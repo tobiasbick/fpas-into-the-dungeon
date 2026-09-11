@@ -1,0 +1,159 @@
+// Authoritative single-client server for the initial executable slice.
+unit Dungeon.Server;
+
+uses
+  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Arrays, Std.Console, Std.Conv,
+  Std.Net, Std.Results, Std.Server, Std.Task, Std.Time;
+
+function Send(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
+begin
+  return WriteLine(ConnectionValue, EncodeServer(Message), Token)
+end;
+
+// Serves one connected client until disconnect, EOF, cancellation, or a protocol error.
+public function ServeConnection(ConnectionValue: Connection; Token: CancellationToken): result of boolean, string;
+begin
+  mutable var Reader: LineReader := NewLineReader(ConnectionValue);
+  var FirstRead: LineRead := try ReadLine(Reader, Token);
+  Reader := FirstRead.Reader;
+  case DecodeClient(FirstRead.Line) of
+    Ok(FirstMessage):
+    begin
+      case FirstMessage of
+        ClientMessage.Hello(Version):
+        begin
+          if Version <> ProtocolVersion then
+          begin
+            var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', 'Protocol version 1 is required'), Token);
+            return Ok(true)
+          end
+        end
+        else
+        begin
+          var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('expected_hello', 'The first message must be hello'), Token);
+          return Ok(true)
+        end
+      end
+    end;
+    Error(Message):
+    begin
+      var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('invalid_message', 'The client message is invalid'), Token);
+      return Ok(true)
+    end
+  end;
+  mutable var State: GameState := NewGame();
+  var WelcomeSent: boolean := try Send(ConnectionValue, ServerMessage.Welcome(ProtocolVersion), Token);
+  var StateSent: boolean := try Send(ConnectionValue, ServerMessage.State(State.PlayerX, State.PlayerY), Token);
+  while not IsCancellationRequested(Token) do
+  begin
+    var LineResult: result of LineRead, string := ReadLine(Reader, Token);
+    case LineResult of
+      Error(ReadMessage):
+      begin
+        return Ok(true)
+      end;
+      Ok(ReadValue):
+      begin
+        Reader := ReadValue.Reader;
+        case DecodeClient(ReadValue.Line) of
+          Error(DecodeMessage):
+          begin
+            var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('invalid_message', 'The client message is invalid'), Token);
+            return Ok(true)
+          end;
+          Ok(ClientMessageValue):
+          begin
+            case ClientMessageValue of
+              ClientMessage.Disconnect:
+              begin
+                return Ok(true)
+              end;
+              ClientMessage.Hello(Version):
+              begin
+                var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
+                return Ok(true)
+              end;
+              ClientMessage.Move(DeltaX, DeltaY):
+              begin
+                case MovePlayer(State, DeltaX, DeltaY) of
+                  Ok(Next):
+                  begin
+                    State := Next;
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(State.PlayerX, State.PlayerY), Token)
+                  end;
+                  Error(Reason):
+                  begin
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end;
+
+  return Ok(true)
+end;
+
+// Runs the signal-aware server until a stop signal is received.
+public function RunServer(Host: string; Port: integer): result of boolean, string;
+begin
+  var ListenerValue: Listener := try Listen(Host, Port);
+  var Life: ServerLifetime := try CreateLifetime(2000, false);
+  var Owned: boolean := try OwnListener(Life, ListenerValue);
+  var Observing: boolean := try ObserveSignals(Life);
+  var Workers: TaskGroup := GetWorkGroup(Life);
+  StartTaskInGroup(Workers, function(Token: CancellationToken): result of boolean, string begin
+    while not IsCancellationRequested(Token) do
+    begin
+      case AcceptWithCancellation(ListenerValue, Token) of
+        Ok(Client):
+        begin
+          var Outcome: result of boolean, string := ServeConnection(Client, Token);
+          var Closed: boolean := try Close(Client);
+          case Outcome of
+            Error(Message):
+            begin
+              WriteLn('Client failed: ' + Message)
+            end
+            else
+            begin
+            end
+          end
+        end;
+        Error(Message):
+        begin
+          if IsCancellationRequested(Token) then
+          begin
+            return Ok(true)
+          end;
+
+          return Error(Message)
+        end
+      end
+    end;
+
+    return Ok(true)
+  end);
+  WriteLn((('Dungeon server listening on ' + Host) + ':') + Std.Conv.IntToStr(Port));
+  while IsReady(Life) do
+  begin
+    Sleep(20)
+  end;
+
+  RequestStop(Life);
+  var Failures: array of TaskFailure := try CloseTaskGroupWithTimeout(Workers, RemainingMillis(Life));
+  for Failure: TaskFailure in Failures do
+  begin
+    WriteLn(Failure.Message)
+  end;
+  var Finished: boolean := try FinishShutdown(Life);
+  if Std.Arrays.Length(Failures) <> 0 then
+  begin
+    return Error('server worker failed')
+  end;
+
+  return Ok(true)
+end;

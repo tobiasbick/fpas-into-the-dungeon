@@ -6,9 +6,17 @@ in [Functional Pascal](https://github.com/tobiasbick/functional-pascal).
 > **Disclaimer:** This is a hobby project and entirely vibe-coded. We do not
 > know where it will lead, or whether it will ever reach an ending.
 
-The repository is at a very early stage and does not contain a playable game
-yet. Its initial direction is a TUI client, an authoritative game server, and
-shared modules for the game rules and protocol.
+The repository is at a very early stage. Its first executable slice is a TUI
+client connected to an authoritative game server, with one player moving on a
+small empty map.
+
+```powershell
+fpas run apps/server/server.fpasprj
+fpas run apps/client/client.fpasprj
+```
+
+Run the server first. Both programs use `127.0.0.1:4040` by default; optional
+host and port arguments override that address.
 
 See the [architecture overview](docs/architecture/overview.md) for the planned
 repository structure. Functional Pascal's

@@ -1,0 +1,173 @@
+// Versioned JSON message contract shared by the client and server.
+unit Dungeon.Protocol;
+
+uses Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options;
+
+public const
+  ProtocolVersion: integer := 1;
+  MaximumLineBytes: integer := 65536;
+
+public type
+  ClientMessage = enum
+    Hello(Version: integer);
+    Move(DeltaX: integer; DeltaY: integer);
+    Disconnect;
+  end;
+  ServerMessage = enum
+    Welcome(Version: integer);
+    State(PlayerX: integer; PlayerY: integer);
+    Rejected(Code: string; Message: string);
+    ErrorMessage(Code: string; Message: string);
+  end;
+
+function RequiredField(Fields: dict of string to JsonValue; Name: string): result of JsonValue, string;
+begin
+  case Std.Dictionaries.Get(Fields, Name) of
+    Some(Value):
+    begin
+      return Ok(Value)
+    end;
+    None:
+    begin
+      return Error('message is missing field ' + Name)
+    end
+  end
+end;
+
+function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.String(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error(('message field ' + Name) + ' must be a string')
+    end
+  end
+end;
+
+function IntegerField(Fields: dict of string to JsonValue; Name: string): result of integer, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.Number(Value):
+    begin
+      var IntegerValue: integer := Trunc(Value);
+      if IntToReal(IntegerValue) <> Value then
+      begin
+        return Error(('message field ' + Name) + ' must be an integer')
+      end;
+
+      return Ok(IntegerValue)
+    end
+    else
+    begin
+      return Error(('message field ' + Name) + ' must be a number')
+    end
+  end
+end;
+
+function ObjectFields(Text: string): result of dict of string to JsonValue, string;
+begin
+  case try Std.Json.Parse(Text) of
+    JsonValue.Object(Fields):
+    begin
+      return Ok(Fields)
+    end
+    else
+    begin
+      return Error('message root must be an object')
+    end
+  end
+end;
+
+public function EncodeClient(Message: ClientMessage): string;
+begin
+  case Message of
+    ClientMessage.Hello(Version):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('hello'), 'version': JsonValue.Number(IntToReal(Version))]))
+    end;
+    ClientMessage.Move(DeltaX, DeltaY):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('move'), 'dx': JsonValue.Number(IntToReal(DeltaX)), 'dy': JsonValue.Number(IntToReal(DeltaY))]))
+    end;
+    ClientMessage.Disconnect:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('disconnect')]))
+    end
+  end
+end;
+
+public function DecodeClient(Text: string): result of ClientMessage, string;
+begin
+  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  case try StringField(Fields, 'type') of
+    'hello':
+    begin
+      return Ok(ClientMessage.Hello(try IntegerField(Fields, 'version')))
+    end;
+    'move':
+    begin
+      return Ok(ClientMessage.Move(try IntegerField(Fields, 'dx'), try IntegerField(Fields, 'dy')))
+    end;
+    'disconnect':
+    begin
+      return Ok(ClientMessage.Disconnect)
+    end
+    else
+    begin
+      return Error('unknown client message type')
+    end
+  end
+end;
+
+public function EncodeServer(Message: ServerMessage): string;
+begin
+  case Message of
+    ServerMessage.Welcome(Version):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('welcome'), 'version': JsonValue.Number(IntToReal(Version))]))
+    end;
+    ServerMessage.State(PlayerX, PlayerY):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'x': JsonValue.Number(IntToReal(PlayerX)), 'y': JsonValue.Number(IntToReal(PlayerY))]))
+    end;
+    ServerMessage.Rejected(Code, MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('rejected'), 'code': JsonValue.String(Code), 'message': JsonValue.String(MessageText)]))
+    end;
+    ServerMessage.ErrorMessage(Code, MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('error'), 'code': JsonValue.String(Code), 'message': JsonValue.String(MessageText)]))
+    end
+  end
+end;
+
+public function DecodeServer(Text: string): result of ServerMessage, string;
+begin
+  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  case try StringField(Fields, 'type') of
+    'welcome':
+    begin
+      return Ok(ServerMessage.Welcome(try IntegerField(Fields, 'version')))
+    end;
+    'state':
+    begin
+      return Ok(ServerMessage.State(try IntegerField(Fields, 'x'), try IntegerField(Fields, 'y')))
+    end;
+    'rejected':
+    begin
+      return Ok(ServerMessage.Rejected(try StringField(Fields, 'code'), try StringField(Fields, 'message')))
+    end;
+    'error':
+    begin
+      return Ok(ServerMessage.ErrorMessage(try StringField(Fields, 'code'), try StringField(Fields, 'message')))
+    end
+    else
+    begin
+      return Error('unknown server message type')
+    end
+  end
+end;

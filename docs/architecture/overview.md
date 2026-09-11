@@ -8,13 +8,17 @@ fpas-into-the-dungeon/
 ├── dungeon.fpasworkspace
 ├── apps/
 │   ├── client/
+│   │   ├── client-core.fpasprj
 │   │   ├── client.fpasprj
 │   │   └── src/
-│   │       └── main.fpas
+│   │       ├── client.fpas
+│   │       └── Dungeon/Client/
 │   └── server/
+│       ├── server-core.fpasprj
 │       ├── server.fpasprj
 │       └── src/
-│           └── main.fpas
+│           ├── server.fpas
+│           └── Dungeon/Server/
 ├── libs/
 │   ├── game/
 │   ├── protocol/
@@ -33,9 +37,10 @@ fpas-into-the-dungeon/
     └── worlds/
 ```
 
-Each directory under `apps/`, `libs/`, and `tests/` owns its own `.fpasprj`
-manifest and `src/` directory. The root `.fpasworkspace` connects these
-projects.
+Each module under `apps/`, `libs/`, and `tests/` owns its `.fpasprj` manifest.
+Production source lives under the module's `src/` directory; small test
+programs live beside their test manifest. The root `.fpasworkspace` connects
+these projects.
 
 ## Module ownership
 
@@ -53,15 +58,18 @@ projects.
 
 ## Client-server seam
 
-The first playable version may run the simulation in the client process. The
-client still talks to the simulation through a small interface. A local adapter
-implements that interface initially; a network adapter can replace it later
-without changing the TUI or the game simulation.
+Client and server run as separate processes from the first executable slice.
+The server is authoritative: the client sends player intentions and renders
+visible state returned by the server. Shared protocol types must not expose or
+duplicate server-owned game rules. See the
+[initial client-server slice](initial-client-server.md) for the first executable
+contract.
 
-The server remains authoritative once it becomes a separate process. The
-client sends player intentions and renders visible state returned by the
-server. Shared protocol types must not expose or duplicate server-owned game
-rules.
+## Runtime data
+
+Configuration, saved worlds, logs, and caches live outside the repository. See
+the [runtime data layout](runtime-data.md) for the default location, overrides,
+and ownership rules.
 
 ## Documentation
 

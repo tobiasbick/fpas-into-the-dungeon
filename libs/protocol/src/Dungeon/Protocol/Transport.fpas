@@ -1,0 +1,95 @@
+// LF-delimited UTF-8 framing over a Functional Pascal TCP connection.
+unit Dungeon.Protocol.Transport;
+
+uses Dungeon.Protocol, Std.Arrays, Std.Net, Std.Net.Utf8, Std.Task;
+
+public type
+  LineReader = record
+    public ConnectionValue: Connection;
+    public Buffer: array of integer;
+  end;
+  LineRead = record
+    public Line: string;
+    public Reader: LineReader;
+  end;
+
+public function NewLineReader(ConnectionValue: Connection): LineReader;
+begin
+  return record
+    ConnectionValue := ConnectionValue;
+    Buffer := [];
+  end
+end;
+
+function LineFeedIndex(Bytes: array of integer): integer;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(Bytes) - 1 do
+  begin
+    if Bytes[Index] = 10 then
+    begin
+      return Index
+    end
+  end;
+
+  return -1
+end;
+
+// Reads one complete line while retaining bytes belonging to the next line.
+public function ReadLine(Reader: LineReader; Token: CancellationToken): result of LineRead, string;
+begin
+  mutable var Next: LineReader := Reader;
+  mutable var LineEnd: integer := LineFeedIndex(Next.Buffer);
+  while LineEnd < 0 do
+  begin
+    if Std.Arrays.Length(Next.Buffer) > MaximumLineBytes then
+    begin
+      return Error('protocol line exceeds 64 KiB')
+    end;
+    var Part: array of integer := try ReceiveBytesWithCancellation(Next.ConnectionValue, 4096, Token);
+    if Std.Arrays.Length(Part) = 0 then
+    begin
+      return Error('connection closed')
+    end;
+
+    Next.Buffer := Std.Arrays.Concat(Next.Buffer, Part);
+    LineEnd := LineFeedIndex(Next.Buffer)
+  end;
+
+  if LineEnd > MaximumLineBytes then
+  begin
+    return Error('protocol line exceeds 64 KiB')
+  end;
+  var LineBytes: array of integer := Std.Arrays.Slice(Next.Buffer, 0, LineEnd);
+  var RemainingStart: integer := LineEnd + 1;
+  Next.Buffer := Std.Arrays.Slice(Next.Buffer, RemainingStart, Std.Arrays.Length(Next.Buffer) -
+                                                               RemainingStart);
+  return Ok(record
+    Line := try Std.Net.Utf8.Decode(LineBytes);
+    Reader := Next;
+  end)
+end;
+
+// Writes one complete LF-delimited line, including partial-write handling.
+public function WriteLine(ConnectionValue: Connection; Text: string; Token: CancellationToken): result of boolean, string;
+begin
+  var Bytes: array of integer := Std.Net.Utf8.Encode(Text + #10);
+  if Std.Arrays.Length(Bytes) - 1 > MaximumLineBytes then
+  begin
+    return Error('protocol line exceeds 64 KiB')
+  end;
+  mutable var Offset: integer := 0;
+  while Offset < Std.Arrays.Length(Bytes) do
+  begin
+    var Remaining: array of integer := Std.Arrays.Slice(Bytes, Offset, Std.Arrays.Length(Bytes) -
+                                                                       Offset);
+    var Written: integer := try SendBytesWithCancellation(ConnectionValue, Remaining, Token);
+    if Written <= 0 then
+    begin
+      return Error('connection stopped while writing')
+    end;
+
+    Offset := Offset + Written
+  end;
+
+  return Ok(true)
+end;

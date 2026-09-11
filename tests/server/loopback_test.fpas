@@ -1,0 +1,98 @@
+program DungeonServerLoopbackTest;
+
+uses
+  Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Std.Net, Std.Results, Std.Task,
+  Std.Test;
+
+function ServeOne(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Configured: boolean := try SetTimeout(Client, 2000);
+  var Outcome: result of boolean, string := ServeConnection(Client, Token);
+  var Closed: boolean := try Close(Client);
+  return Outcome
+end;
+
+begin
+  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var ServerTask: task := go ServeOne(ListenerValue, Token);
+  var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(Client, 2000)));
+  mutable var Reader: LineReader := NewLineReader(Client);
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion)), Token)));
+  var WelcomeRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := WelcomeRead.Reader;
+  case DecodeServer(WelcomeRead.Line) of
+    Ok(WelcomeMessage):
+    begin
+      case WelcomeMessage of
+        ServerMessage.Welcome(Version):
+        begin
+          AssertEquals(ProtocolVersion, Version)
+        end
+        else
+        begin
+          AssertTrue(false)
+        end
+      end
+    end
+    else
+    begin
+      panic('unexpected welcome: ' + WelcomeRead.Line)
+    end
+  end;
+  var InitialRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := InitialRead.Reader;
+  case DecodeServer(InitialRead.Line) of
+    Ok(InitialMessage):
+    begin
+      case InitialMessage of
+        ServerMessage.State(PlayerX, PlayerY):
+        begin
+          AssertEquals(4, PlayerX);
+          AssertEquals(2, PlayerY)
+        end
+        else
+        begin
+          AssertTrue(false)
+        end
+      end
+    end
+    else
+    begin
+      AssertTrue(false)
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token)));
+  var MovedRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := MovedRead.Reader;
+  case DecodeServer(MovedRead.Line) of
+    Ok(MovedMessage):
+    begin
+      case MovedMessage of
+        ServerMessage.State(PlayerX, PlayerY):
+        begin
+          AssertEquals(5, PlayerX);
+          AssertEquals(2, PlayerY)
+        end
+        else
+        begin
+          AssertTrue(false)
+        end
+      end
+    end
+    else
+    begin
+      AssertTrue(false)
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(Client)));
+  AssertTrue(Unwrap(Wait(ServerTask)));
+  AssertTrue(Unwrap(CloseListener(ListenerValue)))
+end.

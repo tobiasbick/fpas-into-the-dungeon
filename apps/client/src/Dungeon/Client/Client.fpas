@@ -1,0 +1,396 @@
+// Terminal client and network session for the initial executable slice.
+unit Dungeon.Client;
+
+uses
+  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Console, Std.Net, Std.Results,
+  Std.Str, Std.Task, Std.Tui;
+
+const
+  NetworkSubscriptionId: integer := 1;
+
+public type
+  ClientEvent = enum
+    Connected;
+    State(PlayerX: integer; PlayerY: integer);
+    Rejected(Message: string);
+    Failed(Message: string);
+    Disconnected;
+  end;
+  ClientModel = record
+    public Host: string;
+    public Port: integer;
+    public Requests: channel of ClientMessage;
+    public Events: channel of ClientEvent;
+    public Connected: boolean;
+    public Pending: boolean;
+    public PlayerX: integer;
+    public PlayerY: integer;
+    public Status: string;
+  end;
+
+type
+  ServerRead = record
+    Message: ServerMessage;
+    Reader: LineReader;
+  end;
+
+function Publish(Events: channel of ClientEvent; Value: ClientEvent; Token: CancellationToken): result of boolean, string;
+begin
+  return SendWithCancellation(Events, Value, Token)
+end;
+
+function ReadServer(Reader: LineReader; Token: CancellationToken): result of ServerRead, string;
+begin
+  var ReadValue: LineRead := try ReadLine(Reader, Token);
+  return Ok(record
+    Message := try DecodeServer(ReadValue.Line);
+    Reader := ReadValue.Reader;
+  end)
+end;
+
+// Owns the connection and translates request and response messages for the TUI.
+function RunNetworkSession(
+  Host: string;
+  Port: integer;
+  Requests: channel of ClientMessage;
+  Events: channel of ClientEvent;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  var ConnectionValue: Connection := try ConnectWithCancellation(Host, Port, 5000, Token);
+  mutable var Reader: LineReader := NewLineReader(ConnectionValue);
+  var HelloSent: boolean := try WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion)), Token);
+  case ReadServer(Reader, Token) of
+    Error(Message):
+    begin
+      var Closed: boolean := try Close(ConnectionValue);
+      return Error(Message)
+    end;
+    Ok(ReadValue):
+    begin
+      Reader := ReadValue.Reader;
+      case ReadValue.Message of
+        ServerMessage.Welcome(Version):
+        begin
+          if Version <> ProtocolVersion then
+          begin
+            var Closed: boolean := try Close(ConnectionValue);
+            return Error('server selected an unsupported protocol version')
+          end
+        end
+        else
+        begin
+          var Closed: boolean := try Close(ConnectionValue);
+          return Error('server did not welcome the client')
+        end
+      end
+    end
+  end;
+  var Published: boolean := try Publish(Events, ClientEvent.Connected, Token);
+  case ReadServer(Reader, Token) of
+    Error(Message):
+    begin
+      var Closed: boolean := try Close(ConnectionValue);
+      return Error(Message)
+    end;
+    Ok(ReadValue):
+    begin
+      Reader := ReadValue.Reader;
+      case ReadValue.Message of
+        ServerMessage.State(PlayerX, PlayerY):
+        begin
+          var PublishedState: boolean := try Publish(Events, ClientEvent.State(PlayerX, PlayerY), Token)
+        end
+        else
+        begin
+          var Closed: boolean := try Close(ConnectionValue);
+          return Error('server did not send initial state')
+        end
+      end
+    end
+  end;
+
+  while not IsCancellationRequested(Token) do
+  begin
+    case ReceiveWithCancellation(Requests, Token) of
+      Error(Message):
+      begin
+        var Closed: boolean := try Close(ConnectionValue);
+        return Ok(true)
+      end;
+      Ok(Request):
+      begin
+        var Written: boolean := try WriteLine(ConnectionValue, EncodeClient(Request), Token);
+        case Request of
+          ClientMessage.Disconnect:
+          begin
+            var Closed: boolean := try Close(ConnectionValue);
+            return Ok(true)
+          end;
+          ClientMessage.Move(DeltaX, DeltaY):
+          begin
+            case ReadServer(Reader, Token) of
+              Error(Message):
+              begin
+                var Closed: boolean := try Close(ConnectionValue);
+                return Error(Message)
+              end;
+              Ok(ReadValue):
+              begin
+                Reader := ReadValue.Reader;
+                case ReadValue.Message of
+                  ServerMessage.State(PlayerX, PlayerY):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.State(PlayerX, PlayerY), Token)
+                  end;
+                  ServerMessage.Rejected(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                  end;
+                  ServerMessage.ErrorMessage(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Ok(true)
+                  end
+                  else
+                  begin
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Error('unexpected server response')
+                  end
+                end
+              end
+            end
+          end;
+          ClientMessage.Hello(Version):
+          begin
+            var Closed: boolean := try Close(ConnectionValue);
+            return Error('hello can only be sent during connection setup')
+          end
+        end
+      end
+    end
+  end;
+  var Closed: boolean := try Close(ConnectionValue);
+  return Ok(true)
+end;
+
+// Treats framework-requested cancellation as a normal client shutdown.
+public function RunNetwork(
+  Host: string;
+  Port: integer;
+  Requests: channel of ClientMessage;
+  Events: channel of ClientEvent;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  case RunNetworkSession(Host, Port, Requests, Events, Token) of
+    Ok(Completed):
+    begin
+      return Ok(Completed)
+    end;
+    Error(Message):
+    begin
+      if IsCancellationRequested(Token) then
+      begin
+        return Ok(true)
+      end;
+
+      return Error(Message)
+    end
+  end
+end;
+
+public function NewClientModel(
+  Host: string;
+  Port: integer;
+  Requests: channel of ClientMessage;
+  Events: channel of ClientEvent
+): ClientModel;
+begin
+  return record
+    Host := Host;
+    Port := Port;
+    Requests := Requests;
+    Events := Events;
+    Connected := false;
+    Pending := false;
+    PlayerX := MapWidth div 2;
+    PlayerY := MapHeight div 2;
+    Status := 'Connecting...';
+  end
+end;
+
+function QueueMove(State: ClientModel; DeltaX: integer; DeltaY: integer): ClientModel;
+begin
+  if not State.Connected or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.Move(DeltaX, DeltaY)) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := 'Moving...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+// Handles terminal lifecycle and player input.
+public function UpdateClient(State: ClientModel; Msg: TuiMsg; Cmd: TuiCmdOutput): ClientModel;
+begin
+  Cmd.Set(TuiCmd.NoCommand);
+  case Msg of
+    TuiMsg.Started:
+    begin
+      var Host: string := State.Host;
+      var Port: integer := State.Port;
+      var Requests: channel of ClientMessage := State.Requests;
+      var Events: channel of ClientEvent := State.Events;
+      Cmd.StartBackground(NetworkSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
+        return RunNetwork(Host, Port, Requests, Events, Token)
+      end);
+      return State
+    end;
+    TuiMsg.Key(Key):
+    begin
+      if Key.kind = TuiKeyKind.Left then
+      begin
+        return QueueMove(State, -1, 0)
+      end;
+
+      if Key.kind = TuiKeyKind.Right then
+      begin
+        return QueueMove(State, 1, 0)
+      end;
+
+      if Key.kind = TuiKeyKind.Up then
+      begin
+        return QueueMove(State, 0, -1)
+      end;
+
+      if Key.kind = TuiKeyKind.Down then
+      begin
+        return QueueMove(State, 0, 1)
+      end;
+
+      if (Key.kind = TuiKeyKind.Character) and ((Key.ch = 'q') or (Key.ch = 'Q')) then
+      begin
+        TrySend(State.Requests, ClientMessage.Disconnect);
+        Cmd.Set(TuiCmd.Quit)
+      end;
+
+      return State
+    end;
+    TuiMsg.BackgroundFailed(Id, Kind, Message, Code, Line, Column):
+    begin
+      mutable var Next: ClientModel := State;
+      Next.Connected := false;
+      Next.Pending := false;
+      Next.Status := 'Connection failed: ' + Message;
+      return Next
+    end;
+    TuiMsg.QuitRequested:
+    begin
+      TrySend(State.Requests, ClientMessage.Disconnect);
+      Cmd.Set(TuiCmd.Quit);
+      return State
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+// Applies messages emitted by the network task.
+public function UpdateClientEvent(State: ClientModel; Value: ClientEvent; Cmd: TuiCmdOutput): ClientModel;
+begin
+  Cmd.Set(TuiCmd.NoCommand);
+  mutable var Next: ClientModel := State;
+  case Value of
+    ClientEvent.Connected:
+    begin
+      Next.Connected := true;
+      Next.Status := 'Connected'
+    end;
+    ClientEvent.State(PlayerX, PlayerY):
+    begin
+      Next.PlayerX := PlayerX;
+      Next.PlayerY := PlayerY;
+      Next.Pending := false;
+      Next.Status := 'Connected'
+    end;
+    ClientEvent.Rejected(Message):
+    begin
+      Next.Pending := false;
+      Next.Status := Message
+    end;
+    ClientEvent.Failed(Message):
+    begin
+      Next.Connected := false;
+      Next.Pending := false;
+      Next.Status := 'Connection failed: ' + Message
+    end;
+    ClientEvent.Disconnected:
+    begin
+      Next.Connected := false;
+      Next.Pending := false;
+      Next.Status := 'Disconnected'
+    end
+  end;
+
+  return Next
+end;
+
+function MapRow(State: ClientModel; Y: integer): string;
+begin
+  mutable var Text: string := '';
+  for X: integer := 0 to MapWidth - 1 do
+  begin
+    if (X = State.PlayerX) and (Y = State.PlayerY) then
+    begin
+      Text := Text + '@'
+    end
+    else
+    begin
+      Text := Text + '.'
+    end
+  end;
+
+  return Text
+end;
+
+public function ViewClient(State: ClientModel): TuiElement;
+begin
+  return TuiElement.Column([
+                             TuiElementBuilders.MakeLabel('INTO THE DUNGEON'),
+                             TuiElementBuilders.MakeLabel(''),
+                             TuiElementBuilders.MakeLabel(MapRow(State, 0)),
+                             TuiElementBuilders.MakeLabel(MapRow(State, 1)),
+                             TuiElementBuilders.MakeLabel(MapRow(State, 2)),
+                             TuiElementBuilders.MakeLabel(MapRow(State, 3)),
+                             TuiElementBuilders.MakeLabel(MapRow(State, 4)),
+                             TuiElementBuilders.MakeLabel(''),
+                             TuiElementBuilders.MakeLabel(State.Status),
+                             TuiElementBuilders.MakeLabel('Arrow keys: move    Q: quit')
+                           ], 0)
+end;
+
+public function RunClient(Host: string; Port: integer): ClientModel;
+begin
+  var Requests: channel of ClientMessage := CreateChannel(1);
+  var Events: channel of ClientEvent := CreateChannel(8);
+  return TuiApplication.RunWithBackground(NewClientModel(Host, Port, Requests, Events), Events, UpdateClient, UpdateClientEvent, ViewClient)
+end;
