@@ -42,13 +42,13 @@ The server owns the area kind, geometry, rules, and visible state. The client
 does not receive the complete world. It selects the required view family from
 the visible state and renders it without owning or duplicating game rules.
 
-## Initial implementation direction
+## Current implementation
 
-The next world slice is a fixed outdoor region shown in the top-down map view,
-not a dungeon. Its visible state is owned and produced by the server. The
-client renders that state without importing world dimensions or rules from the
-game module.
+The first world slice is a fixed outdoor region shown in the top-down map view,
+not a dungeon. Its visible state is owned and produced by the server. The client
+renders that state without importing world dimensions or rules from the game
+module.
 
 Isometric rendering, area transitions, interiors, dungeons, procedural world
 generation, persistence, LLM integration, and the first RPG action are outside
-this slice and will be specified separately.
+this slice. Their intended order is tracked in the [roadmap](../roadmap.md).

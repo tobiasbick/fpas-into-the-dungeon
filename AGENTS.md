@@ -18,6 +18,9 @@ Before adding projects or changing module ownership, read the
 [architecture overview](docs/architecture/overview.md). Further game and
 architecture documentation belongs under `docs/`.
 
+Use the canonical terms in [world structure and views](docs/product/world-and-views.md).
+Add newly established game terms there when they are missing.
+
 ## Functional Pascal source documentation
 
 Before committing Functional Pascal changes, verify that every changed `.fpas`

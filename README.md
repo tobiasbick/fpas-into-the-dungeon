@@ -8,7 +8,7 @@ in [Functional Pascal](https://github.com/tobiasbick/functional-pascal).
 
 The repository is at a very early stage. Its first executable slice is a TUI
 client connected to an authoritative game server, with one player moving on a
-small empty map.
+small outdoor map.
 
 ```powershell
 fpas run apps/server/server.fpasprj
@@ -21,7 +21,8 @@ host and port arguments override that address; `--data-dir PATH` selects a
 different runtime-data directory.
 
 See the [architecture overview](docs/architecture/overview.md) for the planned
-repository structure. Functional Pascal's
+repository structure and the [roadmap](docs/roadmap.md) for the incremental
+development order. Functional Pascal's
 [language documentation](https://github.com/tobiasbick/functional-pascal/tree/main/docs/pascal)
 is the source of truth for the implementation.
 

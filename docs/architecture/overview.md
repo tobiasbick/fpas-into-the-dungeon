@@ -29,8 +29,10 @@ fpas-into-the-dungeon/
 │   ├── game/
 │   ├── protocol/
 │   ├── client/
+│   ├── runtime/
 │   └── server/
 ├── docs/
+│   ├── roadmap.md
 │   ├── product/
 │   ├── architecture/
 │   └── decisions/
@@ -76,9 +78,13 @@ and ownership rules.
 
 ## Documentation
 
+- The [roadmap](../roadmap.md) records the incremental development order and
+  completion criteria without defining the complete game in advance.
 - `docs/product` describes the game and player experience. The
   [world structure and views](../product/world-and-views.md) document defines
-  the canonical spatial terminology and presentation rules.
+  the canonical spatial terminology and presentation rules. The
+  [client UI](../product/client-ui.md) document defines the shared terminal
+  presentation and interaction shell.
 - `docs/architecture` describes the system structure and module interfaces.
 - `docs/decisions` records architecture decisions whose reasoning must remain
   available later.
