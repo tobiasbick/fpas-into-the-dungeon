@@ -15,8 +15,10 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-Run the server first. Both programs use `127.0.0.1:4040` by default; optional
-host and port arguments override that address.
+Run the server first. Both programs use `127.0.0.1:4040` by default and create
+their TOML configuration under `~/.fpas-into-the-dungeon/config/`. Optional
+host and port arguments override that address; `--data-dir PATH` selects a
+different runtime-data directory.
 
 See the [architecture overview](docs/architecture/overview.md) for the planned
 repository structure. Functional Pascal's

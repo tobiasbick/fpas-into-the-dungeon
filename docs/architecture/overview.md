@@ -24,6 +24,7 @@ fpas-into-the-dungeon/
 │   ├── protocol/
 │   ├── tui/
 │   └── persistence/
+│       └── runtime-data.fpasprj
 ├── tests/
 │   ├── game/
 │   ├── protocol/
@@ -52,6 +53,8 @@ these projects.
   server. It contains no game rules.
 - `libs/tui` owns terminal rendering and interaction.
 - `libs/persistence` owns loading and saving authoritative state.
+  `Dungeon.RuntimeData` also owns the shared runtime path and configuration
+  interface.
 - `tests` follows the production modules so each module is exercised through
   its interface.
 - `fixtures` contains reusable, deterministic test data such as saved worlds.
@@ -73,7 +76,9 @@ and ownership rules.
 
 ## Documentation
 
-- `docs/product` describes the game and player experience.
+- `docs/product` describes the game and player experience. The
+  [world structure and views](../product/world-and-views.md) document defines
+  the canonical spatial terminology and presentation rules.
 - `docs/architecture` describes the system structure and module interfaces.
 - `docs/decisions` records architecture decisions whose reasoning must remain
   available later.

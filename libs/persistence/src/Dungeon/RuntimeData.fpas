@@ -1,0 +1,260 @@
+// Runtime paths and persistent network configuration shared by both applications.
+unit Dungeon.RuntimeData;
+
+uses Std.Dictionaries, Std.Env, Std.Fs, Std.Options, Std.Path, Std.Str, Std.Toml;
+
+public type
+  // Validated endpoint configuration shared by client and server startup.
+  NetworkConfig = record
+    public Host: string;
+    public Port: integer;
+  end;
+  // Resolved data root and the project-owned files and directories below it.
+  RuntimePaths = record
+    public Root: string;
+    public Config: string;
+    public ClientConfig: string;
+    public ServerConfig: string;
+    public Worlds: string;
+    public Logs: string;
+    public Cache: string;
+  end;
+  // Bundles prepared runtime paths with the effective network configuration.
+  RuntimeSettings = record
+    public Paths: RuntimePaths;
+    public Network: NetworkConfig;
+  end;
+
+function DefaultNetworkConfig(): NetworkConfig;
+begin
+  return record
+    Host := '127.0.0.1';
+    Port := 4040;
+  end
+end;
+
+function NonEmpty(Value: string; Source: string): result of string, string;
+begin
+  if Std.Str.Length(Std.Str.Trim(Value)) = 0 then
+  begin
+    return Error(Source + ' must not be empty')
+  end;
+
+  return Ok(Std.Path.Normalize(Value))
+end;
+
+function HomeDirectory(): result of string, string;
+begin
+  case Std.Env.Get('HOME') of
+    Some(Value):
+    begin
+      return NonEmpty(Value, 'HOME')
+    end;
+    None:
+    begin
+      case Std.Env.Get('USERPROFILE') of
+        Some(Value):
+        begin
+          return NonEmpty(Value, 'USERPROFILE')
+        end;
+        None:
+        begin
+          return Error('cannot resolve the data root because HOME and USERPROFILE are not set')
+        end
+      end
+    end
+  end
+end;
+
+// Resolves command-line, environment, and default data roots in precedence order.
+function ResolveDataRoot(CommandLineOverride: option of string): result of string, string;
+begin
+  case CommandLineOverride of
+    Some(Value):
+    begin
+      return NonEmpty(Value, '--data-dir')
+    end;
+    None:
+    begin
+      case Std.Env.Get('INTO_THE_DUNGEON_HOME') of
+        Some(Value):
+        begin
+          return NonEmpty(Value, 'INTO_THE_DUNGEON_HOME')
+        end;
+        None:
+        begin
+          return Ok(Std.Path.Join([try HomeDirectory(), '.fpas-into-the-dungeon']))
+        end
+      end
+    end
+  end
+end;
+
+function RuntimePathsForRoot(Root: string): RuntimePaths;
+begin
+  var NormalizedRoot: string := Std.Path.Normalize(Root);
+  var ConfigPath: string := Std.Path.Join([NormalizedRoot, 'config']);
+  return record
+    Root := NormalizedRoot;
+    Config := ConfigPath;
+    ClientConfig := Std.Path.Join([ConfigPath, 'client.toml']);
+    ServerConfig := Std.Path.Join([ConfigPath, 'server.toml']);
+    Worlds := Std.Path.Join([NormalizedRoot, 'worlds']);
+    Logs := Std.Path.Join([NormalizedRoot, 'logs']);
+    Cache := Std.Path.Join([NormalizedRoot, 'cache']);
+  end
+end;
+
+function EnsureDirectory(Path: string): result of boolean, string;
+begin
+  if Std.Fs.Exists(Path) then
+  begin
+    if Std.Fs.IsDir(Path) then
+    begin
+      return Ok(true)
+    end;
+
+    return Error('runtime path exists but is not a directory: ' + Path)
+  end;
+
+  case Std.Fs.CreateDir(Path) of
+    Ok(Created):
+    begin
+      return Ok(Created)
+    end;
+    Error(Message):
+    begin
+      if Std.Fs.IsDir(Path) then
+      begin
+        return Ok(true)
+      end;
+
+      return Error((('cannot create runtime directory ' + Path) + ': ') + Message)
+    end
+  end
+end;
+
+function EncodeNetworkConfig(Value: NetworkConfig): string;
+begin
+  return Std.Toml.Stringify(TomlValue.Table(['host': TomlValue.String(Value.Host), 'port': TomlValue.Integer(Value.Port)]))
+end;
+
+function EnsureConfigFile(Path: string; Defaults: NetworkConfig): result of boolean, string;
+begin
+  if Std.Fs.Exists(Path) then
+  begin
+    if Std.Fs.IsFile(Path) then
+    begin
+      return Ok(true)
+    end;
+
+    return Error('configuration path exists but is not a file: ' + Path)
+  end;
+
+  return Std.Fs.WriteTextAtomic(Path, EncodeNetworkConfig(Defaults))
+end;
+
+function PrepareShared(Paths: RuntimePaths): result of boolean, string;
+begin
+  var RootReady: boolean := try EnsureDirectory(Paths.Root);
+  var ConfigReady: boolean := try EnsureDirectory(Paths.Config);
+  var LogsReady: boolean := try EnsureDirectory(Paths.Logs);
+  var CacheReady: boolean := try EnsureDirectory(Paths.Cache);
+  return Ok(true)
+end;
+
+function ReadNetworkConfig(Path: string): result of NetworkConfig, string;
+begin
+  var Text: string := try Std.Fs.ReadText(Path);
+  mutable var Fields: dict of string to TomlValue := [:];
+  case try Std.Toml.Parse(Text) of
+    TomlValue.Table(Value):
+    begin
+      Fields := Value
+    end
+    else
+    begin
+      return Error('configuration root must be a TOML table: ' + Path)
+    end
+  end;
+  mutable var Host: string := '';
+  case Std.Dictionaries.Get(Fields, 'host') of
+    Some(HostValue):
+    begin
+      case HostValue of
+        TomlValue.String(Value):
+        begin
+          Host := Value
+        end
+        else
+        begin
+          return Error('configuration field host must be a string: ' + Path)
+        end
+      end
+    end;
+    None:
+    begin
+      return Error('configuration is missing field host: ' + Path)
+    end
+  end;
+  mutable var Port: integer := 0;
+  case Std.Dictionaries.Get(Fields, 'port') of
+    Some(PortValue):
+    begin
+      case PortValue of
+        TomlValue.Integer(Value):
+        begin
+          Port := Value
+        end
+        else
+        begin
+          return Error('configuration field port must be an integer: ' + Path)
+        end
+      end
+    end;
+    None:
+    begin
+      return Error('configuration is missing field port: ' + Path)
+    end
+  end;
+
+  if Std.Str.Length(Std.Str.Trim(Host)) = 0 then
+  begin
+    return Error('configuration field host must not be empty: ' + Path)
+  end;
+
+  if (Port < 1) or (Port > 65535) then
+  begin
+    return Error('configuration field port must be between 1 and 65535: ' + Path)
+  end;
+
+  return Ok(record
+    Host := Host;
+    Port := Port;
+  end)
+end;
+
+// Prepares shared client directories and loads or creates client.toml.
+public function LoadClientRuntime(DataRootOverride: option of string): result of RuntimeSettings, string;
+begin
+  var Paths: RuntimePaths := RuntimePathsForRoot(try ResolveDataRoot(DataRootOverride));
+  var SharedReady: boolean := try PrepareShared(Paths);
+  var ConfigReady: boolean := try EnsureConfigFile(Paths.ClientConfig, DefaultNetworkConfig());
+  return Ok(record
+    Paths := Paths;
+    Network := try ReadNetworkConfig(Paths.ClientConfig);
+  end)
+end;
+
+// Prepares server directories, including worlds, and loads or creates server.toml.
+public function LoadServerRuntime(DataRootOverride: option of string): result of RuntimeSettings, string;
+begin
+  var Paths: RuntimePaths := RuntimePathsForRoot(try ResolveDataRoot(DataRootOverride));
+  var SharedReady: boolean := try PrepareShared(Paths);
+  var WorldsReady: boolean := try EnsureDirectory(Paths.Worlds);
+  var ConfigReady: boolean := try EnsureConfigFile(Paths.ServerConfig, DefaultNetworkConfig());
+  return Ok(record
+    Paths := Paths;
+    Network := try ReadNetworkConfig(Paths.ServerConfig);
+  end)
+end;

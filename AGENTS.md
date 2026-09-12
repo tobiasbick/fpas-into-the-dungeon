@@ -17,3 +17,11 @@ a reproducible report.
 Before adding projects or changing module ownership, read the
 [architecture overview](docs/architecture/overview.md). Further game and
 architecture documentation belongs under `docs/`.
+
+## Functional Pascal source documentation
+
+Before committing Functional Pascal changes, verify that every changed `.fpas`
+file starts with a concise purpose comment. Document each public type, constant,
+function, and procedure with its role and any non-obvious invariants, ownership,
+error, or lifecycle behavior. Keep comments synchronized with the interface and
+omit comments that merely repeat the declaration.

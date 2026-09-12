@@ -10,47 +10,78 @@ begin
   return WriteLine(ConnectionValue, EncodeServer(Message), Token)
 end;
 
+function ProjectVisibleState(State: GameState): VisibleState;
+begin
+  var Area: VisibleArea := GetVisibleArea(State);
+  return record
+    View := ViewKind.Map;
+    Width := Area.Width;
+    Height := Area.Height;
+    Rows := Area.Rows;
+    PlayerX := Area.PlayerX;
+    PlayerY := Area.PlayerY;
+  end
+end;
+
+function FinishReadFailure(ConnectionValue: Connection; Message: string; Token: CancellationToken): result of boolean, string;
+begin
+  if Message = 'protocol line exceeds 64 KiB' then
+  begin
+    var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('line_too_long', Message), Token)
+  end;
+
+  return Ok(true)
+end;
+
 // Serves one connected client until disconnect, EOF, cancellation, or a protocol error.
 public function ServeConnection(ConnectionValue: Connection; Token: CancellationToken): result of boolean, string;
 begin
   mutable var Reader: LineReader := NewLineReader(ConnectionValue);
-  var FirstRead: LineRead := try ReadLine(Reader, Token);
-  Reader := FirstRead.Reader;
-  case DecodeClient(FirstRead.Line) of
-    Ok(FirstMessage):
+  case ReadLine(Reader, Token) of
+    Error(ReadMessage):
     begin
-      case FirstMessage of
-        ClientMessage.Hello(Version):
+      return FinishReadFailure(ConnectionValue, ReadMessage, Token)
+    end;
+    Ok(FirstRead):
+    begin
+      Reader := FirstRead.Reader;
+      case DecodeClient(FirstRead.Line) of
+        Ok(FirstMessage):
         begin
-          if Version <> ProtocolVersion then
-          begin
-            var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', 'Protocol version 1 is required'), Token);
-            return Ok(true)
+          case FirstMessage of
+            ClientMessage.Hello(Version):
+            begin
+              if Version <> ProtocolVersion then
+              begin
+                var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', 'Protocol version 1 is required'), Token);
+                return Ok(true)
+              end
+            end
+            else
+            begin
+              var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('expected_hello', 'The first message must be hello'), Token);
+              return Ok(true)
+            end
           end
-        end
-        else
+        end;
+        Error(Message):
         begin
-          var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('expected_hello', 'The first message must be hello'), Token);
+          var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('invalid_message', 'The client message is invalid'), Token);
           return Ok(true)
         end
       end
-    end;
-    Error(Message):
-    begin
-      var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('invalid_message', 'The client message is invalid'), Token);
-      return Ok(true)
     end
   end;
   mutable var State: GameState := NewGame();
   var WelcomeSent: boolean := try Send(ConnectionValue, ServerMessage.Welcome(ProtocolVersion), Token);
-  var StateSent: boolean := try Send(ConnectionValue, ServerMessage.State(State.PlayerX, State.PlayerY), Token);
+  var StateSent: boolean := try Send(ConnectionValue, ServerMessage.State(ProjectVisibleState(State)), Token);
   while not IsCancellationRequested(Token) do
   begin
     var LineResult: result of LineRead, string := ReadLine(Reader, Token);
     case LineResult of
       Error(ReadMessage):
       begin
-        return Ok(true)
+        return FinishReadFailure(ConnectionValue, ReadMessage, Token)
       end;
       Ok(ReadValue):
       begin
@@ -79,7 +110,7 @@ begin
                   Ok(Next):
                   begin
                     State := Next;
-                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(State.PlayerX, State.PlayerY), Token)
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(ProjectVisibleState(State)), Token)
                   end;
                   Error(Reason):
                   begin

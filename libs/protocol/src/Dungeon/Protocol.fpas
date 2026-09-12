@@ -1,21 +1,38 @@
 // Versioned JSON message contract shared by the client and server.
 unit Dungeon.Protocol;
 
-uses Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options;
+uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, Std.Str;
 
 public const
+  // Wire compatibility version required during the hello/welcome handshake.
   ProtocolVersion: integer := 1;
+  // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
 
 public type
+  // Selects the renderer the client must use for a visible state.
+  ViewKind = enum
+    Map;
+  end;
+  // Client-safe map projection; dimensions, rows, and player coordinates must agree.
+  VisibleState = record
+    public View: ViewKind;
+    public Width: integer;
+    public Height: integer;
+    public Rows: array of string;
+    public PlayerX: integer;
+    public PlayerY: integer;
+  end;
+  // Session setup, player intentions, and lifecycle messages accepted by the server.
   ClientMessage = enum
     Hello(Version: integer);
     Move(DeltaX: integer; DeltaY: integer);
     Disconnect;
   end;
+  // Handshake, visible state, and structured outcomes returned by the server.
   ServerMessage = enum
     Welcome(Version: integer);
-    State(PlayerX: integer; PlayerY: integer);
+    State(Value: VisibleState);
     Rejected(Code: string; Message: string);
     ErrorMessage(Code: string; Message: string);
   end;
@@ -32,6 +49,99 @@ begin
       return Error('message is missing field ' + Name)
     end
   end
+end;
+
+function ViewName(Value: ViewKind): string;
+begin
+  case Value of
+    ViewKind.Map:
+    begin
+      return 'map'
+    end
+  end
+end;
+
+function DecodeView(Value: string): result of ViewKind, string;
+begin
+  case Value of
+    'map':
+    begin
+      return Ok(ViewKind.Map)
+    end
+    else
+    begin
+      return Error('unknown visible-state view')
+    end
+  end
+end;
+
+function EncodeRows(Rows: array of string): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Row: string in Rows do
+  begin
+    Values := Std.Arrays.Concat(Values, [JsonValue.String(Row)])
+  end;
+
+  return Values
+end;
+
+function StringArrayField(Fields: dict of string to JsonValue; Name: string): result of array of string, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.ArrayValue(Items):
+    begin
+      mutable var Values: array of string := [];
+      for Item: JsonValue in Items do
+      begin
+        case Item of
+          JsonValue.String(Value):
+          begin
+            Values := Std.Arrays.Concat(Values, [Value])
+          end
+          else
+          begin
+            return Error(('message field ' + Name) + ' must contain only strings')
+          end
+        end
+      end;
+
+      return Ok(Values)
+    end
+    else
+    begin
+      return Error(('message field ' + Name) + ' must be an array')
+    end
+  end
+end;
+
+function ValidateVisibleState(Value: VisibleState): result of VisibleState, string;
+begin
+  if (Value.Width <= 0) or (Value.Height <= 0) then
+  begin
+    return Error('visible-state dimensions must be positive')
+  end;
+
+  if Std.Arrays.Length(Value.Rows) <> Value.Height then
+  begin
+    return Error('visible-state row count must match height')
+  end;
+
+  for Row: string in Value.Rows do
+  begin
+    if Std.Str.Length(Row) <> Value.Width then
+    begin
+      return Error('visible-state row width must match width')
+    end
+  end;
+
+  if (((Value.PlayerX < 0) or (Value.PlayerX >= Value.Width)) or (Value.PlayerY < 0)) or
+     (Value.PlayerY >= Value.Height) then
+  begin
+    return Error('visible-state player position is outside the area')
+  end;
+
+  return Ok(Value)
 end;
 
 function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
@@ -82,6 +192,7 @@ begin
   end
 end;
 
+// Encodes one client message as a compact JSON object for line transport.
 public function EncodeClient(Message: ClientMessage): string;
 begin
   case Message of
@@ -100,6 +211,7 @@ begin
   end
 end;
 
+// Decodes one client message and rejects missing, mistyped, or unknown fields.
 public function DecodeClient(Text: string): result of ClientMessage, string;
 begin
   var Fields: dict of string to JsonValue := try ObjectFields(Text);
@@ -123,6 +235,7 @@ begin
   end
 end;
 
+// Encodes one server message as a compact JSON object for line transport.
 public function EncodeServer(Message: ServerMessage): string;
 begin
   case Message of
@@ -130,9 +243,9 @@ begin
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('welcome'), 'version': JsonValue.Number(IntToReal(Version))]))
     end;
-    ServerMessage.State(PlayerX, PlayerY):
+    ServerMessage.State(Value):
     begin
-      return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'x': JsonValue.Number(IntToReal(PlayerX)), 'y': JsonValue.Number(IntToReal(PlayerY))]))
+      return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(Value.View)), 'width': JsonValue.Number(IntToReal(Value.Width)), 'height': JsonValue.Number(IntToReal(Value.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(Value.Rows)), 'x': JsonValue.Number(IntToReal(Value.PlayerX)), 'y': JsonValue.Number(IntToReal(Value.PlayerY))]))
     end;
     ServerMessage.Rejected(Code, MessageText):
     begin
@@ -145,6 +258,7 @@ begin
   end
 end;
 
+// Decodes one server message and validates visible-state dimensions and coordinates.
 public function DecodeServer(Text: string): result of ServerMessage, string;
 begin
   var Fields: dict of string to JsonValue := try ObjectFields(Text);
@@ -155,7 +269,16 @@ begin
     end;
     'state':
     begin
-      return Ok(ServerMessage.State(try IntegerField(Fields, 'x'), try IntegerField(Fields, 'y')))
+      var Value: VisibleState := record
+        View := try DecodeView(try StringField(Fields, 'view'));
+        Width := try IntegerField(Fields, 'width');
+        Height := try IntegerField(Fields, 'height');
+        Rows := try StringArrayField(Fields, 'rows');
+        PlayerX := try IntegerField(Fields, 'x');
+        PlayerY := try IntegerField(Fields, 'y');
+      end;
+
+      return Ok(ServerMessage.State(try ValidateVisibleState(Value)))
     end;
     'rejected':
     begin

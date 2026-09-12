@@ -2,20 +2,22 @@
 unit Dungeon.Client;
 
 uses
-  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Console, Std.Net, Std.Results,
+  Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Arrays, Std.Console, Std.Net, Std.Results,
   Std.Str, Std.Task, Std.Tui;
 
 const
   NetworkSubscriptionId: integer := 1;
 
 public type
+  // Messages crossing from the network task into the synchronous TUI update loop.
   ClientEvent = enum
     Connected;
-    State(PlayerX: integer; PlayerY: integer);
+    State(Value: VisibleState);
     Rejected(Message: string);
     Failed(Message: string);
     Disconnected;
   end;
+  // Client-side connection and presentation state; map fields are valid after state arrival.
   ClientModel = record
     public Host: string;
     public Port: integer;
@@ -23,6 +25,11 @@ public type
     public Events: channel of ClientEvent;
     public Connected: boolean;
     public Pending: boolean;
+    public HasVisibleState: boolean;
+    public View: ViewKind;
+    public Width: integer;
+    public Height: integer;
+    public Rows: array of string;
     public PlayerX: integer;
     public PlayerY: integer;
     public Status: string;
@@ -97,9 +104,9 @@ begin
     begin
       Reader := ReadValue.Reader;
       case ReadValue.Message of
-        ServerMessage.State(PlayerX, PlayerY):
+        ServerMessage.State(Value):
         begin
-          var PublishedState: boolean := try Publish(Events, ClientEvent.State(PlayerX, PlayerY), Token)
+          var PublishedState: boolean := try Publish(Events, ClientEvent.State(Value), Token)
         end
         else
         begin
@@ -139,9 +146,9 @@ begin
               begin
                 Reader := ReadValue.Reader;
                 case ReadValue.Message of
-                  ServerMessage.State(PlayerX, PlayerY):
+                  ServerMessage.State(Value):
                   begin
-                    var Sent: boolean := try Publish(Events, ClientEvent.State(PlayerX, PlayerY), Token)
+                    var Sent: boolean := try Publish(Events, ClientEvent.State(Value), Token)
                   end;
                   ServerMessage.Rejected(Code, Message):
                   begin
@@ -201,6 +208,7 @@ begin
   end
 end;
 
+// Creates the pre-connection model without assuming server-owned map dimensions.
 public function NewClientModel(
   Host: string;
   Port: integer;
@@ -215,8 +223,13 @@ begin
     Events := Events;
     Connected := false;
     Pending := false;
-    PlayerX := MapWidth div 2;
-    PlayerY := MapHeight div 2;
+    HasVisibleState := false;
+    View := ViewKind.Map;
+    Width := 0;
+    Height := 0;
+    Rows := [];
+    PlayerX := 0;
+    PlayerY := 0;
     Status := 'Connecting...';
   end
 end;
@@ -325,10 +338,15 @@ begin
       Next.Connected := true;
       Next.Status := 'Connected'
     end;
-    ClientEvent.State(PlayerX, PlayerY):
+    ClientEvent.State(Value):
     begin
-      Next.PlayerX := PlayerX;
-      Next.PlayerY := PlayerY;
+      Next.HasVisibleState := true;
+      Next.View := Value.View;
+      Next.Width := Value.Width;
+      Next.Height := Value.Height;
+      Next.Rows := Value.Rows;
+      Next.PlayerX := Value.PlayerX;
+      Next.PlayerY := Value.PlayerY;
       Next.Pending := false;
       Next.Status := 'Connected'
     end;
@@ -357,7 +375,7 @@ end;
 function MapRow(State: ClientModel; Y: integer): string;
 begin
   mutable var Text: string := '';
-  for X: integer := 0 to MapWidth - 1 do
+  for X: integer := 0 to State.Width - 1 do
   begin
     if (X = State.PlayerX) and (Y = State.PlayerY) then
     begin
@@ -365,29 +383,41 @@ begin
     end
     else
     begin
-      Text := Text + '.'
+      Text := Text + Std.Str.CharAt(State.Rows[Y], X)
     end
   end;
 
   return Text
 end;
 
+// Renders the latest server-provided map and connection status.
 public function ViewClient(State: ClientModel): TuiElement;
 begin
-  return TuiElement.Column([
-                             TuiElementBuilders.MakeLabel('INTO THE DUNGEON'),
-                             TuiElementBuilders.MakeLabel(''),
-                             TuiElementBuilders.MakeLabel(MapRow(State, 0)),
-                             TuiElementBuilders.MakeLabel(MapRow(State, 1)),
-                             TuiElementBuilders.MakeLabel(MapRow(State, 2)),
-                             TuiElementBuilders.MakeLabel(MapRow(State, 3)),
-                             TuiElementBuilders.MakeLabel(MapRow(State, 4)),
-                             TuiElementBuilders.MakeLabel(''),
-                             TuiElementBuilders.MakeLabel(State.Status),
-                             TuiElementBuilders.MakeLabel('Arrow keys: move    Q: quit')
-                           ], 0)
+  mutable var Elements: array of TuiElement := [
+                                                 TuiElementBuilders.MakeLabel('INTO THE DUNGEON'),
+                                                 TuiElementBuilders.MakeLabel('')
+                                               ];
+  if State.HasVisibleState then
+  begin
+    for Y: integer := 0 to State.Height - 1 do
+    begin
+      Elements := Std.Arrays.Concat(Elements, [TuiElementBuilders.MakeLabel(MapRow(State, Y))])
+    end
+  end
+  else
+  begin
+    Elements := Std.Arrays.Concat(Elements, [TuiElementBuilders.MakeLabel('Waiting for world...')])
+  end;
+
+  Elements := Std.Arrays.Concat(Elements, [
+                                            TuiElementBuilders.MakeLabel(''),
+                                            TuiElementBuilders.MakeLabel(State.Status),
+                                            TuiElementBuilders.MakeLabel('Arrow keys: move    Q: quit')
+                                          ]);
+  return TuiElement.Column(Elements, 0)
 end;
 
+// Owns the request channels and TUI lifecycle until the user exits.
 public function RunClient(Host: string; Port: integer): ClientModel;
 begin
   var Requests: channel of ClientMessage := CreateChannel(1);

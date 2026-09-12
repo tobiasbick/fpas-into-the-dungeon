@@ -27,7 +27,23 @@ The data root is selected in this order:
 
 Path resolution belongs behind one interface shared by the client, server, and
 tests. Callers receive the resolved data root instead of constructing these
-paths themselves.
+paths themselves. The default is absolute because it is derived from the home
+directory. Explicit overrides are normalized with the host's path rules; a
+relative override is resolved from the process working directory.
+
+## Configuration
+
+The client and server create their configuration file with defaults when it is
+missing, then load it as TOML. Both files currently have the same shape:
+
+```toml
+host = "127.0.0.1"
+port = 4040
+```
+
+Command-line `HOST` and `PORT` values override the loaded file for that run.
+Use `--data-dir PATH` to select a different data root before configuration is
+loaded.
 
 ## Ownership
 

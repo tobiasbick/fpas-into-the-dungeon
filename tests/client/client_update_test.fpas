@@ -1,0 +1,48 @@
+// Verifies input gating and movement-intention handling in the client update loop.
+program DungeonClientUpdateTest;
+
+uses Dungeon.Client, Dungeon.Protocol, Std.Results, Std.Task, Std.Test, Std.Tui;
+
+function MakeLeftKey(): TuiKeyEvent;
+begin
+  return record
+    kind := TuiKeyKind.Left;
+    ch := '';
+    shift := false;
+    ctrl := false;
+    alt := false;
+    meta := false;
+  end
+end;
+
+begin
+  var Requests: channel of ClientMessage := CreateChannel(2);
+  var Events: channel of ClientEvent := CreateChannel(2);
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, Requests, Events);
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  Model := UpdateClient(Model, TuiMsg.Key(MakeLeftKey()), Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClientEvent(Model, ClientEvent.Connected, Cmd);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeLeftKey()), Cmd);
+  AssertTrue(Model.Pending);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.Move(DeltaX, DeltaY):
+    begin
+      AssertEquals(-1, DeltaX);
+      AssertEquals(0, DeltaY)
+    end
+    else
+    begin
+      panic('expected one movement intention')
+    end
+  end;
+
+  Model := UpdateClient(Model, TuiMsg.Key(MakeLeftKey()), Cmd);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClientEvent(Model, ClientEvent.Rejected('blocked'), Cmd);
+  AssertFalse(Model.Pending);
+  AssertEquals('blocked', Model.Status);
+  CloseChannel(Requests);
+  CloseChannel(Events)
+end.

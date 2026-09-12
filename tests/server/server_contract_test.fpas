@@ -1,0 +1,75 @@
+// Verifies structured errors for invalid handshake and framing inputs.
+program DungeonServerContractTest;
+
+uses
+  Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Std.Arrays, Std.Net, Std.Net.Utf8,
+  Std.Results, Std.Str, Std.Task, Std.Test;
+
+function ServeOne(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Configured: boolean := try SetTimeout(Client, 2000);
+  var Outcome: result of boolean, string := ServeConnection(Client, Token);
+  var Closed: boolean := try Close(Client);
+  return Outcome
+end;
+
+function SendAll(ConnectionValue: Connection; Text: string): result of boolean, string;
+begin
+  var Bytes: array of integer := Std.Net.Utf8.Encode(Text);
+  mutable var Offset: integer := 0;
+  while Offset < Std.Arrays.Length(Bytes) do
+  begin
+    var Remaining: array of integer := Std.Arrays.Slice(Bytes, Offset, Std.Arrays.Length(Bytes) -
+                                                                       Offset);
+    var Written: integer := try SendBytes(ConnectionValue, Remaining);
+    if Written <= 0 then
+    begin
+      return Error('connection stopped while writing contract input')
+    end;
+
+    Offset := Offset + Written
+  end;
+
+  return Ok(true)
+end;
+
+function FirstResponse(Text: string): ServerMessage;
+begin
+  var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var ServerTask: task := go ServeOne(ListenerValue, Token);
+  var Client: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Std.Results.Unwrap(SetTimeout(Client, 2000)));
+  AssertTrue(Std.Results.Unwrap(SendAll(Client, Text + Std.Str.Chr(10))));
+  var Reader: LineReader := NewLineReader(Client);
+  var Response: LineRead := Std.Results.Unwrap(ReadLine(Reader, Token));
+  var Message: ServerMessage := Std.Results.Unwrap(DecodeServer(Response.Line));
+  AssertTrue(Std.Results.Unwrap(Close(Client)));
+  AssertTrue(Std.Results.Unwrap(Wait(ServerTask)));
+  AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
+  return Message
+end;
+
+procedure AssertErrorCode(Message: ServerMessage; ExpectedCode: string);
+begin
+  case Message of
+    ServerMessage.ErrorMessage(Code, Text):
+    begin
+      AssertEquals(ExpectedCode, Code)
+    end
+    else
+    begin
+      panic('expected structured server error')
+    end
+  end
+end;
+
+begin
+  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.Hello(ProtocolVersion + 1))), 'unsupported_version');
+  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.Move(1, 0))), 'expected_hello');
+  AssertErrorCode(FirstResponse('{not-json'), 'invalid_message');
+  AssertErrorCode(FirstResponse(Std.Str.RepeatStr('x', MaximumLineBytes + 1)), 'line_too_long')
+end.

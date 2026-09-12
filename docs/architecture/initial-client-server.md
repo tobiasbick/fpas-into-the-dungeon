@@ -6,7 +6,8 @@ test seams without defining the wider game.
 ## Behavior
 
 - `dungeon-server` listens on `127.0.0.1:4040` by default.
-- `dungeon-client` connects to that address and renders a 9 by 5 empty map.
+- `dungeon-client` connects to that address and renders a fixed 13 by 7 outdoor
+  region supplied by the server.
 - The server creates one player at the center of the map.
 - Arrow keys send cardinal movement intentions.
 - The server validates movement and returns the resulting visible state.
@@ -33,11 +34,15 @@ oversized messages produce a structured error and close only that connection.
 Movement is request-response: every accepted or rejected `move` receives one
 server message before the next move is sent.
 
+Each `state` message identifies the map view and contains its dimensions,
+server-produced terrain rows, and the player's authoritative coordinates. The
+client validates this visible-state shape and does not import map dimensions or
+rules from the game module.
+
 ## Configuration
 
-The first slice uses command-line overrides with the documented defaults.
-Persistent TOML configuration will use the paths in
-[runtime-data.md](runtime-data.md) once configuration loading is implemented.
+Persistent TOML configuration and command-line overrides use the paths and
+precedence described in [runtime-data.md](runtime-data.md).
 
 ## Completion
 
