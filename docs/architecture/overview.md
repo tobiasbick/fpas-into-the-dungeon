@@ -21,23 +21,21 @@ fpas-into-the-dungeon/
 │           └── Dungeon/Server/
 ├── libs/
 │   ├── game/
+│   ├── world/
 │   ├── protocol/
-│   ├── tui/
 │   └── persistence/
 │       └── runtime-data.fpasprj
 ├── tests/
 │   ├── game/
+│   ├── world/
 │   ├── protocol/
 │   ├── client/
 │   ├── runtime/
 │   └── server/
-├── docs/
+└── docs/
 │   ├── roadmap.md
 │   ├── product/
-│   ├── architecture/
-│   └── decisions/
-└── fixtures/
-    └── worlds/
+│   └── architecture/
 ```
 
 Each module under `apps/`, `libs/`, and `tests/` owns its `.fpasprj` manifest.
@@ -51,15 +49,14 @@ these projects.
   connection to the game simulation.
 - `apps/server` owns the server program entry point and server lifetime.
 - `libs/game` owns the authoritative world model, rules, and simulation.
+- `libs/world` owns validated world/chunk persistence, missing-chunk generation,
+  visible-window composition, prefetching, and bounded caching.
 - `libs/protocol` owns commands and visible-state messages shared by client and
   server. It contains no game rules.
-- `libs/tui` owns terminal rendering and interaction.
-- `libs/persistence` owns loading and saving authoritative state.
-  `Dungeon.RuntimeData` also owns the shared runtime path and configuration
-  interface.
+- `libs/persistence` currently owns the shared runtime path and configuration
+  interface. Authoritative world files are owned by `libs/world`.
 - `tests` follows the production modules so each module is exercised through
   its interface.
-- `fixtures` contains reusable, deterministic test data such as saved worlds.
 
 ## Client-server seam
 
@@ -69,6 +66,9 @@ visible state returned by the server. Shared protocol types must not expose or
 duplicate server-owned game rules. See the
 [initial client-server slice](initial-client-server.md) for the first executable
 contract.
+
+The chunked world seam is described in
+[unbounded outdoor world](unbounded-world.md).
 
 ## Runtime data
 
@@ -86,5 +86,3 @@ and ownership rules.
   [client UI](../product/client-ui.md) document defines the shared terminal
   presentation and interaction shell.
 - `docs/architecture` describes the system structure and module interfaces.
-- `docs/decisions` records architecture decisions whose reasoning must remain
-  available later.

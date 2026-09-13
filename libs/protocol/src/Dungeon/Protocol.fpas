@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 1;
+  ProtocolVersion: integer := 2;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
 
@@ -17,15 +17,20 @@ public type
   // Client-safe map projection; dimensions, rows, and player coordinates must agree.
   VisibleState = record
     public View: ViewKind;
+    public OriginX: integer;
+    public OriginY: integer;
     public Width: integer;
     public Height: integer;
     public Rows: array of string;
     public PlayerX: integer;
     public PlayerY: integer;
+    public WorldX: integer;
+    public WorldY: integer;
   end;
   // Session setup, player intentions, and lifecycle messages accepted by the server.
   ClientMessage = enum
-    Hello(Version: integer);
+    Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
+    Viewport(Width: integer; Height: integer);
     Move(DeltaX: integer; DeltaY: integer);
     Disconnect;
   end;
@@ -71,6 +76,48 @@ begin
     else
     begin
       return Error('unknown visible-state view')
+    end
+  end
+end;
+
+function IsVisibleCellCode(Value: string): boolean;
+begin
+  case Value of
+    'g':
+    begin
+      return true
+    end;
+    'f':
+    begin
+      return true
+    end;
+    'd':
+    begin
+      return true
+    end;
+    'm':
+    begin
+      return true
+    end;
+    'o':
+    begin
+      return true
+    end;
+    'r':
+    begin
+      return true
+    end;
+    'l':
+    begin
+      return true
+    end;
+    'p':
+    begin
+      return true
+    end
+    else
+    begin
+      return false
     end
   end
 end;
@@ -132,6 +179,15 @@ begin
     if Std.Str.Length(Row) <> Value.Width then
     begin
       return Error('visible-state row width must match width')
+    end;
+
+    for Index: integer := 0 to Std.Str.Length(Row) - 1 do
+    begin
+      var Code: string := Std.Str.CharAt(Row, Index);
+      if not IsVisibleCellCode(Code) then
+      begin
+        return Error('visible-state row contains an unknown cell code')
+      end
     end
   end;
 
@@ -139,6 +195,12 @@ begin
      (Value.PlayerY >= Value.Height) then
   begin
     return Error('visible-state player position is outside the area')
+  end;
+
+  if (Value.OriginX + Value.PlayerX <> Value.WorldX) or
+     (Value.OriginY + Value.PlayerY <> Value.WorldY) then
+  begin
+    return Error('visible-state local and world player positions disagree')
   end;
 
   return Ok(Value)
@@ -196,9 +258,13 @@ end;
 public function EncodeClient(Message: ClientMessage): string;
 begin
   case Message of
-    ClientMessage.Hello(Version):
+    ClientMessage.Hello(Version, ViewWidth, ViewHeight):
     begin
-      return Stringify(JsonValue.Object(['type': JsonValue.String('hello'), 'version': JsonValue.Number(IntToReal(Version))]))
+      return Stringify(JsonValue.Object(['type': JsonValue.String('hello'), 'version': JsonValue.Number(IntToReal(Version)), 'width': JsonValue.Number(IntToReal(ViewWidth)), 'height': JsonValue.Number(IntToReal(ViewHeight))]))
+    end;
+    ClientMessage.Viewport(Width, Height):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('viewport'), 'width': JsonValue.Number(IntToReal(Width)), 'height': JsonValue.Number(IntToReal(Height))]))
     end;
     ClientMessage.Move(DeltaX, DeltaY):
     begin
@@ -218,7 +284,11 @@ begin
   case try StringField(Fields, 'type') of
     'hello':
     begin
-      return Ok(ClientMessage.Hello(try IntegerField(Fields, 'version')))
+      return Ok(ClientMessage.Hello(try IntegerField(Fields, 'version'), try IntegerField(Fields, 'width'), try IntegerField(Fields, 'height')))
+    end;
+    'viewport':
+    begin
+      return Ok(ClientMessage.Viewport(try IntegerField(Fields, 'width'), try IntegerField(Fields, 'height')))
     end;
     'move':
     begin
@@ -245,7 +315,7 @@ begin
     end;
     ServerMessage.State(Value):
     begin
-      return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(Value.View)), 'width': JsonValue.Number(IntToReal(Value.Width)), 'height': JsonValue.Number(IntToReal(Value.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(Value.Rows)), 'x': JsonValue.Number(IntToReal(Value.PlayerX)), 'y': JsonValue.Number(IntToReal(Value.PlayerY))]))
+      return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(Value.View)), 'origin_x': JsonValue.Number(IntToReal(Value.OriginX)), 'origin_y': JsonValue.Number(IntToReal(Value.OriginY)), 'width': JsonValue.Number(IntToReal(Value.Width)), 'height': JsonValue.Number(IntToReal(Value.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(Value.Rows)), 'x': JsonValue.Number(IntToReal(Value.PlayerX)), 'y': JsonValue.Number(IntToReal(Value.PlayerY)), 'world_x': JsonValue.Number(IntToReal(Value.WorldX)), 'world_y': JsonValue.Number(IntToReal(Value.WorldY))]))
     end;
     ServerMessage.Rejected(Code, MessageText):
     begin
@@ -271,11 +341,15 @@ begin
     begin
       var Value: VisibleState := record
         View := try DecodeView(try StringField(Fields, 'view'));
+        OriginX := try IntegerField(Fields, 'origin_x');
+        OriginY := try IntegerField(Fields, 'origin_y');
         Width := try IntegerField(Fields, 'width');
         Height := try IntegerField(Fields, 'height');
         Rows := try StringArrayField(Fields, 'rows');
         PlayerX := try IntegerField(Fields, 'x');
         PlayerY := try IntegerField(Fields, 'y');
+        WorldX := try IntegerField(Fields, 'world_x');
+        WorldY := try IntegerField(Fields, 'world_y');
       end;
 
       return Ok(ServerMessage.State(try ValidateVisibleState(Value)))

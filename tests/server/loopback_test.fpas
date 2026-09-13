@@ -2,28 +2,66 @@
 program DungeonServerLoopbackTest;
 
 uses
-  Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Std.Net, Std.Results, Std.Task,
-  Std.Test;
+  Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Std.Fs, Std.Net, Std.Path,
+  Std.Results, Std.Task, Std.Test;
+
+function TestConfig(): ServerConfig;
+begin
+  return record
+    WorldsRoot := '.temp-data/server-worlds-v3';
+    WorldId := 'loopback';
+    WorldSeed := 12345;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 240;
+    MaximumViewHeight := 20;
+  end
+end;
+
+function EnsureDirectory(Path: string): boolean;
+begin
+  if Std.Fs.IsDir(Path) then
+  begin
+    return true
+  end;
+
+  case Std.Fs.CreateDir(Path) of
+    Ok(Created):
+    begin
+      return true
+    end
+    else
+    begin
+      return Std.Fs.IsDir(Path)
+    end
+  end
+end;
+
+procedure EnsureWorldRoot();
+begin
+  AssertTrue(EnsureDirectory('.temp-data'));
+  AssertTrue(EnsureDirectory(TestConfig().WorldsRoot))
+end;
 
 function ServeOne(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
 begin
   var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
   var Configured: boolean := try SetTimeout(Client, 2000);
-  var Outcome: result of boolean, string := ServeConnection(Client, Token);
+  var Outcome: result of boolean, string := ServeConnection(Client, TestConfig(), Token);
   var Closed: boolean := try Close(Client);
   return Outcome
 end;
 
 begin
+  EnsureWorldRoot();
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
   var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
   var Source: CancellationSource := CreateCancellationSource();
   var Token: CancellationToken := GetCancellationToken(Source);
   var ServerTask: task := go ServeOne(ListenerValue, Token);
   var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(Client, 2000)));
+  AssertTrue(Unwrap(SetTimeout(Client, 30000)));
   mutable var Reader: LineReader := NewLineReader(Client);
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion)), Token)));
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)));
   var WelcomeRead: LineRead := Unwrap(ReadLine(Reader, Token));
   Reader := WelcomeRead.Reader;
   case DecodeServer(WelcomeRead.Line) of
@@ -56,9 +94,38 @@ begin
           AssertTrue(Value.View = ViewKind.Map);
           AssertEquals(13, Value.Width);
           AssertEquals(7, Value.Height);
-          AssertEquals('~~~~.........', Value.Rows[0]);
+          AssertEquals(-6, Value.OriginX);
+          AssertEquals(-3, Value.OriginY);
           AssertEquals(6, Value.PlayerX);
-          AssertEquals(3, Value.PlayerY)
+          AssertEquals(3, Value.PlayerY);
+          AssertEquals(0, Value.WorldX);
+          AssertEquals(0, Value.WorldY)
+        end
+        else
+        begin
+          AssertTrue(false)
+        end
+      end
+    end
+    else
+    begin
+      panic('unexpected initial state: ' + InitialRead.Line)
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token)));
+  var MovedRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := MovedRead.Reader;
+  case DecodeServer(MovedRead.Line) of
+    Ok(MovedMessage):
+    begin
+      case MovedMessage of
+        ServerMessage.State(Value):
+        begin
+          AssertEquals(6, Value.PlayerX);
+          AssertEquals(3, Value.PlayerY);
+          AssertEquals(1, Value.WorldX);
+          AssertEquals(0, Value.WorldY)
         end
         else
         begin
@@ -72,27 +139,19 @@ begin
     end
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token)));
-  var MovedRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := MovedRead.Reader;
-  case DecodeServer(MovedRead.Line) of
-    Ok(MovedMessage):
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Viewport(1000, 1000)), Token)));
+  var ResizedRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := ResizedRead.Reader;
+  case Unwrap(DecodeServer(ResizedRead.Line)) of
+    ServerMessage.State(Value):
     begin
-      case MovedMessage of
-        ServerMessage.State(Value):
-        begin
-          AssertEquals(7, Value.PlayerX);
-          AssertEquals(3, Value.PlayerY)
-        end
-        else
-        begin
-          AssertTrue(false)
-        end
-      end
+      AssertEquals(240, Value.Width);
+      AssertEquals(20, Value.Height);
+      AssertEquals(1, Value.WorldX)
     end
     else
     begin
-      AssertTrue(false)
+      panic('expected clamped viewport state')
     end
   end;
 
@@ -114,5 +173,39 @@ begin
   AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
   AssertTrue(Unwrap(Close(Client)));
   AssertTrue(Unwrap(Wait(ServerTask)));
-  AssertTrue(Unwrap(CloseListener(ListenerValue)))
+  AssertTrue(Unwrap(CloseListener(ListenerValue)));
+  var WorldPath: string := Std.Path.Join([TestConfig().WorldsRoot, TestConfig().WorldId]);
+  var MetadataPath: string := Std.Path.Join([WorldPath, 'world.json']);
+  var ChunkPath: string := Std.Path.Join([WorldPath, 'chunks', 'x_-1', 'y_-1.json']);
+  var MetadataBefore: string := Unwrap(Std.Fs.ReadText(MetadataPath));
+  var ChunkBefore: string := Unwrap(Std.Fs.ReadText(ChunkPath));
+  var RestartListener: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var RestartAddress: NetworkAddress := Unwrap(ListenerLocalAddress(RestartListener));
+  var RestartTask: task := go ServeOne(RestartListener, Token);
+  var RestartClient: Connection := Unwrap(Connect('127.0.0.1', RestartAddress.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(RestartClient, 30000)));
+  mutable var RestartReader: LineReader := NewLineReader(RestartClient);
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 1, 1)), Token)));
+  var RestartWelcome: LineRead := Unwrap(ReadLine(RestartReader, Token));
+  RestartReader := RestartWelcome.Reader;
+  var RestartState: LineRead := Unwrap(ReadLine(RestartReader, Token));
+  RestartReader := RestartState.Reader;
+  case Unwrap(DecodeServer(RestartState.Line)) of
+    ServerMessage.State(Value):
+    begin
+      AssertEquals(0, Value.WorldX);
+      AssertEquals(0, Value.WorldY)
+    end
+    else
+    begin
+      panic('expected state after server-session restart')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(RestartClient)));
+  AssertTrue(Unwrap(Wait(RestartTask)));
+  AssertTrue(Unwrap(CloseListener(RestartListener)));
+  AssertEquals(MetadataBefore, Unwrap(Std.Fs.ReadText(MetadataPath)));
+  AssertEquals(ChunkBefore, Unwrap(Std.Fs.ReadText(ChunkPath)))
 end.

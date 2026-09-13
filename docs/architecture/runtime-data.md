@@ -10,6 +10,8 @@ default data root is:
 │   └── server.toml
 ├── worlds/
 │   └── <world-id>/
+│       ├── world.json
+│       └── chunks/
 ├── logs/
 └── cache/
 ```
@@ -34,21 +36,36 @@ relative override is resolved from the process working directory.
 ## Configuration
 
 The client and server create their configuration file with defaults when it is
-missing, then load it as TOML. Both files currently have the same shape:
+missing, then load it as TOML. The client file contains its endpoint:
 
 ```toml
 host = "127.0.0.1"
 port = 4040
 ```
 
+The server file additionally selects its authoritative world and bounds client
+viewport requests:
+
+```toml
+host = "127.0.0.1"
+port = 4040
+world_id = "main"
+world_seed = 12345
+chunk_cache_limit = 64
+max_view_width = 240
+max_view_height = 120
+```
+
 Command-line `HOST` and `PORT` values override the loaded file for that run.
-Use `--data-dir PATH` to select a different data root before configuration is
-loaded.
+The server's `--world ID` selects another world without changing the stored
+default. Use `--data-dir PATH` to select a different data root before
+configuration is loaded.
 
 ## Ownership
 
 - `config` contains persistent client and server settings.
-- `worlds` contains authoritative world state and is owned by the server.
+- `worlds` contains versioned authoritative world metadata and generated chunk
+  files and is owned by the server.
 - `logs` contains diagnostic output and is not part of a saved world.
 - `cache` contains disposable data that the application can rebuild.
 - Tests use a temporary data root supplied through the same interface and do

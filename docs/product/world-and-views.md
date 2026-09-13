@@ -11,7 +11,7 @@ or character progression.
 - **Area** is one navigable spatial environment. The player occupies one area
   at a time.
 - **Outdoor region** is an exterior area such as countryside, wilderness, or
-  the land between settlements.
+  the land between settlements. Outdoor regions may be practically unbounded.
 - **Settlement** is an exterior built-up area such as a village or town.
 - **Interior** is an entered, enclosed part of a building such as a house or
   castle.
@@ -20,12 +20,25 @@ or character progression.
 - **Location** is an identifiable place within an area. A location can mark a
   destination or an entrance to another area, such as a building or dungeon
   entrance.
+- **Chunk** is one fixed 128 by 128 storage, generation, and cache partition
+  inside an outdoor region. It is not an area and is never presented to the
+  player as a transition.
+- **Chunk coordinate** is the signed pair identifying a chunk. World
+  coordinates use floor-based conversion so negative positions map
+  consistently to chunk and local coordinates.
+- **Visible window** is the bounded rectangular part of an area sent to a
+  client. It has a world-coordinate origin and is independent of chunk
+  boundaries.
 - **Player intention** is an action requested by the client. It is not an
   authoritative result.
 - **Visible state** is the server-produced, client-safe projection of the
   current area and player state. It is not the complete world.
 - **Transition** is the server-authoritative move from one area to another,
   such as entering or leaving a building or dungeon.
+
+Walking across a chunk boundary is seamless movement within the same outdoor
+region. A transition occurs only when entering or leaving a settlement,
+interior, dungeon, or another distinct area.
 
 ## UI terminology
 
@@ -57,11 +70,13 @@ the visible state and renders it without owning or duplicating game rules.
 
 ## Current implementation
 
-The first world slice is a fixed outdoor region shown in the top-down map view,
-not a dungeon. Its visible state is owned and produced by the server. The client
-renders that state without importing world dimensions or rules from the game
-module.
+The first world is a deterministic, chunked outdoor region shown in the
+top-down map view. Its signed world coordinates remain stable across chunk
+loads and reconnects. The server creates missing chunks, composes the requested
+visible window, and sends only presentation codes plus the authoritative
+position. The client has no chunk or movement-rule model.
 
-Isometric rendering, area transitions, interiors, dungeons, procedural world
-generation, persistence, LLM integration, and the first RPG action are outside
-this slice. Their intended order is tracked in the [roadmap](../roadmap.md).
+Settlements, transitions, interiors, dungeons, mutable terrain, broader world
+simulation, isometric rendering, LLM integration, and the first RPG action are
+outside this slice. Their intended order is tracked in the
+[roadmap](../roadmap.md).

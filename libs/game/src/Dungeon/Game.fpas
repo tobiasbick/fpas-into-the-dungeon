@@ -1,82 +1,544 @@
-// Authoritative rules for the initial game slice.
+// Authoritative coordinates, terrain, generation, and movement rules for outdoor worlds.
 unit Dungeon.Game;
 
+uses Std.Arrays, Std.Math;
+
 public const
-  // Fixed dimensions of the initial outdoor region.
-  MapWidth: integer := 13;
-  MapHeight: integer := 7;
+  // Schema version written to world metadata and chunk files.
+  WorldFormatVersion: integer := 1;
+  // Selects the deterministic algorithm used for chunks that do not exist yet.
+  WorldGeneratorVersion: integer := 1;
+  // Fixed cell width and height of every version 1 outdoor chunk.
+  WorldChunkSize: integer := 128;
 
 public type
-  // Distinguishes outdoor maps from first-person interiors and dungeons.
+  // Distinguishes outdoor maps from finite first-person interiors and dungeons.
   AreaKind = enum
     OutdoorRegion;
+    Settlement;
     Interior;
     Dungeon;
   end;
-  // Client-safe projection of an area and the player's position within it.
-  VisibleArea = record
-    public Kind: AreaKind;
-    public Width: integer;
-    public Height: integer;
-    public Rows: array of string;
-    public PlayerX: integer;
-    public PlayerY: integer;
+  // Identifies one stable position in an outdoor area's unbounded coordinate space.
+  WorldPosition = record
+    public X: integer;
+    public Y: integer;
   end;
-  // Authoritative game state retained by the server for one session.
+  // Identifies one 128 by 128 storage and generation partition.
+  ChunkCoordinate = record
+    public X: integer;
+    public Y: integer;
+  end;
+  // Base material retained when a feature such as a forest or path is present.
+  BaseTerrainKind = enum
+    Grass;
+    Sand;
+    Rock;
+    Water;
+  end;
+  // Optional surface feature rendered above compatible base terrain.
+  TerrainFeatureKind = enum
+    NoFeature;
+    Forest;
+    Path;
+    River;
+  end;
+  // Classifies water without requiring connectivity traversal across an unbounded world.
+  WaterKind = enum
+    NoWater;
+    Sea;
+    Lake;
+    RiverWater;
+  end;
+  // Complete authoritative terrain value for one outdoor world coordinate.
+  WorldCell = record
+    public Base: BaseTerrainKind;
+    public Feature: TerrainFeatureKind;
+    public Water: WaterKind;
+  end;
+  // Immutable identity and generator contract for one outdoor world.
+  WorldMetadata = record
+    public Id: string;
+    public Seed: integer;
+    public FormatVersion: integer;
+    public GeneratorVersion: integer;
+    public ChunkSize: integer;
+    public Spawn: WorldPosition;
+  end;
+  // One complete outdoor chunk in row-major order.
+  WorldChunk = record
+    public Coordinate: ChunkCoordinate;
+    public Cells: array of WorldCell;
+  end;
+  // Authoritative player state retained by the server for one session.
   GameState = record
     public Area: AreaKind;
-    public PlayerX: integer;
-    public PlayerY: integer;
+    public Player: WorldPosition;
   end;
 
-// Creates the initial player position at the center of the map.
-public function NewGame(): GameState;
+type
+  NoiseGrid = record
+    Scale: integer;
+    MinimumX: integer;
+    MinimumY: integer;
+    Width: integer;
+    Values: array of integer;
+  end;
+
+function PositiveModulo(Value: integer; Divisor: integer): integer;
+begin
+  mutable var Remainder: integer := Value mod Divisor;
+  if Remainder < 0 then
+  begin
+    Remainder := Remainder + Divisor
+  end;
+
+  return Remainder
+end;
+
+// Returns mathematical floor division for signed coordinates and a positive divisor.
+public function FloorDivide(Value: integer; Divisor: integer): integer;
+begin
+  if Divisor <= 0 then
+  begin
+    panic('coordinate divisor must be positive')
+  end;
+  mutable var Quotient: integer := Value div Divisor;
+  var Remainder: integer := Value mod Divisor;
+  if (Remainder <> 0) and (Value < 0) then
+  begin
+    Quotient := Quotient - 1
+  end;
+
+  return Quotient
+end;
+
+// Maps one world coordinate to its containing chunk coordinate.
+public function ChunkForCoordinate(Value: integer): integer;
+begin
+  return FloorDivide(Value, WorldChunkSize)
+end;
+
+// Maps one world coordinate to its zero-based local coordinate inside a chunk.
+public function LocalForCoordinate(Value: integer): integer;
+begin
+  return PositiveModulo(Value, WorldChunkSize)
+end;
+
+// Creates version 1 metadata for a new deterministic outdoor world.
+public function NewWorldMetadata(Id: string; Seed: integer): WorldMetadata;
+begin
+  return record
+    Id := Id;
+    Seed := Seed;
+    FormatVersion := WorldFormatVersion;
+    GeneratorVersion := WorldGeneratorVersion;
+    ChunkSize := WorldChunkSize;
+    Spawn := record
+      X := 0;
+      Y := 0;
+    end;
+  end
+end;
+
+function CoordinateHash(Seed: integer; X: integer; Y: integer; Salt: integer): integer;
+begin
+  var Prime: integer := 2147483647;
+  var XPart: integer := PositiveModulo(X, 1000003);
+  var YPart: integer := PositiveModulo(Y, 1000033);
+  var SeedPart: integer := PositiveModulo(Seed, 1000037);
+  var SaltPart: integer := PositiveModulo(Salt, 1000039);
+  mutable var Mixed: integer := PositiveModulo((XPart * 73856093) + (YPart * 19349663), Prime);
+  Mixed := PositiveModulo(Mixed + (SeedPart * 83492791), Prime);
+  Mixed := PositiveModulo(Mixed + (SaltPart * 265443), Prime);
+  Mixed := PositiveModulo((Mixed * 48271) + 1, Prime);
+  return Mixed mod 1000
+end;
+
+function SmoothWeight(Local: integer; Scale: integer): integer;
+begin
+  return ((Local * Local) * ((3 * Scale) - (2 * Local))) div (Scale * Scale)
+end;
+
+function Interpolate(A: integer; B: integer; Weight: integer; Scale: integer): integer;
+begin
+  return ((A * (Scale - Weight)) + (B * Weight)) div Scale
+end;
+
+function ValueNoise(Seed: integer; X: integer; Y: integer; Scale: integer; Salt: integer): integer;
+begin
+  var GridX: integer := FloorDivide(X, Scale);
+  var GridY: integer := FloorDivide(Y, Scale);
+  var LocalX: integer := PositiveModulo(X, Scale);
+  var LocalY: integer := PositiveModulo(Y, Scale);
+  var WeightX: integer := SmoothWeight(LocalX, Scale);
+  var WeightY: integer := SmoothWeight(LocalY, Scale);
+  var Top: integer := Interpolate(CoordinateHash(Seed, GridX, GridY, Salt), CoordinateHash(Seed, GridX +
+                                                                                                 1, GridY, Salt), WeightX, Scale);
+  var Bottom: integer := Interpolate(CoordinateHash(Seed, GridX, GridY + 1, Salt), CoordinateHash(Seed, GridX +
+                                                                                                        1, GridY +
+                                                                                                           1, Salt), WeightX, Scale);
+  return Interpolate(Top, Bottom, WeightY, Scale)
+end;
+
+function BuildNoiseGrid(
+  Seed: integer;
+  OriginX: integer;
+  OriginY: integer;
+  Scale: integer;
+  Salt: integer
+): NoiseGrid;
+begin
+  var MinimumX: integer := FloorDivide(OriginX, Scale);
+  var MinimumY: integer := FloorDivide(OriginY, Scale);
+  var MaximumX: integer := FloorDivide((OriginX + WorldChunkSize) - 1, Scale) + 1;
+  var MaximumY: integer := FloorDivide((OriginY + WorldChunkSize) - 1, Scale) + 1;
+  mutable var Values: array of integer := [];
+  for GridY: integer := MinimumY to MaximumY do
+  begin
+    for GridX: integer := MinimumX to MaximumX do
+    begin
+      Std.Arrays.Push(Values, CoordinateHash(Seed, GridX, GridY, Salt))
+    end
+  end;
+
+  return record
+    Scale := Scale;
+    MinimumX := MinimumX;
+    MinimumY := MinimumY;
+    Width := (MaximumX - MinimumX) + 1;
+    Values := Values;
+  end
+end;
+
+function SampleNoise(Grid: NoiseGrid; X: integer; Y: integer): integer;
+begin
+  var GridX: integer := FloorDivide(X, Grid.Scale);
+  var GridY: integer := FloorDivide(Y, Grid.Scale);
+  var LocalX: integer := PositiveModulo(X, Grid.Scale);
+  var LocalY: integer := PositiveModulo(Y, Grid.Scale);
+  var WeightX: integer := SmoothWeight(LocalX, Grid.Scale);
+  var WeightY: integer := SmoothWeight(LocalY, Grid.Scale);
+  var OffsetX: integer := GridX - Grid.MinimumX;
+  var OffsetY: integer := GridY - Grid.MinimumY;
+  var TopIndex: integer := (OffsetY * Grid.Width) + OffsetX;
+  var BottomIndex: integer := TopIndex + Grid.Width;
+  var Top: integer := Interpolate(Grid.Values[TopIndex], Grid.Values[TopIndex + 1], WeightX, Grid.Scale);
+  var Bottom: integer := Interpolate(Grid.Values[BottomIndex], Grid.Values[BottomIndex + 1], WeightX, Grid.Scale);
+  return Interpolate(Top, Bottom, WeightY, Grid.Scale)
+end;
+
+function PeriodicDistance(Value: integer; Period: integer): integer;
+begin
+  var Wrapped: integer := PositiveModulo(Value, Period);
+  if Wrapped > Period div 2 then
+  begin
+    return Period - Wrapped
+  end;
+
+  return Wrapped
+end;
+
+function PlainCell(): WorldCell;
+begin
+  return record
+    Base := BaseTerrainKind.Grass;
+    Feature := TerrainFeatureKind.NoFeature;
+    Water := WaterKind.NoWater;
+  end
+end;
+
+function WaterCell(Kind: WaterKind; Feature: TerrainFeatureKind): WorldCell;
+begin
+  return record
+    Base := BaseTerrainKind.Water;
+    Feature := Feature;
+    Water := Kind;
+  end
+end;
+
+function RiverShift(Metadata: WorldMetadata; Y: integer): integer;
+begin
+  return (ValueNoise(Metadata.Seed, 0, Y, 160, 71) - 500) div 2
+end;
+
+function PathShift(Metadata: WorldMetadata; X: integer): integer;
+begin
+  return (ValueNoise(Metadata.Seed, X, 0, 144, 89) - 500) div 3
+end;
+
+function GenerateCellFromInputs(
+  Metadata: WorldMetadata;
+  X: integer;
+  Y: integer;
+  RiverOffset: integer;
+  PathOffset: integer;
+  Elevation: integer;
+  Moisture: integer
+): WorldCell;
+begin
+  if (Std.Math.Abs(X - Metadata.Spawn.X) <= 4) and (Std.Math.Abs(Y - Metadata.Spawn.Y) <= 4) then
+  begin
+    mutable var SpawnCell: WorldCell := PlainCell();
+    if Y = Metadata.Spawn.Y then
+    begin
+      SpawnCell.Feature := TerrainFeatureKind.Path
+    end;
+
+    return SpawnCell
+  end;
+  var Detail: integer := CoordinateHash(Metadata.Seed, X, Y, 37);
+  var LakeX: integer := PeriodicDistance(X + PositiveModulo(Metadata.Seed, 673), 673);
+  var LakeY: integer := PeriodicDistance(Y - PositiveModulo(Metadata.Seed, 521), 521);
+  if Elevation < 225 then
+  begin
+    return WaterCell(WaterKind.Sea, TerrainFeatureKind.NoFeature)
+  end;
+
+  if ((LakeX <= 14) and (LakeY <= 9)) and (Elevation < 700) then
+  begin
+    return WaterCell(WaterKind.Lake, TerrainFeatureKind.NoFeature)
+  end;
+
+  if (Elevation < 790) and (PeriodicDistance(X - RiverOffset, 1024) <= 1) then
+  begin
+    return WaterCell(WaterKind.RiverWater, TerrainFeatureKind.River)
+  end;
+  mutable var Cell: WorldCell := PlainCell();
+  if Elevation > 790 then
+  begin
+    Cell.Base := BaseTerrainKind.Rock
+  end
+  else
+  begin
+    if Moisture < 275 then
+    begin
+      Cell.Base := BaseTerrainKind.Sand
+    end
+    else
+    begin
+      if (Moisture > 620) and (Detail > 430) then
+      begin
+        Cell.Feature := TerrainFeatureKind.Forest
+      end
+    end
+  end;
+
+  if (Cell.Base <> BaseTerrainKind.Rock) and (PeriodicDistance(Y - PathOffset, 768) <= 1) then
+  begin
+    Cell.Feature := TerrainFeatureKind.Path
+  end;
+
+  return Cell
+end;
+
+function GenerateCellWithShifts(
+  Metadata: WorldMetadata;
+  X: integer;
+  Y: integer;
+  RiverOffset: integer;
+  PathOffset: integer
+): WorldCell;
+begin
+  return GenerateCellFromInputs(Metadata, X, Y, RiverOffset, PathOffset, ValueNoise(Metadata.Seed, X, Y, 256, 11), ValueNoise(Metadata.Seed, X, Y, 192, 23))
+end;
+
+// Generates one cell solely from metadata and absolute coordinates.
+public function GenerateWorldCell(Metadata: WorldMetadata; X: integer; Y: integer): WorldCell;
+begin
+  if Metadata.GeneratorVersion <> WorldGeneratorVersion then
+  begin
+    panic('unsupported world generator version')
+  end;
+
+  return GenerateCellWithShifts(Metadata, X, Y, RiverShift(Metadata, Y), PathShift(Metadata, X))
+end;
+
+// Generates one complete chunk independently of load or generation order.
+public function GenerateChunk(Metadata: WorldMetadata; Coordinate: ChunkCoordinate): WorldChunk;
+begin
+  mutable var Cells: array of WorldCell := [];
+  var OriginX: integer := Coordinate.X * WorldChunkSize;
+  var OriginY: integer := Coordinate.Y * WorldChunkSize;
+  var ElevationGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 256, 11);
+  var MoistureGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 192, 23);
+  mutable var PathOffsets: array of integer := [];
+  for LocalX: integer := 0 to WorldChunkSize - 1 do
+  begin
+    Std.Arrays.Push(PathOffsets, PathShift(Metadata, OriginX + LocalX))
+  end;
+
+  for LocalY: integer := 0 to WorldChunkSize - 1 do
+  begin
+    var RowRiverOffset: integer := RiverShift(Metadata, OriginY + LocalY);
+    for LocalX: integer := 0 to WorldChunkSize - 1 do
+    begin
+      var X: integer := OriginX + LocalX;
+      var Y: integer := OriginY + LocalY;
+      Std.Arrays.Push(Cells, GenerateCellFromInputs(Metadata, X, Y, RowRiverOffset, PathOffsets[LocalX], SampleNoise(ElevationGrid, X, Y), SampleNoise(MoistureGrid, X, Y)))
+    end
+  end;
+
+  return record
+    Coordinate := Coordinate;
+    Cells := Cells;
+  end
+end;
+
+// Returns one cell after validating local coordinates and chunk shape.
+public function ChunkCell(Chunk: WorldChunk; LocalX: integer; LocalY: integer): WorldCell;
+begin
+  if ((LocalX < 0) or (LocalX >= WorldChunkSize)) or ((LocalY < 0) or (LocalY >= WorldChunkSize)) then
+  begin
+    panic('local coordinate is outside the chunk')
+  end;
+
+  if Std.Arrays.Length(Chunk.Cells) <> WorldChunkSize * WorldChunkSize then
+  begin
+    panic('chunk cell count does not match chunk size')
+  end;
+
+  return Chunk.Cells[(LocalY * WorldChunkSize) + LocalX]
+end;
+
+// Validates a loaded chunk's shape and terrain-layer invariants.
+public function ValidateChunk(Chunk: WorldChunk): result of WorldChunk, string;
+begin
+  if Std.Arrays.Length(Chunk.Cells) <> WorldChunkSize * WorldChunkSize then
+  begin
+    return Error('chunk cell count must match 128 by 128 chunk size')
+  end;
+
+  for Cell: WorldCell in Chunk.Cells do
+  begin
+    if Cell.Base = BaseTerrainKind.Water then
+    begin
+      if Cell.Water = WaterKind.NoWater then
+      begin
+        return Error('water terrain must have a water classification')
+      end
+    end
+    else
+    begin
+      if Cell.Water <> WaterKind.NoWater then
+      begin
+        return Error('non-water terrain must not have a water classification')
+      end;
+
+      if Cell.Feature = TerrainFeatureKind.River then
+      begin
+        return Error('river feature requires water terrain')
+      end
+    end;
+
+    if (Cell.Feature = TerrainFeatureKind.Forest) or (Cell.Feature = TerrainFeatureKind.Path) then
+    begin
+      if Cell.Base = BaseTerrainKind.Water then
+      begin
+        return Error('forest and path features require land terrain')
+      end
+    end;
+
+    if Cell.Feature = TerrainFeatureKind.River then
+    begin
+      if Cell.Water <> WaterKind.RiverWater then
+      begin
+        return Error('river feature requires river water classification')
+      end
+    end
+  end;
+
+  return Ok(Chunk)
+end;
+
+// Maps an authoritative cell to one compact client-safe presentation code.
+public function VisibleCellCode(Cell: WorldCell): string;
+begin
+  case Cell.Feature of
+    TerrainFeatureKind.Forest:
+    begin
+      return 'f'
+    end;
+    TerrainFeatureKind.Path:
+    begin
+      return 'p'
+    end;
+    TerrainFeatureKind.River:
+    begin
+      return 'r'
+    end
+    else
+    begin
+    end
+  end;
+
+  case Cell.Water of
+    WaterKind.Sea:
+    begin
+      return 'o'
+    end;
+    WaterKind.Lake:
+    begin
+      return 'l'
+    end
+    else
+    begin
+    end
+  end;
+
+  case Cell.Base of
+    BaseTerrainKind.Grass:
+    begin
+      return 'g'
+    end;
+    BaseTerrainKind.Sand:
+    begin
+      return 'd'
+    end;
+    BaseTerrainKind.Rock:
+    begin
+      return 'm'
+    end
+    else
+    begin
+      return 'o'
+    end
+  end
+end;
+
+// Returns whether the server may place or move a player onto one cell.
+public function IsWalkable(Cell: WorldCell): boolean;
+begin
+  return (Cell.Base = BaseTerrainKind.Grass) or (Cell.Base = BaseTerrainKind.Sand)
+end;
+
+// Creates the initial player state at the metadata-defined spawn coordinate.
+public function NewGame(Metadata: WorldMetadata): GameState;
 begin
   return record
     Area := AreaKind.OutdoorRegion;
-    PlayerX := MapWidth div 2;
-    PlayerY := MapHeight div 2;
+    Player := Metadata.Spawn;
   end
 end;
 
-// Projects the fixed outdoor region into state that may be shown to a client.
-public function GetVisibleArea(State: GameState): VisibleArea;
-begin
-  return record
-    Kind := State.Area;
-    Width := MapWidth;
-    Height := MapHeight;
-    Rows := [
-              '~~~~.........',
-              '~~~..^^......',
-              '..==.^^......',
-              '..==.......#.',
-              '..=====......',
-              '......^^^....',
-              '.............'
-            ];
-    PlayerX := State.PlayerX;
-    PlayerY := State.PlayerY;
-  end
-end;
-
-// Applies one cardinal movement intention inside the map.
-public function MovePlayer(State: GameState; DeltaX: integer; DeltaY: integer): result of GameState, string;
+// Applies one cardinal movement intention after validating the authoritative target cell.
+public function MovePlayer(State: GameState; DeltaX: integer; DeltaY: integer; Target: WorldCell): result of GameState, string;
 begin
   if not (((DeltaX = 0) and ((DeltaY = -1) or (DeltaY = 1))) or ((DeltaY = 0) and ((DeltaX = -1) or (DeltaX = 1)))) then
   begin
     return Error('movement must be one cardinal step')
   end;
-  var NextX: integer := State.PlayerX + DeltaX;
-  var NextY: integer := State.PlayerY + DeltaY;
-  if (((NextX < 0) or (NextX >= MapWidth)) or (NextY < 0)) or (NextY >= MapHeight) then
+
+  if not IsWalkable(Target) then
   begin
-    return Error('movement leaves the map')
+    return Error('terrain is not traversable')
   end;
 
   return Ok(record
     Area := State.Area;
-    PlayerX := NextX;
-    PlayerY := NextY;
+    Player := record
+      X := State.Player.X + DeltaX;
+      Y := State.Player.Y + DeltaY;
+    end;
   end)
 end;

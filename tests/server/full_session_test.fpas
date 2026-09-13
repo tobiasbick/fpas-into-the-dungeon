@@ -1,0 +1,120 @@
+// Verifies the real client adapter, server world session, and colored TUI projection together.
+program DungeonFullSessionTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.Server, Std.Conv, Std.Fs, Std.Net, Std.Options,
+  Std.Results, Std.Task, Std.Test, Std.Time, Std.Tui;
+
+function TestConfig(WorldsRoot: string): ServerConfig;
+begin
+  return record
+    WorldsRoot := WorldsRoot;
+    WorldId := 'fresh-world';
+    WorldSeed := 12345;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 240;
+    MaximumViewHeight := 120;
+  end
+end;
+
+function EnsureDirectory(Path: string): boolean;
+begin
+  if Std.Fs.IsDir(Path) then
+  begin
+    return true
+  end;
+
+  case Std.Fs.CreateDir(Path) of
+    Ok(Created):
+    begin
+      return true
+    end
+    else
+    begin
+      return Std.Fs.IsDir(Path)
+    end
+  end
+end;
+
+procedure EnsureWorldRoot(WorldsRoot: string);
+begin
+  AssertTrue(EnsureDirectory('.temp-data'));
+  AssertTrue(EnsureDirectory(WorldsRoot))
+end;
+
+function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Configured: boolean := try SetTimeout(Client, 30000);
+  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
+  var Closed: boolean := try Close(Client);
+  return Outcome
+end;
+
+begin
+  var WorldsRoot: string := '.temp-data/full-session-' + IntToStr(TimestampMillis());
+  EnsureWorldRoot(WorldsRoot);
+  var Config: ServerConfig := TestConfig(WorldsRoot);
+  var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var ServerTask: task := go ServeOne(ListenerValue, Config, Token);
+  var Requests: channel of ClientMessage := CreateChannel(4);
+  var Events: channel of ClientEvent := CreateChannel(8);
+  var ClientTask: task := go RunNetwork('127.0.0.1', Address.Port, 13, 7, Requests, Events, Token);
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', Address.Port, Requests, Events);
+  Model.Screen := ClientScreen.GameScreen;
+  Model.FocusedControl := 0;
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 30000)) of
+    ClientEvent.Connected:
+    begin
+      Model := UpdateClientEvent(Model, ClientEvent.Connected, Cmd)
+    end
+    else
+    begin
+      panic('expected connected event')
+    end
+  end;
+
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 30000)) of
+    ClientEvent.State(Value):
+    begin
+      AssertEquals(13, Value.Width);
+      AssertEquals(7, Value.Height);
+      AssertEquals(0, Value.WorldX);
+      AssertEquals(0, Value.WorldY);
+      Model := UpdateClientEvent(Model, ClientEvent.State(Value), Cmd)
+    end
+    else
+    begin
+      panic('expected generated initial state')
+    end
+  end;
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(Std.Options.Unwrap(App.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle).Background.Kind =
+             TuiColorKind.Rgb);
+  App.Close();
+  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Viewport(240, 20), 1000)));
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 30000)) of
+    ClientEvent.State(Value):
+    begin
+      AssertEquals(240, Value.Width);
+      AssertEquals(20, Value.Height);
+      AssertEquals(0, Value.WorldX)
+    end
+    else
+    begin
+      panic('expected resized generated state')
+    end
+  end;
+
+  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Disconnect, 1000)));
+  AssertTrue(Std.Results.Unwrap(Wait(ClientTask)));
+  AssertTrue(Std.Results.Unwrap(Wait(ServerTask)));
+  AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
+  CloseChannel(Requests);
+  CloseChannel(Events)
+end.

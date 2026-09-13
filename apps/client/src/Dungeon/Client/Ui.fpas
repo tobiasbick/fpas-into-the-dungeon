@@ -26,6 +26,15 @@ const
   MinimumDockedContextWidth: integer := 72;
   MinimumDockedMessagesHeight: integer := 18;
   MaximumMessages: integer := 8;
+  DockedMessageLines: integer := 4;
+  MessagePanelHeight: integer := 6;
+  StatusPanelHeight: integer := 3;
+
+type
+  WorldViewport = record
+    Width: integer;
+    Height: integer;
+  end;
 
 function AppendMessage(State: ClientModel; Text: string): ClientModel;
 begin
@@ -63,6 +72,75 @@ end;
 function MessagesCanDock(State: ClientModel): boolean;
 begin
   return State.ViewportHeight >= MinimumDockedMessagesHeight
+end;
+
+function PrimaryTerminalWidth(State: ClientModel): integer;
+begin
+  if State.ContextPanelVisible and ContextCanDock(State) then
+  begin
+    return (State.ViewportWidth * 2) div 3
+  end;
+
+  return State.ViewportWidth
+end;
+
+function DesiredWorldViewport(State: ClientModel): WorldViewport;
+begin
+  var PrimaryWidth: integer := PrimaryTerminalWidth(State);
+  mutable var PrimaryHeight: integer := State.ViewportHeight - StatusPanelHeight;
+  if State.MessagePanelVisible and MessagesCanDock(State) then
+  begin
+    PrimaryHeight := PrimaryHeight - MessagePanelHeight
+  end;
+  mutable var Width: integer := (PrimaryWidth - 2) div 2;
+  mutable var Height: integer := PrimaryHeight - 2;
+  if Width < 1 then
+  begin
+    Width := 1
+  end;
+
+  if Height < 1 then
+  begin
+    Height := 1
+  end;
+
+  return record
+    Width := Width;
+    Height := Height;
+  end
+end;
+
+function QueueViewport(State: ClientModel): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  begin
+    return State
+  end;
+  var Desired: WorldViewport := DesiredWorldViewport(State);
+  if (Desired.Width = State.RequestedWorldWidth) and (Desired.Height = State.RequestedWorldHeight) then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.Viewport(Desired.Width, Desired.Height)) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.RequestedWorldWidth := Desired.Width;
+      Next.RequestedWorldHeight := Desired.Height;
+      Next.Pending := true;
+      Next.Status := 'Updating view...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
 end;
 
 function CloseOverlay(State: ClientModel): ClientModel;
@@ -109,8 +187,9 @@ begin
   var Port: integer := State.Port;
   var Requests: channel of ClientMessage := State.Requests;
   var Events: channel of ClientEvent := State.Events;
+  var Viewport: WorldViewport := DesiredWorldViewport(State);
   Cmd.ReplaceSubscription(NetworkSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
-    return Dungeon.Client.Network.RunNetwork(Host, Port, Requests, Events, Token)
+    return Dungeon.Client.Network.RunNetwork(Host, Port, Viewport.Width, Viewport.Height, Requests, Events, Token)
   end);
   mutable var Next: ClientModel := State;
   Next.Screen := ClientScreen.GameScreen;
@@ -118,6 +197,8 @@ begin
   Next.ConnectionPhase := ClientConnectionPhase.Connecting;
   Next.FocusedControl := 0;
   Next.Pending := false;
+  Next.RequestedWorldWidth := Viewport.Width;
+  Next.RequestedWorldHeight := Viewport.Height;
   Next.HasVisibleState := false;
   Next.Status := ('Connecting to ' + Host) + (':' + IntToStr(Port));
   return AppendMessage(Next, Next.Status)
@@ -174,7 +255,7 @@ begin
   if ContextCanDock(State) then
   begin
     Next.ContextPanelVisible := not State.ContextPanelVisible;
-    return Next
+    return QueueViewport(Next)
   end;
 
   if State.Overlay = ClientOverlay.ContextOverlay then
@@ -193,7 +274,7 @@ begin
   if MessagesCanDock(State) then
   begin
     Next.MessagePanelVisible := not State.MessagePanelVisible;
-    return Next
+    return QueueViewport(Next)
   end;
 
   if State.Overlay = ClientOverlay.MessageOverlay then
@@ -321,7 +402,7 @@ begin
       mutable var Next: ClientModel := State;
       Next.ViewportWidth := ScreenWidth();
       Next.ViewportHeight := ScreenHeight();
-      return Next
+      return QueueViewport(Next)
     end;
     TuiMsg.Resize(Size):
     begin
@@ -340,7 +421,7 @@ begin
         Next.FocusedControl := 0
       end;
 
-      return Next
+      return QueueViewport(Next)
     end;
     TuiMsg.FocusChanged(Previous, Current):
     begin
@@ -407,14 +488,18 @@ begin
     begin
       Next.HasVisibleState := true;
       Next.View := Value.View;
+      Next.OriginX := Value.OriginX;
+      Next.OriginY := Value.OriginY;
       Next.Width := Value.Width;
       Next.Height := Value.Height;
       Next.Rows := Value.Rows;
       Next.PlayerX := Value.PlayerX;
       Next.PlayerY := Value.PlayerY;
+      Next.WorldX := Value.WorldX;
+      Next.WorldY := Value.WorldY;
       Next.Pending := false;
       Next.Status := 'Connected';
-      return Next
+      return QueueViewport(Next)
     end;
     ClientEvent.Rejected(Message):
     begin
@@ -439,22 +524,137 @@ begin
   end
 end;
 
-function MapRow(State: ClientModel; Y: integer): string;
+function ColoredCell(
+  Glyph: string;
+  ForegroundRed: integer;
+  ForegroundGreen: integer;
+  ForegroundBlue: integer;
+  BackgroundRed: integer;
+  BackgroundGreen: integer;
+  BackgroundBlue: integer
+): TuiCell;
 begin
-  mutable var Text: string := '';
-  for X: integer := 0 to State.Width - 1 do
+  return TuiCell.Styled(Glyph, TuiStyle.FromColors(TuiColor.FromRgb(ForegroundRed, ForegroundGreen, ForegroundBlue), TuiColor.FromRgb(BackgroundRed, BackgroundGreen, BackgroundBlue)))
+end;
+
+function TerrainCell(Code: string; SecondColumn: boolean): TuiCell;
+begin
+  mutable var Glyph: string := ' ';
+  if not SecondColumn then
   begin
-    if (X = State.PlayerX) and (Y = State.PlayerY) then
-    begin
-      Text := Text + '@'
-    end
-    else
-    begin
-      Text := Text + Std.Str.CharAt(State.Rows[Y], X)
+    case Code of
+      'g':
+      begin
+        Glyph := '·'
+      end;
+      'f':
+      begin
+        Glyph := '░'
+      end;
+      'd':
+      begin
+        Glyph := '·'
+      end;
+      'm':
+      begin
+        Glyph := '▲'
+      end;
+      'o':
+      begin
+        Glyph := '≈'
+      end;
+      'r':
+      begin
+        Glyph := '≈'
+      end;
+      'l':
+      begin
+        Glyph := '∼'
+      end;
+      'p':
+      begin
+        Glyph := '·'
+      end
+      else
+      begin
+        Glyph := '?'
+      end
     end
   end;
 
-  return Text
+  case Code of
+    'g':
+    begin
+      return ColoredCell(Glyph, 136, 186, 110, 40, 92, 52)
+    end;
+    'f':
+    begin
+      return ColoredCell(Glyph, 102, 173, 101, 24, 67, 40)
+    end;
+    'd':
+    begin
+      return ColoredCell(Glyph, 235, 207, 128, 151, 116, 58)
+    end;
+    'm':
+    begin
+      return ColoredCell(Glyph, 224, 228, 232, 82, 89, 96)
+    end;
+    'o':
+    begin
+      return ColoredCell(Glyph, 116, 184, 255, 18, 65, 122)
+    end;
+    'r':
+    begin
+      return ColoredCell(Glyph, 189, 231, 255, 30, 112, 171)
+    end;
+    'l':
+    begin
+      return ColoredCell(Glyph, 176, 235, 255, 35, 125, 156)
+    end;
+    'p':
+    begin
+      return ColoredCell(Glyph, 236, 210, 156, 116, 83, 47)
+    end
+    else
+    begin
+      return ColoredCell(Glyph, 255, 255, 255, 80, 0, 80)
+    end
+  end
+end;
+
+function PlayerCell(SecondColumn: boolean): TuiCell;
+begin
+  if SecondColumn then
+  begin
+    return ColoredCell(' ', 255, 245, 190, 150, 68, 24)
+  end;
+
+  return ColoredCell('●', 255, 250, 210, 150, 68, 24)
+end;
+
+function MapGrid(State: ClientModel): TuiCellGrid;
+begin
+  mutable var Cells: array of TuiCell := [];
+  for Y: integer := 0 to State.Height - 1 do
+  begin
+    for X: integer := 0 to State.Width - 1 do
+    begin
+      var IsPlayer: boolean := (X = State.PlayerX) and (Y = State.PlayerY);
+      var Code: string := Std.Str.CharAt(State.Rows[Y], X);
+      if IsPlayer then
+      begin
+        Std.Arrays.Push(Cells, PlayerCell(false));
+        Std.Arrays.Push(Cells, PlayerCell(true))
+      end
+      else
+      begin
+        Std.Arrays.Push(Cells, TerrainCell(Code, false));
+        Std.Arrays.Push(Cells, TerrainCell(Code, true))
+      end
+    end
+  end;
+
+  return TuiCellGrid.Create(State.Width * 2, State.Height, Cells)
 end;
 
 function ViewMap(State: ClientModel): TuiElement;
@@ -462,10 +662,7 @@ begin
   mutable var Elements: array of TuiElement := [];
   if State.HasVisibleState then
   begin
-    for Y: integer := 0 to State.Height - 1 do
-    begin
-      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(MapRow(State, Y)))
-    end
+    Std.Arrays.Push(Elements, TuiElementBuilders.MakeCellGrid(MapGrid(State)))
   end
   else
   begin
@@ -480,7 +677,7 @@ begin
   mutable var Position: string := 'Not available';
   if State.HasVisibleState then
   begin
-    Position := (IntToStr(State.PlayerX) + ', ') + IntToStr(State.PlayerY)
+    Position := (IntToStr(State.WorldX) + ', ') + IntToStr(State.WorldY)
   end;
 
   return TuiElementBuilders.MakeColumn([
@@ -517,6 +714,36 @@ begin
   return TuiElementBuilders.MakeColumn(Elements)
 end;
 
+function ViewDockedMessages(State: ClientModel): TuiElement;
+begin
+  mutable var Elements: array of TuiElement := [];
+  if Std.Arrays.Length(State.Messages) = 0 then
+  begin
+    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('No messages'))
+  end;
+
+  if Std.Arrays.Length(State.Messages) > 0 then
+  begin
+    mutable var Start: integer := Std.Arrays.Length(State.Messages) - DockedMessageLines;
+    if Start < 0 then
+    begin
+      Start := 0
+    end;
+
+    for Index: integer := Start to Std.Arrays.Length(State.Messages) - 1 do
+    begin
+      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(State.Messages[Index]))
+    end
+  end;
+
+  while Std.Arrays.Length(Elements) < DockedMessageLines do
+  begin
+    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(''))
+  end;
+
+  return TuiElementBuilders.MakeColumn(Elements)
+end;
+
 function Expanding(Stretch: integer): TuiLayoutSettings;
 begin
   return TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Expanding(), TuiAlignment.Fill(), Stretch)
@@ -524,7 +751,12 @@ end;
 
 function ViewGameShell(State: ClientModel): TuiElement;
 begin
-  var Primary: TuiElement := TuiElementBuilders.MakeLayout(Expanding(2), ViewMap(State));
+  mutable var PrimarySettings: TuiLayoutSettings := Expanding(2);
+  if State.ContextPanelVisible and ContextCanDock(State) then
+  begin
+    PrimarySettings := PrimarySettings.WithFixedWidth(PrimaryTerminalWidth(State))
+  end;
+  var Primary: TuiElement := TuiElementBuilders.MakeLayout(PrimarySettings, ViewMap(State));
   mutable var MainRow: TuiElement := TuiElementBuilders.MakeRow([Primary]);
   if State.ContextPanelVisible and ContextCanDock(State) then
   begin
@@ -539,20 +771,23 @@ begin
   if State.MessagePanelVisible and MessagesCanDock(State) then
   begin
     var MessageSettings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
-                                                .WithFixedHeight(5);
+                                                .WithFixedHeight(MessagePanelHeight);
     Std.Arrays.Push(Rows, TuiElementBuilders.MakeLayout(MessageSettings, TuiElementBuilders.MakePanel('Messages', [
-                                                                                                                    ViewMessages(State)
+                                                                                                                    ViewDockedMessages(State)
                                                                                                                   ])))
   end;
-
-  Std.Arrays.Push(Rows, TuiElementBuilders.MakeStatusLine([
-                                                            TuiStatusItemBuilders.MakeHint(State.Status),
-                                                            TuiStatusItemBuilders.MakeKeyHint('WASD', 'Move'),
-                                                            TuiStatusItemBuilders.MakeKeyHint('F2', 'Context'),
-                                                            TuiStatusItemBuilders.MakeKeyHint('F3', 'Messages'),
-                                                            TuiStatusItemBuilders.MakeKeyHint('Ctrl+P', 'Menu'),
-                                                            TuiStatusItemBuilders.MakeKeyHint('Alt+X', 'Quit')
-                                                          ]));
+  var StatusSettings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
+                                             .WithFixedHeight(StatusPanelHeight);
+  Std.Arrays.Push(Rows, TuiElementBuilders.MakeLayout(StatusSettings, TuiElementBuilders.MakePanel('Status', [
+                                                                                                               TuiElementBuilders.MakeStatusLine([
+                                                                                                                                                   TuiStatusItemBuilders.MakeHint(State.Status),
+                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('WASD', 'Move'),
+                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('F2', 'Context'),
+                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('F3', 'Messages'),
+                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('Ctrl+P', 'Menu'),
+                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('Alt+X', 'Quit')
+                                                                                                                                                 ])
+                                                                                                             ])));
   return TuiElementBuilders.MakeColumn(Rows)
 end;
 

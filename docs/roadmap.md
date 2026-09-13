@@ -37,19 +37,23 @@ remain server-defined; and a terminal smaller than the content does not crash
 the client. Final styling and gameplay-specific panels remain outside this
 stage.
 
-## 4. Data-driven outdoor region — NEXT
+## 4. Unbounded outdoor region — DONE
 
-Move the outdoor geometry and terrain out of compiled game code into a small,
-validated world-data file. The server loads the data and continues to send only
-client-safe visible state, so the client does not gain world rules or direct
-file access.
+Create the first deterministic, chunked outdoor region with signed stable world
+coordinates. The server persists versioned 128 by 128 chunks, loads every chunk
+required by a bounded visible window, prefetches one surrounding margin, and
+retains a bounded cache. The client reports its available map size and renders
+the server projection as a two-column, truecolor `TuiCellGrid`.
 
-This stage is complete when a deterministic fixture can start the server,
-invalid world data fails with a useful error, and the existing client can
-navigate the loaded region unchanged. Procedural generation and databases are
-not part of this stage.
+This stage is complete when invalid existing data fails without modification,
+missing chunks are atomically generated, restart and chunk-edge movement are
+covered end to end, viewport resizing crosses arbitrary chunk ranges, and the
+client contains presentation mappings but no world rules.
 
-## 5. Area transitions — LATER
+Mutable objects, savegames, settlements, broader world simulation, and polished
+procedural generation remain outside this stage.
+
+## 5. Area transitions — NEXT
 
 Add one server-authoritative transition from an outdoor location into one
 interior or dungeon and back. Define stable area identities, entrances, return

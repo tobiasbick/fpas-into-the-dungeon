@@ -1,26 +1,94 @@
-// Authoritative single-client server for the initial executable slice.
+// Authoritative world-backed server for versioned client sessions.
 unit Dungeon.Server;
 
 uses
-  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Arrays, Std.Console, Std.Conv,
-  Std.Net, Std.Results, Std.Server, Std.Task, Std.Time;
+  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.World, Std.Arrays, Std.Console,
+  Std.Conv, Std.Net, Std.Results, Std.Server, Std.Task, Std.Time;
+
+public type
+  // Immutable server policy and selected persistent world used by each session.
+  ServerConfig = record
+    public WorldsRoot: string;
+    public WorldId: string;
+    public WorldSeed: integer;
+    public ChunkCacheLimit: integer;
+    public MaximumViewWidth: integer;
+    public MaximumViewHeight: integer;
+  end;
+
+type
+  ViewportSize = record
+    Width: integer;
+    Height: integer;
+  end;
+  SessionProjection = record
+    World: WorldSession;
+    State: VisibleState;
+  end;
 
 function Send(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
 begin
   return WriteLine(ConnectionValue, EncodeServer(Message), Token)
 end;
 
-function ProjectVisibleState(State: GameState): VisibleState;
+function ResolveViewport(Width: integer; Height: integer; Config: ServerConfig): result of ViewportSize, string;
 begin
-  var Area: VisibleArea := GetVisibleArea(State);
-  return record
-    View := ViewKind.Map;
-    Width := Area.Width;
-    Height := Area.Height;
-    Rows := Area.Rows;
-    PlayerX := Area.PlayerX;
-    PlayerY := Area.PlayerY;
-  end
+  if (Width < 1) or (Height < 1) then
+  begin
+    return Error('viewport dimensions must be positive')
+  end;
+  mutable var BoundedWidth: integer := Width;
+  mutable var BoundedHeight: integer := Height;
+  if BoundedWidth > Config.MaximumViewWidth then
+  begin
+    BoundedWidth := Config.MaximumViewWidth
+  end;
+
+  if BoundedHeight > Config.MaximumViewHeight then
+  begin
+    BoundedHeight := Config.MaximumViewHeight
+  end;
+
+  return Ok(record
+    Width := BoundedWidth;
+    Height := BoundedHeight;
+  end)
+end;
+
+function MaximumIntersectingChunks(Length: integer): integer;
+begin
+  if Length = 1 then
+  begin
+    return 1
+  end;
+
+  return ((Length - 2) div WorldChunkSize) + 2
+end;
+
+function RequiredCacheCapacity(Config: ServerConfig): integer;
+begin
+  return (MaximumIntersectingChunks(Config.MaximumViewWidth) + 2) *
+         (MaximumIntersectingChunks(Config.MaximumViewHeight) + 2)
+end;
+
+function ProjectWorld(World: WorldSession; State: GameState; Viewport: ViewportSize): result of SessionProjection, string;
+begin
+  var Loaded: WindowLoad := try LoadVisibleWindow(World, State, Viewport.Width, Viewport.Height);
+  return Ok(record
+    World := Loaded.World;
+    State := record
+      View := ViewKind.Map;
+      OriginX := Loaded.Window.OriginX;
+      OriginY := Loaded.Window.OriginY;
+      Width := Loaded.Window.Width;
+      Height := Loaded.Window.Height;
+      Rows := Loaded.Window.Rows;
+      PlayerX := Loaded.Window.PlayerX;
+      PlayerY := Loaded.Window.PlayerY;
+      WorldX := State.Player.X;
+      WorldY := State.Player.Y;
+    end;
+  end)
 end;
 
 function FinishReadFailure(ConnectionValue: Connection; Message: string; Token: CancellationToken): result of boolean, string;
@@ -33,10 +101,32 @@ begin
   return Ok(true)
 end;
 
-// Serves one connected client until disconnect, EOF, cancellation, or a protocol error.
-public function ServeConnection(ConnectionValue: Connection; Token: CancellationToken): result of boolean, string;
+function SendProjection(
+  ConnectionValue: Connection;
+  World: WorldSession;
+  State: GameState;
+  Viewport: ViewportSize;
+  Token: CancellationToken
+): result of WorldSession, string;
+begin
+  var Projection: SessionProjection := try ProjectWorld(World, State, Viewport);
+  var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(Projection.State), Token);
+  return Ok(Projection.World)
+end;
+
+// Serves one connected client against the selected world until the session ends.
+public function ServeConnection(
+  ConnectionValue: Connection;
+  Config: ServerConfig;
+  Token: CancellationToken
+): result of boolean, string;
 begin
   mutable var Reader: LineReader := NewLineReader(ConnectionValue);
+  mutable var Viewport: ViewportSize := record
+    Width := 1;
+    Height := 1;
+  end;
+
   case ReadLine(Reader, Token) of
     Error(ReadMessage):
     begin
@@ -49,12 +139,24 @@ begin
         Ok(FirstMessage):
         begin
           case FirstMessage of
-            ClientMessage.Hello(Version):
+            ClientMessage.Hello(Version, Width, Height):
             begin
               if Version <> ProtocolVersion then
               begin
-                var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', 'Protocol version 1 is required'), Token);
+                var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', 'Protocol version 2 is required'), Token);
                 return Ok(true)
+              end;
+
+              case ResolveViewport(Width, Height, Config) of
+                Ok(Value):
+                begin
+                  Viewport := Value
+                end;
+                Error(Message):
+                begin
+                  var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('invalid_viewport', Message), Token);
+                  return Ok(true)
+                end
               end
             end
             else
@@ -72,13 +174,13 @@ begin
       end
     end
   end;
-  mutable var State: GameState := NewGame();
+  mutable var World: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit);
+  mutable var State: GameState := NewGame(World.Metadata);
   var WelcomeSent: boolean := try Send(ConnectionValue, ServerMessage.Welcome(ProtocolVersion), Token);
-  var StateSent: boolean := try Send(ConnectionValue, ServerMessage.State(ProjectVisibleState(State)), Token);
+  World := try SendProjection(ConnectionValue, World, State, Viewport, Token);
   while not IsCancellationRequested(Token) do
   begin
-    var LineResult: result of LineRead, string := ReadLine(Reader, Token);
-    case LineResult of
+    case ReadLine(Reader, Token) of
       Error(ReadMessage):
       begin
         return FinishReadFailure(ConnectionValue, ReadMessage, Token)
@@ -99,18 +201,33 @@ begin
               begin
                 return Ok(true)
               end;
-              ClientMessage.Hello(Version):
+              ClientMessage.Hello(Version, Width, Height):
               begin
                 var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
                 return Ok(true)
               end;
+              ClientMessage.Viewport(Width, Height):
+              begin
+                case ResolveViewport(Width, Height, Config) of
+                  Ok(Value):
+                  begin
+                    Viewport := Value;
+                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
+                  end;
+                  Error(Message):
+                  begin
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('invalid_viewport', Message), Token)
+                  end
+                end
+              end;
               ClientMessage.Move(DeltaX, DeltaY):
               begin
-                case MovePlayer(State, DeltaX, DeltaY) of
-                  Ok(Next):
+                case MoveInWorld(World, State, DeltaX, DeltaY) of
+                  Ok(Moved):
                   begin
-                    State := Next;
-                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(ProjectVisibleState(State)), Token)
+                    World := Moved.World;
+                    State := Moved.State;
+                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
                   end;
                   Error(Reason):
                   begin
@@ -128,9 +245,19 @@ begin
   return Ok(true)
 end;
 
-// Runs the signal-aware server until a stop signal is received.
-public function RunServer(Host: string; Port: integer): result of boolean, string;
+// Runs the signal-aware server with validated world and viewport configuration.
+public function RunServer(Host: string; Port: integer; Config: ServerConfig): result of boolean, string;
 begin
+  if (Config.MaximumViewWidth < 1) or (Config.MaximumViewHeight < 1) then
+  begin
+    return Error('server maximum viewport dimensions must be positive')
+  end;
+
+  if Config.ChunkCacheLimit < RequiredCacheCapacity(Config) then
+  begin
+    return Error('server chunk cache is too small for the configured maximum viewport and prefetch margin')
+  end;
+  var ValidatedWorld: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit);
   var ListenerValue: Listener := try Listen(Host, Port);
   var Life: ServerLifetime := try CreateLifetime(2000, false);
   var Owned: boolean := try OwnListener(Life, ListenerValue);
@@ -142,7 +269,7 @@ begin
       case AcceptWithCancellation(ListenerValue, Token) of
         Ok(Client):
         begin
-          var Outcome: result of boolean, string := ServeConnection(Client, Token);
+          var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
           var Closed: boolean := try Close(Client);
           case Outcome of
             Error(Message):
@@ -168,7 +295,8 @@ begin
 
     return Ok(true)
   end);
-  WriteLn((('Dungeon server listening on ' + Host) + ':') + Std.Conv.IntToStr(Port));
+  WriteLn((((('Dungeon server for world ' + Config.WorldId) + ' listening on ') + Host) + ':') +
+          Std.Conv.IntToStr(Port));
   while IsReady(Life) do
   begin
     Sleep(20)

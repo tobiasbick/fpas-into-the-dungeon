@@ -6,9 +6,11 @@ test seams without defining the wider game.
 ## Behavior
 
 - `dungeon-server` listens on `127.0.0.1:4040` by default.
-- `dungeon-client` connects to that address and renders a fixed 13 by 7 outdoor
-  region supplied by the server.
-- The server creates one player at the center of the map.
+- `dungeon-server` opens the configured world, creating missing metadata and
+  deterministic chunks below the runtime-data root.
+- `dungeon-client` connects to that address and requests a visible window that
+  fits its current primary view.
+- The server creates one player at the world's stable spawn coordinate.
 - `W`, `A`, `S`, and `D` send cardinal movement intentions.
 - The server validates movement and returns the resulting visible state.
 - `Alt+X` cleanly disconnects and quits the client. A disconnected client does
@@ -16,8 +18,8 @@ test seams without defining the wider game.
 - The initial server accepts one active client at a time.
 
 No game time passes without a player intention. The slice has no combat,
-generation, persistence, authentication, TLS, multiplayer state, or LLM
-integration.
+mutable world state, player savegames, authentication, TLS, multiplayer state,
+or LLM integration.
 
 ## Protocol
 
@@ -26,18 +28,21 @@ line is limited to 64 KiB. The client starts with `hello`; the server answers
 with `welcome` followed by the initial `state`.
 
 ```text
-Client: hello, move, disconnect
+Client: hello, viewport, move, disconnect
 Server: welcome, state, rejected, error
 ```
 
-Protocol version `1` is included in the handshake. Unknown, malformed, or
+Protocol version `2` is included in the handshake. `hello` includes the initial
+world-cell viewport, and later `viewport` messages report terminal or panel
+layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.
 Movement is request-response: every accepted or rejected `move` receives one
 server message before the next move is sent.
 
-Each `state` message identifies the map view and contains its dimensions,
-server-produced terrain rows, and the player's authoritative coordinates. The
-client validates this visible-state shape and does not import map dimensions or
+Each `state` message identifies the map view and contains its world origin,
+dimensions, compact server-produced terrain rows, and the player's local and
+authoritative world coordinates. The client validates this visible-state shape
+and does not import chunk boundaries, generation, map dimensions, or movement
 rules from the game module.
 
 ## Configuration

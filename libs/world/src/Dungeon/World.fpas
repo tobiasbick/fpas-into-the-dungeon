@@ -1,0 +1,779 @@
+// Persistent chunk loading, creation, caching, and visible-window composition.
+unit Dungeon.World;
+
+uses
+  Dungeon.Game, Std.Arrays, Std.Conv, Std.Dictionaries, Std.Fs, Std.Json, Std.Math, Std.Options,
+  Std.Path, Std.Str;
+
+public const
+  // Default deterministic seed used only when creating a selected world for the first time.
+  DefaultWorldSeed: integer := 12345;
+  // Default maximum number of complete chunks retained by one world session.
+  DefaultChunkCacheLimit: integer := 64;
+
+public type
+  // Inclusive chunk rectangle intersecting a visible world-coordinate rectangle.
+  ChunkRange = record
+    public MinimumX: integer;
+    public MinimumY: integer;
+    public MaximumX: integer;
+    public MaximumY: integer;
+  end;
+  // One bounded client-safe projection composed from authoritative chunks.
+  VisibleWindow = record
+    public OriginX: integer;
+    public OriginY: integer;
+    public Width: integer;
+    public Height: integer;
+    public Rows: array of string;
+    public PlayerX: integer;
+    public PlayerY: integer;
+  end;
+  // Internal cache entry carried immutably with the world session.
+  CachedWorldChunk = record
+    public Chunk: WorldChunk;
+    public LastUsed: integer;
+  end;
+  // Open authoritative world metadata, storage location, and bounded chunk cache.
+  WorldSession = record
+    public Directory: string;
+    public Metadata: WorldMetadata;
+    public Cache: array of CachedWorldChunk;
+    public Clock: integer;
+    public CacheLimit: integer;
+  end;
+  // Returns a loaded chunk together with the updated immutable cache state.
+  ChunkLoad = record
+    public World: WorldSession;
+    public Chunk: WorldChunk;
+  end;
+  // Returns one cell together with the updated immutable cache state.
+  CellLoad = record
+    public World: WorldSession;
+    public Cell: WorldCell;
+  end;
+  // Returns a composed visible window together with the updated immutable cache state.
+  WindowLoad = record
+    public World: WorldSession;
+    public Window: VisibleWindow;
+  end;
+  // Returns an authoritative movement result together with the updated cache state.
+  WorldMove = record
+    public World: WorldSession;
+    public State: GameState;
+  end;
+
+function EnsureDirectory(Path: string): result of boolean, string;
+begin
+  if Std.Fs.Exists(Path) then
+  begin
+    if Std.Fs.IsDir(Path) then
+    begin
+      return Ok(true)
+    end;
+
+    return Error('world path exists but is not a directory: ' + Path)
+  end;
+
+  case Std.Fs.CreateDir(Path) of
+    Ok(Created):
+    begin
+      return Ok(Created)
+    end;
+    Error(Message):
+    begin
+      if Std.Fs.IsDir(Path) then
+      begin
+        return Ok(true)
+      end;
+
+      return Error((('cannot create world directory ' + Path) + ': ') + Message)
+    end
+  end
+end;
+
+function ValidateWorldId(WorldId: string): result of string, string;
+begin
+  if (Std.Str.Length(WorldId) = 0) or (Std.Str.Length(WorldId) > 64) then
+  begin
+    return Error('world id must contain between 1 and 64 characters')
+  end;
+  var Allowed: string := 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_';
+  for Index: integer := 0 to Std.Str.Length(WorldId) - 1 do
+  begin
+    if not Std.Str.Contains(Allowed, Std.Str.CharAt(WorldId, Index)) then
+    begin
+      return Error('world id may contain only letters, digits, hyphen, and underscore')
+    end
+  end;
+
+  return Ok(WorldId)
+end;
+
+function RequiredField(Fields: dict of string to JsonValue; Name: string): result of JsonValue, string;
+begin
+  case Std.Dictionaries.Get(Fields, Name) of
+    Some(Value):
+    begin
+      return Ok(Value)
+    end;
+    None:
+    begin
+      return Error('world data is missing field ' + Name)
+    end
+  end
+end;
+
+function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.String(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error(('world data field ' + Name) + ' must be a string')
+    end
+  end
+end;
+
+function IntegerField(Fields: dict of string to JsonValue; Name: string): result of integer, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.Number(Value):
+    begin
+      var IntegerValue: integer := Trunc(Value);
+      if IntToReal(IntegerValue) <> Value then
+      begin
+        return Error(('world data field ' + Name) + ' must be an integer')
+      end;
+
+      return Ok(IntegerValue)
+    end
+    else
+    begin
+      return Error(('world data field ' + Name) + ' must be a number')
+    end
+  end
+end;
+
+function StringArrayField(Fields: dict of string to JsonValue; Name: string): result of array of string, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.ArrayValue(Items):
+    begin
+      mutable var Values: array of string := [];
+      for Item: JsonValue in Items do
+      begin
+        case Item of
+          JsonValue.String(Value):
+          begin
+            Std.Arrays.Push(Values, Value)
+          end
+          else
+          begin
+            return Error(('world data field ' + Name) + ' must contain only strings')
+          end
+        end
+      end;
+
+      return Ok(Values)
+    end
+    else
+    begin
+      return Error(('world data field ' + Name) + ' must be an array')
+    end
+  end
+end;
+
+function ObjectFields(Text: string): result of dict of string to JsonValue, string;
+begin
+  case try Std.Json.Parse(Text) of
+    JsonValue.Object(Fields):
+    begin
+      return Ok(Fields)
+    end
+    else
+    begin
+      return Error('world data root must be an object')
+    end
+  end
+end;
+
+function EncodeRows(Rows: array of string): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Row: string in Rows do
+  begin
+    Std.Arrays.Push(Values, JsonValue.String(Row))
+  end;
+
+  return Values
+end;
+
+function EncodeMetadata(Metadata: WorldMetadata): string;
+begin
+  return Std.Json.Stringify(JsonValue.Object(['version': JsonValue.Number(IntToReal(Metadata.FormatVersion)), 'id': JsonValue.String(Metadata.Id), 'seed': JsonValue.Number(IntToReal(Metadata.Seed)), 'generator_version': JsonValue.Number(IntToReal(Metadata.GeneratorVersion)), 'chunk_size': JsonValue.Number(IntToReal(Metadata.ChunkSize)), 'spawn_x': JsonValue.Number(IntToReal(Metadata.Spawn.X)), 'spawn_y': JsonValue.Number(IntToReal(Metadata.Spawn.Y))]))
+end;
+
+function DecodeMetadata(Text: string; ExpectedId: string): result of WorldMetadata, string;
+begin
+  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  var Metadata: WorldMetadata := record
+    FormatVersion := try IntegerField(Fields, 'version');
+    Id := try StringField(Fields, 'id');
+    Seed := try IntegerField(Fields, 'seed');
+    GeneratorVersion := try IntegerField(Fields, 'generator_version');
+    ChunkSize := try IntegerField(Fields, 'chunk_size');
+    Spawn := record
+      X := try IntegerField(Fields, 'spawn_x');
+      Y := try IntegerField(Fields, 'spawn_y');
+    end;
+  end;
+
+  if Metadata.FormatVersion <> WorldFormatVersion then
+  begin
+    return Error('unsupported world format version')
+  end;
+
+  if Metadata.GeneratorVersion <> WorldGeneratorVersion then
+  begin
+    return Error('unsupported world generator version')
+  end;
+
+  if Metadata.ChunkSize <> WorldChunkSize then
+  begin
+    return Error('world chunk size must be 128')
+  end;
+
+  if Metadata.Id <> ExpectedId then
+  begin
+    return Error('world metadata id does not match selected world')
+  end;
+  var ExpectedSpawn: WorldPosition := NewWorldMetadata(Metadata.Id, Metadata.Seed).Spawn;
+  if (Metadata.Spawn.X <> ExpectedSpawn.X) or (Metadata.Spawn.Y <> ExpectedSpawn.Y) then
+  begin
+    return Error('world spawn position is invalid for this generator version')
+  end;
+
+  if not IsWalkable(GenerateWorldCell(Metadata, Metadata.Spawn.X, Metadata.Spawn.Y)) then
+  begin
+    return Error('world spawn position must be traversable')
+  end;
+
+  return Ok(Metadata)
+end;
+
+function BaseCode(Value: BaseTerrainKind): string;
+begin
+  case Value of
+    BaseTerrainKind.Grass:
+    begin
+      return 'g'
+    end;
+    BaseTerrainKind.Sand:
+    begin
+      return 's'
+    end;
+    BaseTerrainKind.Rock:
+    begin
+      return 'r'
+    end;
+    BaseTerrainKind.Water:
+    begin
+      return 'w'
+    end
+  end
+end;
+
+function FeatureCode(Value: TerrainFeatureKind): string;
+begin
+  case Value of
+    TerrainFeatureKind.NoFeature:
+    begin
+      return '.'
+    end;
+    TerrainFeatureKind.Forest:
+    begin
+      return 'f'
+    end;
+    TerrainFeatureKind.Path:
+    begin
+      return 'p'
+    end;
+    TerrainFeatureKind.River:
+    begin
+      return 'r'
+    end
+  end
+end;
+
+function WaterCode(Value: WaterKind): string;
+begin
+  case Value of
+    WaterKind.NoWater:
+    begin
+      return '.'
+    end;
+    WaterKind.Sea:
+    begin
+      return 's'
+    end;
+    WaterKind.Lake:
+    begin
+      return 'l'
+    end;
+    WaterKind.RiverWater:
+    begin
+      return 'r'
+    end
+  end
+end;
+
+function DecodeBase(Value: string): result of BaseTerrainKind, string;
+begin
+  case Value of
+    'g':
+    begin
+      return Ok(BaseTerrainKind.Grass)
+    end;
+    's':
+    begin
+      return Ok(BaseTerrainKind.Sand)
+    end;
+    'r':
+    begin
+      return Ok(BaseTerrainKind.Rock)
+    end;
+    'w':
+    begin
+      return Ok(BaseTerrainKind.Water)
+    end
+    else
+    begin
+      return Error('chunk contains an unknown base terrain code')
+    end
+  end
+end;
+
+function DecodeFeature(Value: string): result of TerrainFeatureKind, string;
+begin
+  case Value of
+    '.':
+    begin
+      return Ok(TerrainFeatureKind.NoFeature)
+    end;
+    'f':
+    begin
+      return Ok(TerrainFeatureKind.Forest)
+    end;
+    'p':
+    begin
+      return Ok(TerrainFeatureKind.Path)
+    end;
+    'r':
+    begin
+      return Ok(TerrainFeatureKind.River)
+    end
+    else
+    begin
+      return Error('chunk contains an unknown terrain feature code')
+    end
+  end
+end;
+
+function DecodeWater(Value: string): result of WaterKind, string;
+begin
+  case Value of
+    '.':
+    begin
+      return Ok(WaterKind.NoWater)
+    end;
+    's':
+    begin
+      return Ok(WaterKind.Sea)
+    end;
+    'l':
+    begin
+      return Ok(WaterKind.Lake)
+    end;
+    'r':
+    begin
+      return Ok(WaterKind.RiverWater)
+    end
+    else
+    begin
+      return Error('chunk contains an unknown water classification code')
+    end
+  end
+end;
+
+function ChunkRows(Chunk: WorldChunk; Layer: integer): array of string;
+begin
+  mutable var Rows: array of string := [];
+  for Y: integer := 0 to WorldChunkSize - 1 do
+  begin
+    mutable var Row: string := '';
+    for X: integer := 0 to WorldChunkSize - 1 do
+    begin
+      var Cell: WorldCell := ChunkCell(Chunk, X, Y);
+      case Layer of
+        0:
+        begin
+          Row := Row + BaseCode(Cell.Base)
+        end;
+        1:
+        begin
+          Row := Row + FeatureCode(Cell.Feature)
+        end
+        else
+        begin
+          Row := Row + WaterCode(Cell.Water)
+        end
+      end
+    end;
+
+    Std.Arrays.Push(Rows, Row)
+  end;
+
+  return Rows
+end;
+
+function EncodeChunk(WorldId: string; Chunk: WorldChunk): string;
+begin
+  return Std.Json.Stringify(JsonValue.Object(['version': JsonValue.Number(IntToReal(WorldFormatVersion)), 'world_id': JsonValue.String(WorldId), 'chunk_x': JsonValue.Number(IntToReal(Chunk.Coordinate.X)), 'chunk_y': JsonValue.Number(IntToReal(Chunk.Coordinate.Y)), 'base_rows': JsonValue.ArrayValue(EncodeRows(ChunkRows(Chunk, 0))), 'feature_rows': JsonValue.ArrayValue(EncodeRows(ChunkRows(Chunk, 1))), 'water_rows': JsonValue.ArrayValue(EncodeRows(ChunkRows(Chunk, 2)))]))
+end;
+
+function ValidateLayerRows(Rows: array of string; Name: string): result of array of string, string;
+begin
+  if Std.Arrays.Length(Rows) <> WorldChunkSize then
+  begin
+    return Error((Name + ' row count must be ') + IntToStr(WorldChunkSize))
+  end;
+
+  for Row: string in Rows do
+  begin
+    if Std.Str.Length(Row) <> WorldChunkSize then
+    begin
+      return Error((Name + ' row width must be ') + IntToStr(WorldChunkSize))
+    end
+  end;
+
+  return Ok(Rows)
+end;
+
+function DecodeChunk(Text: string; ExpectedWorldId: string; ExpectedCoordinate: ChunkCoordinate): result of WorldChunk, string;
+begin
+  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  if try IntegerField(Fields, 'version') <> WorldFormatVersion then
+  begin
+    return Error('unsupported chunk format version')
+  end;
+
+  if try StringField(Fields, 'world_id') <> ExpectedWorldId then
+  begin
+    return Error('chunk world id does not match selected world')
+  end;
+
+  if (try IntegerField(Fields, 'chunk_x') <> ExpectedCoordinate.X) or
+     (try IntegerField(Fields, 'chunk_y') <> ExpectedCoordinate.Y) then
+  begin
+    return Error('chunk coordinates do not match its storage path')
+  end;
+  var BaseRows: array of string := try ValidateLayerRows(try StringArrayField(Fields, 'base_rows'), 'base');
+  var FeatureRows: array of string := try ValidateLayerRows(try StringArrayField(Fields, 'feature_rows'), 'feature');
+  var WaterRows: array of string := try ValidateLayerRows(try StringArrayField(Fields, 'water_rows'), 'water');
+  mutable var Cells: array of WorldCell := [];
+  for Y: integer := 0 to WorldChunkSize - 1 do
+  begin
+    for X: integer := 0 to WorldChunkSize - 1 do
+    begin
+      Std.Arrays.Push(Cells, record
+        Base := try DecodeBase(Std.Str.CharAt(BaseRows[Y], X));
+        Feature := try DecodeFeature(Std.Str.CharAt(FeatureRows[Y], X));
+        Water := try DecodeWater(Std.Str.CharAt(WaterRows[Y], X));
+      end)
+    end
+  end;
+
+  return ValidateChunk(record
+    Coordinate := ExpectedCoordinate;
+    Cells := Cells;
+  end)
+end;
+
+// Returns the stable metadata path for an open world.
+public function WorldMetadataPath(World: WorldSession): string;
+begin
+  return Std.Path.Join([World.Directory, 'world.json'])
+end;
+
+function ChunkColumnDirectory(World: WorldSession; Coordinate: ChunkCoordinate): string;
+begin
+  return Std.Path.Join([World.Directory, 'chunks', 'x_' + IntToStr(Coordinate.X)])
+end;
+
+// Returns the stable file path for positive or negative chunk coordinates.
+public function WorldChunkPath(World: WorldSession; Coordinate: ChunkCoordinate): string;
+begin
+  return Std.Path.Join([
+                         ChunkColumnDirectory(World, Coordinate),
+                         ('y_' + IntToStr(Coordinate.Y)) + '.json'
+                       ])
+end;
+
+// Opens an existing world or atomically creates new deterministic metadata.
+public function OpenWorld(WorldsRoot: string; WorldId: string; Seed: integer; CacheLimit: integer): result of WorldSession, string;
+begin
+  var ValidId: string := try ValidateWorldId(WorldId);
+  if CacheLimit < 1 then
+  begin
+    return Error('world chunk cache limit must be positive')
+  end;
+  var RootReady: boolean := try EnsureDirectory(WorldsRoot);
+  var Directory: string := Std.Path.Join([WorldsRoot, ValidId]);
+  var DirectoryReady: boolean := try EnsureDirectory(Directory);
+  mutable var Empty: WorldSession := record
+    Directory := Directory;
+    Metadata := NewWorldMetadata(ValidId, Seed);
+    Cache := [];
+    Clock := 0;
+    CacheLimit := CacheLimit;
+  end;
+  var ChunksReady: boolean := try EnsureDirectory(Std.Path.Join([Directory, 'chunks']));
+  var MetadataPath: string := WorldMetadataPath(Empty);
+  mutable var Metadata: WorldMetadata := Empty.Metadata;
+  if Std.Fs.Exists(MetadataPath) then
+  begin
+    if not Std.Fs.IsFile(MetadataPath) then
+    begin
+      return Error('world metadata path exists but is not a file: ' + MetadataPath)
+    end;
+
+    Metadata := try DecodeMetadata(try Std.Fs.ReadText(MetadataPath), ValidId)
+  end
+  else
+  begin
+    var Written: boolean := try Std.Fs.WriteTextAtomic(MetadataPath, EncodeMetadata(Metadata))
+  end;
+
+  Empty.Metadata := Metadata;
+  return Ok(Empty)
+end;
+
+function CacheIndex(World: WorldSession; Coordinate: ChunkCoordinate): integer;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(World.Cache) - 1 do
+  begin
+    if (World.Cache[Index].Chunk.Coordinate.X = Coordinate.X) and
+       (World.Cache[Index].Chunk.Coordinate.Y = Coordinate.Y) then
+    begin
+      return Index
+    end
+  end;
+
+  return -1
+end;
+
+function StoreInCache(World: WorldSession; Chunk: WorldChunk): WorldSession;
+begin
+  mutable var Next: WorldSession := World;
+  Next.Clock := World.Clock + 1;
+  mutable var Values: array of CachedWorldChunk := [];
+  for Index: integer := 0 to Std.Arrays.Length(World.Cache) - 1 do
+  begin
+    if not ((World.Cache[Index].Chunk.Coordinate.X = Chunk.Coordinate.X) and (World.Cache[Index].Chunk.Coordinate.Y = Chunk.Coordinate.Y)) then
+    begin
+      Std.Arrays.Push(Values, World.Cache[Index])
+    end
+  end;
+
+  if Std.Arrays.Length(Values) >= World.CacheLimit then
+  begin
+    mutable var OldestIndex: integer := 0;
+    for Index: integer := 1 to Std.Arrays.Length(Values) - 1 do
+    begin
+      if Values[Index].LastUsed < Values[OldestIndex].LastUsed then
+      begin
+        OldestIndex := Index
+      end
+    end;
+    mutable var Retained: array of CachedWorldChunk := [];
+    for Index: integer := 0 to Std.Arrays.Length(Values) - 1 do
+    begin
+      if Index <> OldestIndex then
+      begin
+        Std.Arrays.Push(Retained, Values[Index])
+      end
+    end;
+
+    Values := Retained
+  end;
+
+  Std.Arrays.Push(Values, record
+    Chunk := Chunk;
+    LastUsed := Next.Clock;
+  end);
+  Next.Cache := Values;
+  return Next
+end;
+
+function ReadOrCreateChunk(World: WorldSession; Coordinate: ChunkCoordinate): result of WorldChunk, string;
+begin
+  var ColumnReady: boolean := try EnsureDirectory(ChunkColumnDirectory(World, Coordinate));
+  var Path: string := WorldChunkPath(World, Coordinate);
+  if Std.Fs.Exists(Path) then
+  begin
+    if not Std.Fs.IsFile(Path) then
+    begin
+      return Error('chunk path exists but is not a file: ' + Path)
+    end;
+
+    return DecodeChunk(try Std.Fs.ReadText(Path), World.Metadata.Id, Coordinate)
+  end;
+  var Generated: WorldChunk := GenerateChunk(World.Metadata, Coordinate);
+  var Written: boolean := try Std.Fs.WriteTextAtomic(Path, EncodeChunk(World.Metadata.Id, Generated));
+  return Ok(Generated)
+end;
+
+// Loads one cached or persisted chunk, generating and storing it when absent.
+public function LoadWorldChunk(World: WorldSession; Coordinate: ChunkCoordinate): result of ChunkLoad, string;
+begin
+  var Existing: integer := CacheIndex(World, Coordinate);
+  if Existing >= 0 then
+  begin
+    var Chunk: WorldChunk := World.Cache[Existing].Chunk;
+    return Ok(record
+      World := StoreInCache(World, Chunk);
+      Chunk := Chunk;
+    end)
+  end;
+  var Loaded: WorldChunk := try ReadOrCreateChunk(World, Coordinate);
+  return Ok(record
+    World := StoreInCache(World, Loaded);
+    Chunk := Loaded;
+  end)
+end;
+
+// Loads one authoritative cell at signed world coordinates.
+public function LoadWorldCell(World: WorldSession; X: integer; Y: integer): result of CellLoad, string;
+begin
+  var Coordinate: ChunkCoordinate := record
+    X := ChunkForCoordinate(X);
+    Y := ChunkForCoordinate(Y);
+  end;
+  var Loaded: ChunkLoad := try LoadWorldChunk(World, Coordinate);
+  return Ok(record
+    World := Loaded.World;
+    Cell := ChunkCell(Loaded.Chunk, LocalForCoordinate(X), LocalForCoordinate(Y));
+  end)
+end;
+
+// Computes all chunks intersecting a positive-sized visible rectangle.
+public function ChunkRangeForWindow(OriginX: integer; OriginY: integer; Width: integer; Height: integer): result of ChunkRange, string;
+begin
+  if (Width <= 0) or (Height <= 0) then
+  begin
+    return Error('visible window dimensions must be positive')
+  end;
+
+  return Ok(record
+    MinimumX := ChunkForCoordinate(OriginX);
+    MinimumY := ChunkForCoordinate(OriginY);
+    MaximumX := ChunkForCoordinate((OriginX + Width) - 1);
+    MaximumY := ChunkForCoordinate((OriginY + Height) - 1);
+  end)
+end;
+
+function CachedCell(World: WorldSession; X: integer; Y: integer): result of WorldCell, string;
+begin
+  var Coordinate: ChunkCoordinate := record
+    X := ChunkForCoordinate(X);
+    Y := ChunkForCoordinate(Y);
+  end;
+  var Index: integer := CacheIndex(World, Coordinate);
+  if Index < 0 then
+  begin
+    return Error('required chunk is absent from the prepared cache')
+  end;
+
+  return Ok(ChunkCell(World.Cache[Index].Chunk, LocalForCoordinate(X), LocalForCoordinate(Y)))
+end;
+
+function PrepareWindow(World: WorldSession; Range: ChunkRange): result of WorldSession, string;
+begin
+  var CountX: integer := (Range.MaximumX - Range.MinimumX) + 3;
+  var CountY: integer := (Range.MaximumY - Range.MinimumY) + 3;
+  if (CountX * CountY) > World.CacheLimit then
+  begin
+    return Error('visible window and prefetch margin exceed the chunk cache limit')
+  end;
+  mutable var Current: WorldSession := World;
+  for ChunkY: integer := Range.MinimumY - 1 to Range.MaximumY + 1 do
+  begin
+    for ChunkX: integer := Range.MinimumX - 1 to Range.MaximumX + 1 do
+    begin
+      var Loaded: ChunkLoad := try LoadWorldChunk(Current, record
+        X := ChunkX;
+        Y := ChunkY;
+      end);
+      Current := Loaded.World
+    end
+  end;
+
+  return Ok(Current)
+end;
+
+// Composes a centered client-safe window and preloads one surrounding chunk margin.
+public function LoadVisibleWindow(World: WorldSession; State: GameState; Width: integer; Height: integer): result of WindowLoad, string;
+begin
+  var OriginX: integer := State.Player.X - (Width div 2);
+  var OriginY: integer := State.Player.Y - (Height div 2);
+  var Range: ChunkRange := try ChunkRangeForWindow(OriginX, OriginY, Width, Height);
+  var Prepared: WorldSession := try PrepareWindow(World, Range);
+  mutable var Rows: array of string := [];
+  for LocalY: integer := 0 to Height - 1 do
+  begin
+    mutable var Row: string := '';
+    for LocalX: integer := 0 to Width - 1 do
+    begin
+      Row := Row + VisibleCellCode(try CachedCell(Prepared, OriginX + LocalX, OriginY + LocalY))
+    end;
+
+    Std.Arrays.Push(Rows, Row)
+  end;
+
+  return Ok(record
+    World := Prepared;
+    Window := record
+      OriginX := OriginX;
+      OriginY := OriginY;
+      Width := Width;
+      Height := Height;
+      Rows := Rows;
+      PlayerX := State.Player.X - OriginX;
+      PlayerY := State.Player.Y - OriginY;
+    end;
+  end)
+end;
+
+// Applies movement against the generated target terrain and returns updated world state.
+public function MoveInWorld(World: WorldSession; State: GameState; DeltaX: integer; DeltaY: integer): result of WorldMove, string;
+begin
+  if not (((DeltaX = 0) and ((DeltaY = -1) or (DeltaY = 1))) or ((DeltaY = 0) and ((DeltaX = -1) or (DeltaX = 1)))) then
+  begin
+    return Error('movement must be one cardinal step')
+  end;
+  var Target: CellLoad := try LoadWorldCell(World, State.Player.X + DeltaX, State.Player.Y + DeltaY);
+  return Ok(record
+    World := Target.World;
+    State := try MovePlayer(State, DeltaX, DeltaY, Target.Cell);
+  end)
+end;
+
+// Returns the number of complete chunks currently retained in memory.
+public function CachedChunkCount(World: WorldSession): integer;
+begin
+  return Std.Arrays.Length(World.Cache)
+end;

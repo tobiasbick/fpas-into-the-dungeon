@@ -26,6 +26,8 @@ end;
 function RunNetworkSession(
   Host: string;
   Port: integer;
+  ViewWidth: integer;
+  ViewHeight: integer;
   Requests: channel of ClientMessage;
   Events: channel of ClientEvent;
   Token: CancellationToken
@@ -33,7 +35,7 @@ function RunNetworkSession(
 begin
   var ConnectionValue: Connection := try ConnectWithCancellation(Host, Port, 5000, Token);
   mutable var Reader: LineReader := NewLineReader(ConnectionValue);
-  var HelloSent: boolean := try WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion)), Token);
+  var HelloSent: boolean := try WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion, ViewWidth, ViewHeight)), Token);
   case ReadServer(Reader, Token) of
     Error(Message):
     begin
@@ -136,7 +138,42 @@ begin
               end
             end
           end;
-          ClientMessage.Hello(Version):
+          ClientMessage.Viewport(Width, Height):
+          begin
+            case ReadServer(Reader, Token) of
+              Error(Message):
+              begin
+                var Closed: boolean := try Close(ConnectionValue);
+                return Error(Message)
+              end;
+              Ok(ReadValue):
+              begin
+                Reader := ReadValue.Reader;
+                case ReadValue.Message of
+                  ServerMessage.State(Value):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.State(Value), Token)
+                  end;
+                  ServerMessage.Rejected(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                  end;
+                  ServerMessage.ErrorMessage(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Ok(true)
+                  end
+                  else
+                  begin
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Error('unexpected server response')
+                  end
+                end
+              end
+            end
+          end;
+          ClientMessage.Hello(Version, Width, Height):
           begin
             var Closed: boolean := try Close(ConnectionValue);
             return Error('hello can only be sent during connection setup')
@@ -153,12 +190,14 @@ end;
 public function RunNetwork(
   Host: string;
   Port: integer;
+  ViewWidth: integer;
+  ViewHeight: integer;
   Requests: channel of ClientMessage;
   Events: channel of ClientEvent;
   Token: CancellationToken
 ): result of boolean, string;
 begin
-  case RunNetworkSession(Host, Port, Requests, Events, Token) of
+  case RunNetworkSession(Host, Port, ViewWidth, ViewHeight, Requests, Events, Token) of
     Ok(Completed):
     begin
       return Ok(Completed)

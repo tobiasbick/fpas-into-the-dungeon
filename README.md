@@ -7,8 +7,8 @@ in [Functional Pascal](https://github.com/tobiasbick/functional-pascal).
 > know where it will lead, or whether it will ever reach an ending.
 
 The repository is at a very early stage. Its first executable slice is a TUI
-client connected to an authoritative game server, with one player moving on a
-small outdoor map.
+client connected to an authoritative game server, with one player moving
+through a generated, chunked outdoor world.
 
 ```powershell
 fpas run apps/server/server.fpasprj
@@ -19,6 +19,7 @@ Run the server first. Both programs use `127.0.0.1:4040` by default and create
 their TOML configuration under `~/.fpas-into-the-dungeon/config/`. Optional
 host and port arguments override that address; `--data-dir PATH` selects a
 different runtime-data directory.
+The server also accepts `--world ID` to select or create another world.
 
 See the [architecture overview](docs/architecture/overview.md) for the planned
 repository structure and the [roadmap](docs/roadmap.md) for the incremental

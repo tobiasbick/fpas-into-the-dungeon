@@ -1,0 +1,321 @@
+// Verifies world creation, chunk persistence, validation, composition, and cache limits.
+program DungeonWorldStorageTest;
+
+uses
+  Dungeon.Game, Dungeon.World, Std.Arrays, Std.Conv, Std.Fs, Std.Path, Std.Results, Std.Str,
+  Std.Task, Std.Test, Std.Time;
+
+function EnsureTestRoot(Path: string): result of boolean, string;
+begin
+  if not Std.Fs.Exists('.temp-data') then
+  begin
+    var CreatedBase: boolean := try Std.Fs.CreateDir('.temp-data')
+  end;
+
+  if not Std.Fs.Exists(Path) then
+  begin
+    var Created: boolean := try Std.Fs.CreateDir(Path)
+  end;
+
+  return Ok(true)
+end;
+
+function EnsureChild(Path: string): result of boolean, string;
+begin
+  if Std.Fs.Exists(Path) then
+  begin
+    return Ok(Std.Fs.IsDir(Path))
+  end;
+
+  return Std.Fs.CreateDir(Path)
+end;
+
+function MetadataJson(
+  Id: string;
+  FormatVersion: integer;
+  ChunkSize: integer;
+  SpawnX: integer;
+  SpawnY: integer
+): string;
+begin
+  mutable var Text: string := '{"version":' + IntToStr(FormatVersion);
+  Text := ((Text + ',"id":"') + Id) + '"';
+  Text := (Text + ',"seed":12345,"generator_version":') + IntToStr(WorldGeneratorVersion);
+  Text := (Text + ',"chunk_size":') + IntToStr(ChunkSize);
+  Text := (Text + ',"spawn_x":') + IntToStr(SpawnX);
+  Text := (Text + ',"spawn_y":') + IntToStr(SpawnY);
+  return Text + '}'
+end;
+
+function JsonRows(Code: string; Width: integer; Count: integer): string;
+begin
+  mutable var Text: string := '[';
+  for Index: integer := 0 to Count - 1 do
+  begin
+    if Index > 0 then
+    begin
+      Text := Text + ','
+    end;
+
+    Text := ((Text + '"') + Std.Str.RepeatStr(Code, Width)) + '"'
+  end;
+
+  return Text + ']'
+end;
+
+function ChunkJson(
+  WorldId: string;
+  ChunkX: integer;
+  ChunkY: integer;
+  Version: integer;
+  BaseCode: string;
+  Width: integer;
+  Count: integer
+): string;
+begin
+  mutable var Text: string := '{"version":' + IntToStr(Version);
+  Text := ((Text + ',"world_id":"') + WorldId) + '"';
+  Text := (Text + ',"chunk_x":') + IntToStr(ChunkX);
+  Text := (Text + ',"chunk_y":') + IntToStr(ChunkY);
+  Text := (Text + ',"base_rows":') + JsonRows(BaseCode, Width, Count);
+  Text := (Text + ',"feature_rows":') + JsonRows('.', Width, Count);
+  Text := (Text + ',"water_rows":') + JsonRows('.', Width, Count);
+  return Text + '}'
+end;
+
+function ConcurrentLoad(Root: string; Coordinate: ChunkCoordinate): result of boolean, string;
+begin
+  var World: WorldSession := try OpenWorld(Root, 'concurrent', 12345, 8);
+  var Loaded: ChunkLoad := try LoadWorldChunk(World, Coordinate);
+  return Ok(Std.Arrays.Length(Loaded.Chunk.Cells) = WorldChunkSize * WorldChunkSize)
+end;
+
+function FindHorizontalCrossing(Metadata: WorldMetadata; LeftX: integer; RightX: integer): integer;
+begin
+  for Y: integer := -2048 to 2048 do
+  begin
+    if IsWalkable(GenerateWorldCell(Metadata, LeftX, Y)) and
+       IsWalkable(GenerateWorldCell(Metadata, RightX, Y)) then
+    begin
+      return Y
+    end
+  end;
+
+  panic('expected a traversable horizontal chunk crossing')
+end;
+
+function FindVerticalCrossing(Metadata: WorldMetadata; TopY: integer; BottomY: integer): integer;
+begin
+  for X: integer := -2048 to 2048 do
+  begin
+    if IsWalkable(GenerateWorldCell(Metadata, X, TopY)) and
+       IsWalkable(GenerateWorldCell(Metadata, X, BottomY)) then
+    begin
+      return X
+    end
+  end;
+
+  panic('expected a traversable vertical chunk crossing')
+end;
+
+begin
+  var Root: string := '.temp-data/world-storage-test-' + IntToStr(TimestampMillis());
+  AssertTrue(Unwrap(EnsureTestRoot(Root)));
+  mutable var World: WorldSession := Unwrap(OpenWorld(Root, 'storage', 12345, 16));
+  AssertTrue(Std.Fs.IsFile(WorldMetadataPath(World)));
+  AssertEquals(WorldFormatVersion, World.Metadata.FormatVersion);
+  AssertEquals(WorldChunkSize, World.Metadata.ChunkSize);
+  var Coordinate: ChunkCoordinate := record
+    X := -1;
+    Y := 2;
+  end;
+  var First: ChunkLoad := Unwrap(LoadWorldChunk(World, Coordinate));
+  World := First.World;
+  var Path: string := WorldChunkPath(World, Coordinate);
+  AssertTrue(Std.Fs.IsFile(Path));
+  var Stored: string := Unwrap(Std.Fs.ReadText(Path));
+  var Second: ChunkLoad := Unwrap(LoadWorldChunk(Unwrap(OpenWorld(Root, 'storage', 99999, 16)), Coordinate));
+  AssertEquals(Stored, Unwrap(Std.Fs.ReadText(Path)));
+  AssertTrue(VisibleCellCode(First.Chunk.Cells[0]) = VisibleCellCode(Second.Chunk.Cells[0]));
+  var State: GameState := NewGame(World.Metadata);
+  var WindowResult: WindowLoad := Unwrap(LoadVisibleWindow(World, State, 17, 9));
+  World := WindowResult.World;
+  AssertEquals(-8, WindowResult.Window.OriginX);
+  AssertEquals(-4, WindowResult.Window.OriginY);
+  AssertEquals(17, WindowResult.Window.Width);
+  AssertEquals(9, Std.Arrays.Length(WindowResult.Window.Rows));
+  AssertEquals(17, Std.Str.Length(WindowResult.Window.Rows[0]));
+  AssertTrue(CachedChunkCount(World) <= 16);
+  var WithinOne: ChunkRange := Unwrap(ChunkRangeForWindow(10, 10, 5, 5));
+  AssertEquals(0, WithinOne.MinimumX);
+  AssertEquals(0, WithinOne.MaximumX);
+  var AcrossEdge: ChunkRange := Unwrap(ChunkRangeForWindow(127, 20, 2, 2));
+  AssertEquals(0, AcrossEdge.MinimumX);
+  AssertEquals(1, AcrossEdge.MaximumX);
+  var AcrossCorners: ChunkRange := Unwrap(ChunkRangeForWindow(127, 127, 2, 2));
+  AssertEquals(0, AcrossCorners.MinimumX);
+  AssertEquals(1, AcrossCorners.MaximumX);
+  AssertEquals(0, AcrossCorners.MinimumY);
+  AssertEquals(1, AcrossCorners.MaximumY);
+  var NegativeEdge: ChunkRange := Unwrap(ChunkRangeForWindow(-129, -129, 2, 2));
+  AssertEquals(-2, NegativeEdge.MinimumX);
+  AssertEquals(-1, NegativeEdge.MaximumX);
+  AssertEquals(-2, NegativeEdge.MinimumY);
+  AssertEquals(-1, NegativeEdge.MaximumY);
+  var AcrossMany: ChunkRange := Unwrap(ChunkRangeForWindow(-200, -200, 520, 520));
+  AssertTrue((AcrossMany.MaximumX - AcrossMany.MinimumX) + 1 > 3);
+  AssertTrue((AcrossMany.MaximumY - AcrossMany.MinimumY) + 1 > 3);
+  var WideWorld: WorldSession := Unwrap(OpenWorld(Root, 'storage', 12345, 64));
+  var WideWindow: WindowLoad := Unwrap(LoadVisibleWindow(WideWorld, State, 385, 385));
+  AssertEquals(385, WideWindow.Window.Width);
+  AssertEquals(385, WideWindow.Window.Height);
+  AssertEquals(385, Std.Str.Length(WideWindow.Window.Rows[384]));
+  AssertTrue(CachedChunkCount(WideWindow.World) <= 64);
+  var Moved: WorldMove := Unwrap(MoveInWorld(World, State, -1, 0));
+  AssertEquals(-1, Moved.State.Player.X);
+  AssertEquals(0, Moved.State.Player.Y);
+  var RightY: integer := FindHorizontalCrossing(World.Metadata, 127, 128);
+  var CrossRight: WorldMove := Unwrap(MoveInWorld(World, record
+    Area := AreaKind.OutdoorRegion;
+    Player := record
+      X := 127;
+      Y := RightY;
+    end;
+  end, 1, 0));
+  AssertEquals(128, CrossRight.State.Player.X);
+  var LeftY: integer := FindHorizontalCrossing(World.Metadata, -128, -129);
+  var CrossLeft: WorldMove := Unwrap(MoveInWorld(World, record
+    Area := AreaKind.OutdoorRegion;
+    Player := record
+      X := -128;
+      Y := LeftY;
+    end;
+  end, -1, 0));
+  AssertEquals(-129, CrossLeft.State.Player.X);
+  var DownX: integer := FindVerticalCrossing(World.Metadata, 127, 128);
+  var CrossDown: WorldMove := Unwrap(MoveInWorld(World, record
+    Area := AreaKind.OutdoorRegion;
+    Player := record
+      X := DownX;
+      Y := 127;
+    end;
+  end, 0, 1));
+  AssertEquals(128, CrossDown.State.Player.Y);
+  var UpX: integer := FindVerticalCrossing(World.Metadata, -128, -129);
+  var CrossUp: WorldMove := Unwrap(MoveInWorld(World, record
+    Area := AreaKind.OutdoorRegion;
+    Player := record
+      X := UpX;
+      Y := -128;
+    end;
+  end, 0, -1));
+  AssertEquals(-129, CrossUp.State.Player.Y);
+  AssertTrue(IsError(OpenWorld(Root, '../escape', 1, 16)));
+  AssertTrue(IsError(OpenWorld(Root, 'storage', 1, 0)));
+  mutable var SmallCache: WorldSession := Unwrap(OpenWorld(Root, 'small-cache', 12345, 2));
+  var CachedA: ChunkLoad := Unwrap(LoadWorldChunk(SmallCache, record
+    X := 10;
+    Y := 10;
+  end));
+  SmallCache := CachedA.World;
+  var CachedB: ChunkLoad := Unwrap(LoadWorldChunk(SmallCache, record
+    X := 11;
+    Y := 10;
+  end));
+  SmallCache := CachedB.World;
+  var CachedC: ChunkLoad := Unwrap(LoadWorldChunk(SmallCache, record
+    X := 12;
+    Y := 10;
+  end));
+  SmallCache := CachedC.World;
+  AssertEquals(2, CachedChunkCount(SmallCache));
+  AssertEquals(11, SmallCache.Cache[0].Chunk.Coordinate.X);
+  AssertEquals(12, SmallCache.Cache[1].Chunk.Coordinate.X);
+  var InvalidVersionDirectory: string := Std.Path.Join([Root, 'invalid-version']);
+  AssertTrue(Unwrap(EnsureChild(InvalidVersionDirectory)));
+  var InvalidVersionPath: string := Std.Path.Join([InvalidVersionDirectory, 'world.json']);
+  var InvalidVersionText: string := MetadataJson('invalid-version', 99, WorldChunkSize, 0, 0);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(InvalidVersionPath, InvalidVersionText)));
+  AssertTrue(IsError(OpenWorld(Root, 'invalid-version', 1, 8)));
+  AssertEquals(InvalidVersionText, Unwrap(Std.Fs.ReadText(InvalidVersionPath)));
+  var InvalidSizeDirectory: string := Std.Path.Join([Root, 'invalid-size']);
+  AssertTrue(Unwrap(EnsureChild(InvalidSizeDirectory)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(Std.Path.Join([InvalidSizeDirectory, 'world.json']), MetadataJson('invalid-size', WorldFormatVersion, 127, 0, 0))));
+  AssertTrue(IsError(OpenWorld(Root, 'invalid-size', 1, 8)));
+  var MismatchDirectory: string := Std.Path.Join([Root, 'mismatch']);
+  AssertTrue(Unwrap(EnsureChild(MismatchDirectory)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(Std.Path.Join([MismatchDirectory, 'world.json']), MetadataJson('different', WorldFormatVersion, WorldChunkSize, 0, 0))));
+  AssertTrue(IsError(OpenWorld(Root, 'mismatch', 1, 8)));
+  mutable var BlockedX: integer := 100;
+  while IsWalkable(GenerateWorldCell(NewWorldMetadata('invalid-spawn', 12345), BlockedX, 100)) do
+  begin
+    BlockedX := BlockedX + 1
+  end;
+  var InvalidSpawnDirectory: string := Std.Path.Join([Root, 'invalid-spawn']);
+  AssertTrue(Unwrap(EnsureChild(InvalidSpawnDirectory)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(Std.Path.Join([InvalidSpawnDirectory, 'world.json']), MetadataJson('invalid-spawn', WorldFormatVersion, WorldChunkSize, BlockedX, 100))));
+  AssertTrue(IsError(OpenWorld(Root, 'invalid-spawn', 1, 8)));
+  mutable var InvalidChunkWorld: WorldSession := Unwrap(OpenWorld(Root, 'invalid-chunks', 12345, 8));
+  var InvalidCoordinate: ChunkCoordinate := record
+    X := 20;
+    Y := -20;
+  end;
+  var InvalidColumn: string := Std.Path.Join([InvalidChunkWorld.Directory, 'chunks', 'x_20']);
+  AssertTrue(Unwrap(EnsureChild(InvalidColumn)));
+  var InvalidChunkPath: string := WorldChunkPath(InvalidChunkWorld, InvalidCoordinate);
+  var InvalidChunkText: string := ChunkJson('invalid-chunks', 20, -20, WorldFormatVersion, 'x', WorldChunkSize, WorldChunkSize);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(InvalidChunkPath, InvalidChunkText)));
+  AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, InvalidCoordinate)));
+  AssertEquals(InvalidChunkText, Unwrap(Std.Fs.ReadText(InvalidChunkPath)));
+  var MalformedCoordinate: ChunkCoordinate := record
+    X := 21;
+    Y := -20;
+  end;
+  var MalformedColumn: string := Std.Path.Join([InvalidChunkWorld.Directory, 'chunks', 'x_21']);
+  AssertTrue(Unwrap(EnsureChild(MalformedColumn)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WorldChunkPath(InvalidChunkWorld, MalformedCoordinate), ChunkJson('invalid-chunks', 21, -20, WorldFormatVersion, 'g', 127, WorldChunkSize))));
+  AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, MalformedCoordinate)));
+  var WrongCoordinate: ChunkCoordinate := record
+    X := 22;
+    Y := -20;
+  end;
+  var WrongColumn: string := Std.Path.Join([InvalidChunkWorld.Directory, 'chunks', 'x_22']);
+  AssertTrue(Unwrap(EnsureChild(WrongColumn)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WorldChunkPath(InvalidChunkWorld, WrongCoordinate), ChunkJson('invalid-chunks', 999, -20, WorldFormatVersion, 'g', WorldChunkSize, WorldChunkSize))));
+  AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, WrongCoordinate)));
+  var WrongVersionCoordinate: ChunkCoordinate := record
+    X := 23;
+    Y := -20;
+  end;
+  var WrongVersionColumn: string := Std.Path.Join([InvalidChunkWorld.Directory, 'chunks', 'x_23']);
+  AssertTrue(Unwrap(EnsureChild(WrongVersionColumn)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WorldChunkPath(InvalidChunkWorld, WrongVersionCoordinate), ChunkJson('invalid-chunks', 23, -20, 99, 'g', WorldChunkSize, WorldChunkSize))));
+  AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, WrongVersionCoordinate)));
+  var WrongWorldCoordinate: ChunkCoordinate := record
+    X := 24;
+    Y := -20;
+  end;
+  var WrongWorldColumn: string := Std.Path.Join([InvalidChunkWorld.Directory, 'chunks', 'x_24']);
+  AssertTrue(Unwrap(EnsureChild(WrongWorldColumn)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WorldChunkPath(InvalidChunkWorld, WrongWorldCoordinate), ChunkJson('another-world', 24, -20, WorldFormatVersion, 'g', WorldChunkSize, WorldChunkSize))));
+  AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, WrongWorldCoordinate)));
+  var WrongRowCountCoordinate: ChunkCoordinate := record
+    X := 25;
+    Y := -20;
+  end;
+  var WrongRowCountColumn: string := Std.Path.Join([InvalidChunkWorld.Directory, 'chunks', 'x_25']);
+  AssertTrue(Unwrap(EnsureChild(WrongRowCountColumn)));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WorldChunkPath(InvalidChunkWorld, WrongRowCountCoordinate), ChunkJson('invalid-chunks', 25, -20, WorldFormatVersion, 'g', WorldChunkSize, 127))));
+  AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, WrongRowCountCoordinate)));
+  var ConcurrentWorld: WorldSession := Unwrap(OpenWorld(Root, 'concurrent', 12345, 8));
+  var ConcurrentCoordinate: ChunkCoordinate := record
+    X := 31;
+    Y := 17;
+  end;
+  var FirstTask: task := go ConcurrentLoad(Root, ConcurrentCoordinate);
+  var SecondTask: task := go ConcurrentLoad(Root, ConcurrentCoordinate);
+  AssertTrue(Unwrap(Wait(FirstTask)));
+  AssertTrue(Unwrap(Wait(SecondTask)));
+  var ConcurrentResult: ChunkLoad := Unwrap(LoadWorldChunk(ConcurrentWorld, ConcurrentCoordinate));
+  AssertEquals(WorldChunkSize * WorldChunkSize, Std.Arrays.Length(ConcurrentResult.Chunk.Cells))
+end.

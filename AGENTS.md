@@ -21,6 +21,13 @@ architecture documentation belongs under `docs/`.
 Use the canonical terms in [world structure and views](docs/product/world-and-views.md).
 Add newly established game terms there when they are missing.
 
+## Configuration compatibility
+
+Treat runtime configuration files as current-version only. When their schema
+changes, reject obsolete files with a clear error and instruct the user to
+delete or recreate them. Keep defaults, documentation, and tests aligned with
+the current schema.
+
 ## Functional Pascal source documentation
 
 Before committing Functional Pascal changes, verify that every changed `.fpas`

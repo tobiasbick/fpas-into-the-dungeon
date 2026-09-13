@@ -43,7 +43,8 @@ server operations exist.
 
 ## Game screen
 
-The active game uses a bordered main row and a persistent status line:
+The active game uses a bordered main row, an optional framed message panel,
+and a persistent framed status view:
 
 ```text
 ┌──────────────────────────────────────┬───────────────────┐
@@ -65,10 +66,10 @@ a wide terminal, so the context panel fills roughly one third of the main row.
 It contains summaries rather than the complete inventory or another full game
 screen.
 
-The context and message panels can be shown or hidden. The one-line status line
-remains visible because it carries connection feedback, pending actions, and
-errors. Hidden panels remain reachable as overlays when the terminal cannot fit
-them beside or below the primary view.
+The context and message panels can be shown or hidden. The framed status view
+remains visible with one content line because it carries connection feedback,
+pending actions, and errors. Hidden panels remain reachable as overlays when
+the terminal cannot fit them beside or below the primary view.
 
 ## Client states
 
@@ -85,10 +86,11 @@ client is connected, and controls appropriate to the current view are enabled.
 
 ### Request pending
 
-After sending a movement intention, the existing view remains visible and the
-status shows that movement is pending. Further movement is ignored until the
-server returns either a new visible state or a rejection. This preserves the
-request-response protocol and avoids speculative local movement.
+After sending a movement or viewport intention, the existing complete view
+remains visible and the status shows that an update is pending. Further
+movement is ignored until the server returns either a new visible state or a
+rejection. This preserves the request-response protocol and avoids speculative
+local movement or partially painted resizes.
 
 ### Rejected
 
@@ -108,9 +110,16 @@ reconnection is not part of the initial UI.
 ## Map view
 
 Outdoor regions and settlements use the map view. The server supplies the view
-kind, dimensions, terrain rows, and player coordinates. The client renders the
-terrain glyphs unchanged and overlays `@` at the authoritative player position.
-It must not assume the initial 13 by 7 dimensions.
+kind, world origin, dimensions, compact visible-cell rows, and local and world
+player coordinates. The client maps visible kinds to a restrained glyph and a
+concrete truecolor style in a `TuiCellGrid`. Grass, forest, desert, mountains,
+sea, rivers, lakes, and paths have distinct palette entries. The player uses a
+separate overlay style without changing the received terrain.
+
+One world cell occupies two adjacent terminal cells with the same background.
+This corrects terminal character proportions and makes continuous color fields
+dominant over glyphs. The client does not know chunk coordinates or reproduce
+generation, movement, or passability rules.
 
 The first implementation is top-down. A later isometric renderer may present
 the same kind of outdoor state differently, but isometric presentation is not a
@@ -153,13 +162,20 @@ Mouse input and remappable keys are not yet defined.
 
 ## Terminal size
 
-Map dimensions come from the server rather than the terminal. The initial
-client hides the context panel first when horizontal space is insufficient and
-hides the optional message panel when vertical space is insufficient. The
+The client derives its requested world-cell width from the primary view's
+terminal columns divided by two, after panel and border space. It similarly
+accounts for the framed status view, map border, and optional message panel when
+requesting height. It sends this size on connect and whenever terminal size or
+docked-panel visibility changes. The server may clamp it to its configured
+limit.
+
+The client hides the context panel first when horizontal space is insufficient
+and hides the optional message panel when vertical space is insufficient. The
 primary view and one-line status remain. At still smaller sizes, hidden panels
-open as overlays and the TUI may clip the primary view, but it must not fail or
-access rows outside the visible-state bounds. Scrolling, scaling, and a minimum
-supported terminal size remain open.
+open as overlays and the TUI may clip the previous complete primary view while
+the replacement is pending, but it must not fail or access rows outside the
+visible-state bounds. Scrolling, scaling, and a minimum supported terminal size
+remain open.
 
 ## Completion criteria
 
@@ -168,8 +184,8 @@ The client UI foundation is complete when:
 - the framed start screen and its keyboard navigation have headless coverage;
 - connecting, active, pending, rejected, failed, and disconnected states have
   deliberate status text and headless test coverage;
-- map rendering is covered with server-provided dimensions that differ from
-  the first fixed map;
+- truecolor cell-grid rendering, two-column cells, player overlay, and
+  server-provided dimensions are covered headlessly;
 - the game-screen layout, panel visibility, menu overlay, movement gating, and
   quit behavior are covered through the update interface;
 - a terminal smaller than the rendered content does not crash;
@@ -177,6 +193,6 @@ The client UI foundation is complete when:
 - client projects do not import server-owned game rules; and
 - the implementation and this document describe the same behavior.
 
-Final colors, title artwork, complete inventory, combat UI, dialogue UI,
-first-person styling, and accessibility conventions are deferred until their
-corresponding gameplay slices are planned.
+Title artwork, complete inventory, combat UI, dialogue UI, first-person
+styling, and accessibility conventions are deferred until their corresponding
+gameplay slices are planned.

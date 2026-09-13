@@ -1,4 +1,4 @@
-// Runtime paths and persistent network configuration shared by both applications.
+// Runtime paths plus persistent client-network and server-world configuration.
 unit Dungeon.RuntimeData;
 
 uses Std.Dictionaries, Std.Env, Std.Fs, Std.Options, Std.Path, Std.Str, Std.Toml;
@@ -8,6 +8,14 @@ public type
   NetworkConfig = record
     public Host: string;
     public Port: integer;
+  end;
+  // Server-owned world selection and bounded client viewport policy.
+  ServerWorldConfig = record
+    public Id: string;
+    public Seed: integer;
+    public ChunkCacheLimit: integer;
+    public MaximumViewWidth: integer;
+    public MaximumViewHeight: integer;
   end;
   // Resolved data root and the project-owned files and directories below it.
   RuntimePaths = record
@@ -19,10 +27,11 @@ public type
     public Logs: string;
     public Cache: string;
   end;
-  // Bundles prepared runtime paths with the effective network configuration.
+  // Bundles prepared runtime paths with effective network and server-world settings.
   RuntimeSettings = record
     public Paths: RuntimePaths;
     public Network: NetworkConfig;
+    public World: ServerWorldConfig;
   end;
 
 function DefaultNetworkConfig(): NetworkConfig;
@@ -30,6 +39,17 @@ begin
   return record
     Host := '127.0.0.1';
     Port := 4040;
+  end
+end;
+
+function DefaultServerWorldConfig(): ServerWorldConfig;
+begin
+  return record
+    Id := 'main';
+    Seed := 12345;
+    ChunkCacheLimit := 64;
+    MaximumViewWidth := 240;
+    MaximumViewHeight := 120;
   end
 end;
 
@@ -139,6 +159,11 @@ begin
   return Std.Toml.Stringify(TomlValue.Table(['host': TomlValue.String(Value.Host), 'port': TomlValue.Integer(Value.Port)]))
 end;
 
+function EncodeServerConfig(Network: NetworkConfig; World: ServerWorldConfig): string;
+begin
+  return Std.Toml.Stringify(TomlValue.Table(['host': TomlValue.String(Network.Host), 'port': TomlValue.Integer(Network.Port), 'world_id': TomlValue.String(World.Id), 'world_seed': TomlValue.Integer(World.Seed), 'chunk_cache_limit': TomlValue.Integer(World.ChunkCacheLimit), 'max_view_width': TomlValue.Integer(World.MaximumViewWidth), 'max_view_height': TomlValue.Integer(World.MaximumViewHeight)]))
+end;
+
 function EnsureConfigFile(Path: string; Defaults: NetworkConfig): result of boolean, string;
 begin
   if Std.Fs.Exists(Path) then
@@ -152,6 +177,21 @@ begin
   end;
 
   return Std.Fs.WriteTextAtomic(Path, EncodeNetworkConfig(Defaults))
+end;
+
+function EnsureServerConfigFile(Path: string; Network: NetworkConfig; World: ServerWorldConfig): result of boolean, string;
+begin
+  if Std.Fs.Exists(Path) then
+  begin
+    if Std.Fs.IsFile(Path) then
+    begin
+      return Ok(true)
+    end;
+
+    return Error('configuration path exists but is not a file: ' + Path)
+  end;
+
+  return Std.Fs.WriteTextAtomic(Path, EncodeServerConfig(Network, World))
 end;
 
 function PrepareShared(Paths: RuntimePaths): result of boolean, string;
@@ -234,6 +274,92 @@ begin
   end)
 end;
 
+function RequiredString(Fields: dict of string to TomlValue; Name: string; Path: string): result of string, string;
+begin
+  case Std.Dictionaries.Get(Fields, Name) of
+    Some(FieldValue):
+    begin
+      case FieldValue of
+        TomlValue.String(Value):
+        begin
+          if Std.Str.Length(Std.Str.Trim(Value)) = 0 then
+          begin
+            return Error((('configuration field ' + Name) + ' must not be empty: ') + Path)
+          end;
+
+          return Ok(Value)
+        end
+        else
+        begin
+          return Error((('configuration field ' + Name) + ' must be a string: ') + Path)
+        end
+      end
+    end;
+    None:
+    begin
+      return Error((('configuration is missing field ' + Name) + ': ') + Path)
+    end
+  end
+end;
+
+function RequiredInteger(Fields: dict of string to TomlValue; Name: string; Path: string): result of integer, string;
+begin
+  case Std.Dictionaries.Get(Fields, Name) of
+    Some(FieldValue):
+    begin
+      case FieldValue of
+        TomlValue.Integer(Value):
+        begin
+          return Ok(Value)
+        end
+        else
+        begin
+          return Error((('configuration field ' + Name) + ' must be an integer: ') + Path)
+        end
+      end
+    end;
+    None:
+    begin
+      return Error((('configuration is missing field ' + Name) + ': ') + Path)
+    end
+  end
+end;
+
+function ReadServerWorldConfig(Path: string): result of ServerWorldConfig, string;
+begin
+  var Text: string := try Std.Fs.ReadText(Path);
+  mutable var Fields: dict of string to TomlValue := [:];
+  case try Std.Toml.Parse(Text) of
+    TomlValue.Table(Value):
+    begin
+      Fields := Value
+    end
+    else
+    begin
+      return Error('configuration root must be a TOML table: ' + Path)
+    end
+  end;
+  var Value: ServerWorldConfig := record
+    Id := try RequiredString(Fields, 'world_id', Path);
+    Seed := try RequiredInteger(Fields, 'world_seed', Path);
+    ChunkCacheLimit := try RequiredInteger(Fields, 'chunk_cache_limit', Path);
+    MaximumViewWidth := try RequiredInteger(Fields, 'max_view_width', Path);
+    MaximumViewHeight := try RequiredInteger(Fields, 'max_view_height', Path);
+  end;
+
+  if Value.ChunkCacheLimit < 9 then
+  begin
+    return Error('configuration field chunk_cache_limit must be at least 9: ' + Path)
+  end;
+
+  if (Value.MaximumViewWidth < 1) or (Value.MaximumViewHeight < 1) then
+  begin
+    return Error('configured maximum viewport dimensions must be positive: ' + Path)
+  end;
+
+  return Ok(Value)
+end;
+
 // Prepares shared client directories and loads or creates client.toml.
 public function LoadClientRuntime(DataRootOverride: option of string): result of RuntimeSettings, string;
 begin
@@ -243,6 +369,7 @@ begin
   return Ok(record
     Paths := Paths;
     Network := try ReadNetworkConfig(Paths.ClientConfig);
+    World := DefaultServerWorldConfig();
   end)
 end;
 
@@ -252,9 +379,10 @@ begin
   var Paths: RuntimePaths := RuntimePathsForRoot(try ResolveDataRoot(DataRootOverride));
   var SharedReady: boolean := try PrepareShared(Paths);
   var WorldsReady: boolean := try EnsureDirectory(Paths.Worlds);
-  var ConfigReady: boolean := try EnsureConfigFile(Paths.ServerConfig, DefaultNetworkConfig());
+  var ConfigReady: boolean := try EnsureServerConfigFile(Paths.ServerConfig, DefaultNetworkConfig(), DefaultServerWorldConfig());
   return Ok(record
     Paths := Paths;
     Network := try ReadNetworkConfig(Paths.ServerConfig);
+    World := try ReadServerWorldConfig(Paths.ServerConfig);
   end)
 end;
