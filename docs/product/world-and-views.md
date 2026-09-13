@@ -20,6 +20,12 @@ or character progression.
 - **Location** is an identifiable place within an area. A location can mark a
   destination or an entrance to another area, such as a building or dungeon
   entrance.
+- **Terrain** is the generated ground material, vegetation, or water that gives
+  an outdoor location its physical character.
+- **Tree** is an individual vegetation feature on otherwise open terrain.
+- **Forest** is a connected vegetation region with a dense interior and a
+  looser edge of individual trees.
+- **Lake** is a finite inland body of water with a generated shoreline.
 - **Chunk** is one fixed 128 by 128 storage, generation, and cache partition
   inside an outdoor region. It is not an area and is never presented to the
   player as a transition.
@@ -47,9 +53,9 @@ interior, dungeon, or another distinct area.
 - **Primary view** is the map or first-person presentation on the game screen.
 - **Context panel** is the optional right-hand summary of character, location,
   equipment, and immediately relevant inventory information.
-- **Status line** is the persistent bottom line for connection state, action
-  progress, messages, and errors.
-- **Message panel** is an optional, larger history area above the status line.
+- **Status view** is the persistent framed bottom view with one content line for
+  connection state, action progress, messages, and errors.
+- **Message panel** is an optional, larger history area above the status view.
 - **System menu** is the overlay for information, controls, session actions,
   and quitting.
 

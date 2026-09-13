@@ -21,6 +21,13 @@ host and port arguments override that address; `--data-dir PATH` selects a
 different runtime-data directory.
 The server also accepts `--world ID` to select or create another world.
 
+Inspect terrain or an individual generator field without starting the server:
+
+```powershell
+fpas run tools/world-preview/world-preview.fpasprj -- terrain
+fpas run tools/world-preview/world-preview.fpasprj -- continentalness
+```
+
 See the [architecture overview](docs/architecture/overview.md) for the planned
 repository structure and the [roadmap](docs/roadmap.md) for the incremental
 development order. Functional Pascal's

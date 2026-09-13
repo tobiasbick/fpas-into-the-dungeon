@@ -7,8 +7,8 @@ public const
   // Schema version written to world metadata and chunk files.
   WorldFormatVersion: integer := 1;
   // Selects the deterministic algorithm used for chunks that do not exist yet.
-  WorldGeneratorVersion: integer := 1;
-  // Fixed cell width and height of every version 1 outdoor chunk.
+  WorldGeneratorVersion: integer := 4;
+  // Fixed cell width and height of every version 4 outdoor chunk.
   WorldChunkSize: integer := 128;
 
 public type
@@ -39,6 +39,7 @@ public type
   // Optional surface feature rendered above compatible base terrain.
   TerrainFeatureKind = enum
     NoFeature;
+    Tree;
     Forest;
     Path;
     River;
@@ -55,6 +56,25 @@ public type
     public Base: BaseTerrainKind;
     public Feature: TerrainFeatureKind;
     public Water: WaterKind;
+  end;
+  // Diagnostic values behind one generated cell, normalized to the range 0 through 1000.
+  TerrainGenerationSample = record
+    // Very slowly changing field that establishes continent-scale character.
+    public Continentalness: integer;
+    // Combined large-, regional-, and coast-scale height field.
+    public Elevation: integer;
+    // Regional climate field used for deserts and forests.
+    public Moisture: integer;
+    // Smooth vegetation field used for forest interiors and tree-lined edges.
+    public Vegetation: integer;
+    // Fine smooth field used to disturb otherwise regular lake shorelines.
+    public LakeShape: integer;
+    // Ridge-shaped regional field used to form mountain ranges.
+    public Ruggedness: integer;
+    // Final land-versus-sea score after connected ridges are applied.
+    public LandScore: integer;
+    // Ridge strength that can lift narrow connected land bands above sea level.
+    public LandBridge: integer;
   end;
   // Immutable identity and generator contract for one outdoor world.
   WorldMetadata = record
@@ -84,6 +104,18 @@ type
     Width: integer;
     Values: array of integer;
   end;
+
+const
+  SeaLevel: integer := 460;
+  MountainRuggedness: integer := 790;
+  NaturalSpawnRadius: integer := 8;
+  MaximumSpawnCandidates: integer := 1024;
+  VisibleSpawnRadiusX: integer := 64;
+  VisibleSpawnRadiusY: integer := 24;
+  NearbySpawnRadiusX: integer := 512;
+  NearbySpawnRadiusY: integer := 256;
+  LakePeriodX: integer := 997;
+  LakePeriodY: integer := 743;
 
 function PositiveModulo(Value: integer; Divisor: integer): integer;
 begin
@@ -125,22 +157,6 @@ begin
   return PositiveModulo(Value, WorldChunkSize)
 end;
 
-// Creates version 1 metadata for a new deterministic outdoor world.
-public function NewWorldMetadata(Id: string; Seed: integer): WorldMetadata;
-begin
-  return record
-    Id := Id;
-    Seed := Seed;
-    FormatVersion := WorldFormatVersion;
-    GeneratorVersion := WorldGeneratorVersion;
-    ChunkSize := WorldChunkSize;
-    Spawn := record
-      X := 0;
-      Y := 0;
-    end;
-  end
-end;
-
 function CoordinateHash(Seed: integer; X: integer; Y: integer; Salt: integer): integer;
 begin
   var Prime: integer := 2147483647;
@@ -153,6 +169,13 @@ begin
   Mixed := PositiveModulo(Mixed + (SaltPart * 265443), Prime);
   Mixed := PositiveModulo((Mixed * 48271) + 1, Prime);
   return Mixed mod 1000
+end;
+
+function CoordinateDetail(Seed: integer; X: integer; Y: integer): integer;
+begin
+  var Primary: integer := CoordinateHash(Seed, X, Y, 37);
+  var Secondary: integer := CoordinateHash(Seed, Y, X, 53);
+  return PositiveModulo(((Primary * 613) + (Secondary * 337)) + (Primary * Secondary), 1000)
 end;
 
 function SmoothWeight(Local: integer; Scale: integer): integer;
@@ -179,6 +202,52 @@ begin
                                                                                                         1, GridY +
                                                                                                            1, Salt), WeightX, Scale);
   return Interpolate(Top, Bottom, WeightY, Scale)
+end;
+
+function RidgeValue(Value: integer): integer;
+begin
+  return 1000 - (Std.Math.Abs(Value - 500) * 2)
+end;
+
+function ComposeTerrainSample(
+  ContinentalWide: integer;
+  ContinentalRegional: integer;
+  RegionalElevation: integer;
+  CoastDetail: integer;
+  MoistureRegional: integer;
+  MoistureDetail: integer;
+  VegetationRegional: integer;
+  LakeShape: integer
+): TerrainGenerationSample;
+begin
+  var Continentalness: integer := ((ContinentalWide * 2) + ContinentalRegional) div 3;
+  mutable var LandScore: integer := (((Continentalness * 6) + (RegionalElevation * 3)) + CoastDetail) div
+                                    10;
+  var LandBridge: integer := RidgeValue(ContinentalRegional);
+  if LandBridge > 900 then
+  begin
+    var BridgeLandScore: integer := SeaLevel + ((LandBridge - 900) * 2);
+    if BridgeLandScore > LandScore then
+    begin
+      LandScore := BridgeLandScore
+    end
+  end;
+
+  return record
+    Continentalness := Continentalness;
+    Elevation := (((LandScore * 5) + (RegionalElevation * 3)) + (CoastDetail * 2)) div 10;
+    Moisture := ((MoistureRegional * 2) + MoistureDetail) div 3;
+    Vegetation := ((((MoistureRegional * 2) + MoistureDetail) * 3) + (VegetationRegional * 2)) div 11;
+    LakeShape := LakeShape;
+    Ruggedness := ((RidgeValue(RegionalElevation) * 3) + (CoastDetail * 2)) div 5;
+    LandScore := LandScore;
+    LandBridge := LandBridge;
+  end
+end;
+
+function SampleTerrainAtSeed(Seed: integer; X: integer; Y: integer): TerrainGenerationSample;
+begin
+  return ComposeTerrainSample(ValueNoise(Seed, X, Y, 8192, 11), ValueNoise(Seed, X, Y, 4096, 13), ValueNoise(Seed, X, Y, 1024, 17), ValueNoise(Seed, X, Y, 256, 19), ValueNoise(Seed, X, Y, 2048, 23), ValueNoise(Seed, X, Y, 384, 29), ValueNoise(Seed, X, Y, 512, 31), ValueNoise(Seed, X, Y, 48, 41))
 end;
 
 function BuildNoiseGrid(
@@ -257,69 +326,84 @@ begin
   end
 end;
 
-function RiverShift(Metadata: WorldMetadata; Y: integer): integer;
+function CellIsWalkable(Cell: WorldCell): boolean;
 begin
-  return (ValueNoise(Metadata.Seed, 0, Y, 160, 71) - 500) div 2
+  return (Cell.Base = BaseTerrainKind.Grass) or (Cell.Base = BaseTerrainKind.Sand)
 end;
 
-function PathShift(Metadata: WorldMetadata; X: integer): integer;
+function RiverShift(Seed: integer; Y: integer): integer;
 begin
-  return (ValueNoise(Metadata.Seed, X, 0, 144, 89) - 500) div 3
+  return (ValueNoise(Seed, 0, Y, 512, 71) - 500) div 2
+end;
+
+function PathShift(Seed: integer; X: integer): integer;
+begin
+  return (ValueNoise(Seed, X, 0, 144, 89) - 500) div 3
+end;
+
+function NearestPeriodicIndex(Value: integer; Offset: integer; Period: integer): integer;
+begin
+  return FloorDivide((Value + Offset) + (Period div 2), Period)
 end;
 
 function GenerateCellFromInputs(
-  Metadata: WorldMetadata;
+  Seed: integer;
   X: integer;
   Y: integer;
   RiverOffset: integer;
   PathOffset: integer;
-  Elevation: integer;
-  Moisture: integer
+  Sample: TerrainGenerationSample
 ): WorldCell;
 begin
-  if (Std.Math.Abs(X - Metadata.Spawn.X) <= 4) and (Std.Math.Abs(Y - Metadata.Spawn.Y) <= 4) then
-  begin
-    mutable var SpawnCell: WorldCell := PlainCell();
-    if Y = Metadata.Spawn.Y then
-    begin
-      SpawnCell.Feature := TerrainFeatureKind.Path
-    end;
-
-    return SpawnCell
-  end;
-  var Detail: integer := CoordinateHash(Metadata.Seed, X, Y, 37);
-  var LakeX: integer := PeriodicDistance(X + PositiveModulo(Metadata.Seed, 673), 673);
-  var LakeY: integer := PeriodicDistance(Y - PositiveModulo(Metadata.Seed, 521), 521);
-  if Elevation < 225 then
+  var Detail: integer := CoordinateDetail(Seed, X, Y);
+  var LakeOffsetX: integer := PositiveModulo(Seed, LakePeriodX);
+  var LakeOffsetY: integer := PositiveModulo(Seed, LakePeriodY);
+  var LakeGridX: integer := NearestPeriodicIndex(X, LakeOffsetX, LakePeriodX);
+  var LakeGridY: integer := NearestPeriodicIndex(Y, LakeOffsetY, LakePeriodY);
+  var LakeX: integer := (X + LakeOffsetX) - (LakeGridX * LakePeriodX);
+  var LakeY: integer := (Y + LakeOffsetY) - (LakeGridY * LakePeriodY);
+  var LakeRadiusX: integer := 42 + (CoordinateHash(Seed, LakeGridX, LakeGridY, 43) mod 25);
+  var LakeRadiusY: integer := 26 + (CoordinateHash(Seed, LakeGridX, LakeGridY, 47) mod 17);
+  var LakeScore: integer := ((((LakeX * LakeX) * 1000) div (LakeRadiusX * LakeRadiusX)) + (((LakeY * LakeY) * 1000) div (LakeRadiusY * LakeRadiusY))) +
+                            ((Sample.LakeShape - 500) div 2);
+  if Sample.LandScore < SeaLevel then
   begin
     return WaterCell(WaterKind.Sea, TerrainFeatureKind.NoFeature)
   end;
 
-  if ((LakeX <= 14) and (LakeY <= 9)) and (Elevation < 700) then
+  if ((LakeScore < 1000) and (Sample.LandScore > SeaLevel + 30)) and (Sample.Elevation < 740) then
   begin
     return WaterCell(WaterKind.Lake, TerrainFeatureKind.NoFeature)
   end;
 
-  if (Elevation < 790) and (PeriodicDistance(X - RiverOffset, 1024) <= 1) then
+  if (Sample.Elevation < 800) and (PeriodicDistance(X - RiverOffset, 1024) <= 1) then
   begin
     return WaterCell(WaterKind.RiverWater, TerrainFeatureKind.River)
   end;
   mutable var Cell: WorldCell := PlainCell();
-  if Elevation > 790 then
+  if (Sample.Ruggedness > MountainRuggedness) and (Sample.Elevation > 520) then
   begin
     Cell.Base := BaseTerrainKind.Rock
   end
   else
   begin
-    if Moisture < 275 then
+    if Sample.Moisture < 285 then
     begin
       Cell.Base := BaseTerrainKind.Sand
     end
     else
     begin
-      if (Moisture > 620) and (Detail > 430) then
+      if Sample.Vegetation >= 650 then
       begin
         Cell.Feature := TerrainFeatureKind.Forest
+      end
+      else
+      begin
+        if ((Sample.Vegetation >= 540) and (Detail > 300)) or
+           ((Sample.Moisture >= 450) and (Detail > 960)) then
+        begin
+          Cell.Feature := TerrainFeatureKind.Tree
+        end
       end
     end
   end;
@@ -333,14 +417,131 @@ begin
 end;
 
 function GenerateCellWithShifts(
-  Metadata: WorldMetadata;
+  Seed: integer;
   X: integer;
   Y: integer;
   RiverOffset: integer;
   PathOffset: integer
 ): WorldCell;
 begin
-  return GenerateCellFromInputs(Metadata, X, Y, RiverOffset, PathOffset, ValueNoise(Metadata.Seed, X, Y, 256, 11), ValueNoise(Metadata.Seed, X, Y, 192, 23))
+  return GenerateCellFromInputs(Seed, X, Y, RiverOffset, PathOffset, SampleTerrainAtSeed(Seed, X, Y))
+end;
+
+function HasVisibleWoodland(Seed: integer; X: integer; Y: integer): boolean;
+begin
+  mutable var CandidateY: integer := Y - VisibleSpawnRadiusY;
+  while CandidateY <= Y + VisibleSpawnRadiusY do
+  begin
+    mutable var CandidateX: integer := X - VisibleSpawnRadiusX;
+    while CandidateX <= X + VisibleSpawnRadiusX do
+    begin
+      var Cell: WorldCell := GenerateCellWithShifts(Seed, CandidateX, CandidateY, RiverShift(Seed, CandidateY), PathShift(Seed, CandidateX));
+      if (Cell.Feature = TerrainFeatureKind.Tree) or (Cell.Feature = TerrainFeatureKind.Forest) then
+      begin
+        return true
+      end;
+
+      CandidateX := CandidateX + 4
+    end;
+
+    CandidateY := CandidateY + 4
+  end;
+
+  return false
+end;
+
+function HasNearbyLandscapeContrast(Seed: integer; X: integer; Y: integer): boolean;
+begin
+  mutable var CandidateY: integer := Y - NearbySpawnRadiusY;
+  while CandidateY <= Y + NearbySpawnRadiusY do
+  begin
+    mutable var CandidateX: integer := X - NearbySpawnRadiusX;
+    while CandidateX <= X + NearbySpawnRadiusX do
+    begin
+      var Cell: WorldCell := GenerateCellWithShifts(Seed, CandidateX, CandidateY, RiverShift(Seed, CandidateY), PathShift(Seed, CandidateX));
+      if (((Cell.Base = BaseTerrainKind.Sand) or (Cell.Base = BaseTerrainKind.Rock)) or (Cell.Water <> WaterKind.NoWater)) or
+         (Cell.Feature = TerrainFeatureKind.Forest) then
+      begin
+        return true
+      end;
+
+      CandidateX := CandidateX + 32
+    end;
+
+    CandidateY := CandidateY + 32
+  end;
+
+  return false
+end;
+
+function IsNaturalSpawnSite(Seed: integer; X: integer; Y: integer): boolean;
+begin
+  var CenterSample: TerrainGenerationSample := SampleTerrainAtSeed(Seed, X, Y);
+  if ((CenterSample.LandScore < 590) or (CenterSample.Ruggedness > 700)) or
+     (((CenterSample.Moisture < 300) or (CenterSample.Moisture > 800)) or ((CenterSample.Vegetation < 430) or (CenterSample.Vegetation > 680))) then
+  begin
+    return false
+  end;
+  var Center: WorldCell := GenerateCellWithShifts(Seed, X, Y, RiverShift(Seed, Y), PathShift(Seed, X));
+  if not CellIsWalkable(Center) or (Center.Feature <> TerrainFeatureKind.NoFeature) then
+  begin
+    return false
+  end;
+
+  for CandidateY: integer := Y - NaturalSpawnRadius to Y + NaturalSpawnRadius do
+  begin
+    for CandidateX: integer := X - NaturalSpawnRadius to X + NaturalSpawnRadius do
+    begin
+      if not CellIsWalkable(GenerateCellWithShifts(Seed, CandidateX, CandidateY, RiverShift(Seed, CandidateY), PathShift(Seed, CandidateX))) then
+      begin
+        return false
+      end
+    end
+  end;
+
+  return HasVisibleWoodland(Seed, X, Y) and HasNearbyLandscapeContrast(Seed, X, Y)
+end;
+
+function FindNaturalSpawn(Seed: integer): WorldPosition;
+begin
+  for Candidate: integer := 0 to MaximumSpawnCandidates - 1 do
+  begin
+    var X: integer := (CoordinateHash(Seed, Candidate, 0, 101) - 500) * 32;
+    var Y: integer := (CoordinateHash(Seed, Candidate, 0, 103) - 500) * 32;
+    if IsNaturalSpawnSite(Seed, X, Y) then
+    begin
+      return record
+        X := X;
+        Y := Y;
+      end
+    end
+  end;
+
+  panic('unable to find a natural spawn site for world seed')
+end;
+
+// Creates version 4 metadata with a deterministic spawn near varied naturally generated terrain.
+public function NewWorldMetadata(Id: string; Seed: integer): WorldMetadata;
+begin
+  return record
+    Id := Id;
+    Seed := Seed;
+    FormatVersion := WorldFormatVersion;
+    GeneratorVersion := WorldGeneratorVersion;
+    ChunkSize := WorldChunkSize;
+    Spawn := FindNaturalSpawn(Seed);
+  end
+end;
+
+// Samples normalized generator fields for previews, diagnostics, and distribution tests.
+public function SampleWorldGeneration(Metadata: WorldMetadata; X: integer; Y: integer): TerrainGenerationSample;
+begin
+  if Metadata.GeneratorVersion <> WorldGeneratorVersion then
+  begin
+    panic('unsupported world generator version')
+  end;
+
+  return SampleTerrainAtSeed(Metadata.Seed, X, Y)
 end;
 
 // Generates one cell solely from metadata and absolute coordinates.
@@ -351,7 +552,7 @@ begin
     panic('unsupported world generator version')
   end;
 
-  return GenerateCellWithShifts(Metadata, X, Y, RiverShift(Metadata, Y), PathShift(Metadata, X))
+  return GenerateCellWithShifts(Metadata.Seed, X, Y, RiverShift(Metadata.Seed, Y), PathShift(Metadata.Seed, X))
 end;
 
 // Generates one complete chunk independently of load or generation order.
@@ -360,22 +561,29 @@ begin
   mutable var Cells: array of WorldCell := [];
   var OriginX: integer := Coordinate.X * WorldChunkSize;
   var OriginY: integer := Coordinate.Y * WorldChunkSize;
-  var ElevationGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 256, 11);
-  var MoistureGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 192, 23);
+  var ContinentalWideGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 8192, 11);
+  var ContinentalRegionalGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 4096, 13);
+  var RegionalElevationGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 1024, 17);
+  var CoastDetailGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 256, 19);
+  var MoistureRegionalGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 2048, 23);
+  var MoistureDetailGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 384, 29);
+  var VegetationRegionalGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 512, 31);
+  var LakeShapeGrid: NoiseGrid := BuildNoiseGrid(Metadata.Seed, OriginX, OriginY, 48, 41);
   mutable var PathOffsets: array of integer := [];
   for LocalX: integer := 0 to WorldChunkSize - 1 do
   begin
-    Std.Arrays.Push(PathOffsets, PathShift(Metadata, OriginX + LocalX))
+    Std.Arrays.Push(PathOffsets, PathShift(Metadata.Seed, OriginX + LocalX))
   end;
 
   for LocalY: integer := 0 to WorldChunkSize - 1 do
   begin
-    var RowRiverOffset: integer := RiverShift(Metadata, OriginY + LocalY);
+    var RowRiverOffset: integer := RiverShift(Metadata.Seed, OriginY + LocalY);
     for LocalX: integer := 0 to WorldChunkSize - 1 do
     begin
       var X: integer := OriginX + LocalX;
       var Y: integer := OriginY + LocalY;
-      Std.Arrays.Push(Cells, GenerateCellFromInputs(Metadata, X, Y, RowRiverOffset, PathOffsets[LocalX], SampleNoise(ElevationGrid, X, Y), SampleNoise(MoistureGrid, X, Y)))
+      var Sample: TerrainGenerationSample := ComposeTerrainSample(SampleNoise(ContinentalWideGrid, X, Y), SampleNoise(ContinentalRegionalGrid, X, Y), SampleNoise(RegionalElevationGrid, X, Y), SampleNoise(CoastDetailGrid, X, Y), SampleNoise(MoistureRegionalGrid, X, Y), SampleNoise(MoistureDetailGrid, X, Y), SampleNoise(VegetationRegionalGrid, X, Y), SampleNoise(LakeShapeGrid, X, Y));
+      Std.Arrays.Push(Cells, GenerateCellFromInputs(Metadata.Seed, X, Y, RowRiverOffset, PathOffsets[LocalX], Sample))
     end
   end;
 
@@ -431,7 +639,8 @@ begin
       end
     end;
 
-    if (Cell.Feature = TerrainFeatureKind.Forest) or (Cell.Feature = TerrainFeatureKind.Path) then
+    if ((Cell.Feature = TerrainFeatureKind.Tree) or (Cell.Feature = TerrainFeatureKind.Forest)) or
+       (Cell.Feature = TerrainFeatureKind.Path) then
     begin
       if Cell.Base = BaseTerrainKind.Water then
       begin
@@ -455,6 +664,10 @@ end;
 public function VisibleCellCode(Cell: WorldCell): string;
 begin
   case Cell.Feature of
+    TerrainFeatureKind.Tree:
+    begin
+      return 't'
+    end;
     TerrainFeatureKind.Forest:
     begin
       return 'f'
@@ -509,7 +722,7 @@ end;
 // Returns whether the server may place or move a player onto one cell.
 public function IsWalkable(Cell: WorldCell): boolean;
 begin
-  return (Cell.Base = BaseTerrainKind.Grass) or (Cell.Base = BaseTerrainKind.Sand)
+  return CellIsWalkable(Cell)
 end;
 
 // Creates the initial player state at the metadata-defined spawn coordinate.

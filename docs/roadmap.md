@@ -50,8 +50,8 @@ missing chunks are atomically generated, restart and chunk-edge movement are
 covered end to end, viewport resizing crosses arbitrary chunk ranges, and the
 client contains presentation mappings but no world rules.
 
-Mutable objects, savegames, settlements, broader world simulation, and polished
-procedural generation remain outside this stage.
+Mutable objects, savegames, settlements, broader world simulation, and
+simulated erosion and hydrology remain outside this stage.
 
 ## 5. Area transitions — NEXT
 

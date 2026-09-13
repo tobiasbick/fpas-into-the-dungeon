@@ -25,6 +25,8 @@ fpas-into-the-dungeon/
 │   ├── protocol/
 │   └── persistence/
 │       └── runtime-data.fpasprj
+├── tools/
+│   └── world-preview/
 ├── tests/
 │   ├── game/
 │   ├── world/
@@ -55,6 +57,8 @@ these projects.
   server. It contains no game rules.
 - `libs/persistence` currently owns the shared runtime path and configuration
   interface. Authoritative world files are owned by `libs/world`.
+- `tools/world-preview` samples final terrain or one normalized generator field
+  without loading a persistent world.
 - `tests` follows the production modules so each module is exercised through
   its interface.
 

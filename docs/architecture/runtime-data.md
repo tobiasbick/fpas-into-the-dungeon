@@ -61,6 +61,12 @@ The server's `--world ID` selects another world without changing the stored
 default. Use `--data-dir PATH` to select a different data root before
 configuration is loaded.
 
+Runtime configuration and world formats support only their current schema and
+generator version. After an incompatible development change, select a new world
+id or delete the obsolete world's directory so it can be generated again. The
+application reports the incompatibility and does not migrate or overwrite the
+old data.
+
 ## Ownership
 
 - `config` contains persistent client and server settings.

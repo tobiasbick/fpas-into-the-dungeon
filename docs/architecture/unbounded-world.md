@@ -66,17 +66,34 @@ atomic write wins.
 
 ## Generation and visible cells
 
-Generator version 1 derives continuous elevation and moisture values from
-smooth deterministic integer noise in world space. Elevation selects seas and
-mountains; moisture and coordinate detail select deserts and forests. Small
-periodic basins produce finite lakes without attempting connectivity analysis
-over an infinite plane. Slowly changing world-coordinate offsets produce rivers
-and paths that continue across chunk edges. The spawn and its immediate
-surroundings are deliberately traversable.
+Generator version 4 evaluates several smooth deterministic integer fields from
+the seed and absolute world coordinate. Very broad and regional noise establish
+continentalness; regional elevation and coast detail shape land and water at
+smaller scales. A ridge transform raises narrow connected land bands above sea
+level instead of leaving every low-elevation region as disconnected islands.
+Separate ruggedness, moisture, and vegetation fields select mountain ranges,
+deserts, connected forest interiors, loose tree-lined forest edges, and
+occasional individual trees only after the land shape exists.
+
+Seed-varied periodic basins combine elliptical distance with smooth local noise
+to produce larger finite lakes with irregular shorelines without attempting
+global connectivity analysis over an infinite plane. Slowly changing
+world-coordinate offsets produce rivers and paths that continue across chunk
+edges. New-world creation searches deterministic candidates for a naturally
+generated, temperate, non-mountainous spawn whose surrounding 17 by 17 cells
+are traversable. Trees or forest are present within the initial visible area,
+and another generated landscape is reachable within 512 horizontal and 256
+vertical cells. Generation never overwrites terrain around the chosen spawn.
+
+The `dungeon-world-preview` tool samples final terrain or continentalness,
+land, elevation, ruggedness, moisture, vegetation, lake-shape, and land-bridge
+fields around that spawn.
+Its field values are normalized from 0 through 1000, making generator changes
+visible without coupling the client or protocol to generation internals.
 
 The server reduces each composed cell to one client-safe visible code: `g`
-grass, `f` forest, `d` desert, `m` mountain, `o` sea, `r` river, `l` lake, and
-`p` path. These codes carry presentation meaning only. The richer base,
+grass, `t` tree, `f` forest, `d` desert, `m` mountain, `o` sea, `r` river, `l`
+lake, and `p` path. These codes carry presentation meaning only. The richer base,
 feature, water-classification, and passability values remain server-owned.
 
 ## Loading and cache policy
@@ -88,7 +105,7 @@ configured number of chunks and evicts the least recently used chunk first.
 Requests whose visible range and margin cannot fit the configured cache fail
 instead of returning a partial window.
 
-Version 1 defaults to a 64-chunk cache and a maximum requested visible window
+The current runtime defaults to a 64-chunk cache and a maximum requested visible window
 of 240 by 120 world cells. The server rejects nonpositive sizes and clamps
 larger requests. These values are server configuration, not wire assumptions.
 
@@ -96,4 +113,4 @@ larger requests. These values are server configuration, not wire assumptions.
 
 This slice does not define mutable terrain, persistent player savegames,
 settlements, locations, bridges, movement costs, weather, seasons, world time,
-interior or dungeon generation, raycasting, or polished procedural generation.
+interior or dungeon generation, raycasting, or simulated erosion and hydrology.
