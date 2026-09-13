@@ -1,16 +1,16 @@
-// Verifies input gating and movement-intention handling in the client update loop.
+// Verifies client screen, overlay, panel, and movement transitions without host routing.
 program DungeonClientUpdateTest;
 
 uses Dungeon.Client, Dungeon.Protocol, Std.Results, Std.Task, Std.Test, Std.Tui;
 
-function MakeLeftKey(): TuiKeyEvent;
+function MakeKey(Kind: TuiKeyKind; Character: string; Ctrl: boolean; Alt: boolean): TuiKeyEvent;
 begin
   return record
-    kind := TuiKeyKind.Left;
-    ch := '';
+    kind := Kind;
+    ch := Character;
     shift := false;
-    ctrl := false;
-    alt := false;
+    ctrl := Ctrl;
+    alt := Alt;
     meta := false;
   end
 end;
@@ -20,11 +20,14 @@ begin
   var Events: channel of ClientEvent := CreateChannel(2);
   mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, Requests, Events);
   var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
-  Model := UpdateClient(Model, TuiMsg.Key(MakeLeftKey()), Cmd);
-  AssertFalse(Model.Pending);
+  AssertTrue(Model.Screen = ClientScreen.StartScreen);
+  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.Offline);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'w', false, false)), Cmd);
   AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model.Screen := ClientScreen.GameScreen;
   Model := UpdateClientEvent(Model, ClientEvent.Connected, Cmd);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeLeftKey()), Cmd);
+  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.Active);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'a', false, false)), Cmd);
   AssertTrue(Model.Pending);
   case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
     ClientMessage.Move(DeltaX, DeltaY):
@@ -38,11 +41,39 @@ begin
     end
   end;
 
-  Model := UpdateClient(Model, TuiMsg.Key(MakeLeftKey()), Cmd);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'd', false, false)), Cmd);
   AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
   Model := UpdateClientEvent(Model, ClientEvent.Rejected('blocked'), Cmd);
   AssertFalse(Model.Pending);
   AssertEquals('blocked', Model.Status);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'p', true, false)), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.SystemMenuOverlay);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'd', false, false)), Cmd);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, TuiMsg.QuitRequested, Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  AssertTrue(Cmd.Command() = TuiCmd.NoCommand);
+  Model := UpdateClient(Model, TuiMsg.Resize(TuiSize.Create(40, 12)), Cmd);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.F2, '', false, false)), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.ContextOverlay);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.F2, '', false, false)), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.F3, '', false, false)), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.MessageOverlay);
+  Model := UpdateClient(Model, TuiMsg.QuitRequested, Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'x', false, true)), Cmd);
+  AssertTrue(Cmd.Command() = TuiCmd.Quit);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.Disconnect:
+    begin
+    end
+    else
+    begin
+      panic('expected a clean disconnect request')
+    end
+  end;
+
   CloseChannel(Requests);
   CloseChannel(Events)
 end.

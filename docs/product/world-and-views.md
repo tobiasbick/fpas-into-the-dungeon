@@ -27,6 +27,19 @@ or character progression.
 - **Transition** is the server-authoritative move from one area to another,
   such as entering or leaving a building or dungeon.
 
+## UI terminology
+
+- **Start screen** is the framed, centered menu shown before a game session.
+- **Game screen** is the client screen used during an active session.
+- **Primary view** is the map or first-person presentation on the game screen.
+- **Context panel** is the optional right-hand summary of character, location,
+  equipment, and immediately relevant inventory information.
+- **Status line** is the persistent bottom line for connection state, action
+  progress, messages, and errors.
+- **Message panel** is an optional, larger history area above the status line.
+- **System menu** is the overlay for information, controls, session actions,
+  and quitting.
+
 ## View families
 
 Outdoor regions and settlements use a **map view**. The initial implementation

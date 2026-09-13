@@ -1,0 +1,666 @@
+// Functional Pascal TUI state transitions and rendering for the dungeon client.
+unit Dungeon.Client.Ui;
+
+uses
+  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Protocol, Std.Arrays, Std.Console, Std.Conv,
+  Std.Options, Std.Str, Std.Task, Std.Tui;
+
+const
+  NetworkSubscriptionId: integer := 1;
+  ConnectControlId: integer := 1;
+  StartInformationControlId: integer := 2;
+  StartQuitControlId: integer := 3;
+  ResumeControlId: integer := 10;
+  SystemInformationControlId: integer := 11;
+  DisconnectControlId: integer := 12;
+  SystemQuitControlId: integer := 13;
+  OverlayBackControlId: integer := 20;
+  PanelCloseControlId: integer := 21;
+  ConnectAction: integer := 101;
+  InformationAction: integer := 102;
+  QuitAction: integer := 103;
+  ResumeAction: integer := 110;
+  DisconnectAction: integer := 111;
+  BackAction: integer := 120;
+  ClosePanelAction: integer := 121;
+  MinimumDockedContextWidth: integer := 72;
+  MinimumDockedMessagesHeight: integer := 18;
+  MaximumMessages: integer := 8;
+
+function AppendMessage(State: ClientModel; Text: string): ClientModel;
+begin
+  mutable var Next: ClientModel := State;
+  mutable var Values: array of string := Std.Arrays.Concat(State.Messages, [Text]);
+  if Std.Arrays.Length(Values) > MaximumMessages then
+  begin
+    Values := Std.Arrays.Slice(Values, Std.Arrays.Length(Values) - MaximumMessages, MaximumMessages)
+  end;
+
+  Next.Messages := Values;
+  return Next
+end;
+
+function HasCharacter(Key: TuiKeyEvent; Lower: string; Upper: string): boolean;
+begin
+  return (Key.kind = TuiKeyKind.Character) and ((Key.ch = Lower) or (Key.ch = Upper))
+end;
+
+function IsCtrlCharacter(Key: TuiKeyEvent; Lower: string; Upper: string): boolean;
+begin
+  return (HasCharacter(Key, Lower, Upper) and Key.ctrl) and not Key.alt
+end;
+
+function IsAltCharacter(Key: TuiKeyEvent; Lower: string; Upper: string): boolean;
+begin
+  return (HasCharacter(Key, Lower, Upper) and Key.alt) and not Key.ctrl
+end;
+
+function ContextCanDock(State: ClientModel): boolean;
+begin
+  return State.ViewportWidth >= MinimumDockedContextWidth
+end;
+
+function MessagesCanDock(State: ClientModel): boolean;
+begin
+  return State.ViewportHeight >= MinimumDockedMessagesHeight
+end;
+
+function CloseOverlay(State: ClientModel): ClientModel;
+begin
+  mutable var Next: ClientModel := State;
+  if State.Overlay = ClientOverlay.InformationOverlay then
+  begin
+    if State.Screen = ClientScreen.StartScreen then
+    begin
+      Next.FocusedControl := ConnectControlId
+    end
+    else
+    begin
+      Next.Overlay := ClientOverlay.SystemMenuOverlay;
+      Next.FocusedControl := ResumeControlId;
+      return Next
+    end
+  end;
+
+  Next.Overlay := ClientOverlay.NoOverlay;
+  Next.FocusedControl := 0;
+  if State.Screen = ClientScreen.StartScreen then
+  begin
+    Next.FocusedControl := ConnectControlId
+  end;
+
+  return Next
+end;
+
+function RequestQuit(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+begin
+  if State.ConnectionPhase = ClientConnectionPhase.Active then
+  begin
+    TrySend(State.Requests, ClientMessage.Disconnect)
+  end;
+
+  Cmd.Set(TuiCmd.Quit);
+  return State
+end;
+
+function StartConnection(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+begin
+  var Host: string := State.Host;
+  var Port: integer := State.Port;
+  var Requests: channel of ClientMessage := State.Requests;
+  var Events: channel of ClientEvent := State.Events;
+  Cmd.ReplaceSubscription(NetworkSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
+    return Dungeon.Client.Network.RunNetwork(Host, Port, Requests, Events, Token)
+  end);
+  mutable var Next: ClientModel := State;
+  Next.Screen := ClientScreen.GameScreen;
+  Next.Overlay := ClientOverlay.NoOverlay;
+  Next.ConnectionPhase := ClientConnectionPhase.Connecting;
+  Next.FocusedControl := 0;
+  Next.Pending := false;
+  Next.HasVisibleState := false;
+  Next.Status := ('Connecting to ' + Host) + (':' + IntToStr(Port));
+  return AppendMessage(Next, Next.Status)
+end;
+
+function ReturnToStart(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+begin
+  if (State.ConnectionPhase = ClientConnectionPhase.Active) or
+     (State.ConnectionPhase = ClientConnectionPhase.Connecting) then
+  begin
+    TrySend(State.Requests, ClientMessage.Disconnect);
+    Cmd.CancelSubscription(NetworkSubscriptionId)
+  end;
+  mutable var Next: ClientModel := State;
+  Next.Screen := ClientScreen.StartScreen;
+  Next.Overlay := ClientOverlay.NoOverlay;
+  Next.ConnectionPhase := ClientConnectionPhase.Offline;
+  Next.FocusedControl := ConnectControlId;
+  Next.Pending := false;
+  Next.HasVisibleState := false;
+  Next.Status := 'Ready';
+  return Next
+end;
+
+function QueueMove(State: ClientModel; DeltaX: integer; DeltaY: integer): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.Move(DeltaX, DeltaY)) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := 'Moving...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+function ToggleContext(State: ClientModel): ClientModel;
+begin
+  mutable var Next: ClientModel := State;
+  if ContextCanDock(State) then
+  begin
+    Next.ContextPanelVisible := not State.ContextPanelVisible;
+    return Next
+  end;
+
+  if State.Overlay = ClientOverlay.ContextOverlay then
+  begin
+    return CloseOverlay(State)
+  end;
+
+  Next.Overlay := ClientOverlay.ContextOverlay;
+  Next.FocusedControl := PanelCloseControlId;
+  return Next
+end;
+
+function ToggleMessages(State: ClientModel): ClientModel;
+begin
+  mutable var Next: ClientModel := State;
+  if MessagesCanDock(State) then
+  begin
+    Next.MessagePanelVisible := not State.MessagePanelVisible;
+    return Next
+  end;
+
+  if State.Overlay = ClientOverlay.MessageOverlay then
+  begin
+    return CloseOverlay(State)
+  end;
+
+  Next.Overlay := ClientOverlay.MessageOverlay;
+  Next.FocusedControl := PanelCloseControlId;
+  return Next
+end;
+
+function HandleAction(State: ClientModel; Action: TuiAction; Cmd: TuiCmdOutput): ClientModel;
+begin
+  if Action.Value = ConnectAction then
+  begin
+    return StartConnection(State, Cmd)
+  end;
+
+  if Action.Value = InformationAction then
+  begin
+    mutable var Next: ClientModel := State;
+    Next.Overlay := ClientOverlay.InformationOverlay;
+    Next.FocusedControl := OverlayBackControlId;
+    return Next
+  end;
+
+  if Action.Value = QuitAction then
+  begin
+    return RequestQuit(State, Cmd)
+  end;
+
+  if Action.Value = ResumeAction then
+  begin
+    return CloseOverlay(State)
+  end;
+
+  if Action.Value = DisconnectAction then
+  begin
+    return ReturnToStart(State, Cmd)
+  end;
+
+  if Action.Value = BackAction then
+  begin
+    return CloseOverlay(State)
+  end;
+
+  if Action.Value = ClosePanelAction then
+  begin
+    return CloseOverlay(State)
+  end;
+
+  return State
+end;
+
+function HandleKey(State: ClientModel; Key: TuiKeyEvent; Cmd: TuiCmdOutput): ClientModel;
+begin
+  if IsAltCharacter(Key, 'x', 'X') then
+  begin
+    return RequestQuit(State, Cmd)
+  end;
+
+  if State.Screen <> ClientScreen.GameScreen then
+  begin
+    return State
+  end;
+
+  if IsCtrlCharacter(Key, 'p', 'P') then
+  begin
+    if State.Overlay = ClientOverlay.SystemMenuOverlay then
+    begin
+      return CloseOverlay(State)
+    end;
+    mutable var Next: ClientModel := State;
+    Next.Overlay := ClientOverlay.SystemMenuOverlay;
+    Next.FocusedControl := ResumeControlId;
+    return Next
+  end;
+
+  if Key.kind = TuiKeyKind.F2 then
+  begin
+    return ToggleContext(State)
+  end;
+
+  if Key.kind = TuiKeyKind.F3 then
+  begin
+    return ToggleMessages(State)
+  end;
+
+  if State.Overlay <> ClientOverlay.NoOverlay then
+  begin
+    return State
+  end;
+
+  if HasCharacter(Key, 'a', 'A') then
+  begin
+    return QueueMove(State, -1, 0)
+  end;
+
+  if HasCharacter(Key, 'd', 'D') then
+  begin
+    return QueueMove(State, 1, 0)
+  end;
+
+  if HasCharacter(Key, 'w', 'W') then
+  begin
+    return QueueMove(State, 0, -1)
+  end;
+
+  if HasCharacter(Key, 's', 'S') then
+  begin
+    return QueueMove(State, 0, 1)
+  end;
+
+  return State
+end;
+
+// Handles terminal lifecycle, screen navigation, overlays, panels, and player input.
+public function UpdateClient(State: ClientModel; Msg: TuiMsg; Cmd: TuiCmdOutput): ClientModel;
+begin
+  Cmd.Set(TuiCmd.NoCommand);
+  case Msg of
+    TuiMsg.Started:
+    begin
+      mutable var Next: ClientModel := State;
+      Next.ViewportWidth := ScreenWidth();
+      Next.ViewportHeight := ScreenHeight();
+      return Next
+    end;
+    TuiMsg.Resize(Size):
+    begin
+      mutable var Next: ClientModel := State;
+      Next.ViewportWidth := Size.Width;
+      Next.ViewportHeight := Size.Height;
+      if (State.Overlay = ClientOverlay.ContextOverlay) and ContextCanDock(Next) then
+      begin
+        Next.Overlay := ClientOverlay.NoOverlay;
+        Next.FocusedControl := 0
+      end;
+
+      if (State.Overlay = ClientOverlay.MessageOverlay) and MessagesCanDock(Next) then
+      begin
+        Next.Overlay := ClientOverlay.NoOverlay;
+        Next.FocusedControl := 0
+      end;
+
+      return Next
+    end;
+    TuiMsg.FocusChanged(Previous, Current):
+    begin
+      case Current of
+        Some(Id):
+        begin
+          mutable var Next: ClientModel := State;
+          Next.FocusedControl := Id.Value;
+          return Next
+        end;
+        None:
+        begin
+          mutable var Next: ClientModel := State;
+          Next.FocusedControl := 0;
+          return Next
+        end
+      end
+    end;
+    TuiMsg.Action(Source, Action):
+    begin
+      return HandleAction(State, Action, Cmd)
+    end;
+    TuiMsg.Key(Key):
+    begin
+      return HandleKey(State, Key, Cmd)
+    end;
+    TuiMsg.BackgroundFailed(Id, Kind, Message, Code, Line, Column):
+    begin
+      mutable var Next: ClientModel := State;
+      Next.ConnectionPhase := ClientConnectionPhase.Failed;
+      Next.Pending := false;
+      Next.Status := 'Connection failed: ' + Message;
+      return AppendMessage(Next, Next.Status)
+    end;
+    TuiMsg.QuitRequested:
+    begin
+      if State.Overlay <> ClientOverlay.NoOverlay then
+      begin
+        return CloseOverlay(State)
+      end;
+
+      return State
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+// Applies authoritative messages emitted by the network task.
+public function UpdateClientEvent(State: ClientModel; Value: ClientEvent; Cmd: TuiCmdOutput): ClientModel;
+begin
+  Cmd.Set(TuiCmd.NoCommand);
+  mutable var Next: ClientModel := State;
+  case Value of
+    ClientEvent.Connected:
+    begin
+      Next.ConnectionPhase := ClientConnectionPhase.Active;
+      Next.Status := 'Connected';
+      return AppendMessage(Next, 'Connected')
+    end;
+    ClientEvent.State(Value):
+    begin
+      Next.HasVisibleState := true;
+      Next.View := Value.View;
+      Next.Width := Value.Width;
+      Next.Height := Value.Height;
+      Next.Rows := Value.Rows;
+      Next.PlayerX := Value.PlayerX;
+      Next.PlayerY := Value.PlayerY;
+      Next.Pending := false;
+      Next.Status := 'Connected';
+      return Next
+    end;
+    ClientEvent.Rejected(Message):
+    begin
+      Next.Pending := false;
+      Next.Status := Message;
+      return AppendMessage(Next, 'Rejected: ' + Message)
+    end;
+    ClientEvent.Failed(Message):
+    begin
+      Next.ConnectionPhase := ClientConnectionPhase.Failed;
+      Next.Pending := false;
+      Next.Status := 'Connection failed: ' + Message;
+      return AppendMessage(Next, Next.Status)
+    end;
+    ClientEvent.Disconnected:
+    begin
+      Next.ConnectionPhase := ClientConnectionPhase.Disconnected;
+      Next.Pending := false;
+      Next.Status := 'Disconnected';
+      return AppendMessage(Next, 'Disconnected')
+    end
+  end
+end;
+
+function MapRow(State: ClientModel; Y: integer): string;
+begin
+  mutable var Text: string := '';
+  for X: integer := 0 to State.Width - 1 do
+  begin
+    if (X = State.PlayerX) and (Y = State.PlayerY) then
+    begin
+      Text := Text + '@'
+    end
+    else
+    begin
+      Text := Text + Std.Str.CharAt(State.Rows[Y], X)
+    end
+  end;
+
+  return Text
+end;
+
+function ViewMap(State: ClientModel): TuiElement;
+begin
+  mutable var Elements: array of TuiElement := [];
+  if State.HasVisibleState then
+  begin
+    for Y: integer := 0 to State.Height - 1 do
+    begin
+      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(MapRow(State, Y)))
+    end
+  end
+  else
+  begin
+    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('Waiting for world...'))
+  end;
+
+  return TuiElementBuilders.MakePanel('World', [TuiElementBuilders.MakeColumn(Elements)])
+end;
+
+function ViewContext(State: ClientModel): TuiElement;
+begin
+  mutable var Position: string := 'Not available';
+  if State.HasVisibleState then
+  begin
+    Position := (IntToStr(State.PlayerX) + ', ') + IntToStr(State.PlayerY)
+  end;
+
+  return TuiElementBuilders.MakeColumn([
+                                         TuiElementBuilders.MakeLabel('Character'),
+                                         TuiElementBuilders.MakeLabel('Adventurer'),
+                                         TuiElementBuilders.MakeLabel(''),
+                                         TuiElementBuilders.MakeLabel('Location'),
+                                         TuiElementBuilders.MakeLabel('Outdoor region'),
+                                         TuiElementBuilders.MakeLabel('Position: ' + Position),
+                                         TuiElementBuilders.MakeLabel(''),
+                                         TuiElementBuilders.MakeLabel('Equipment'),
+                                         TuiElementBuilders.MakeLabel('Not available'),
+                                         TuiElementBuilders.MakeLabel(''),
+                                         TuiElementBuilders.MakeLabel('Quick inventory'),
+                                         TuiElementBuilders.MakeLabel('Not available')
+                                       ])
+end;
+
+function ViewMessages(State: ClientModel): TuiElement;
+begin
+  mutable var Elements: array of TuiElement := [];
+  if Std.Arrays.Length(State.Messages) = 0 then
+  begin
+    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('No messages'))
+  end
+  else
+  begin
+    for Message: string in State.Messages do
+    begin
+      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Message))
+    end
+  end;
+
+  return TuiElementBuilders.MakeColumn(Elements)
+end;
+
+function Expanding(Stretch: integer): TuiLayoutSettings;
+begin
+  return TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Expanding(), TuiAlignment.Fill(), Stretch)
+end;
+
+function ViewGameShell(State: ClientModel): TuiElement;
+begin
+  var Primary: TuiElement := TuiElementBuilders.MakeLayout(Expanding(2), ViewMap(State));
+  mutable var MainRow: TuiElement := TuiElementBuilders.MakeRow([Primary]);
+  if State.ContextPanelVisible and ContextCanDock(State) then
+  begin
+    MainRow := TuiElementBuilders.MakeRow([
+                                            Primary,
+                                            TuiElementBuilders.MakeLayout(Expanding(1), TuiElementBuilders.MakePanel('Context', [
+                                                                                                                                  ViewContext(State)
+                                                                                                                                ]))
+                                          ])
+  end;
+  mutable var Rows: array of TuiElement := [TuiElementBuilders.MakeLayout(Expanding(1), MainRow)];
+  if State.MessagePanelVisible and MessagesCanDock(State) then
+  begin
+    var MessageSettings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
+                                                .WithFixedHeight(5);
+    Std.Arrays.Push(Rows, TuiElementBuilders.MakeLayout(MessageSettings, TuiElementBuilders.MakePanel('Messages', [
+                                                                                                                    ViewMessages(State)
+                                                                                                                  ])))
+  end;
+
+  Std.Arrays.Push(Rows, TuiElementBuilders.MakeStatusLine([
+                                                            TuiStatusItemBuilders.MakeHint(State.Status),
+                                                            TuiStatusItemBuilders.MakeKeyHint('WASD', 'Move'),
+                                                            TuiStatusItemBuilders.MakeKeyHint('F2', 'Context'),
+                                                            TuiStatusItemBuilders.MakeKeyHint('F3', 'Messages'),
+                                                            TuiStatusItemBuilders.MakeKeyHint('Ctrl+P', 'Menu'),
+                                                            TuiStatusItemBuilders.MakeKeyHint('Alt+X', 'Quit')
+                                                          ]));
+  return TuiElementBuilders.MakeColumn(Rows)
+end;
+
+function ViewInformation(): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay('Information', [
+                                                         TuiElementBuilders.MakeColumn([
+                                                                                         TuiElementBuilders.MakeLabel('Into the Dungeon'),
+                                                                                         TuiElementBuilders.MakeLabel('A Functional Pascal client-server RPG.'),
+                                                                                         TuiElementBuilders.MakeLabel(''),
+                                                                                         TuiElementBuilders.MakeButton(TuiControlId.Create(OverlayBackControlId), 'Back', TuiAction.Create(BackAction))
+                                                                                       ])
+                                                       ])
+end;
+
+function ViewStartScreen(): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay('INTO THE DUNGEON', [
+                                                              TuiElementBuilders.MakeColumn([
+                                                                                              TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(ConnectControlId), 'Connect', '', TuiAction.Create(ConnectAction)),
+                                                                                              TuiElementBuilders.MakeButton(TuiControlId.Create(StartInformationControlId), 'Information', TuiAction.Create(InformationAction)),
+                                                                                              TuiElementBuilders.MakeButton(TuiControlId.Create(StartQuitControlId), 'Quit', TuiAction.Create(QuitAction))
+                                                                                            ])
+                                                            ])
+end;
+
+function ViewSystemMenu(State: ClientModel): TuiElement;
+begin
+  mutable var Items: array of TuiElement := [
+                                              TuiElementBuilders.MakeButton(TuiControlId.Create(ResumeControlId), 'Resume', TuiAction.Create(ResumeAction)),
+                                              TuiElementBuilders.MakeButton(TuiControlId.Create(SystemInformationControlId), 'Information', TuiAction.Create(InformationAction)),
+                                              TuiElementBuilders.MakeRule('Key bindings'),
+                                              TuiElementBuilders.MakeLabel('WASD   Move'),
+                                              TuiElementBuilders.MakeLabel('F2     Context'),
+                                              TuiElementBuilders.MakeLabel('F3     Messages'),
+                                              TuiElementBuilders.MakeLabel('Ctrl+P Menu'),
+                                              TuiElementBuilders.MakeLabel('Alt+X  Quit')
+                                            ];
+  if (State.ConnectionPhase = ClientConnectionPhase.Active) or
+     (State.ConnectionPhase = ClientConnectionPhase.Connecting) then
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(DisconnectControlId), 'Disconnect', TuiAction.Create(DisconnectAction)))
+  end
+  else
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(DisconnectControlId), 'Return to start', TuiAction.Create(DisconnectAction)))
+  end;
+
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(SystemQuitControlId), 'Quit', TuiAction.Create(QuitAction)));
+  return TuiElementBuilders.MakeOverlay('System menu', [TuiElementBuilders.MakeColumn(Items)])
+end;
+
+function ViewPanelOverlay(State: ClientModel; Title: string; Content: TuiElement): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay(Title, [
+                                                 Content,
+                                                 TuiElementBuilders.MakeButton(TuiControlId.Create(PanelCloseControlId), 'Close', TuiAction.Create(ClosePanelAction))
+                                               ])
+end;
+
+function ViewOverlay(State: ClientModel): TuiElement;
+begin
+  case State.Overlay of
+    ClientOverlay.InformationOverlay:
+    begin
+      return ViewInformation()
+    end;
+    ClientOverlay.SystemMenuOverlay:
+    begin
+      return ViewSystemMenu(State)
+    end;
+    ClientOverlay.ContextOverlay:
+    begin
+      return ViewPanelOverlay(State, 'Context', ViewContext(State))
+    end;
+    ClientOverlay.MessageOverlay:
+    begin
+      return ViewPanelOverlay(State, 'Messages', ViewMessages(State))
+    end;
+    ClientOverlay.NoOverlay:
+    begin
+      return TuiElementBuilders.MakeEmpty()
+    end
+  end
+end;
+
+function Focus(State: ClientModel): option of TuiControlId;
+begin
+  if State.FocusedControl > 0 then
+  begin
+    return Some(TuiControlId.Create(State.FocusedControl))
+  end;
+
+  return None
+end;
+
+// Renders the start screen or game screen with any active modal overlay.
+public function ViewClient(State: ClientModel): TuiElement;
+begin
+  if State.Screen = ClientScreen.StartScreen then
+  begin
+    if State.Overlay = ClientOverlay.InformationOverlay then
+    begin
+      return TuiElementBuilders.MakeDesktop(Focus(State), [ViewInformation()])
+    end;
+
+    return TuiElementBuilders.MakeDesktop(Focus(State), [ViewStartScreen()])
+  end;
+
+  return TuiElementBuilders.MakeDesktop(Focus(State), [ViewGameShell(State), ViewOverlay(State)])
+end;

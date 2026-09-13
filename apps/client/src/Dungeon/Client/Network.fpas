@@ -1,0 +1,176 @@
+// TCP session adapter between client intentions and model events.
+unit Dungeon.Client.Network;
+
+uses Dungeon.Client.Model, Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Net, Std.Task;
+
+type
+  ServerRead = record
+    Message: ServerMessage;
+    Reader: LineReader;
+  end;
+
+function Publish(Events: channel of ClientEvent; Value: ClientEvent; Token: CancellationToken): result of boolean, string;
+begin
+  return SendWithCancellation(Events, Value, Token)
+end;
+
+function ReadServer(Reader: LineReader; Token: CancellationToken): result of ServerRead, string;
+begin
+  var ReadValue: LineRead := try ReadLine(Reader, Token);
+  return Ok(record
+    Message := try DecodeServer(ReadValue.Line);
+    Reader := ReadValue.Reader;
+  end)
+end;
+
+function RunNetworkSession(
+  Host: string;
+  Port: integer;
+  Requests: channel of ClientMessage;
+  Events: channel of ClientEvent;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  var ConnectionValue: Connection := try ConnectWithCancellation(Host, Port, 5000, Token);
+  mutable var Reader: LineReader := NewLineReader(ConnectionValue);
+  var HelloSent: boolean := try WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion)), Token);
+  case ReadServer(Reader, Token) of
+    Error(Message):
+    begin
+      var Closed: boolean := try Close(ConnectionValue);
+      return Error(Message)
+    end;
+    Ok(ReadValue):
+    begin
+      Reader := ReadValue.Reader;
+      case ReadValue.Message of
+        ServerMessage.Welcome(Version):
+        begin
+          if Version <> ProtocolVersion then
+          begin
+            var Closed: boolean := try Close(ConnectionValue);
+            return Error('server selected an unsupported protocol version')
+          end
+        end
+        else
+        begin
+          var Closed: boolean := try Close(ConnectionValue);
+          return Error('server did not welcome the client')
+        end
+      end
+    end
+  end;
+  var Published: boolean := try Publish(Events, ClientEvent.Connected, Token);
+  case ReadServer(Reader, Token) of
+    Error(Message):
+    begin
+      var Closed: boolean := try Close(ConnectionValue);
+      return Error(Message)
+    end;
+    Ok(ReadValue):
+    begin
+      Reader := ReadValue.Reader;
+      case ReadValue.Message of
+        ServerMessage.State(Value):
+        begin
+          var PublishedState: boolean := try Publish(Events, ClientEvent.State(Value), Token)
+        end
+        else
+        begin
+          var Closed: boolean := try Close(ConnectionValue);
+          return Error('server did not send initial state')
+        end
+      end
+    end
+  end;
+
+  while not IsCancellationRequested(Token) do
+  begin
+    case ReceiveWithCancellation(Requests, Token) of
+      Error(Message):
+      begin
+        var Closed: boolean := try Close(ConnectionValue);
+        return Ok(true)
+      end;
+      Ok(Request):
+      begin
+        var Written: boolean := try WriteLine(ConnectionValue, EncodeClient(Request), Token);
+        case Request of
+          ClientMessage.Disconnect:
+          begin
+            var Closed: boolean := try Close(ConnectionValue);
+            return Ok(true)
+          end;
+          ClientMessage.Move(DeltaX, DeltaY):
+          begin
+            case ReadServer(Reader, Token) of
+              Error(Message):
+              begin
+                var Closed: boolean := try Close(ConnectionValue);
+                return Error(Message)
+              end;
+              Ok(ReadValue):
+              begin
+                Reader := ReadValue.Reader;
+                case ReadValue.Message of
+                  ServerMessage.State(Value):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.State(Value), Token)
+                  end;
+                  ServerMessage.Rejected(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                  end;
+                  ServerMessage.ErrorMessage(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Ok(true)
+                  end
+                  else
+                  begin
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Error('unexpected server response')
+                  end
+                end
+              end
+            end
+          end;
+          ClientMessage.Hello(Version):
+          begin
+            var Closed: boolean := try Close(ConnectionValue);
+            return Error('hello can only be sent during connection setup')
+          end
+        end
+      end
+    end
+  end;
+  var Closed: boolean := try Close(ConnectionValue);
+  return Ok(true)
+end;
+
+// Owns one connection and treats host-requested cancellation as normal shutdown.
+public function RunNetwork(
+  Host: string;
+  Port: integer;
+  Requests: channel of ClientMessage;
+  Events: channel of ClientEvent;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  case RunNetworkSession(Host, Port, Requests, Events, Token) of
+    Ok(Completed):
+    begin
+      return Ok(Completed)
+    end;
+    Error(Message):
+    begin
+      if IsCancellationRequested(Token) then
+      begin
+        return Ok(true)
+      end;
+
+      return Error(Message)
+    end
+  end
+end;

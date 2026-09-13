@@ -1,7 +1,7 @@
-// Verifies that server-provided state is rendered by the terminal client.
+// Verifies start, game, responsive panel, and modal client presentation through the TUI host.
 program DungeonClientTuiTest;
 
-uses Dungeon.Client, Dungeon.Protocol, Std.Str, Std.Task, Std.Test, Std.Tui;
+uses Dungeon.Client, Dungeon.Protocol, Std.Results, Std.Str, Std.Task, Std.Test, Std.Tui;
 
 function ScreenContains(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
 begin
@@ -16,10 +16,50 @@ begin
   return false
 end;
 
+function MakeKey(Kind: TuiKeyKind; Character: string; Ctrl: boolean; Alt: boolean): TuiKeyEvent;
 begin
-  var Requests: channel of ClientMessage := CreateChannel(1);
+  return record
+    kind := Kind;
+    ch := Character;
+    shift := false;
+    ctrl := Ctrl;
+    alt := Alt;
+    meta := false;
+  end
+end;
+
+begin
+  var StartRequests: channel of ClientMessage := CreateChannel(2);
+  var StartEvents: channel of ClientEvent := CreateChannel(2);
+  mutable var StartModel: ClientModel := NewClientModel('127.0.0.1', 4040, StartRequests, StartEvents);
+  var StartApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
+  StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 0, 0);
+  var StartSurface: TuiSurfaceSnapshot := StartApp.SurfaceSnapshot();
+  AssertTrue(ScreenContains(StartSurface, 'INTO THE DUNGEON'));
+  AssertTrue(ScreenContains(StartSurface, 'Connect'));
+  AssertTrue(ScreenContains(StartSurface, 'Information'));
+  AssertTrue(ScreenContains(StartSurface, 'Quit'));
+  AssertTrue(ScreenContains(StartSurface, '╭'));
+  StartApp.InjectKeyForTest(MakeKey(TuiKeyKind.Down, '', false, false));
+  StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 1, 0);
+  StartApp.InjectKeyForTest(MakeKey(TuiKeyKind.Enter, '', false, false));
+  StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(StartModel.Overlay = ClientOverlay.InformationOverlay);
+  AssertTrue(ScreenContains(StartApp.SurfaceSnapshot(), 'Functional Pascal client-server RPG'));
+  StartApp.InjectKeyForTest(MakeKey(TuiKeyKind.Escape, '', false, false));
+  StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(StartModel.Overlay = ClientOverlay.NoOverlay);
+  AssertTrue(ScreenContains(StartApp.SurfaceSnapshot(), 'Connect'));
+  StartApp.Close();
+  CloseChannel(StartRequests);
+  CloseChannel(StartEvents);
+  var Requests: channel of ClientMessage := CreateChannel(2);
   var Events: channel of ClientEvent := CreateChannel(2);
   mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, Requests, Events);
+  Model.Screen := ClientScreen.GameScreen;
+  Model.FocusedControl := 0;
+  Model.ViewportWidth := 180;
+  Model.ViewportHeight := 30;
   var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
   Model := UpdateClientEvent(Model, ClientEvent.Connected, Cmd);
   var StateValue: VisibleState := record
@@ -32,12 +72,58 @@ begin
   end;
 
   Model := UpdateClientEvent(Model, ClientEvent.State(StateValue), Cmd);
-  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(40, 10));
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(180, 30));
   Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'INTO THE DUNGEON'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), '..=@..'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Connected'));
+  var GameSurface: TuiSurfaceSnapshot := App.SurfaceSnapshot();
+  var ContextColumn: integer := Std.Str.IndexOf(GameSurface.LineAt(0), 'Context');
+  AssertTrue(ContextColumn >= GameSurface.Width div 2);
+  AssertTrue(ContextColumn <= (GameSurface.Width * 3) div 4);
+  AssertTrue(ScreenContains(GameSurface, '..=@..'));
+  AssertTrue(ScreenContains(GameSurface, 'Context'));
+  AssertTrue(ScreenContains(GameSurface, 'Character'));
+  AssertTrue(ScreenContains(GameSurface, 'Connected'));
+  AssertTrue(ScreenContains(GameSurface, 'Ctrl+P'));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.F3, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.MessagePanelVisible);
+  var MessageSurface: TuiSurfaceSnapshot := App.SurfaceSnapshot();
+  AssertTrue(ScreenContains(MessageSurface, 'Messages'));
+  AssertEquals('╮', Std.Str.CharAt(MessageSurface.LineAt(MessageSurface.Height - 6), MessageSurface.Width -
+                                                                                     1));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Character, 'p', true, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.Overlay = ClientOverlay.SystemMenuOverlay);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'System menu'));
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'WASD'));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Character, 'd', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Std.Results.IsError(ReceiveWithTimeout(Requests, 0)));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Escape, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  App.InjectResizeForTest(TuiSize.Create(40, 16));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertEquals(40, Model.ViewportWidth);
+  AssertFalse(ScreenContains(App.SurfaceSnapshot(), 'Character'));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.F2, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.Overlay = ClientOverlay.ContextOverlay);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Character'));
   App.Close();
   CloseChannel(Requests);
-  CloseChannel(Events)
+  CloseChannel(Events);
+  var TinyRequests: channel of ClientMessage := CreateChannel(1);
+  var TinyEvents: channel of ClientEvent := CreateChannel(1);
+  mutable var TinyModel: ClientModel := NewClientModel('127.0.0.1', 4040, TinyRequests, TinyEvents);
+  TinyModel.Screen := ClientScreen.GameScreen;
+  TinyModel.FocusedControl := 0;
+  TinyModel.ViewportWidth := 20;
+  TinyModel.ViewportHeight := 6;
+  var TinyApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(20, 6));
+  TinyModel := TinyApp.RunIterations(TinyModel, UpdateClient, ViewClient, 0, 0);
+  AssertEquals(20, TinyApp.SurfaceSnapshot().Width);
+  AssertEquals(6, TinyApp.SurfaceSnapshot().Height);
+  TinyApp.Close();
+  CloseChannel(TinyRequests);
+  CloseChannel(TinyEvents)
 end.
