@@ -17,6 +17,34 @@ begin
   end
 end;
 
+function RequireMap(Value: VisibleState): MapVisibleState;
+begin
+  case Value of
+    VisibleState.MapState(MapValue):
+    begin
+      return MapValue
+    end
+    else
+    begin
+      panic('expected map visible state')
+    end
+  end
+end;
+
+function RequireFirstPerson(Value: VisibleState): FirstPersonVisibleState;
+begin
+  case Value of
+    VisibleState.FirstPersonState(FirstPersonValue):
+    begin
+      return FirstPersonValue
+    end
+    else
+    begin
+      panic('expected first-person visible state')
+    end
+  end
+end;
+
 function EnsureDirectory(Path: string): boolean;
 begin
   if Std.Fs.IsDir(Path) then
@@ -53,7 +81,8 @@ end;
 
 begin
   EnsureWorldRoot();
-  var Metadata: WorldMetadata := NewWorldMetadata(TestConfig().WorldId, TestConfig().WorldSeed);
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(TestConfig().WorldId, TestConfig()
+                                                                                 .WorldSeed));
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
   var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
   var Source: CancellationSource := CreateCancellationSource();
@@ -92,15 +121,15 @@ begin
       case InitialMessage of
         ServerMessage.State(Value):
         begin
-          AssertTrue(Value.View = ViewKind.Map);
-          AssertEquals(13, Value.Width);
-          AssertEquals(7, Value.Height);
-          AssertEquals(Metadata.Spawn.X - 6, Value.OriginX);
-          AssertEquals(Metadata.Spawn.Y - 3, Value.OriginY);
-          AssertEquals(6, Value.PlayerX);
-          AssertEquals(3, Value.PlayerY);
-          AssertEquals(Metadata.Spawn.X, Value.WorldX);
-          AssertEquals(Metadata.Spawn.Y, Value.WorldY)
+          var MapValue: MapVisibleState := RequireMap(Value);
+          AssertEquals(13, MapValue.Width);
+          AssertEquals(7, MapValue.Height);
+          AssertEquals(Metadata.Spawn.X - 6, MapValue.OriginX);
+          AssertEquals(Metadata.Spawn.Y - 3, MapValue.OriginY);
+          AssertEquals(6, MapValue.PlayerX);
+          AssertEquals(3, MapValue.PlayerY);
+          AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+          AssertEquals(Metadata.Spawn.Y, MapValue.WorldY)
         end
         else
         begin
@@ -114,29 +143,122 @@ begin
     end
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token)));
-  var MovedRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := MovedRead.Reader;
-  case DecodeServer(MovedRead.Line) of
-    Ok(MovedMessage):
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ActivateAreaTransition), Token)));
+  var EarlyActivationRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := EarlyActivationRead.Reader;
+  case Unwrap(DecodeServer(EarlyActivationRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
     begin
-      case MovedMessage of
-        ServerMessage.State(Value):
-        begin
-          AssertEquals(6, Value.PlayerX);
-          AssertEquals(3, Value.PlayerY);
-          AssertEquals(Metadata.Spawn.X + 1, Value.WorldX);
-          AssertEquals(Metadata.Spawn.Y, Value.WorldY)
-        end
-        else
-        begin
-          AssertTrue(false)
-        end
-      end
+      AssertEquals('transition_rejected', Code);
+      AssertEquals('player is not standing on an entrance', Message)
     end
     else
     begin
-      AssertTrue(false)
+      panic('expected activation rejection away from entrance')
+    end
+  end;
+  mutable var CurrentX: integer := Metadata.Spawn.X;
+  mutable var CurrentY: integer := Metadata.Spawn.Y;
+  for Step: integer := 1 to 3 do
+  begin
+    mutable var DeltaX: integer := 0;
+    mutable var DeltaY: integer := 0;
+    if CurrentX < Metadata.Entrance.X then
+    begin
+      DeltaX := 1
+    end
+    else if CurrentX > Metadata.Entrance.X then
+    begin
+      DeltaX := -1
+    end
+    else if CurrentY < Metadata.Entrance.Y then
+    begin
+      DeltaY := 1
+    end
+    else
+    begin
+      DeltaY := -1
+    end;
+
+    AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(DeltaX, DeltaY)), Token)));
+    var MovedRead: LineRead := Unwrap(ReadLine(Reader, Token));
+    Reader := MovedRead.Reader;
+    case Unwrap(DecodeServer(MovedRead.Line)) of
+      ServerMessage.State(Value):
+      begin
+        CurrentX := CurrentX + DeltaX;
+        CurrentY := CurrentY + DeltaY;
+        var MapValue: MapVisibleState := RequireMap(Value);
+        AssertEquals(CurrentX, MapValue.WorldX);
+        AssertEquals(CurrentY, MapValue.WorldY)
+      end
+      else
+      begin
+        panic('expected map state after entrance movement')
+      end
+    end
+  end;
+
+  AssertEquals(Metadata.Entrance.X, CurrentX);
+  AssertEquals(Metadata.Entrance.Y, CurrentY);
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ActivateAreaTransition), Token)));
+  var EnteredRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := EnteredRead.Reader;
+  case Unwrap(DecodeServer(EnteredRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
+      AssertEquals(Metadata.DungeonAreaLabel, FirstPersonValue.Title);
+      AssertEquals('Press Enter to return to the outdoor region.', FirstPersonValue.Status)
+    end
+    else
+    begin
+      panic('expected first-person placeholder after entry')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token)));
+  var DungeonMoveRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := DungeonMoveRead.Reader;
+  case Unwrap(DecodeServer(DungeonMoveRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('movement_rejected', Code);
+      AssertEquals('movement is unavailable in the current area', Message)
+    end
+    else
+    begin
+      panic('expected dungeon movement rejection')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Viewport(1000, 1000)), Token)));
+  var DungeonViewportRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := DungeonViewportRead.Reader;
+  case Unwrap(DecodeServer(DungeonViewportRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      AssertEquals(Metadata.DungeonAreaLabel, RequireFirstPerson(Value).Title)
+    end
+    else
+    begin
+      panic('viewport must retain the first-person placeholder')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ActivateAreaTransition), Token)));
+  var LeftRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := LeftRead.Reader;
+  case Unwrap(DecodeServer(LeftRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(Metadata.Entrance.X, MapValue.WorldX);
+      AssertEquals(Metadata.Entrance.Y, MapValue.WorldY)
+    end
+    else
+    begin
+      panic('expected restored map after leaving dungeon')
     end
   end;
 
@@ -146,9 +268,10 @@ begin
   case Unwrap(DecodeServer(ResizedRead.Line)) of
     ServerMessage.State(Value):
     begin
-      AssertEquals(240, Value.Width);
-      AssertEquals(20, Value.Height);
-      AssertEquals(Metadata.Spawn.X + 1, Value.WorldX)
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(240, MapValue.Width);
+      AssertEquals(20, MapValue.Height);
+      AssertEquals(Metadata.Entrance.X, MapValue.WorldX)
     end
     else
     begin
@@ -199,8 +322,9 @@ begin
   case Unwrap(DecodeServer(RestartState.Line)) of
     ServerMessage.State(Value):
     begin
-      AssertEquals(Metadata.Spawn.X, Value.WorldX);
-      AssertEquals(Metadata.Spawn.Y, Value.WorldY)
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+      AssertEquals(Metadata.Spawn.Y, MapValue.WorldY)
     end
     else
     begin

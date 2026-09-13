@@ -1,7 +1,7 @@
 // Verifies signed chunk coordinates, deterministic terrain, and authoritative movement rules.
 program DungeonMovementTest;
 
-uses Dungeon.Game, Std.Arrays, Std.Results, Std.Test;
+uses Dungeon.Game, Std.Arrays, Std.Math, Std.Results, Std.Test;
 
 procedure AssertCoordinate(Value: integer; ExpectedChunk: integer; ExpectedLocal: integer);
 begin
@@ -23,7 +23,29 @@ begin
   AssertCoordinate(0, 0, 0);
   AssertCoordinate(127, 0, 127);
   AssertCoordinate(128, 1, 0);
-  var Metadata: WorldMetadata := NewWorldMetadata('test-world', 12345);
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('test-world', 12345));
+  var Repeated: WorldMetadata := Unwrap(NewWorldMetadata('test-world', 12345));
+  AssertEquals(Metadata.OutdoorAreaId, Repeated.OutdoorAreaId);
+  AssertEquals(Metadata.DungeonAreaId, Repeated.DungeonAreaId);
+  AssertEquals(Metadata.EntranceId, Repeated.EntranceId);
+  AssertEquals(Metadata.Entrance.X, Repeated.Entrance.X);
+  AssertEquals(Metadata.Entrance.Y, Repeated.Entrance.Y);
+  AssertTrue(Metadata.Spawn.Y < 0);
+  AssertTrue(Metadata.Entrance.Y < 0);
+  AssertEquals(3, Abs(Metadata.Entrance.X - Metadata.Spawn.X) +
+                  Abs(Metadata.Entrance.Y - Metadata.Spawn.Y));
+  AssertTrue(GenerateWorldCell(Metadata, Metadata.Entrance.X, Metadata.Entrance.Y).Feature =
+             TerrainFeatureKind.Entrance);
+  for Seed: integer := -4 to 8 do
+  begin
+    var SeedMetadata: WorldMetadata := Unwrap(NewWorldMetadata('multi-seed', Seed));
+    var SeedRepeated: WorldMetadata := Unwrap(NewWorldMetadata('multi-seed', Seed));
+    AssertEquals(3, Abs(SeedMetadata.Entrance.X - SeedMetadata.Spawn.X) +
+                    Abs(SeedMetadata.Entrance.Y - SeedMetadata.Spawn.Y));
+    AssertEquals(SeedMetadata.Entrance.X, SeedRepeated.Entrance.X);
+    AssertEquals(SeedMetadata.Entrance.Y, SeedRepeated.Entrance.Y);
+    AssertTrue(IsWalkable(GenerateWorldCell(SeedMetadata, SeedMetadata.Entrance.X, SeedMetadata.Entrance.Y)))
+  end;
   var Origin: WorldCell := GenerateWorldCell(Metadata, Metadata.Spawn.X, Metadata.Spawn.Y);
   AssertTrue(IsWalkable(Origin));
   AssertFalse(Origin.Feature = TerrainFeatureKind.Path);
@@ -43,6 +65,10 @@ begin
   var Initial: GameState := NewGame(Metadata);
   AssertEquals(Metadata.Spawn.X, Initial.Player.X);
   AssertEquals(Metadata.Spawn.Y, Initial.Player.Y);
+  AssertEquals(Metadata.OutdoorAreaId, Initial.AreaId);
+  AssertTrue(Initial.Area = AreaKind.OutdoorRegion);
+  AssertTrue(IsOk(ValidateGameState(Metadata, Initial)));
+  AssertTrue(IsError(ActivateAreaTransition(Metadata, Initial)));
   var Moved: GameState := Unwrap(MovePlayer(Initial, 1, 0, GenerateWorldCell(Metadata, Metadata.Spawn.X +
                                                                                        1, Metadata.Spawn.Y)));
   AssertEquals(Metadata.Spawn.X + 1, Moved.Player.X);
@@ -53,5 +79,51 @@ begin
     Base := BaseTerrainKind.Water;
     Feature := TerrainFeatureKind.NoFeature;
     Water := WaterKind.Sea;
-  end)))
+  end)));
+  mutable var AtEntrance: GameState := Initial;
+  AtEntrance.Player := Metadata.Entrance;
+  var Entered: GameState := Unwrap(ActivateAreaTransition(Metadata, AtEntrance));
+  AssertTrue(Entered.Area = AreaKind.Dungeon);
+  AssertEquals(Metadata.DungeonAreaId, Entered.AreaId);
+  AssertEquals(Metadata.Entrance.X, Entered.Player.X);
+  AssertEquals(Metadata.Entrance.Y, Entered.Player.Y);
+  case Entered.ReturnLocation of
+    ReturnLocation.ReturnTo(AreaId, Position):
+    begin
+      AssertEquals(Metadata.OutdoorAreaId, AreaId);
+      AssertEquals(Metadata.Entrance.X, Position.X);
+      AssertEquals(Metadata.Entrance.Y, Position.Y)
+    end
+    else
+    begin
+      panic('expected exact return location')
+    end
+  end;
+
+  AssertTrue(IsOk(ValidateGameState(Metadata, Entered)));
+  AssertTrue(IsError(MovePlayer(Entered, 1, 0, Origin)));
+  var Left: GameState := Unwrap(ActivateAreaTransition(Metadata, Entered));
+  AssertTrue(Left.Area = AreaKind.OutdoorRegion);
+  AssertEquals(Metadata.OutdoorAreaId, Left.AreaId);
+  AssertEquals(Metadata.Entrance.X, Left.Player.X);
+  AssertEquals(Metadata.Entrance.Y, Left.Player.Y);
+  case Left.ReturnLocation of
+    ReturnLocation.NoReturnLocation:
+    begin
+    end
+    else
+    begin
+      panic('return location must be cleared on exit')
+    end
+  end;
+  mutable var InvalidOutdoor: GameState := Initial;
+  InvalidOutdoor.ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Initial.Player);
+  AssertTrue(IsError(ValidateGameState(Metadata, InvalidOutdoor)));
+  mutable var InvalidDungeon: GameState := Entered;
+  InvalidDungeon.ReturnLocation := ReturnLocation.NoReturnLocation;
+  AssertTrue(IsError(ValidateGameState(Metadata, InvalidDungeon)));
+  AssertTrue(IsError(ActivateAreaTransition(Metadata, InvalidDungeon)));
+  mutable var MovedDungeonCoordinate: GameState := Entered;
+  MovedDungeonCoordinate.Player.X := MovedDungeonCoordinate.Player.X + 1;
+  AssertTrue(IsError(ValidateGameState(Metadata, MovedDungeonCoordinate)))
 end.

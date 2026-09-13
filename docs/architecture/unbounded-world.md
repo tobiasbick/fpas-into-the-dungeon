@@ -49,10 +49,12 @@ worlds/<world-id>/
         └── y_<signed-y>.json
 ```
 
-`world.json` records the format version, id, seed, generator version, chunk
-size, and spawn coordinate. A chunk file records its format version, world id,
-coordinates, and three 128-row layers. Each row uses one compact character per
-cell for base terrain, feature, or water classification.
+World format version `2` records the id, seed, generator version, chunk size,
+spawn coordinate, stable outdoor and dungeon identities and labels, and the
+initial entrance identity, coordinate, and target in `world.json`. A chunk file
+records its format version, world id, coordinates, and three 128-row layers.
+Each row uses one compact character per cell for base terrain, feature, or water
+classification.
 
 World ids contain only letters, digits, hyphens, and underscores. Unsupported
 versions, mismatched ids or coordinates, incorrect dimensions, malformed rows,
@@ -66,7 +68,7 @@ atomic write wins.
 
 ## Generation and visible cells
 
-Generator version 4 evaluates several smooth deterministic integer fields from
+Generator version 5 evaluates several smooth deterministic integer fields from
 the seed and absolute world coordinate. Very broad and regional noise establish
 continentalness; regional elevation and coast detail shape land and water at
 smaller scales. A ridge transform raises narrow connected land bands above sea
@@ -83,7 +85,10 @@ edges. New-world creation searches deterministic candidates for a naturally
 generated, temperate, non-mountainous spawn whose surrounding 17 by 17 cells
 are traversable. Trees or forest are present within the initial visible area,
 and another generated landscape is reachable within 512 horizontal and 256
-vertical cells. Generation never overwrites terrain around the chosen spawn.
+vertical cells. It also requires a clear natural entrance candidate connected
+by exactly three traversable cardinal steps. Generation composes only the
+selected entrance feature over that cell and otherwise never overwrites terrain
+around the spawn.
 
 The `dungeon-world-preview` tool samples final terrain or continentalness,
 land, elevation, ruggedness, moisture, vegetation, lake-shape, and land-bridge
@@ -93,8 +98,9 @@ visible without coupling the client or protocol to generation internals.
 
 The server reduces each composed cell to one client-safe visible code: `g`
 grass, `t` tree, `f` forest, `d` desert, `m` mountain, `o` sea, `r` river, `l`
-lake, and `p` path. These codes carry presentation meaning only. The richer base,
-feature, water-classification, and passability values remain server-owned.
+lake, `p` path, and `e` entrance. These codes carry presentation meaning only.
+The richer base, feature, water-classification, entrance relationship, and
+passability values remain server-owned.
 
 ## Loading and cache policy
 
@@ -112,5 +118,6 @@ larger requests. These values are server configuration, not wire assumptions.
 ## Deliberately deferred
 
 This slice does not define mutable terrain, persistent player savegames,
-settlements, locations, bridges, movement costs, weather, seasons, world time,
-interior or dungeon generation, raycasting, or simulated erosion and hydrology.
+settlements, additional locations, bridges, movement costs, weather, seasons,
+world time, interior or dungeon geometry, raycasting, or simulated erosion and
+hydrology.

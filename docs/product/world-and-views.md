@@ -10,6 +10,9 @@ or character progression.
   contains all known areas, locations, actors, and their relationships.
 - **Area** is one navigable spatial environment. The player occupies one area
   at a time.
+- **Area identity** is the stable server-owned identifier of one area. It is
+  deterministic within the selected world and remains separate from the
+  display label shown to players.
 - **Outdoor region** is an exterior area such as countryside, wilderness, or
   the land between settlements. Outdoor regions may be practically unbounded.
 - **Settlement** is an exterior built-up area such as a village or town.
@@ -20,6 +23,10 @@ or character progression.
 - **Location** is an identifiable place within an area. A location can mark a
   destination or an entrance to another area, such as a building or dungeon
   entrance.
+- **Entrance** is a location in one source area that names a valid transition
+  target. Standing on an entrance and activating it are separate events.
+- **Return location** is the exact source area identity and coordinate retained
+  by the server while the player occupies an entered area.
 - **Terrain** is the generated ground material, vegetation, or water that gives
   an outdoor location its physical character.
 - **Tree** is an individual vegetation feature on otherwise open terrain.
@@ -43,8 +50,9 @@ or character progression.
   such as entering or leaving a building or dungeon.
 
 Walking across a chunk boundary is seamless movement within the same outdoor
-region. A transition occurs only when entering or leaving a settlement,
-interior, dungeon, or another distinct area.
+region. A transition changes both area identity and view family and occurs only
+when entering or leaving a settlement, interior, dungeon, or another distinct
+area.
 
 ## UI terminology
 
@@ -65,10 +73,11 @@ Outdoor regions and settlements use a **map view**. The initial implementation
 uses a top-down grid of terminal cells. Isometric rendering remains a possible
 later presentation alternative, not a separate world simulation.
 
-Dungeons and all entered interiors use a **first-person view** rendered with
-terminal raycasting. This includes houses, castles, and similar buildings.
-Leaving an interior or dungeon returns the player to the map view of the
-surrounding outdoor region or settlement.
+Dungeons and all entered interiors use a **first-person view**. The current
+dungeon uses a framed placeholder; terminal raycasting begins with the first
+interior slice. This view family also covers houses, castles, and similar
+buildings. Leaving an interior or dungeon returns the player to the exact
+retained location in the map view of the surrounding area.
 
 The server owns the area kind, geometry, rules, and visible state. The client
 does not receive the complete world. It selects the required view family from
@@ -76,13 +85,15 @@ the visible state and renders it without owning or duplicating game rules.
 
 ## Current implementation
 
-The first world is a deterministic, chunked outdoor region shown in the
-top-down map view. Its signed world coordinates remain stable across chunk
-loads and reconnects. The server creates missing chunks, composes the requested
-visible window, and sends only presentation codes plus the authoritative
-position. The client has no chunk or movement-rule model.
+The first world contains a deterministic, chunked outdoor region and one
+initial dungeon. A distinct entrance is generated exactly three traversable
+cardinal steps from the spawn. Walking onto it remains ordinary outdoor
+movement; `Enter` activates the server-authoritative transition. The dungeon is
+already a distinct area even though its current presentation is only the
+first-person placeholder. Pressing `Enter` there returns to the exact entrance
+coordinate.
 
-Settlements, transitions, interiors, dungeons, mutable terrain, broader world
-simulation, isometric rendering, LLM integration, and the first RPG action are
-outside this slice. Their intended order is tracked in the
+Settlements, further entrances, navigable interiors, mutable terrain, broader
+world simulation, isometric rendering, LLM integration, and the first RPG
+action remain outside this slice. Their intended order is tracked in the
 [roadmap](../roadmap.md).

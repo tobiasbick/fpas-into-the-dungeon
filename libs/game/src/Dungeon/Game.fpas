@@ -1,14 +1,14 @@
-// Authoritative coordinates, terrain, generation, and movement rules for outdoor worlds.
+// Authoritative coordinates, terrain, generation, movement, and area-transition rules.
 unit Dungeon.Game;
 
-uses Std.Arrays, Std.Math;
+uses Std.Arrays, Std.Math, Std.Results;
 
 public const
   // Schema version written to world metadata and chunk files.
-  WorldFormatVersion: integer := 1;
+  WorldFormatVersion: integer := 2;
   // Selects the deterministic algorithm used for chunks that do not exist yet.
-  WorldGeneratorVersion: integer := 4;
-  // Fixed cell width and height of every version 4 outdoor chunk.
+  WorldGeneratorVersion: integer := 5;
+  // Fixed cell width and height of every version 5 outdoor chunk.
   WorldChunkSize: integer := 128;
 
 public type
@@ -43,6 +43,7 @@ public type
     Forest;
     Path;
     River;
+    Entrance;
   end;
   // Classifies water without requiring connectivity traversal across an unbounded world.
   WaterKind = enum
@@ -84,16 +85,33 @@ public type
     public GeneratorVersion: integer;
     public ChunkSize: integer;
     public Spawn: WorldPosition;
+    // Stable server-owned identity and display label of the initial outdoor area.
+    public OutdoorAreaId: string;
+    public OutdoorAreaLabel: string;
+    // Stable server-owned identity and display label of the initial dungeon.
+    public DungeonAreaId: string;
+    public DungeonAreaLabel: string;
+    // Stable identity, source coordinate, and destination of the first area transition.
+    public EntranceId: string;
+    public Entrance: WorldPosition;
+    public EntranceTargetAreaId: string;
   end;
   // One complete outdoor chunk in row-major order.
   WorldChunk = record
     public Coordinate: ChunkCoordinate;
     public Cells: array of WorldCell;
   end;
+  // Optional exact source retained only while the player occupies an entered area.
+  ReturnLocation = enum
+    NoReturnLocation;
+    ReturnTo(AreaId: string; Position: WorldPosition);
+  end;
   // Authoritative player state retained by the server for one session.
   GameState = record
     public Area: AreaKind;
+    public AreaId: string;
     public Player: WorldPosition;
+    public ReturnLocation: ReturnLocation;
   end;
 
 type
@@ -474,6 +492,169 @@ begin
   return false
 end;
 
+function EntranceOffset(Index: integer): WorldPosition;
+begin
+  case Index of
+    0:
+    begin
+      return record
+        X := 3;
+        Y := 0;
+      end
+    end;
+    1:
+    begin
+      return record
+        X := 2;
+        Y := 1;
+      end
+    end;
+    2:
+    begin
+      return record
+        X := 1;
+        Y := 2;
+      end
+    end;
+    3:
+    begin
+      return record
+        X := 0;
+        Y := 3;
+      end
+    end;
+    4:
+    begin
+      return record
+        X := -1;
+        Y := 2;
+      end
+    end;
+    5:
+    begin
+      return record
+        X := -2;
+        Y := 1;
+      end
+    end;
+    6:
+    begin
+      return record
+        X := -3;
+        Y := 0;
+      end
+    end;
+    7:
+    begin
+      return record
+        X := -2;
+        Y := -1;
+      end
+    end;
+    8:
+    begin
+      return record
+        X := -1;
+        Y := -2;
+      end
+    end;
+    9:
+    begin
+      return record
+        X := 0;
+        Y := -3;
+      end
+    end;
+    10:
+    begin
+      return record
+        X := 1;
+        Y := -2;
+      end
+    end
+    else
+    begin
+      return record
+        X := 2;
+        Y := -1;
+      end
+    end
+  end
+end;
+
+function NaturalCell(Seed: integer; X: integer; Y: integer): WorldCell;
+begin
+  return GenerateCellWithShifts(Seed, X, Y, RiverShift(Seed, Y), PathShift(Seed, X))
+end;
+
+function IsClearEntranceCell(Seed: integer; Position: WorldPosition): boolean;
+begin
+  var Cell: WorldCell := NaturalCell(Seed, Position.X, Position.Y);
+  return (CellIsWalkable(Cell) and (Cell.Feature = TerrainFeatureKind.NoFeature)) and
+         (Cell.Water = WaterKind.NoWater)
+end;
+
+function HasTraversableCardinalRoute(Seed: integer; Spawn: WorldPosition; Target: WorldPosition): boolean;
+begin
+  mutable var X: integer := Spawn.X;
+  mutable var Y: integer := Spawn.Y;
+  while X <> Target.X do
+  begin
+    if X < Target.X then
+    begin
+      X := X + 1
+    end
+    else
+    begin
+      X := X - 1
+    end;
+
+    if not CellIsWalkable(NaturalCell(Seed, X, Y)) then
+    begin
+      return false
+    end
+  end;
+
+  while Y <> Target.Y do
+  begin
+    if Y < Target.Y then
+    begin
+      Y := Y + 1
+    end
+    else
+    begin
+      Y := Y - 1
+    end;
+
+    if not CellIsWalkable(NaturalCell(Seed, X, Y)) then
+    begin
+      return false
+    end
+  end;
+
+  return true
+end;
+
+function FindEntrance(Seed: integer; Spawn: WorldPosition): result of WorldPosition, string;
+begin
+  var Start: integer := CoordinateHash(Seed, Spawn.X, Spawn.Y, 211) mod 12;
+  for Candidate: integer := 0 to 11 do
+  begin
+    var Offset: WorldPosition := EntranceOffset((Start + Candidate) mod 12);
+    var Position: WorldPosition := record
+      X := Spawn.X + Offset.X;
+      Y := Spawn.Y + Offset.Y;
+    end;
+
+    if IsClearEntranceCell(Seed, Position) and HasTraversableCardinalRoute(Seed, Spawn, Position) then
+    begin
+      return Ok(Position)
+    end
+  end;
+
+  return Error('unable to place an entrance exactly three traversable steps from spawn')
+end;
+
 function IsNaturalSpawnSite(Seed: integer; X: integer; Y: integer): boolean;
 begin
   var CenterSample: TerrainGenerationSample := SampleTerrainAtSeed(Seed, X, Y);
@@ -498,11 +679,16 @@ begin
       end
     end
   end;
+  var Spawn: WorldPosition := record
+    X := X;
+    Y := Y;
+  end;
 
-  return HasVisibleWoodland(Seed, X, Y) and HasNearbyLandscapeContrast(Seed, X, Y)
+  return (HasVisibleWoodland(Seed, X, Y) and HasNearbyLandscapeContrast(Seed, X, Y)) and
+         IsOk(FindEntrance(Seed, Spawn))
 end;
 
-function FindNaturalSpawn(Seed: integer): WorldPosition;
+function FindNaturalSpawn(Seed: integer): result of WorldPosition, string;
 begin
   for Candidate: integer := 0 to MaximumSpawnCandidates - 1 do
   begin
@@ -510,27 +696,125 @@ begin
     var Y: integer := (CoordinateHash(Seed, Candidate, 0, 103) - 500) * 32;
     if IsNaturalSpawnSite(Seed, X, Y) then
     begin
-      return record
+      return Ok(record
         X := X;
         Y := Y;
-      end
+      end)
     end
   end;
 
-  panic('unable to find a natural spawn site for world seed')
+  return Error('unable to find a natural spawn site with a valid entrance for world seed')
 end;
 
-// Creates version 4 metadata with a deterministic spawn near varied naturally generated terrain.
-public function NewWorldMetadata(Id: string; Seed: integer): WorldMetadata;
+// Creates current metadata with deterministic area identities, spawn, and initial entrance.
+public function NewWorldMetadata(Id: string; Seed: integer): result of WorldMetadata, string;
 begin
-  return record
+  var Spawn: WorldPosition := try FindNaturalSpawn(Seed);
+  var Entrance: WorldPosition := try FindEntrance(Seed, Spawn);
+  var OutdoorAreaId: string := Id + ':outdoor';
+  var DungeonAreaId: string := Id + ':dungeon:initial';
+  return Ok(record
     Id := Id;
     Seed := Seed;
     FormatVersion := WorldFormatVersion;
     GeneratorVersion := WorldGeneratorVersion;
     ChunkSize := WorldChunkSize;
-    Spawn := FindNaturalSpawn(Seed);
-  end
+    Spawn := Spawn;
+    OutdoorAreaId := OutdoorAreaId;
+    OutdoorAreaLabel := 'Outdoor region';
+    DungeonAreaId := DungeonAreaId;
+    DungeonAreaLabel := 'Initial dungeon';
+    EntranceId := Id + ':entrance:initial-dungeon';
+    Entrance := Entrance;
+    EntranceTargetAreaId := DungeonAreaId;
+  end)
+end;
+
+// Rejects metadata that does not exactly match the deterministic current-schema world contract.
+public function ValidateWorldMetadata(Metadata: WorldMetadata): result of WorldMetadata, string;
+begin
+  if Metadata.FormatVersion <> WorldFormatVersion then
+  begin
+    return Error('unsupported world format version')
+  end;
+
+  if Metadata.GeneratorVersion <> WorldGeneratorVersion then
+  begin
+    return Error('unsupported world generator version')
+  end;
+
+  if Metadata.ChunkSize <> WorldChunkSize then
+  begin
+    return Error('world chunk size must be 128')
+  end;
+  var Expected: WorldMetadata := try NewWorldMetadata(Metadata.Id, Metadata.Seed);
+  if (Metadata.Spawn.X <> Expected.Spawn.X) or (Metadata.Spawn.Y <> Expected.Spawn.Y) then
+  begin
+    return Error('world spawn position is invalid for this generator version')
+  end;
+
+  if Metadata.OutdoorAreaId <> Expected.OutdoorAreaId then
+  begin
+    return Error('outdoor area identity is invalid')
+  end;
+
+  if Metadata.DungeonAreaId <> Expected.DungeonAreaId then
+  begin
+    return Error('dungeon area identity is invalid')
+  end;
+
+  if Metadata.OutdoorAreaId = Metadata.DungeonAreaId then
+  begin
+    return Error('area identities must be unique')
+  end;
+
+  if Metadata.OutdoorAreaLabel = '' then
+  begin
+    return Error('outdoor area label must not be empty')
+  end;
+
+  if Metadata.DungeonAreaLabel = '' then
+  begin
+    return Error('dungeon area label must not be empty')
+  end;
+
+  if Metadata.EntranceId <> Expected.EntranceId then
+  begin
+    return Error('entrance identity is invalid')
+  end;
+
+  if (Metadata.EntranceId = Metadata.OutdoorAreaId) or
+     (Metadata.EntranceId = Metadata.DungeonAreaId) then
+  begin
+    return Error('entrance identity must be unique')
+  end;
+
+  if Metadata.EntranceTargetAreaId <> Metadata.DungeonAreaId then
+  begin
+    return Error('entrance target must name the initial dungeon')
+  end;
+
+  if (Metadata.Entrance.X <> Expected.Entrance.X) or (Metadata.Entrance.Y <> Expected.Entrance.Y) then
+  begin
+    return Error('entrance coordinate is invalid for this generator version')
+  end;
+
+  if Abs(Metadata.Entrance.X - Metadata.Spawn.X) + Abs(Metadata.Entrance.Y - Metadata.Spawn.Y) <> 3 then
+  begin
+    return Error('entrance must be exactly three cardinal steps from spawn')
+  end;
+
+  if not IsClearEntranceCell(Metadata.Seed, Metadata.Entrance) then
+  begin
+    return Error('entrance conflicts with generated terrain')
+  end;
+
+  if not HasTraversableCardinalRoute(Metadata.Seed, Metadata.Spawn, Metadata.Entrance) then
+  begin
+    return Error('entrance has no traversable three-step route from spawn')
+  end;
+
+  return Ok(Metadata)
 end;
 
 // Samples normalized generator fields for previews, diagnostics, and distribution tests.
@@ -551,8 +835,13 @@ begin
   begin
     panic('unsupported world generator version')
   end;
+  mutable var Cell: WorldCell := NaturalCell(Metadata.Seed, X, Y);
+  if (X = Metadata.Entrance.X) and (Y = Metadata.Entrance.Y) then
+  begin
+    Cell.Feature := TerrainFeatureKind.Entrance
+  end;
 
-  return GenerateCellWithShifts(Metadata.Seed, X, Y, RiverShift(Metadata.Seed, Y), PathShift(Metadata.Seed, X))
+  return Cell
 end;
 
 // Generates one complete chunk independently of load or generation order.
@@ -583,7 +872,13 @@ begin
       var X: integer := OriginX + LocalX;
       var Y: integer := OriginY + LocalY;
       var Sample: TerrainGenerationSample := ComposeTerrainSample(SampleNoise(ContinentalWideGrid, X, Y), SampleNoise(ContinentalRegionalGrid, X, Y), SampleNoise(RegionalElevationGrid, X, Y), SampleNoise(CoastDetailGrid, X, Y), SampleNoise(MoistureRegionalGrid, X, Y), SampleNoise(MoistureDetailGrid, X, Y), SampleNoise(VegetationRegionalGrid, X, Y), SampleNoise(LakeShapeGrid, X, Y));
-      Std.Arrays.Push(Cells, GenerateCellFromInputs(Metadata.Seed, X, Y, RowRiverOffset, PathOffsets[LocalX], Sample))
+      mutable var Cell: WorldCell := GenerateCellFromInputs(Metadata.Seed, X, Y, RowRiverOffset, PathOffsets[LocalX], Sample);
+      if (X = Metadata.Entrance.X) and (Y = Metadata.Entrance.Y) then
+      begin
+        Cell.Feature := TerrainFeatureKind.Entrance
+      end;
+
+      Std.Arrays.Push(Cells, Cell)
     end
   end;
 
@@ -640,7 +935,7 @@ begin
     end;
 
     if ((Cell.Feature = TerrainFeatureKind.Tree) or (Cell.Feature = TerrainFeatureKind.Forest)) or
-       (Cell.Feature = TerrainFeatureKind.Path) then
+       ((Cell.Feature = TerrainFeatureKind.Path) or (Cell.Feature = TerrainFeatureKind.Entrance)) then
     begin
       if Cell.Base = BaseTerrainKind.Water then
       begin
@@ -679,6 +974,10 @@ begin
     TerrainFeatureKind.River:
     begin
       return 'r'
+    end;
+    TerrainFeatureKind.Entrance:
+    begin
+      return 'e'
     end
     else
     begin
@@ -730,13 +1029,115 @@ public function NewGame(Metadata: WorldMetadata): GameState;
 begin
   return record
     Area := AreaKind.OutdoorRegion;
+    AreaId := Metadata.OutdoorAreaId;
     Player := Metadata.Spawn;
+    ReturnLocation := ReturnLocation.NoReturnLocation;
+  end
+end;
+
+// Validates current-area and return-location invariants for the selected world.
+public function ValidateGameState(Metadata: WorldMetadata; State: GameState): result of GameState, string;
+begin
+  if State.AreaId = Metadata.OutdoorAreaId then
+  begin
+    if State.Area <> AreaKind.OutdoorRegion then
+    begin
+      return Error('outdoor area identity requires outdoor area kind')
+    end;
+
+    case State.ReturnLocation of
+      ReturnLocation.NoReturnLocation:
+      begin
+        return Ok(State)
+      end
+      else
+      begin
+        return Error('outdoor state must not retain a return location')
+      end
+    end
+  end;
+
+  if State.AreaId = Metadata.DungeonAreaId then
+  begin
+    if State.Area <> AreaKind.Dungeon then
+    begin
+      return Error('dungeon area identity requires dungeon area kind')
+    end;
+
+    case State.ReturnLocation of
+      ReturnLocation.ReturnTo(AreaId, Position):
+      begin
+        if AreaId <> Metadata.OutdoorAreaId then
+        begin
+          return Error('dungeon return location must name the outdoor area')
+        end;
+
+        if (State.Player.X <> Position.X) or (State.Player.Y <> Position.Y) then
+        begin
+          return Error('placeholder dungeon position must match its return coordinate')
+        end;
+
+        return Ok(State)
+      end
+      else
+      begin
+        return Error('dungeon state requires a return location')
+      end
+    end
+  end;
+
+  return Error('game state names an unknown area identity')
+end;
+
+// Activates the single entrance or exit transition owned by the selected world.
+public function ActivateAreaTransition(Metadata: WorldMetadata; State: GameState): result of GameState, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.AreaId = Metadata.OutdoorAreaId then
+  begin
+    if (Valid.Player.X <> Metadata.Entrance.X) or (Valid.Player.Y <> Metadata.Entrance.Y) then
+    begin
+      return Error('player is not standing on an entrance')
+    end;
+
+    if Metadata.EntranceTargetAreaId <> Metadata.DungeonAreaId then
+    begin
+      return Error('entrance target does not name the initial dungeon')
+    end;
+
+    return Ok(record
+      Area := AreaKind.Dungeon;
+      AreaId := Metadata.DungeonAreaId;
+      Player := Valid.Player;
+      ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Valid.Player);
+    end)
+  end;
+
+  case Valid.ReturnLocation of
+    ReturnLocation.ReturnTo(AreaId, Position):
+    begin
+      return Ok(record
+        Area := AreaKind.OutdoorRegion;
+        AreaId := AreaId;
+        Player := Position;
+        ReturnLocation := ReturnLocation.NoReturnLocation;
+      end)
+    end
+    else
+    begin
+      return Error('cannot leave an entered area without a return location')
+    end
   end
 end;
 
 // Applies one cardinal movement intention after validating the authoritative target cell.
 public function MovePlayer(State: GameState; DeltaX: integer; DeltaY: integer; Target: WorldCell): result of GameState, string;
 begin
+  if State.Area <> AreaKind.OutdoorRegion then
+  begin
+    return Error('movement is unavailable in the current area')
+  end;
+
   if not (((DeltaX = 0) and ((DeltaY = -1) or (DeltaY = 1))) or ((DeltaY = 0) and ((DeltaX = -1) or (DeltaX = 1)))) then
   begin
     return Error('movement must be one cardinal step')
@@ -749,9 +1150,11 @@ begin
 
   return Ok(record
     Area := State.Area;
+    AreaId := State.AreaId;
     Player := record
       X := State.Player.X + DeltaX;
       Y := State.Player.Y + DeltaY;
     end;
+    ReturnLocation := State.ReturnLocation;
   end)
 end;

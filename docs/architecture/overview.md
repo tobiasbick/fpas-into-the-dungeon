@@ -73,6 +73,8 @@ contract.
 
 The chunked world seam is described in
 [unbounded outdoor world](unbounded-world.md).
+The server-owned seam between areas and view-specific protocol states is
+described in [area transitions](area-transitions.md).
 
 ## Runtime data
 

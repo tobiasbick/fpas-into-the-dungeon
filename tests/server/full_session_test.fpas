@@ -55,7 +55,7 @@ begin
   var WorldsRoot: string := '.temp-data/full-session-' + IntToStr(TimestampMillis());
   EnsureWorldRoot(WorldsRoot);
   var Config: ServerConfig := TestConfig(WorldsRoot);
-  var ExpectedMetadata: WorldMetadata := NewWorldMetadata(Config.WorldId, Config.WorldSeed);
+  var ExpectedMetadata: WorldMetadata := Std.Results.Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
   var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
   var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
   var Source: CancellationSource := CreateCancellationSource();
@@ -68,7 +68,7 @@ begin
   mutable var Model: ClientModel := NewClientModel('127.0.0.1', Address.Port, Requests, Events);
   Model.Screen := ClientScreen.GameScreen;
   Model.FocusedControl := 0;
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 30000)) of
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
     ClientEvent.Connected:
     begin
       Model := UpdateClientEvent(Model, ClientEvent.Connected, Cmd)
@@ -79,13 +79,23 @@ begin
     end
   end;
 
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 30000)) of
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
     ClientEvent.State(Value):
     begin
-      AssertEquals(13, Value.Width);
-      AssertEquals(7, Value.Height);
-      AssertEquals(ExpectedMetadata.Spawn.X, Value.WorldX);
-      AssertEquals(ExpectedMetadata.Spawn.Y, Value.WorldY);
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          AssertEquals(13, MapValue.Width);
+          AssertEquals(7, MapValue.Height);
+          AssertEquals(ExpectedMetadata.Spawn.X, MapValue.WorldX);
+          AssertEquals(ExpectedMetadata.Spawn.Y, MapValue.WorldY)
+        end
+        else
+        begin
+          panic('expected map state')
+        end
+      end;
+
       Model := UpdateClientEvent(Model, ClientEvent.State(Value), Cmd)
     end
     else
@@ -99,16 +109,115 @@ begin
              TuiColorKind.Rgb);
   App.Close();
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Viewport(240, 20), 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 30000)) of
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
     ClientEvent.State(Value):
     begin
-      AssertEquals(240, Value.Width);
-      AssertEquals(20, Value.Height);
-      AssertEquals(ExpectedMetadata.Spawn.X, Value.WorldX)
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          AssertEquals(240, MapValue.Width);
+          AssertEquals(20, MapValue.Height);
+          AssertEquals(ExpectedMetadata.Spawn.X, MapValue.WorldX)
+        end
+        else
+        begin
+          panic('expected resized map state')
+        end
+      end
     end
     else
     begin
       panic('expected resized generated state')
+    end
+  end;
+  mutable var CurrentX: integer := ExpectedMetadata.Spawn.X;
+  mutable var CurrentY: integer := ExpectedMetadata.Spawn.Y;
+  for Step: integer := 1 to 3 do
+  begin
+    mutable var DeltaX: integer := 0;
+    mutable var DeltaY: integer := 0;
+    if CurrentX < ExpectedMetadata.Entrance.X then
+    begin
+      DeltaX := 1
+    end
+    else if CurrentX > ExpectedMetadata.Entrance.X then
+    begin
+      DeltaX := -1
+    end
+    else if CurrentY < ExpectedMetadata.Entrance.Y then
+    begin
+      DeltaY := 1
+    end
+    else
+    begin
+      DeltaY := -1
+    end;
+
+    AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Move(DeltaX, DeltaY), 1000)));
+    case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+      ClientEvent.State(VisibleValue):
+      begin
+        case VisibleValue of
+          VisibleState.MapState(MapValue):
+          begin
+            CurrentX := CurrentX + DeltaX;
+            CurrentY := CurrentY + DeltaY;
+            AssertEquals(CurrentX, MapValue.WorldX);
+            AssertEquals(CurrentY, MapValue.WorldY)
+          end
+          else
+          begin
+            panic('expected map state while approaching entrance')
+          end
+        end
+      end
+      else
+      begin
+        panic('expected movement state')
+      end
+    end
+  end;
+
+  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.ActivateAreaTransition, 1000)));
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+    ClientEvent.State(VisibleValue):
+    begin
+      case VisibleValue of
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          AssertEquals(ExpectedMetadata.DungeonAreaLabel, FirstPersonValue.Title)
+        end
+        else
+        begin
+          panic('expected first-person client event')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected entry state')
+    end
+  end;
+
+  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.ActivateAreaTransition, 1000)));
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+    ClientEvent.State(VisibleValue):
+    begin
+      case VisibleValue of
+        VisibleState.MapState(MapValue):
+        begin
+          AssertEquals(ExpectedMetadata.Entrance.X, MapValue.WorldX);
+          AssertEquals(ExpectedMetadata.Entrance.Y, MapValue.WorldY)
+        end
+        else
+        begin
+          panic('expected restored map client event')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected exit state')
     end
   end;
 

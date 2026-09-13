@@ -71,23 +71,36 @@ begin
          (MaximumIntersectingChunks(Config.MaximumViewHeight) + 2)
 end;
 
-function ProjectWorld(World: WorldSession; State: GameState; Viewport: ViewportSize): result of SessionProjection, string;
+function ProjectSession(World: WorldSession; State: GameState; Viewport: ViewportSize): result of SessionProjection, string;
 begin
+  if State.Area = AreaKind.Dungeon then
+  begin
+    var FirstPersonValue: FirstPersonVisibleState := record
+      Title := World.Metadata.DungeonAreaLabel;
+      Status := 'Press Enter to return to the outdoor region.';
+    end;
+
+    return Ok(record
+      World := World;
+      State := VisibleState.FirstPersonState(FirstPersonValue);
+    end)
+  end;
   var Loaded: WindowLoad := try LoadVisibleWindow(World, State, Viewport.Width, Viewport.Height);
+  var MapValue: MapVisibleState := record
+    OriginX := Loaded.Window.OriginX;
+    OriginY := Loaded.Window.OriginY;
+    Width := Loaded.Window.Width;
+    Height := Loaded.Window.Height;
+    Rows := Loaded.Window.Rows;
+    PlayerX := Loaded.Window.PlayerX;
+    PlayerY := Loaded.Window.PlayerY;
+    WorldX := State.Player.X;
+    WorldY := State.Player.Y;
+  end;
+
   return Ok(record
     World := Loaded.World;
-    State := record
-      View := ViewKind.Map;
-      OriginX := Loaded.Window.OriginX;
-      OriginY := Loaded.Window.OriginY;
-      Width := Loaded.Window.Width;
-      Height := Loaded.Window.Height;
-      Rows := Loaded.Window.Rows;
-      PlayerX := Loaded.Window.PlayerX;
-      PlayerY := Loaded.Window.PlayerY;
-      WorldX := State.Player.X;
-      WorldY := State.Player.Y;
-    end;
+    State := VisibleState.MapState(MapValue);
   end)
 end;
 
@@ -109,7 +122,7 @@ function SendProjection(
   Token: CancellationToken
 ): result of WorldSession, string;
 begin
-  var Projection: SessionProjection := try ProjectWorld(World, State, Viewport);
+  var Projection: SessionProjection := try ProjectSession(World, State, Viewport);
   var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(Projection.State), Token);
   return Ok(Projection.World)
 end;
@@ -143,7 +156,8 @@ begin
             begin
               if Version <> ProtocolVersion then
               begin
-                var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', 'Protocol version 2 is required'), Token);
+                var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', ('Protocol version ' + IntToStr(ProtocolVersion)) +
+                                                                                                                 ' is required'), Token);
                 return Ok(true)
               end;
 
@@ -232,6 +246,20 @@ begin
                   Error(Reason):
                   begin
                     var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                  end
+                end
+              end;
+              ClientMessage.ActivateAreaTransition:
+              begin
+                case Dungeon.Game.ActivateAreaTransition(World.Metadata, State) of
+                  Ok(Transitioned):
+                  begin
+                    State := Transitioned;
+                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
+                  end;
+                  Error(Reason):
+                  begin
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('transition_rejected', Reason), Token)
                   end
                 end
               end

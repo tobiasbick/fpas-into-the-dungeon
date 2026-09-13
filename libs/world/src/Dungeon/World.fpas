@@ -214,12 +214,16 @@ end;
 
 function EncodeMetadata(Metadata: WorldMetadata): string;
 begin
-  return Std.Json.Stringify(JsonValue.Object(['version': JsonValue.Number(IntToReal(Metadata.FormatVersion)), 'id': JsonValue.String(Metadata.Id), 'seed': JsonValue.Number(IntToReal(Metadata.Seed)), 'generator_version': JsonValue.Number(IntToReal(Metadata.GeneratorVersion)), 'chunk_size': JsonValue.Number(IntToReal(Metadata.ChunkSize)), 'spawn_x': JsonValue.Number(IntToReal(Metadata.Spawn.X)), 'spawn_y': JsonValue.Number(IntToReal(Metadata.Spawn.Y))]))
+  return Std.Json.Stringify(JsonValue.Object(['version': JsonValue.Number(IntToReal(Metadata.FormatVersion)), 'id': JsonValue.String(Metadata.Id), 'seed': JsonValue.Number(IntToReal(Metadata.Seed)), 'generator_version': JsonValue.Number(IntToReal(Metadata.GeneratorVersion)), 'chunk_size': JsonValue.Number(IntToReal(Metadata.ChunkSize)), 'spawn_x': JsonValue.Number(IntToReal(Metadata.Spawn.X)), 'spawn_y': JsonValue.Number(IntToReal(Metadata.Spawn.Y)), 'outdoor_area_id': JsonValue.String(Metadata.OutdoorAreaId), 'outdoor_area_label': JsonValue.String(Metadata.OutdoorAreaLabel), 'dungeon_area_id': JsonValue.String(Metadata.DungeonAreaId), 'dungeon_area_label': JsonValue.String(Metadata.DungeonAreaLabel), 'entrance_id': JsonValue.String(Metadata.EntranceId), 'entrance_x': JsonValue.Number(IntToReal(Metadata.Entrance.X)), 'entrance_y': JsonValue.Number(IntToReal(Metadata.Entrance.Y)), 'entrance_target_area_id': JsonValue.String(Metadata.EntranceTargetAreaId)]))
 end;
 
 function DecodeMetadata(Text: string; ExpectedId: string): result of WorldMetadata, string;
 begin
   var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  if Std.Dictionaries.Length(Fields) <> 15 then
+  begin
+    return Error('world metadata must contain exactly the current schema fields')
+  end;
   var Metadata: WorldMetadata := record
     FormatVersion := try IntegerField(Fields, 'version');
     Id := try StringField(Fields, 'id');
@@ -230,6 +234,16 @@ begin
       X := try IntegerField(Fields, 'spawn_x');
       Y := try IntegerField(Fields, 'spawn_y');
     end;
+    OutdoorAreaId := try StringField(Fields, 'outdoor_area_id');
+    OutdoorAreaLabel := try StringField(Fields, 'outdoor_area_label');
+    DungeonAreaId := try StringField(Fields, 'dungeon_area_id');
+    DungeonAreaLabel := try StringField(Fields, 'dungeon_area_label');
+    EntranceId := try StringField(Fields, 'entrance_id');
+    Entrance := record
+      X := try IntegerField(Fields, 'entrance_x');
+      Y := try IntegerField(Fields, 'entrance_y');
+    end;
+    EntranceTargetAreaId := try StringField(Fields, 'entrance_target_area_id');
   end;
 
   if Metadata.FormatVersion <> WorldFormatVersion then
@@ -251,18 +265,8 @@ begin
   begin
     return Error('world metadata id does not match selected world')
   end;
-  var ExpectedSpawn: WorldPosition := NewWorldMetadata(Metadata.Id, Metadata.Seed).Spawn;
-  if (Metadata.Spawn.X <> ExpectedSpawn.X) or (Metadata.Spawn.Y <> ExpectedSpawn.Y) then
-  begin
-    return Error('world spawn position is invalid for this generator version')
-  end;
 
-  if not IsWalkable(GenerateWorldCell(Metadata, Metadata.Spawn.X, Metadata.Spawn.Y)) then
-  begin
-    return Error('world spawn position must be traversable')
-  end;
-
-  return Ok(Metadata)
+  return ValidateWorldMetadata(Metadata)
 end;
 
 function BaseCode(Value: BaseTerrainKind): string;
@@ -309,6 +313,10 @@ begin
     TerrainFeatureKind.River:
     begin
       return 'r'
+    end;
+    TerrainFeatureKind.Entrance:
+    begin
+      return 'e'
     end
   end
 end;
@@ -383,6 +391,10 @@ begin
     'r':
     begin
       return Ok(TerrainFeatureKind.River)
+    end;
+    'e':
+    begin
+      return Ok(TerrainFeatureKind.Entrance)
     end
     else
     begin
@@ -471,7 +483,7 @@ begin
   return Ok(Rows)
 end;
 
-function DecodeChunk(Text: string; ExpectedWorldId: string; ExpectedCoordinate: ChunkCoordinate): result of WorldChunk, string;
+function DecodeChunk(Text: string; Metadata: WorldMetadata; ExpectedCoordinate: ChunkCoordinate): result of WorldChunk, string;
 begin
   var Fields: dict of string to JsonValue := try ObjectFields(Text);
   if try IntegerField(Fields, 'version') <> WorldFormatVersion then
@@ -479,7 +491,7 @@ begin
     return Error('unsupported chunk format version')
   end;
 
-  if try StringField(Fields, 'world_id') <> ExpectedWorldId then
+  if try StringField(Fields, 'world_id') <> Metadata.Id then
   begin
     return Error('chunk world id does not match selected world')
   end;
@@ -504,11 +516,28 @@ begin
       end)
     end
   end;
-
-  return ValidateChunk(record
+  var Chunk: WorldChunk := try ValidateChunk(record
     Coordinate := ExpectedCoordinate;
     Cells := Cells;
-  end)
+  end);
+  for LocalY: integer := 0 to WorldChunkSize - 1 do
+  begin
+    for LocalX: integer := 0 to WorldChunkSize - 1 do
+    begin
+      var WorldX: integer := (ExpectedCoordinate.X * WorldChunkSize) + LocalX;
+      var WorldY: integer := (ExpectedCoordinate.Y * WorldChunkSize) + LocalY;
+      var IsExpectedEntrance: boolean := (WorldX = Metadata.Entrance.X) and
+                                         (WorldY = Metadata.Entrance.Y);
+      var HasEntrance: boolean := ChunkCell(Chunk, LocalX, LocalY).Feature =
+                                  TerrainFeatureKind.Entrance;
+      if IsExpectedEntrance <> HasEntrance then
+      begin
+        return Error('chunk entrance feature does not match world metadata')
+      end
+    end
+  end;
+
+  return Ok(Chunk)
 end;
 
 // Returns the stable metadata path for an open world.
@@ -544,7 +573,7 @@ begin
   var DirectoryReady: boolean := try EnsureDirectory(Directory);
   mutable var Empty: WorldSession := record
     Directory := Directory;
-    Metadata := NewWorldMetadata(ValidId, Seed);
+    Metadata := try NewWorldMetadata(ValidId, Seed);
     Cache := [];
     Clock := 0;
     CacheLimit := CacheLimit;
@@ -638,7 +667,7 @@ begin
       return Error('chunk path exists but is not a file: ' + Path)
     end;
 
-    return DecodeChunk(try Std.Fs.ReadText(Path), World.Metadata.Id, Coordinate)
+    return DecodeChunk(try Std.Fs.ReadText(Path), World.Metadata, Coordinate)
   end;
   var Generated: WorldChunk := GenerateChunk(World.Metadata, Coordinate);
   var Written: boolean := try Std.Fs.WriteTextAtomic(Path, EncodeChunk(World.Metadata.Id, Generated));
@@ -736,6 +765,10 @@ end;
 // Composes a centered client-safe window and preloads one surrounding chunk margin.
 public function LoadVisibleWindow(World: WorldSession; State: GameState; Width: integer; Height: integer): result of WindowLoad, string;
 begin
+  if State.Area <> AreaKind.OutdoorRegion then
+  begin
+    return Error('visible outdoor windows require the outdoor area')
+  end;
   var OriginX: integer := State.Player.X - (Width div 2);
   var OriginY: integer := State.Player.Y - (Height div 2);
   var Range: ChunkRange := try ChunkRangeForWindow(OriginX, OriginY, Width, Height);
@@ -769,6 +802,11 @@ end;
 // Applies movement against the generated target terrain and returns updated world state.
 public function MoveInWorld(World: WorldSession; State: GameState; DeltaX: integer; DeltaY: integer): result of WorldMove, string;
 begin
+  if State.Area <> AreaKind.OutdoorRegion then
+  begin
+    return Error('movement is unavailable in the current area')
+  end;
+
   if not (((DeltaX = 0) and ((DeltaY = -1) or (DeltaY = 1))) or ((DeltaY = 0) and ((DeltaX = -1) or (DeltaX = 1)))) then
   begin
     return Error('movement must be one cardinal step')

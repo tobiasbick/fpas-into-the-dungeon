@@ -53,7 +53,7 @@ client contains presentation mappings but no world rules.
 Mutable objects, savegames, settlements, broader world simulation, and
 simulated erosion and hydrology remain outside this stage.
 
-## 5. Area transitions — NEXT
+## 5. Area transitions — DONE
 
 Add one server-authoritative transition from an outdoor location into one
 interior or dungeon and back. Define stable area identities, entrances, return
@@ -63,7 +63,14 @@ This stage is complete when the server validates both directions of the
 transition and the client selects the requested view family without inferring
 area rules.
 
-## 6. First-person interior slice — LATER
+The first implementation places one deterministic dungeon entrance exactly
+three traversable steps from spawn. `Enter` changes between the outdoor map and
+a framed first-person placeholder while the server retains the exact return
+location. World, protocol, TUI, and loopback tests cover both directions.
+
+See [area transitions](architecture/area-transitions.md).
+
+## 6. First-person interior slice — NEXT
 
 Render one small entered interior with terminal raycasting and support the
 minimum movement needed to explore it. The same view family will later serve

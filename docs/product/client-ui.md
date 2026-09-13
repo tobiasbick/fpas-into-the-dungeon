@@ -86,7 +86,7 @@ client is connected, and controls appropriate to the current view are enabled.
 
 ### Request pending
 
-After sending a movement or viewport intention, the existing complete view
+After sending a movement, transition activation, or viewport intention, the existing complete view
 remains visible and the status shows that an update is pending. Further
 movement is ignored until the server returns either a new visible state or a
 rejection. This preserves the request-response protocol and avoids speculative
@@ -116,6 +116,10 @@ concrete truecolor style in a `TuiCellGrid`. Grass, forest, desert, mountains,
 sea, rivers, lakes, and paths have distinct palette entries. The player uses a
 separate overlay style without changing the received terrain.
 
+Entrances also have their own two-column truecolor cell. The player marker
+covers it only while standing on it; the entrance reappears unchanged after the
+player leaves.
+
 One world cell occupies two adjacent terminal cells with the same background.
 This corrects terminal character proportions and makes continuous color fields
 dominant over glyphs. The client does not know chunk coordinates or reproduce
@@ -127,10 +131,12 @@ separate simulation.
 
 ## First-person view
 
-Entered interiors and dungeons use a first-person view. It will be rendered
-with terminal raycasting inside the same screen shell. Its visible-state payload
-and controls will be specified with the first interior slice; map rows must not
-be reinterpreted as first-person geometry by the client.
+Entered interiors and dungeons use a first-person view. The initial dungeon is
+rendered as a framed placeholder inside the same screen shell. Its server state
+contains only a title and instruction; it has no map dimensions, rows, or
+coordinates. `Enter` returns to the exact outdoor entrance. Terminal raycasting
+and first-person movement begin with the next roadmap stage; map rows are never
+reinterpreted as first-person geometry by the client.
 
 ## System menu
 
@@ -145,12 +151,14 @@ server or other players that may exist later.
 ## Controls
 
 - `W`, `A`, `S`, and `D` request cardinal movement in the map view.
-- In the first-person view, `W` and `S` move forward and backward, `A` and `D`
-  move sideways, and `Q` and `E` turn.
+- `Enter` activates an entrance under the player or leaves the current
+  placeholder dungeon. Walking onto an entrance does not activate it.
+- `Q` and `E` are reserved for the later first-person movement scheme.
 - `Ctrl+P` opens or closes the system menu.
 - `Escape` closes the active overlay.
 - `Alt+X` requests a clean disconnect and exits the client.
-- Arrow keys and `Enter` navigate and activate menu entries.
+- Arrow keys and `Enter` navigate and activate menu entries while a menu owns
+  input; no game intention is sent through an overlay.
 - Movement is accepted only in the active state with no request pending.
 
 `F2` toggles the context panel and `F3` toggles the message panel. On a narrow

@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 2;
+  ProtocolVersion: integer := 3;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
 
@@ -13,10 +13,10 @@ public type
   // Selects the renderer the client must use for a visible state.
   ViewKind = enum
     Map;
+    FirstPerson;
   end;
   // Client-safe map projection; dimensions, rows, and player coordinates must agree.
-  VisibleState = record
-    public View: ViewKind;
+  MapVisibleState = record
     public OriginX: integer;
     public OriginY: integer;
     public Width: integer;
@@ -27,11 +27,22 @@ public type
     public WorldX: integer;
     public WorldY: integer;
   end;
+  // Minimal presentation supplied while finite first-person geometry is deferred.
+  FirstPersonVisibleState = record
+    public Title: string;
+    public Status: string;
+  end;
+  // View-specific server projection; map-only fields cannot occur in a first-person state.
+  VisibleState = enum
+    MapState(Value: MapVisibleState);
+    FirstPersonState(Value: FirstPersonVisibleState);
+  end;
   // Session setup, player intentions, and lifecycle messages accepted by the server.
   ClientMessage = enum
     Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
     Viewport(Width: integer; Height: integer);
     Move(DeltaX: integer; DeltaY: integer);
+    ActivateAreaTransition;
     Disconnect;
   end;
   // Handshake, visible state, and structured outcomes returned by the server.
@@ -62,6 +73,10 @@ begin
     ViewKind.Map:
     begin
       return 'map'
+    end;
+    ViewKind.FirstPerson:
+    begin
+      return 'first_person'
     end
   end
 end;
@@ -72,6 +87,10 @@ begin
     'map':
     begin
       return Ok(ViewKind.Map)
+    end;
+    'first_person':
+    begin
+      return Ok(ViewKind.FirstPerson)
     end
     else
     begin
@@ -116,6 +135,10 @@ begin
       return true
     end;
     'p':
+    begin
+      return true
+    end;
+    'e':
     begin
       return true
     end
@@ -166,7 +189,7 @@ begin
   end
 end;
 
-function ValidateVisibleState(Value: VisibleState): result of VisibleState, string;
+function ValidateMapVisibleState(Value: MapVisibleState): result of MapVisibleState, string;
 begin
   if (Value.Width <= 0) or (Value.Height <= 0) then
   begin
@@ -208,6 +231,36 @@ begin
   end;
 
   return Ok(Value)
+end;
+
+function ValidateFirstPersonVisibleState(Value: FirstPersonVisibleState): result of FirstPersonVisibleState, string;
+begin
+  if Std.Str.Length(Value.Title) = 0 then
+  begin
+    return Error('first-person state title must not be empty')
+  end;
+
+  if Std.Str.Length(Value.Status) = 0 then
+  begin
+    return Error('first-person state status must not be empty')
+  end;
+
+  return Ok(Value)
+end;
+
+// Returns the renderer family selected by a view-specific visible state.
+public function ViewForVisibleState(Value: VisibleState): ViewKind;
+begin
+  case Value of
+    VisibleState.MapState(MapValue):
+    begin
+      return ViewKind.Map
+    end;
+    VisibleState.FirstPersonState(FirstPersonValue):
+    begin
+      return ViewKind.FirstPerson
+    end
+  end
 end;
 
 function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
@@ -274,6 +327,10 @@ begin
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('move'), 'dx': JsonValue.Number(IntToReal(DeltaX)), 'dy': JsonValue.Number(IntToReal(DeltaY))]))
     end;
+    ClientMessage.ActivateAreaTransition:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('activate_area_transition')]))
+    end;
     ClientMessage.Disconnect:
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('disconnect')]))
@@ -298,6 +355,15 @@ begin
     begin
       return Ok(ClientMessage.Move(try IntegerField(Fields, 'dx'), try IntegerField(Fields, 'dy')))
     end;
+    'activate_area_transition':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('activate_area_transition must not contain additional fields')
+      end;
+
+      return Ok(ClientMessage.ActivateAreaTransition)
+    end;
     'disconnect':
     begin
       return Ok(ClientMessage.Disconnect)
@@ -319,7 +385,16 @@ begin
     end;
     ServerMessage.State(Value):
     begin
-      return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(Value.View)), 'origin_x': JsonValue.Number(IntToReal(Value.OriginX)), 'origin_y': JsonValue.Number(IntToReal(Value.OriginY)), 'width': JsonValue.Number(IntToReal(Value.Width)), 'height': JsonValue.Number(IntToReal(Value.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(Value.Rows)), 'x': JsonValue.Number(IntToReal(Value.PlayerX)), 'y': JsonValue.Number(IntToReal(Value.PlayerY)), 'world_x': JsonValue.Number(IntToReal(Value.WorldX)), 'world_y': JsonValue.Number(IntToReal(Value.WorldY))]))
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY))]))
+        end;
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status)]))
+        end
+      end
     end;
     ServerMessage.Rejected(Code, MessageText):
     begin
@@ -343,20 +418,37 @@ begin
     end;
     'state':
     begin
-      var Value: VisibleState := record
-        View := try DecodeView(try StringField(Fields, 'view'));
-        OriginX := try IntegerField(Fields, 'origin_x');
-        OriginY := try IntegerField(Fields, 'origin_y');
-        Width := try IntegerField(Fields, 'width');
-        Height := try IntegerField(Fields, 'height');
-        Rows := try StringArrayField(Fields, 'rows');
-        PlayerX := try IntegerField(Fields, 'x');
-        PlayerY := try IntegerField(Fields, 'y');
-        WorldX := try IntegerField(Fields, 'world_x');
-        WorldY := try IntegerField(Fields, 'world_y');
-      end;
+      case try DecodeView(try StringField(Fields, 'view')) of
+        ViewKind.Map:
+        begin
+          var MapValue: MapVisibleState := record
+            OriginX := try IntegerField(Fields, 'origin_x');
+            OriginY := try IntegerField(Fields, 'origin_y');
+            Width := try IntegerField(Fields, 'width');
+            Height := try IntegerField(Fields, 'height');
+            Rows := try StringArrayField(Fields, 'rows');
+            PlayerX := try IntegerField(Fields, 'x');
+            PlayerY := try IntegerField(Fields, 'y');
+            WorldX := try IntegerField(Fields, 'world_x');
+            WorldY := try IntegerField(Fields, 'world_y');
+          end;
 
-      return Ok(ServerMessage.State(try ValidateVisibleState(Value)))
+          return Ok(ServerMessage.State(VisibleState.MapState(try ValidateMapVisibleState(MapValue))))
+        end;
+        ViewKind.FirstPerson:
+        begin
+          if Std.Dictionaries.Length(Fields) <> 4 then
+          begin
+            return Error('first-person state must contain only type, view, title, and status')
+          end;
+          var FirstPersonValue: FirstPersonVisibleState := record
+            Title := try StringField(Fields, 'title');
+            Status := try StringField(Fields, 'status');
+          end;
+
+          return Ok(ServerMessage.State(VisibleState.FirstPersonState(try ValidateFirstPersonVisibleState(FirstPersonValue))))
+        end
+      end
     end;
     'rejected':
     begin

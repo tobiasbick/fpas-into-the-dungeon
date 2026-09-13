@@ -30,6 +30,36 @@ begin
   return Std.Fs.CreateDir(Path)
 end;
 
+function MetadataJsonWithEntrance(
+  Id: string;
+  FormatVersion: integer;
+  GeneratorVersion: integer;
+  ChunkSize: integer;
+  SpawnX: integer;
+  SpawnY: integer;
+  EntranceX: integer;
+  EntranceY: integer;
+  EntranceTargetAreaId: string
+): string;
+begin
+  var Expected: WorldMetadata := Unwrap(NewWorldMetadata(Id, 12345));
+  mutable var Text: string := '{"version":' + IntToStr(FormatVersion);
+  Text := ((Text + ',"id":"') + Id) + '"';
+  Text := (Text + ',"seed":12345,"generator_version":') + IntToStr(GeneratorVersion);
+  Text := (Text + ',"chunk_size":') + IntToStr(ChunkSize);
+  Text := (Text + ',"spawn_x":') + IntToStr(SpawnX);
+  Text := (Text + ',"spawn_y":') + IntToStr(SpawnY);
+  Text := ((Text + ',"outdoor_area_id":"') + Expected.OutdoorAreaId) + '"';
+  Text := ((Text + ',"outdoor_area_label":"') + Expected.OutdoorAreaLabel) + '"';
+  Text := ((Text + ',"dungeon_area_id":"') + Expected.DungeonAreaId) + '"';
+  Text := ((Text + ',"dungeon_area_label":"') + Expected.DungeonAreaLabel) + '"';
+  Text := ((Text + ',"entrance_id":"') + Expected.EntranceId) + '"';
+  Text := (Text + ',"entrance_x":') + IntToStr(EntranceX);
+  Text := (Text + ',"entrance_y":') + IntToStr(EntranceY);
+  Text := ((Text + ',"entrance_target_area_id":"') + EntranceTargetAreaId) + '"';
+  return Text + '}'
+end;
+
 function MetadataJson(
   Id: string;
   FormatVersion: integer;
@@ -39,13 +69,22 @@ function MetadataJson(
   SpawnY: integer
 ): string;
 begin
-  mutable var Text: string := '{"version":' + IntToStr(FormatVersion);
-  Text := ((Text + ',"id":"') + Id) + '"';
-  Text := (Text + ',"seed":12345,"generator_version":') + IntToStr(GeneratorVersion);
-  Text := (Text + ',"chunk_size":') + IntToStr(ChunkSize);
-  Text := (Text + ',"spawn_x":') + IntToStr(SpawnX);
-  Text := (Text + ',"spawn_y":') + IntToStr(SpawnY);
-  return Text + '}'
+  var Expected: WorldMetadata := Unwrap(NewWorldMetadata(Id, 12345));
+  return MetadataJsonWithEntrance(Id, FormatVersion, GeneratorVersion, ChunkSize, SpawnX, SpawnY, Expected.Entrance.X, Expected.Entrance.Y, Expected.EntranceTargetAreaId)
+end;
+
+function CountEntrances(Chunk: WorldChunk): integer;
+begin
+  mutable var Count: integer := 0;
+  for Cell: WorldCell in Chunk.Cells do
+  begin
+    if Cell.Feature = TerrainFeatureKind.Entrance then
+    begin
+      Count := Count + 1
+    end
+  end;
+
+  return Count
 end;
 
 function JsonRows(Code: string; Width: integer; Count: integer): string;
@@ -81,6 +120,23 @@ begin
   Text := (Text + ',"base_rows":') + JsonRows(BaseCode, Width, Count);
   Text := (Text + ',"feature_rows":') + JsonRows('.', Width, Count);
   Text := (Text + ',"water_rows":') + JsonRows('.', Width, Count);
+  return Text + '}'
+end;
+
+function ChunkJsonWithFeature(
+  WorldId: string;
+  ChunkX: integer;
+  ChunkY: integer;
+  FeatureCode: string
+): string;
+begin
+  mutable var Text: string := '{"version":' + IntToStr(WorldFormatVersion);
+  Text := ((Text + ',"world_id":"') + WorldId) + '"';
+  Text := (Text + ',"chunk_x":') + IntToStr(ChunkX);
+  Text := (Text + ',"chunk_y":') + IntToStr(ChunkY);
+  Text := (Text + ',"base_rows":') + JsonRows('g', WorldChunkSize, WorldChunkSize);
+  Text := (Text + ',"feature_rows":') + JsonRows(FeatureCode, WorldChunkSize, WorldChunkSize);
+  Text := (Text + ',"water_rows":') + JsonRows('.', WorldChunkSize, WorldChunkSize);
   return Text + '}'
 end;
 
@@ -126,6 +182,38 @@ begin
   AssertTrue(Std.Fs.IsFile(WorldMetadataPath(World)));
   AssertEquals(WorldFormatVersion, World.Metadata.FormatVersion);
   AssertEquals(WorldChunkSize, World.Metadata.ChunkSize);
+  var MetadataBeforeReload: string := Unwrap(Std.Fs.ReadText(WorldMetadataPath(World)));
+  var ReloadedWorld: WorldSession := Unwrap(OpenWorld(Root, 'storage', 99999, 16));
+  AssertEquals(World.Metadata.EntranceId, ReloadedWorld.Metadata.EntranceId);
+  AssertEquals(World.Metadata.Entrance.X, ReloadedWorld.Metadata.Entrance.X);
+  AssertEquals(World.Metadata.Entrance.Y, ReloadedWorld.Metadata.Entrance.Y);
+  AssertEquals(MetadataBeforeReload, Unwrap(Std.Fs.ReadText(WorldMetadataPath(ReloadedWorld))));
+  var EntranceCoordinate: ChunkCoordinate := record
+    X := ChunkForCoordinate(World.Metadata.Entrance.X);
+    Y := ChunkForCoordinate(World.Metadata.Entrance.Y);
+  end;
+  var EntranceChunk: WorldChunk := Unwrap(LoadWorldChunk(World, EntranceCoordinate)).Chunk;
+  AssertEquals(1, CountEntrances(EntranceChunk));
+  AssertTrue(ChunkCell(EntranceChunk, LocalForCoordinate(World.Metadata.Entrance.X), LocalForCoordinate(World.Metadata.Entrance.Y)).Feature =
+             TerrainFeatureKind.Entrance);
+  mutable var EdgeMetadata: WorldMetadata := World.Metadata;
+  EdgeMetadata.Entrance := record
+    X := -1;
+    Y := -1;
+  end;
+
+  AssertEquals(1, CountEntrances(GenerateChunk(EdgeMetadata, record
+    X := -1;
+    Y := -1;
+  end)));
+  AssertEquals(0, CountEntrances(GenerateChunk(EdgeMetadata, record
+    X := 0;
+    Y := -1;
+  end)));
+  AssertEquals(0, CountEntrances(GenerateChunk(EdgeMetadata, record
+    X := -1;
+    Y := 0;
+  end)));
   var Coordinate: ChunkCoordinate := record
     X := -1;
     Y := 2;
@@ -178,37 +266,45 @@ begin
   var RightY: integer := FindHorizontalCrossing(World.Metadata, 127, 128);
   var CrossRight: WorldMove := Unwrap(MoveInWorld(World, record
     Area := AreaKind.OutdoorRegion;
+    AreaId := World.Metadata.OutdoorAreaId;
     Player := record
       X := 127;
       Y := RightY;
     end;
+    ReturnLocation := ReturnLocation.NoReturnLocation;
   end, 1, 0));
   AssertEquals(128, CrossRight.State.Player.X);
   var LeftY: integer := FindHorizontalCrossing(World.Metadata, -128, -129);
   var CrossLeft: WorldMove := Unwrap(MoveInWorld(World, record
     Area := AreaKind.OutdoorRegion;
+    AreaId := World.Metadata.OutdoorAreaId;
     Player := record
       X := -128;
       Y := LeftY;
     end;
+    ReturnLocation := ReturnLocation.NoReturnLocation;
   end, -1, 0));
   AssertEquals(-129, CrossLeft.State.Player.X);
   var DownX: integer := FindVerticalCrossing(World.Metadata, 127, 128);
   var CrossDown: WorldMove := Unwrap(MoveInWorld(World, record
     Area := AreaKind.OutdoorRegion;
+    AreaId := World.Metadata.OutdoorAreaId;
     Player := record
       X := DownX;
       Y := 127;
     end;
+    ReturnLocation := ReturnLocation.NoReturnLocation;
   end, 0, 1));
   AssertEquals(128, CrossDown.State.Player.Y);
   var UpX: integer := FindVerticalCrossing(World.Metadata, -128, -129);
   var CrossUp: WorldMove := Unwrap(MoveInWorld(World, record
     Area := AreaKind.OutdoorRegion;
+    AreaId := World.Metadata.OutdoorAreaId;
     Player := record
       X := UpX;
       Y := -128;
     end;
+    ReturnLocation := ReturnLocation.NoReturnLocation;
   end, 0, -1));
   AssertEquals(-129, CrossUp.State.Player.Y);
   AssertTrue(IsError(OpenWorld(Root, '../escape', 1, 16)));
@@ -239,6 +335,13 @@ begin
   AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(InvalidVersionPath, InvalidVersionText)));
   AssertTrue(IsError(OpenWorld(Root, 'invalid-version', 1, 8)));
   AssertEquals(InvalidVersionText, Unwrap(Std.Fs.ReadText(InvalidVersionPath)));
+  var MissingFieldDirectory: string := Std.Path.Join([Root, 'missing-field']);
+  AssertTrue(Unwrap(EnsureChild(MissingFieldDirectory)));
+  var MissingFieldText: string := '{"version":2,"id":"missing-field"}';
+  var MissingFieldPath: string := Std.Path.Join([MissingFieldDirectory, 'world.json']);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(MissingFieldPath, MissingFieldText)));
+  AssertTrue(IsError(OpenWorld(Root, 'missing-field', 12345, 8)));
+  AssertEquals(MissingFieldText, Unwrap(Std.Fs.ReadText(MissingFieldPath)));
   var InvalidSizeDirectory: string := Std.Path.Join([Root, 'invalid-size']);
   AssertTrue(Unwrap(EnsureChild(InvalidSizeDirectory)));
   AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(Std.Path.Join([InvalidSizeDirectory, 'world.json']), MetadataJson('invalid-size', WorldFormatVersion, WorldGeneratorVersion, 127, 0, 0))));
@@ -256,7 +359,7 @@ begin
   AssertTrue(IsError(OpenWorld(Root, 'legacy-generator', 1, 8)));
   AssertEquals(LegacyGeneratorText, Unwrap(Std.Fs.ReadText(LegacyGeneratorPath)));
   mutable var BlockedX: integer := 100;
-  var InvalidSpawnMetadata: WorldMetadata := NewWorldMetadata('invalid-spawn', 12345);
+  var InvalidSpawnMetadata: WorldMetadata := Unwrap(NewWorldMetadata('invalid-spawn', 12345));
   while IsWalkable(GenerateWorldCell(InvalidSpawnMetadata, BlockedX, 100)) do
   begin
     BlockedX := BlockedX + 1
@@ -265,6 +368,27 @@ begin
   AssertTrue(Unwrap(EnsureChild(InvalidSpawnDirectory)));
   AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(Std.Path.Join([InvalidSpawnDirectory, 'world.json']), MetadataJson('invalid-spawn', WorldFormatVersion, WorldGeneratorVersion, WorldChunkSize, BlockedX, 100))));
   AssertTrue(IsError(OpenWorld(Root, 'invalid-spawn', 1, 8)));
+  var ConflictingEntranceDirectory: string := Std.Path.Join([Root, 'conflicting-entrance']);
+  AssertTrue(Unwrap(EnsureChild(ConflictingEntranceDirectory)));
+  var ConflictingMetadata: WorldMetadata := Unwrap(NewWorldMetadata('conflicting-entrance', 12345));
+  mutable var ConflictingX: integer := 100;
+  while IsWalkable(GenerateWorldCell(ConflictingMetadata, ConflictingX, 100)) do
+  begin
+    ConflictingX := ConflictingX + 1
+  end;
+  var ConflictingText: string := MetadataJsonWithEntrance('conflicting-entrance', WorldFormatVersion, WorldGeneratorVersion, WorldChunkSize, ConflictingMetadata.Spawn.X, ConflictingMetadata.Spawn.Y, ConflictingX, 100, ConflictingMetadata.DungeonAreaId);
+  var ConflictingPath: string := Std.Path.Join([ConflictingEntranceDirectory, 'world.json']);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(ConflictingPath, ConflictingText)));
+  AssertTrue(IsError(OpenWorld(Root, 'conflicting-entrance', 12345, 8)));
+  AssertEquals(ConflictingText, Unwrap(Std.Fs.ReadText(ConflictingPath)));
+  var WrongTargetDirectory: string := Std.Path.Join([Root, 'wrong-target']);
+  AssertTrue(Unwrap(EnsureChild(WrongTargetDirectory)));
+  var WrongTargetMetadata: WorldMetadata := Unwrap(NewWorldMetadata('wrong-target', 12345));
+  var WrongTargetText: string := MetadataJsonWithEntrance('wrong-target', WorldFormatVersion, WorldGeneratorVersion, WorldChunkSize, WrongTargetMetadata.Spawn.X, WrongTargetMetadata.Spawn.Y, WrongTargetMetadata.Entrance.X, WrongTargetMetadata.Entrance.Y, WrongTargetMetadata.OutdoorAreaId);
+  var WrongTargetPath: string := Std.Path.Join([WrongTargetDirectory, 'world.json']);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WrongTargetPath, WrongTargetText)));
+  AssertTrue(IsError(OpenWorld(Root, 'wrong-target', 12345, 8)));
+  AssertEquals(WrongTargetText, Unwrap(Std.Fs.ReadText(WrongTargetPath)));
   mutable var InvalidChunkWorld: WorldSession := Unwrap(OpenWorld(Root, 'invalid-chunks', 12345, 8));
   var InvalidCoordinate: ChunkCoordinate := record
     X := 20;
@@ -317,6 +441,21 @@ begin
   AssertTrue(Unwrap(EnsureChild(WrongRowCountColumn)));
   AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WorldChunkPath(InvalidChunkWorld, WrongRowCountCoordinate), ChunkJson('invalid-chunks', 25, -20, WorldFormatVersion, 'g', WorldChunkSize, 127))));
   AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, WrongRowCountCoordinate)));
+  var DuplicateEntranceCoordinate: ChunkCoordinate := record
+    X := 26;
+    Y := -20;
+  end;
+  var DuplicateEntranceColumn: string := Std.Path.Join([
+                                                         InvalidChunkWorld.Directory,
+                                                         'chunks',
+                                                         'x_26'
+                                                       ]);
+  AssertTrue(Unwrap(EnsureChild(DuplicateEntranceColumn)));
+  var DuplicateEntrancePath: string := WorldChunkPath(InvalidChunkWorld, DuplicateEntranceCoordinate);
+  var DuplicateEntranceText: string := ChunkJsonWithFeature('invalid-chunks', 26, -20, 'e');
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(DuplicateEntrancePath, DuplicateEntranceText)));
+  AssertTrue(IsError(LoadWorldChunk(InvalidChunkWorld, DuplicateEntranceCoordinate)));
+  AssertEquals(DuplicateEntranceText, Unwrap(Std.Fs.ReadText(DuplicateEntrancePath)));
   var ConcurrentWorld: WorldSession := Unwrap(OpenWorld(Root, 'concurrent', 12345, 8));
   var ConcurrentCoordinate: ChunkCoordinate := record
     X := 31;

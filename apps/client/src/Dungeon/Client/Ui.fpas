@@ -249,6 +249,32 @@ begin
   end
 end;
 
+function QueueAreaTransition(State: ClientModel): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.ActivateAreaTransition) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := 'Activating entrance...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
 function ToggleContext(State: ClientModel): ClientModel;
 begin
   mutable var Next: ClientModel := State;
@@ -369,6 +395,11 @@ begin
     return State
   end;
 
+  if Key.kind = TuiKeyKind.Enter then
+  begin
+    return QueueAreaTransition(State)
+  end;
+
   if HasCharacter(Key, 'a', 'A') then
   begin
     return QueueMove(State, -1, 0)
@@ -487,16 +518,29 @@ begin
     ClientEvent.State(Value):
     begin
       Next.HasVisibleState := true;
-      Next.View := Value.View;
-      Next.OriginX := Value.OriginX;
-      Next.OriginY := Value.OriginY;
-      Next.Width := Value.Width;
-      Next.Height := Value.Height;
-      Next.Rows := Value.Rows;
-      Next.PlayerX := Value.PlayerX;
-      Next.PlayerY := Value.PlayerY;
-      Next.WorldX := Value.WorldX;
-      Next.WorldY := Value.WorldY;
+      Next.View := ViewForVisibleState(Value);
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          Next.OriginX := MapValue.OriginX;
+          Next.OriginY := MapValue.OriginY;
+          Next.Width := MapValue.Width;
+          Next.Height := MapValue.Height;
+          Next.Rows := MapValue.Rows;
+          Next.PlayerX := MapValue.PlayerX;
+          Next.PlayerY := MapValue.PlayerY;
+          Next.WorldX := MapValue.WorldX;
+          Next.WorldY := MapValue.WorldY;
+          Next.PrimaryTitle := '';
+          Next.PrimaryStatus := ''
+        end;
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          Next.PrimaryTitle := FirstPersonValue.Title;
+          Next.PrimaryStatus := FirstPersonValue.Status
+        end
+      end;
+
       Next.Pending := false;
       Next.Status := 'Connected';
       return QueueViewport(Next)
@@ -578,6 +622,10 @@ begin
       'p':
       begin
         Glyph := '·'
+      end;
+      'e':
+      begin
+        Glyph := '◆'
       end
       else
       begin
@@ -622,6 +670,10 @@ begin
     'p':
     begin
       return ColoredCell(Glyph, 236, 210, 156, 116, 83, 47)
+    end;
+    'e':
+    begin
+      return ColoredCell(Glyph, 255, 221, 112, 72, 42, 92)
     end
     else
     begin
@@ -680,12 +732,43 @@ begin
   return TuiElementBuilders.MakePanel('World', [TuiElementBuilders.MakeColumn(Elements)])
 end;
 
+function ViewFirstPerson(State: ClientModel): TuiElement;
+begin
+  return TuiElementBuilders.MakePanel('First-person view', [
+                                                             TuiElementBuilders.MakeColumn([
+                                                                                             TuiElementBuilders.MakeLabel(State.PrimaryTitle),
+                                                                                             TuiElementBuilders.MakeLabel(''),
+                                                                                             TuiElementBuilders.MakeLabel('The passage continues into darkness.'),
+                                                                                             TuiElementBuilders.MakeLabel(''),
+                                                                                             TuiElementBuilders.MakeLabel(State.PrimaryStatus)
+                                                                                           ])
+                                                           ])
+end;
+
+function ViewPrimary(State: ClientModel): TuiElement;
+begin
+  if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
+  begin
+    return ViewFirstPerson(State)
+  end;
+
+  return ViewMap(State)
+end;
+
 function ViewContext(State: ClientModel): TuiElement;
 begin
   mutable var Position: string := 'Not available';
+  mutable var Location: string := 'Outdoor region';
   if State.HasVisibleState then
   begin
-    Position := (IntToStr(State.WorldX) + ', ') + IntToStr(State.WorldY)
+    if State.View = ViewKind.Map then
+    begin
+      Position := (IntToStr(State.WorldX) + ', ') + IntToStr(State.WorldY)
+    end
+    else
+    begin
+      Location := State.PrimaryTitle
+    end
   end;
 
   return TuiElementBuilders.MakeColumn([
@@ -693,7 +776,7 @@ begin
                                          TuiElementBuilders.MakeLabel('Adventurer'),
                                          TuiElementBuilders.MakeLabel(''),
                                          TuiElementBuilders.MakeLabel('Location'),
-                                         TuiElementBuilders.MakeLabel('Outdoor region'),
+                                         TuiElementBuilders.MakeLabel(Location),
                                          TuiElementBuilders.MakeLabel('Position: ' + Position),
                                          TuiElementBuilders.MakeLabel(''),
                                          TuiElementBuilders.MakeLabel('Equipment'),
@@ -757,6 +840,22 @@ begin
   return TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Expanding(), TuiAlignment.Fill(), Stretch)
 end;
 
+function GameStatusItems(State: ClientModel): array of TuiStatusItem;
+begin
+  mutable var Items: array of TuiStatusItem := [TuiStatusItemBuilders.MakeHint(State.Status)];
+  if not State.HasVisibleState or (State.View = ViewKind.Map) then
+  begin
+    Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('WASD', 'Move'))
+  end;
+
+  Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('Enter', 'Enter/leave'));
+  Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('F2', 'Context'));
+  Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('F3', 'Messages'));
+  Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('Ctrl+P', 'Menu'));
+  Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('Alt+X', 'Quit'));
+  return Items
+end;
+
 function ViewGameShell(State: ClientModel): TuiElement;
 begin
   mutable var PrimarySettings: TuiLayoutSettings := Expanding(2);
@@ -764,7 +863,7 @@ begin
   begin
     PrimarySettings := PrimarySettings.WithFixedWidth(PrimaryTerminalWidth(State))
   end;
-  var Primary: TuiElement := TuiElementBuilders.MakeLayout(PrimarySettings, ViewMap(State));
+  var Primary: TuiElement := TuiElementBuilders.MakeLayout(PrimarySettings, ViewPrimary(State));
   mutable var MainRow: TuiElement := TuiElementBuilders.MakeRow([Primary]);
   if State.ContextPanelVisible and ContextCanDock(State) then
   begin
@@ -787,14 +886,7 @@ begin
   var StatusSettings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
                                              .WithFixedHeight(StatusPanelHeight);
   Std.Arrays.Push(Rows, TuiElementBuilders.MakeLayout(StatusSettings, TuiElementBuilders.MakePanel('Status', [
-                                                                                                               TuiElementBuilders.MakeStatusLine([
-                                                                                                                                                   TuiStatusItemBuilders.MakeHint(State.Status),
-                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('WASD', 'Move'),
-                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('F2', 'Context'),
-                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('F3', 'Messages'),
-                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('Ctrl+P', 'Menu'),
-                                                                                                                                                   TuiStatusItemBuilders.MakeKeyHint('Alt+X', 'Quit')
-                                                                                                                                                 ])
+                                                                                                               TuiElementBuilders.MakeStatusLine(GameStatusItems(State))
                                                                                                              ])));
   return TuiElementBuilders.MakeColumn(Rows)
 end;
@@ -827,13 +919,20 @@ begin
   mutable var Items: array of TuiElement := [
                                               TuiElementBuilders.MakeButton(TuiControlId.Create(ResumeControlId), 'Resume', TuiAction.Create(ResumeAction)),
                                               TuiElementBuilders.MakeButton(TuiControlId.Create(SystemInformationControlId), 'Information', TuiAction.Create(InformationAction)),
-                                              TuiElementBuilders.MakeRule('Key bindings'),
-                                              TuiElementBuilders.MakeLabel('WASD   Move'),
-                                              TuiElementBuilders.MakeLabel('F2     Context'),
-                                              TuiElementBuilders.MakeLabel('F3     Messages'),
-                                              TuiElementBuilders.MakeLabel('Ctrl+P Menu'),
-                                              TuiElementBuilders.MakeLabel('Alt+X  Quit')
+                                              TuiElementBuilders.MakeRule('Key bindings')
                                             ];
+  if not State.HasVisibleState or (State.View = ViewKind.Map) then
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('WASD   Move'))
+  end;
+
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Enter  Enter/leave'));
+  Items := Std.Arrays.Concat(Items, [
+                                      TuiElementBuilders.MakeLabel('F2     Context'),
+                                      TuiElementBuilders.MakeLabel('F3     Messages'),
+                                      TuiElementBuilders.MakeLabel('Ctrl+P Menu'),
+                                      TuiElementBuilders.MakeLabel('Alt+X  Quit')
+                                    ]);
   if (State.ConnectionPhase = ClientConnectionPhase.Active) or
      (State.ConnectionPhase = ClientConnectionPhase.Connecting) then
   begin
