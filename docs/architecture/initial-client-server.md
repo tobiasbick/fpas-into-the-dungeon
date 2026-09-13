@@ -9,9 +9,10 @@ test seams without defining the wider game.
 - `dungeon-client` connects to that address and renders a fixed 13 by 7 outdoor
   region supplied by the server.
 - The server creates one player at the center of the map.
-- Arrow keys send cardinal movement intentions.
+- `W`, `A`, `S`, and `D` send cardinal movement intentions.
 - The server validates movement and returns the resulting visible state.
-- `Q` quits the client. A disconnected client does not stop the server.
+- `Alt+X` cleanly disconnects and quits the client. A disconnected client does
+  not stop the server.
 - The initial server accepts one active client at a time.
 
 No game time passes without a player intention. The slice has no combat,

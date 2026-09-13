@@ -24,12 +24,12 @@ headless-TUI, protocol-contract, and loopback tests cover the slice.
 
 See the [initial client-server slice](architecture/initial-client-server.md).
 
-## 3. Client UI foundation — NEXT
+## 3. Client UI foundation — DONE
 
-Establish the stable presentation and interaction shell before adding loaded
-world data. Bring the implementation and headless tests up to the states,
+The stable presentation and interaction shell is implemented with the states,
 layout, controls, and small-terminal behavior described in the
-[client UI](product/client-ui.md) document.
+[client UI](product/client-ui.md) document. Headless tests cover the shell and
+its connection lifecycle.
 
 This stage is complete when connecting, active, pending, rejected, failed, and
 disconnected states have deliberate presentation and test coverage; map sizes
@@ -37,7 +37,7 @@ remain server-defined; and a terminal smaller than the content does not crash
 the client. Final styling and gameplay-specific panels remain outside this
 stage.
 
-## 4. Data-driven outdoor region — LATER
+## 4. Data-driven outdoor region — NEXT
 
 Move the outdoor geometry and terrain out of compiled game code into a small,
 validated world-data file. The server loads the data and continues to send only
