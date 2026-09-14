@@ -1,0 +1,119 @@
+// Verifies fixed interior geometry, one-field relative movement, turns, collision, and exit rules.
+program DungeonInteriorMovementTest;
+
+uses Dungeon.Game, Std.Arrays, Std.Results, Std.Test;
+
+function DungeonState(Metadata: WorldMetadata; Position: InteriorPosition; Facing: FacingDirection): GameState;
+begin
+  return record
+    Area := AreaKind.Dungeon;
+    AreaId := Metadata.DungeonAreaId;
+    Player := PlayerPosition.FirstPerson(record
+    Position := Position;
+    Facing := Facing;
+  end);
+    ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance);
+  end
+end;
+
+procedure AssertStep(
+  Metadata: WorldMetadata;
+  Position: InteriorPosition;
+  Facing: FacingDirection;
+  Step: RelativeStep;
+  ExpectedX: integer;
+  ExpectedY: integer
+);
+begin
+  var Before: GameState := DungeonState(Metadata, Position, Facing);
+  var After: GameState := Unwrap(StepFirstPerson(Metadata, Before, Step));
+  var Pose: FirstPersonPose := Unwrap(FirstPersonPlayerPose(After));
+  AssertEquals(ExpectedX, Pose.Position.X);
+  AssertEquals(ExpectedY, Pose.Position.Y);
+  AssertTrue(Pose.Facing = Facing)
+end;
+
+procedure AssertTurn(
+  Metadata: WorldMetadata;
+  Facing: FacingDirection;
+  Turn: RelativeTurn;
+  Expected: FacingDirection
+);
+begin
+  var Position: InteriorPosition := record
+    X := 9;
+    Y := 1;
+  end;
+  var After: GameState := Unwrap(TurnFirstPerson(Metadata, DungeonState(Metadata, Position, Facing), Turn));
+  var Pose: FirstPersonPose := Unwrap(FirstPersonPlayerPose(After));
+  AssertEquals(Position.X, Pose.Position.X);
+  AssertEquals(Position.Y, Pose.Position.Y);
+  AssertTrue(Pose.Facing = Expected)
+end;
+
+begin
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('interior-test', 12345));
+  var Map: InteriorMap := Unwrap(InitialDungeonMap());
+  AssertEquals(11, Map.Width);
+  AssertEquals(9, Map.Height);
+  AssertEquals(Map.Width * Map.Height, Std.Arrays.Length(Map.Cells));
+  AssertTrue(Unwrap(InteriorCellAt(Map, Map.Start)) = InteriorCellKind.Floor);
+  AssertTrue(Unwrap(InteriorCellAt(Map, Map.Exit)) = InteriorCellKind.ExitField);
+  AssertTrue(IsOk(ValidateInteriorMap(Map)));
+  var Horizontal: InteriorPosition := record
+    X := 5;
+    Y := 1;
+  end;
+  var Vertical: InteriorPosition := record
+    X := 9;
+    Y := 3;
+  end;
+
+  AssertStep(Metadata, Vertical, FacingDirection.North, RelativeStep.Forward, 9, 2);
+  AssertStep(Metadata, Vertical, FacingDirection.North, RelativeStep.Backward, 9, 4);
+  AssertStep(Metadata, Horizontal, FacingDirection.East, RelativeStep.Forward, 6, 1);
+  AssertStep(Metadata, Horizontal, FacingDirection.East, RelativeStep.Backward, 4, 1);
+  AssertStep(Metadata, Vertical, FacingDirection.South, RelativeStep.Forward, 9, 4);
+  AssertStep(Metadata, Vertical, FacingDirection.South, RelativeStep.Backward, 9, 2);
+  AssertStep(Metadata, Horizontal, FacingDirection.West, RelativeStep.Forward, 4, 1);
+  AssertStep(Metadata, Horizontal, FacingDirection.West, RelativeStep.Backward, 6, 1);
+  AssertStep(Metadata, Horizontal, FacingDirection.North, RelativeStep.Left, 4, 1);
+  AssertStep(Metadata, Horizontal, FacingDirection.North, RelativeStep.Right, 6, 1);
+  AssertStep(Metadata, Vertical, FacingDirection.East, RelativeStep.Left, 9, 2);
+  AssertStep(Metadata, Vertical, FacingDirection.East, RelativeStep.Right, 9, 4);
+  AssertStep(Metadata, Horizontal, FacingDirection.South, RelativeStep.Left, 6, 1);
+  AssertStep(Metadata, Horizontal, FacingDirection.South, RelativeStep.Right, 4, 1);
+  AssertStep(Metadata, Vertical, FacingDirection.West, RelativeStep.Left, 9, 4);
+  AssertStep(Metadata, Vertical, FacingDirection.West, RelativeStep.Right, 9, 2);
+  AssertTurn(Metadata, FacingDirection.North, RelativeTurn.TurnLeft, FacingDirection.West);
+  AssertTurn(Metadata, FacingDirection.West, RelativeTurn.TurnLeft, FacingDirection.South);
+  AssertTurn(Metadata, FacingDirection.South, RelativeTurn.TurnLeft, FacingDirection.East);
+  AssertTurn(Metadata, FacingDirection.East, RelativeTurn.TurnLeft, FacingDirection.North);
+  AssertTurn(Metadata, FacingDirection.North, RelativeTurn.TurnRight, FacingDirection.East);
+  AssertTurn(Metadata, FacingDirection.East, RelativeTurn.TurnRight, FacingDirection.South);
+  AssertTurn(Metadata, FacingDirection.South, RelativeTurn.TurnRight, FacingDirection.West);
+  AssertTurn(Metadata, FacingDirection.West, RelativeTurn.TurnRight, FacingDirection.North);
+  var Blocked: GameState := DungeonState(Metadata, Map.Start, FacingDirection.North);
+  AssertTrue(IsError(StepFirstPerson(Metadata, Blocked, RelativeStep.Forward)));
+  var Unchanged: FirstPersonPose := Unwrap(FirstPersonPlayerPose(Blocked));
+  AssertEquals(Map.Start.X, Unchanged.Position.X);
+  AssertEquals(Map.Start.Y, Unchanged.Position.Y);
+  AssertTrue(Unchanged.Facing = FacingDirection.North);
+  AssertTrue(IsError(StepFirstPerson(Metadata, NewGame(Metadata), RelativeStep.Forward)));
+  AssertTrue(IsError(TurnFirstPerson(Metadata, NewGame(Metadata), RelativeTurn.TurnLeft)));
+  AssertTrue(IsError(ActivateAreaTransition(Metadata, DungeonState(Metadata, Map.Start, Map.StartFacing))));
+  AssertTrue(IsOk(ActivateAreaTransition(Metadata, DungeonState(Metadata, Map.Exit, FacingDirection.West))));
+  mutable var WrongShape: InteriorMap := Map;
+  WrongShape.Cells := [];
+  AssertTrue(IsError(ValidateInteriorMap(WrongShape)));
+  mutable var DuplicateExit: InteriorMap := Map;
+  DuplicateExit.Cells[Map.Start.Y * Map.Width + Map.Start.X] := InteriorCellKind.ExitField;
+  AssertTrue(IsError(ValidateInteriorMap(DuplicateExit)));
+  mutable var Disconnected: InteriorMap := Map;
+  Disconnected.Cells[0] := InteriorCellKind.Floor;
+  AssertTrue(IsError(ValidateInteriorMap(Disconnected)));
+  AssertTrue(IsError(InteriorCellAt(Map, record
+    X := -1;
+    Y := 0;
+  end)))
+end.

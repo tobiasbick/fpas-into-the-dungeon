@@ -75,6 +75,8 @@ The chunked world seam is described in
 [unbounded outdoor world](unbounded-world.md).
 The server-owned seam between areas and view-specific protocol states is
 described in [area transitions](area-transitions.md).
+The ownership and rendering seams for discrete indoor navigation are described
+in [first-person interior](first-person-interior.md).
 
 ## Runtime data
 

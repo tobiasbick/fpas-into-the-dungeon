@@ -2,7 +2,7 @@
 
 The first transition connects the initial outdoor region to one initial
 dungeon and back. It establishes the ownership and protocol seams without
-introducing dungeon geometry, raycasting, or a generic interaction system.
+introducing a generic interaction system.
 
 ## Authoritative model
 
@@ -22,20 +22,22 @@ A session's game state carries its current area identity and area kind. An
 outdoor state has no return location. A dungeon state must retain the exact
 outdoor area identity and coordinate from which it was entered. Entry and exit
 change current area and return state as one rule result. The outdoor coordinate
-is not repurposed as placeholder dungeon geometry.
+is not repurposed as interior geometry.
 
 ## Intention and projection
 
 The client sends `activate_area_transition` only after `Enter` on the active
 game screen with no request pending and no overlay. In the outdoor area, the
 server accepts it only while the player occupies the entrance. In the dungeon,
-the same narrow intention leaves through the retained return location. Invalid
+the same narrow intention is accepted only while the player occupies the
+visible exit field, then leaves through the retained return location. Invalid
 activation is a structured rejection and does not close the connection.
 
 The server selects one of two view-specific protocol states:
 
 - map state contains the visible window and player coordinates;
-- first-person placeholder state contains only a title and status instruction.
+- first-person state contains bounded field rows, an area-local player pose,
+  title, and status instruction.
 
 Viewport messages update the retained terminal dimensions in both areas, but
 the server loads and projects outdoor chunks only for a map state. Entry and
@@ -44,7 +46,10 @@ exit reuse the same selected world session and chunk cache.
 ## Versions and lifecycle
 
 World and chunk format version `2`, generator version `5`, and protocol version
-`3` are required. Development data from older schemas is rejected. The project
+`4` are required. Development data from older schemas is rejected. The project
 does not provide migrations, fallbacks, or compatibility paths. Player session
 state and active transitions are not persisted across reconnects yet; each new
 connection starts at the world's stable spawn.
+
+Interior navigation and projection are detailed in
+[first-person interior](first-person-interior.md).

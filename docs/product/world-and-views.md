@@ -48,6 +48,10 @@ or character progression.
   current area and player state. It is not the complete world.
 - **Transition** is the server-authoritative move from one area to another,
   such as entering or leaving a building or dungeon.
+- **Grid-based first-person movement** is discrete movement through a
+  first-person area. The player occupies one whole field and faces one cardinal
+  direction; one movement intention can advance by at most one field, while a
+  turn changes the facing direction without changing the occupied field.
 
 Walking across a chunk boundary is seamless movement within the same outdoor
 region. A transition changes both area identity and view family and occurs only
@@ -74,10 +78,15 @@ uses a top-down grid of terminal cells. Isometric rendering remains a possible
 later presentation alternative, not a separate world simulation.
 
 Dungeons and all entered interiors use a **first-person view**. The current
-dungeon uses a framed placeholder; terminal raycasting begins with the first
-interior slice. This view family also covers houses, castles, and similar
-buildings. Leaving an interior or dungeon returns the player to the exact
-retained location in the map view of the surrounding area.
+dungeon uses terminal raycasting inside the shared framed primary view. This
+view family also covers houses, castles, and similar buildings. Leaving an
+interior or dungeon returns the player to the exact retained location in the
+map view of the surrounding area.
+
+The first-person view uses grid-based first-person movement rather than free or
+continuous movement. Raycasting is the presentation of the discrete area; it
+does not introduce fractional positions, arbitrary view angles, velocity, or
+movement across several fields from one intention.
 
 The server owns the area kind, geometry, rules, and visible state. The client
 does not receive the complete world. It selects the required view family from
@@ -89,9 +98,9 @@ The first world contains a deterministic, chunked outdoor region and one
 initial dungeon. A distinct entrance is generated exactly three traversable
 cardinal steps from the spawn. Walking onto it remains ordinary outdoor
 movement; `Enter` activates the server-authoritative transition. The dungeon is
-already a distinct area even though its current presentation is only the
-first-person placeholder. Pressing `Enter` there returns to the exact entrance
-coordinate.
+an 11 by 9 bounded area with a fixed start pose, walls, floor, corridors, and
+one visible exit field. The server accepts `Enter` as an exit only on that field
+and then returns the player to the exact outdoor entrance coordinate.
 
 Settlements, further entrances, navigable interiors, mutable terrain, broader
 world simulation, isometric rendering, LLM integration, and the first RPG

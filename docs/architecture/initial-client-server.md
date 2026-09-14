@@ -28,25 +28,26 @@ line is limited to 64 KiB. The client starts with `hello`; the server answers
 with `welcome` followed by the initial `state`.
 
 ```text
-Client: hello, viewport, move, activate_area_transition, disconnect
+Client: hello, viewport, move, first_person_step, first_person_turn,
+        activate_area_transition, disconnect
 Server: welcome, state, rejected, error
 ```
 
-Protocol version `3` is included in the handshake. `hello` includes the initial
+Protocol version `4` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.
-Player intentions are request-response: every accepted or rejected movement or
-area-transition activation receives one server message before the next
-intention is sent.
+Player intentions are request-response: every accepted or rejected movement,
+turn, or area-transition activation receives one server message before the
+next intention is sent.
 
 Each `state` message identifies its view family. A map state contains its world
 origin, dimensions, compact server-produced terrain rows, and the player's
-local and authoritative world coordinates. A first-person placeholder contains
-only its title and concise status text. The two payloads are structurally
-distinct, so map invariants are never imposed on first-person state. Stable area
-identities, return locations, chunks, generation, and movement rules remain
-server-owned.
+local and authoritative world coordinates. A first-person state contains
+bounded field rows, dimensions, an area-local player coordinate, cardinal
+facing, title, and concise status text. The two payloads are structurally
+distinct. Stable area identities, return locations, chunks, generation,
+collision, and movement rules remain server-owned.
 
 ## Configuration
 

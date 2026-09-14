@@ -16,6 +16,16 @@ begin
   AssertTrue(Expected.Water = Actual.Water)
 end;
 
+function RequireOutdoor(State: GameState): WorldPosition;
+begin
+  return Unwrap(OutdoorPlayerPosition(State))
+end;
+
+function RequireFirstPerson(State: GameState): FirstPersonPose;
+begin
+  return Unwrap(FirstPersonPlayerPose(State))
+end;
+
 begin
   AssertCoordinate(-129, -2, 127);
   AssertCoordinate(-128, -1, 0);
@@ -63,17 +73,17 @@ begin
                                                                                   1]);
   AssertCellEquals(ChunkCell(First, 127, 64), GenerateWorldCell(Metadata, -1, 64));
   var Initial: GameState := NewGame(Metadata);
-  AssertEquals(Metadata.Spawn.X, Initial.Player.X);
-  AssertEquals(Metadata.Spawn.Y, Initial.Player.Y);
+  AssertEquals(Metadata.Spawn.X, RequireOutdoor(Initial).X);
+  AssertEquals(Metadata.Spawn.Y, RequireOutdoor(Initial).Y);
   AssertEquals(Metadata.OutdoorAreaId, Initial.AreaId);
   AssertTrue(Initial.Area = AreaKind.OutdoorRegion);
   AssertTrue(IsOk(ValidateGameState(Metadata, Initial)));
   AssertTrue(IsError(ActivateAreaTransition(Metadata, Initial)));
   var Moved: GameState := Unwrap(MovePlayer(Initial, 1, 0, GenerateWorldCell(Metadata, Metadata.Spawn.X +
                                                                                        1, Metadata.Spawn.Y)));
-  AssertEquals(Metadata.Spawn.X + 1, Moved.Player.X);
-  AssertEquals(Metadata.Spawn.Y, Moved.Player.Y);
-  AssertEquals(Metadata.Spawn.X, Initial.Player.X);
+  AssertEquals(Metadata.Spawn.X + 1, RequireOutdoor(Moved).X);
+  AssertEquals(Metadata.Spawn.Y, RequireOutdoor(Moved).Y);
+  AssertEquals(Metadata.Spawn.X, RequireOutdoor(Initial).X);
   AssertTrue(IsError(MovePlayer(Initial, 1, 1, Origin)));
   AssertTrue(IsError(MovePlayer(Initial, 1, 0, record
     Base := BaseTerrainKind.Water;
@@ -81,12 +91,14 @@ begin
     Water := WaterKind.Sea;
   end)));
   mutable var AtEntrance: GameState := Initial;
-  AtEntrance.Player := Metadata.Entrance;
+  AtEntrance.Player := PlayerPosition.Outdoor(Metadata.Entrance);
   var Entered: GameState := Unwrap(ActivateAreaTransition(Metadata, AtEntrance));
   AssertTrue(Entered.Area = AreaKind.Dungeon);
   AssertEquals(Metadata.DungeonAreaId, Entered.AreaId);
-  AssertEquals(Metadata.Entrance.X, Entered.Player.X);
-  AssertEquals(Metadata.Entrance.Y, Entered.Player.Y);
+  var DungeonMap: InteriorMap := Unwrap(InitialDungeonMap());
+  AssertEquals(DungeonMap.Start.X, RequireFirstPerson(Entered).Position.X);
+  AssertEquals(DungeonMap.Start.Y, RequireFirstPerson(Entered).Position.Y);
+  AssertTrue(DungeonMap.StartFacing = RequireFirstPerson(Entered).Facing);
   case Entered.ReturnLocation of
     ReturnLocation.ReturnTo(AreaId, Position):
     begin
@@ -102,11 +114,17 @@ begin
 
   AssertTrue(IsOk(ValidateGameState(Metadata, Entered)));
   AssertTrue(IsError(MovePlayer(Entered, 1, 0, Origin)));
-  var Left: GameState := Unwrap(ActivateAreaTransition(Metadata, Entered));
+  AssertTrue(IsError(ActivateAreaTransition(Metadata, Entered)));
+  mutable var AtExit: GameState := Entered;
+  AtExit.Player := PlayerPosition.FirstPerson(record
+    Position := DungeonMap.Exit;
+    Facing := FacingDirection.West;
+  end);
+  var Left: GameState := Unwrap(ActivateAreaTransition(Metadata, AtExit));
   AssertTrue(Left.Area = AreaKind.OutdoorRegion);
   AssertEquals(Metadata.OutdoorAreaId, Left.AreaId);
-  AssertEquals(Metadata.Entrance.X, Left.Player.X);
-  AssertEquals(Metadata.Entrance.Y, Left.Player.Y);
+  AssertEquals(Metadata.Entrance.X, RequireOutdoor(Left).X);
+  AssertEquals(Metadata.Entrance.Y, RequireOutdoor(Left).Y);
   case Left.ReturnLocation of
     ReturnLocation.NoReturnLocation:
     begin
@@ -117,13 +135,22 @@ begin
     end
   end;
   mutable var InvalidOutdoor: GameState := Initial;
-  InvalidOutdoor.ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Initial.Player);
+  InvalidOutdoor.ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, RequireOutdoor(Initial));
   AssertTrue(IsError(ValidateGameState(Metadata, InvalidOutdoor)));
   mutable var InvalidDungeon: GameState := Entered;
   InvalidDungeon.ReturnLocation := ReturnLocation.NoReturnLocation;
   AssertTrue(IsError(ValidateGameState(Metadata, InvalidDungeon)));
   AssertTrue(IsError(ActivateAreaTransition(Metadata, InvalidDungeon)));
+  mutable var WrongReturnCoordinate: GameState := Entered;
+  WrongReturnCoordinate.ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Spawn);
+  AssertTrue(IsError(ValidateGameState(Metadata, WrongReturnCoordinate)));
   mutable var MovedDungeonCoordinate: GameState := Entered;
-  MovedDungeonCoordinate.Player.X := MovedDungeonCoordinate.Player.X + 1;
+  MovedDungeonCoordinate.Player := PlayerPosition.FirstPerson(record
+    Position := record
+      X := -1;
+      Y := 0;
+    end;
+    Facing := FacingDirection.North;
+  end);
   AssertTrue(IsError(ValidateGameState(Metadata, MovedDungeonCoordinate)))
 end.

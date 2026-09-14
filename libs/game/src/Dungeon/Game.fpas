@@ -1,7 +1,7 @@
 // Authoritative coordinates, terrain, generation, movement, and area-transition rules.
 unit Dungeon.Game;
 
-uses Std.Arrays, Std.Math, Std.Results;
+uses Std.Arrays, Std.Math, Std.Results, Std.Str;
 
 public const
   // Schema version written to world metadata and chunk files.
@@ -23,6 +23,55 @@ public type
   WorldPosition = record
     public X: integer;
     public Y: integer;
+  end;
+  // Identifies one bounded field in a finite interior independently of world coordinates.
+  InteriorPosition = record
+    public X: integer;
+    public Y: integer;
+  end;
+  // Cardinal orientation retained for grid-based first-person movement.
+  FacingDirection = enum
+    North;
+    East;
+    South;
+    West;
+  end;
+  // Relative one-field translation requested in a first-person area.
+  RelativeStep = enum
+    Forward;
+    Backward;
+    Left;
+    Right;
+  end;
+  // Relative 90-degree rotation requested in a first-person area.
+  RelativeTurn = enum
+    TurnLeft;
+    TurnRight;
+  end;
+  // Authoritative field material of the fixed initial interior.
+  InteriorCellKind = enum
+    Wall;
+    Floor;
+    ExitField;
+  end;
+  // Complete bounded interior geometry with one connected start and exit.
+  InteriorMap = record
+    public Width: integer;
+    public Height: integer;
+    public Cells: array of InteriorCellKind;
+    public Start: InteriorPosition;
+    public StartFacing: FacingDirection;
+    public Exit: InteriorPosition;
+  end;
+  // Position and facing retained while the player occupies a first-person area.
+  FirstPersonPose = record
+    public Position: InteriorPosition;
+    public Facing: FacingDirection;
+  end;
+  // Area-specific player position; outdoor and interior coordinates cannot be confused.
+  PlayerPosition = enum
+    Outdoor(Value: WorldPosition);
+    FirstPerson(Value: FirstPersonPose);
   end;
   // Identifies one 128 by 128 storage and generation partition.
   ChunkCoordinate = record
@@ -110,7 +159,7 @@ public type
   GameState = record
     public Area: AreaKind;
     public AreaId: string;
-    public Player: WorldPosition;
+    public Player: PlayerPosition;
     public ReturnLocation: ReturnLocation;
   end;
 
@@ -1024,13 +1073,245 @@ begin
   return CellIsWalkable(Cell)
 end;
 
+function InteriorCellFromCode(Code: string): result of InteriorCellKind, string;
+begin
+  case Code of
+    '#':
+    begin
+      return Ok(InteriorCellKind.Wall)
+    end;
+    '.':
+    begin
+      return Ok(InteriorCellKind.Floor)
+    end;
+    'x':
+    begin
+      return Ok(InteriorCellKind.ExitField)
+    end
+    else
+    begin
+      return Error('interior row contains an unknown field code')
+    end
+  end
+end;
+
+// Returns the compact client-safe code for one interior field.
+public function InteriorCellCode(Cell: InteriorCellKind): string;
+begin
+  case Cell of
+    InteriorCellKind.Wall:
+    begin
+      return '#'
+    end;
+    InteriorCellKind.Floor:
+    begin
+      return '.'
+    end;
+    InteriorCellKind.ExitField:
+    begin
+      return 'x'
+    end
+  end
+end;
+
+// Returns one interior field after checking bounded area-local coordinates and map shape.
+public function InteriorCellAt(Map: InteriorMap; Position: InteriorPosition): result of InteriorCellKind, string;
+begin
+  if (Map.Width <= 0) or (Map.Height <= 0) then
+  begin
+    return Error('interior dimensions must be positive')
+  end;
+
+  if Std.Arrays.Length(Map.Cells) <> Map.Width * Map.Height then
+  begin
+    return Error('interior field count must match its dimensions')
+  end;
+
+  if ((Position.X < 0) or (Position.X >= Map.Width)) or
+     ((Position.Y < 0) or (Position.Y >= Map.Height)) then
+  begin
+    return Error('interior position is outside the area')
+  end;
+
+  return Ok(Map.Cells[(Position.Y * Map.Width) + Position.X])
+end;
+
+// Validates bounded shape, unique exit, traversable endpoints, and connected floor space.
+public function ValidateInteriorMap(Map: InteriorMap): result of InteriorMap, string;
+begin
+  if (Map.Width <= 0) or (Map.Height <= 0) then
+  begin
+    return Error('interior dimensions must be positive')
+  end;
+
+  if Std.Arrays.Length(Map.Cells) <> Map.Width * Map.Height then
+  begin
+    return Error('interior field count must match its dimensions')
+  end;
+  var StartCell: InteriorCellKind := try InteriorCellAt(Map, Map.Start);
+  if StartCell <> InteriorCellKind.Floor then
+  begin
+    return Error('interior start must be a floor field')
+  end;
+  var ExitCell: InteriorCellKind := try InteriorCellAt(Map, Map.Exit);
+  if ExitCell <> InteriorCellKind.ExitField then
+  begin
+    return Error('interior exit coordinate must name the exit field')
+  end;
+  mutable var ExitCount: integer := 0;
+  mutable var TraversableCount: integer := 0;
+  for Cell: InteriorCellKind in Map.Cells do
+  begin
+    if Cell <> InteriorCellKind.Wall then
+    begin
+      TraversableCount := TraversableCount + 1
+    end;
+
+    if Cell = InteriorCellKind.ExitField then
+    begin
+      ExitCount := ExitCount + 1
+    end
+  end;
+
+  if ExitCount <> 1 then
+  begin
+    return Error('interior must contain exactly one exit field')
+  end;
+  mutable var Visited: array of boolean := Std.Arrays.Fill(false, Map.Width * Map.Height);
+  mutable var Queue: array of InteriorPosition := [Map.Start];
+  Visited[(Map.Start.Y * Map.Width) + Map.Start.X] := true;
+  mutable var ReadIndex: integer := 0;
+  mutable var VisitedCount: integer := 0;
+  var Offsets: array of InteriorPosition := [
+                                              record
+                                                X := 0;
+                                                Y := -1;
+                                              end,
+                                              record
+                                                X := 1;
+                                                Y := 0;
+                                              end,
+                                              record
+                                                X := 0;
+                                                Y := 1;
+                                              end,
+                                              record
+                                                X := -1;
+                                                Y := 0;
+                                              end
+                                            ];
+  while ReadIndex < Std.Arrays.Length(Queue) do
+  begin
+    var Current: InteriorPosition := Queue[ReadIndex];
+    ReadIndex := ReadIndex + 1;
+    VisitedCount := VisitedCount + 1;
+    for Offset: InteriorPosition in Offsets do
+    begin
+      var Candidate: InteriorPosition := record
+        X := Current.X + Offset.X;
+        Y := Current.Y + Offset.Y;
+      end;
+
+      if ((Candidate.X >= 0) and (Candidate.X < Map.Width)) and
+         ((Candidate.Y >= 0) and (Candidate.Y < Map.Height)) then
+      begin
+        var CandidateIndex: integer := (Candidate.Y * Map.Width) + Candidate.X;
+        if not Visited[CandidateIndex] then
+        begin
+          if Map.Cells[CandidateIndex] <> InteriorCellKind.Wall then
+          begin
+            Visited[CandidateIndex] := true;
+            Std.Arrays.Push(Queue, Candidate)
+          end
+        end
+      end
+    end
+  end;
+
+  if VisitedCount <> TraversableCount then
+  begin
+    return Error('all traversable interior fields must be connected to the start')
+  end;
+
+  return Ok(Map)
+end;
+
+// Creates the fixed, hand-authored initial dungeon used by the first interior slice.
+public function InitialDungeonMap(): result of InteriorMap, string;
+begin
+  var Rows: array of string := [
+                                 '###########',
+                                 '#.........#',
+                                 '#.#####.#.#',
+                                 '#.....#.#.#',
+                                 '###.#.#.#.#',
+                                 '#...#...#.#',
+                                 '#.#####.#.#',
+                                 '#x........#',
+                                 '###########'
+                               ];
+  mutable var Cells: array of InteriorCellKind := [];
+  for Row: string in Rows do
+  begin
+    for X: integer := 0 to Std.Str.Length(Row) - 1 do
+    begin
+      Std.Arrays.Push(Cells, try InteriorCellFromCode(Std.Str.CharAt(Row, X)))
+    end
+  end;
+
+  return ValidateInteriorMap(record
+    Width := 11;
+    Height := 9;
+    Cells := Cells;
+    Start := record
+      X := 9;
+      Y := 1;
+    end;
+    StartFacing := FacingDirection.West;
+    Exit := record
+      X := 1;
+      Y := 7;
+    end;
+  end)
+end;
+
+// Returns the outdoor coordinate only when the player currently occupies an outdoor area.
+public function OutdoorPlayerPosition(State: GameState): result of WorldPosition, string;
+begin
+  case State.Player of
+    PlayerPosition.Outdoor(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error('player does not occupy an outdoor position')
+    end
+  end
+end;
+
+// Returns the interior pose only when the player currently occupies a first-person area.
+public function FirstPersonPlayerPose(State: GameState): result of FirstPersonPose, string;
+begin
+  case State.Player of
+    PlayerPosition.FirstPerson(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error('player does not occupy a first-person position')
+    end
+  end
+end;
+
 // Creates the initial player state at the metadata-defined spawn coordinate.
 public function NewGame(Metadata: WorldMetadata): GameState;
 begin
   return record
     Area := AreaKind.OutdoorRegion;
     AreaId := Metadata.OutdoorAreaId;
-    Player := Metadata.Spawn;
+    Player := PlayerPosition.Outdoor(Metadata.Spawn);
     ReturnLocation := ReturnLocation.NoReturnLocation;
   end
 end;
@@ -1045,14 +1326,23 @@ begin
       return Error('outdoor area identity requires outdoor area kind')
     end;
 
-    case State.ReturnLocation of
-      ReturnLocation.NoReturnLocation:
+    case State.Player of
+      PlayerPosition.Outdoor(OutdoorPosition):
       begin
-        return Ok(State)
+        case State.ReturnLocation of
+          ReturnLocation.NoReturnLocation:
+          begin
+            return Ok(State)
+          end
+          else
+          begin
+            return Error('outdoor state must not retain a return location')
+          end
+        end
       end
       else
       begin
-        return Error('outdoor state must not retain a return location')
+        return Error('outdoor area requires an outdoor player position')
       end
     end
   end;
@@ -1064,24 +1354,39 @@ begin
       return Error('dungeon area identity requires dungeon area kind')
     end;
 
-    case State.ReturnLocation of
-      ReturnLocation.ReturnTo(AreaId, Position):
+    case State.Player of
+      PlayerPosition.FirstPerson(Pose):
       begin
-        if AreaId <> Metadata.OutdoorAreaId then
+        var Map: InteriorMap := try InitialDungeonMap();
+        if try InteriorCellAt(Map, Pose.Position) = InteriorCellKind.Wall then
         begin
-          return Error('dungeon return location must name the outdoor area')
+          return Error('first-person player position must be traversable')
         end;
 
-        if (State.Player.X <> Position.X) or (State.Player.Y <> Position.Y) then
-        begin
-          return Error('placeholder dungeon position must match its return coordinate')
-        end;
+        case State.ReturnLocation of
+          ReturnLocation.ReturnTo(AreaId, Position):
+          begin
+            if AreaId <> Metadata.OutdoorAreaId then
+            begin
+              return Error('dungeon return location must name the outdoor area')
+            end;
 
-        return Ok(State)
+            if (Position.X <> Metadata.Entrance.X) or (Position.Y <> Metadata.Entrance.Y) then
+            begin
+              return Error('dungeon return location must name the exact outdoor entrance')
+            end;
+
+            return Ok(State)
+          end
+          else
+          begin
+            return Error('dungeon state requires a return location')
+          end
+        end
       end
       else
       begin
-        return Error('dungeon state requires a return location')
+        return Error('dungeon area requires a first-person player position')
       end
     end
   end;
@@ -1095,7 +1400,8 @@ begin
   var Valid: GameState := try ValidateGameState(Metadata, State);
   if Valid.AreaId = Metadata.OutdoorAreaId then
   begin
-    if (Valid.Player.X <> Metadata.Entrance.X) or (Valid.Player.Y <> Metadata.Entrance.Y) then
+    var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(Valid);
+    if (OutdoorPosition.X <> Metadata.Entrance.X) or (OutdoorPosition.Y <> Metadata.Entrance.Y) then
     begin
       return Error('player is not standing on an entrance')
     end;
@@ -1104,13 +1410,22 @@ begin
     begin
       return Error('entrance target does not name the initial dungeon')
     end;
-
+    var Map: InteriorMap := try InitialDungeonMap();
     return Ok(record
       Area := AreaKind.Dungeon;
       AreaId := Metadata.DungeonAreaId;
-      Player := Valid.Player;
-      ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Valid.Player);
+      Player := PlayerPosition.FirstPerson(record
+      Position := Map.Start;
+      Facing := Map.StartFacing;
+    end);
+      ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, OutdoorPosition);
     end)
+  end;
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  var Interior: InteriorMap := try InitialDungeonMap();
+  if (Pose.Position.X <> Interior.Exit.X) or (Pose.Position.Y <> Interior.Exit.Y) then
+  begin
+    return Error('player is not standing on the interior exit')
   end;
 
   case Valid.ReturnLocation of
@@ -1119,7 +1434,7 @@ begin
       return Ok(record
         Area := AreaKind.OutdoorRegion;
         AreaId := AreaId;
-        Player := Position;
+        Player := PlayerPosition.Outdoor(Position);
         ReturnLocation := ReturnLocation.NoReturnLocation;
       end)
     end
@@ -1147,14 +1462,172 @@ begin
   begin
     return Error('terrain is not traversable')
   end;
-
+  var Position: WorldPosition := try OutdoorPlayerPosition(State);
   return Ok(record
     Area := State.Area;
     AreaId := State.AreaId;
-    Player := record
-      X := State.Player.X + DeltaX;
-      Y := State.Player.Y + DeltaY;
-    end;
+    Player := PlayerPosition.Outdoor(record
+    X := Position.X + DeltaX;
+    Y := Position.Y + DeltaY;
+  end);
     ReturnLocation := State.ReturnLocation;
+  end)
+end;
+
+function StepOffset(Facing: FacingDirection; Step: RelativeStep): InteriorPosition;
+begin
+  mutable var ForwardX: integer := 0;
+  mutable var ForwardY: integer := -1;
+  case Facing of
+    FacingDirection.North:
+    begin
+      ForwardX := 0;
+      ForwardY := -1
+    end;
+    FacingDirection.East:
+    begin
+      ForwardX := 1;
+      ForwardY := 0
+    end;
+    FacingDirection.South:
+    begin
+      ForwardX := 0;
+      ForwardY := 1
+    end;
+    FacingDirection.West:
+    begin
+      ForwardX := -1;
+      ForwardY := 0
+    end
+  end;
+
+  case Step of
+    RelativeStep.Forward:
+    begin
+      return record
+        X := ForwardX;
+        Y := ForwardY;
+      end
+    end;
+    RelativeStep.Backward:
+    begin
+      return record
+        X := - ForwardX;
+        Y := - ForwardY;
+      end
+    end;
+    RelativeStep.Left:
+    begin
+      return record
+        X := ForwardY;
+        Y := - ForwardX;
+      end
+    end;
+    RelativeStep.Right:
+    begin
+      return record
+        X := - ForwardY;
+        Y := ForwardX;
+      end
+    end
+  end
+end;
+
+// Applies one relative first-person step against the fixed authoritative interior map.
+public function StepFirstPerson(Metadata: WorldMetadata; State: GameState; Step: RelativeStep): result of GameState, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.Area <> AreaKind.Dungeon then
+  begin
+    return Error('first-person movement is unavailable in the current area')
+  end;
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  var Offset: InteriorPosition := StepOffset(Pose.Facing, Step);
+  var Target: InteriorPosition := record
+    X := Pose.Position.X + Offset.X;
+    Y := Pose.Position.Y + Offset.Y;
+  end;
+  var Map: InteriorMap := try InitialDungeonMap();
+  if try InteriorCellAt(Map, Target) = InteriorCellKind.Wall then
+  begin
+    return Error('a wall blocks the way')
+  end;
+
+  return Ok(record
+    Area := Valid.Area;
+    AreaId := Valid.AreaId;
+    Player := PlayerPosition.FirstPerson(record
+    Position := Target;
+    Facing := Pose.Facing;
+  end);
+    ReturnLocation := Valid.ReturnLocation;
+  end)
+end;
+
+function TurnedFacing(Facing: FacingDirection; Turn: RelativeTurn): FacingDirection;
+begin
+  case Turn of
+    RelativeTurn.TurnLeft:
+    begin
+      case Facing of
+        FacingDirection.North:
+        begin
+          return FacingDirection.West
+        end;
+        FacingDirection.East:
+        begin
+          return FacingDirection.North
+        end;
+        FacingDirection.South:
+        begin
+          return FacingDirection.East
+        end;
+        FacingDirection.West:
+        begin
+          return FacingDirection.South
+        end
+      end
+    end;
+    RelativeTurn.TurnRight:
+    begin
+      case Facing of
+        FacingDirection.North:
+        begin
+          return FacingDirection.East
+        end;
+        FacingDirection.East:
+        begin
+          return FacingDirection.South
+        end;
+        FacingDirection.South:
+        begin
+          return FacingDirection.West
+        end;
+        FacingDirection.West:
+        begin
+          return FacingDirection.North
+        end
+      end
+    end
+  end
+end;
+
+// Applies one relative 90-degree turn without changing the occupied interior field.
+public function TurnFirstPerson(Metadata: WorldMetadata; State: GameState; Turn: RelativeTurn): result of GameState, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.Area <> AreaKind.Dungeon then
+  begin
+    return Error('first-person turning is unavailable in the current area')
+  end;
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  return Ok(record
+    Area := Valid.Area;
+    AreaId := Valid.AreaId;
+    Player := PlayerPosition.FirstPerson(record
+    Position := Pose.Position;
+    Facing := TurnedFacing(Pose.Facing, Turn);
+  end);
+    ReturnLocation := Valid.ReturnLocation;
   end)
 end;

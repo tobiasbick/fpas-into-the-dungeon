@@ -2,8 +2,8 @@
 unit Dungeon.Client.Ui;
 
 uses
-  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Protocol, Std.Arrays, Std.Console, Std.Conv,
-  Std.Options, Std.Str, Std.Task, Std.Tui;
+  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Client.Raycast, Dungeon.Protocol, Std.Arrays,
+  Std.Console, Std.Conv, Std.Options, Std.Str, Std.Task, Std.Tui;
 
 const
   NetworkSubscriptionId: integer := 1;
@@ -92,7 +92,11 @@ begin
   begin
     PrimaryHeight := PrimaryHeight - MessagePanelHeight
   end;
-  mutable var Width: integer := (PrimaryWidth - 2) div 2;
+  mutable var Width: integer := PrimaryWidth - 2;
+  if not State.HasVisibleState or (State.View = ViewKind.Map) then
+  begin
+    Width := Width div 2
+  end;
   mutable var Height: integer := PrimaryHeight - 2;
   if Width < 1 then
   begin
@@ -240,6 +244,58 @@ begin
       mutable var Next: ClientModel := State;
       Next.Pending := true;
       Next.Status := 'Moving...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+function QueueFirstPersonStep(State: ClientModel; Direction: FirstPersonStepDirection): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.StepFirstPerson(Direction)) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := 'Moving one field...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+function QueueFirstPersonTurn(State: ClientModel; Direction: FirstPersonTurnDirection): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.TurnFirstPerson(Direction)) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := 'Turning...';
       return Next
     end
     else
@@ -402,22 +458,55 @@ begin
 
   if HasCharacter(Key, 'a', 'A') then
   begin
+    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
+    begin
+      return QueueFirstPersonStep(State, FirstPersonStepDirection.Left)
+    end;
+
     return QueueMove(State, -1, 0)
   end;
 
   if HasCharacter(Key, 'd', 'D') then
   begin
+    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
+    begin
+      return QueueFirstPersonStep(State, FirstPersonStepDirection.Right)
+    end;
+
     return QueueMove(State, 1, 0)
   end;
 
   if HasCharacter(Key, 'w', 'W') then
   begin
+    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
+    begin
+      return QueueFirstPersonStep(State, FirstPersonStepDirection.Forward)
+    end;
+
     return QueueMove(State, 0, -1)
   end;
 
   if HasCharacter(Key, 's', 'S') then
   begin
+    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
+    begin
+      return QueueFirstPersonStep(State, FirstPersonStepDirection.Backward)
+    end;
+
     return QueueMove(State, 0, 1)
+  end;
+
+  if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
+  begin
+    if HasCharacter(Key, 'q', 'Q') then
+    begin
+      return QueueFirstPersonTurn(State, FirstPersonTurnDirection.Left)
+    end;
+
+    if HasCharacter(Key, 'e', 'E') then
+    begin
+      return QueueFirstPersonTurn(State, FirstPersonTurnDirection.Right)
+    end
   end;
 
   return State
@@ -536,13 +625,31 @@ begin
         end;
         VisibleState.FirstPersonState(FirstPersonValue):
         begin
+          Next.OriginX := 0;
+          Next.OriginY := 0;
+          Next.Width := FirstPersonValue.Width;
+          Next.Height := FirstPersonValue.Height;
+          Next.Rows := FirstPersonValue.Rows;
+          Next.PlayerX := FirstPersonValue.PlayerX;
+          Next.PlayerY := FirstPersonValue.PlayerY;
+          Next.WorldX := 0;
+          Next.WorldY := 0;
+          Next.FirstPersonFacing := FirstPersonValue.Facing;
           Next.PrimaryTitle := FirstPersonValue.Title;
           Next.PrimaryStatus := FirstPersonValue.Status
         end
       end;
 
       Next.Pending := false;
-      Next.Status := 'Connected';
+      if Next.View = ViewKind.FirstPerson then
+      begin
+        Next.Status := Next.PrimaryStatus
+      end
+      else
+      begin
+        Next.Status := 'Connected'
+      end;
+
       return QueueViewport(Next)
     end;
     ClientEvent.Rejected(Message):
@@ -734,15 +841,21 @@ end;
 
 function ViewFirstPerson(State: ClientModel): TuiElement;
 begin
-  return TuiElementBuilders.MakePanel('First-person view', [
-                                                             TuiElementBuilders.MakeColumn([
-                                                                                             TuiElementBuilders.MakeLabel(State.PrimaryTitle),
-                                                                                             TuiElementBuilders.MakeLabel(''),
-                                                                                             TuiElementBuilders.MakeLabel('The passage continues into darkness.'),
-                                                                                             TuiElementBuilders.MakeLabel(''),
-                                                                                             TuiElementBuilders.MakeLabel(State.PrimaryStatus)
-                                                                                           ])
-                                                           ])
+  var Viewport: WorldViewport := DesiredWorldViewport(State);
+  var Value: FirstPersonVisibleState := record
+    Title := State.PrimaryTitle;
+    Status := State.PrimaryStatus;
+    Width := State.Width;
+    Height := State.Height;
+    Rows := State.Rows;
+    PlayerX := State.PlayerX;
+    PlayerY := State.PlayerY;
+    Facing := State.FirstPersonFacing;
+  end;
+
+  return TuiElementBuilders.MakePanel(State.PrimaryTitle, [
+                                                            TuiElementBuilders.MakeCellGrid(RenderFirstPersonGrid(Value, Viewport.Width, Viewport.Height))
+                                                          ])
 end;
 
 function ViewPrimary(State: ClientModel): TuiElement;
@@ -753,6 +866,28 @@ begin
   end;
 
   return ViewMap(State)
+end;
+
+function FacingLabel(Value: FirstPersonFacing): string;
+begin
+  case Value of
+    FirstPersonFacing.North:
+    begin
+      return 'north'
+    end;
+    FirstPersonFacing.East:
+    begin
+      return 'east'
+    end;
+    FirstPersonFacing.South:
+    begin
+      return 'south'
+    end;
+    FirstPersonFacing.West:
+    begin
+      return 'west'
+    end
+  end
 end;
 
 function ViewContext(State: ClientModel): TuiElement;
@@ -767,7 +902,9 @@ begin
     end
     else
     begin
-      Location := State.PrimaryTitle
+      Location := State.PrimaryTitle;
+      Position := (((IntToStr(State.PlayerX) + ', ') + IntToStr(State.PlayerY)) + ' facing ') +
+                  FacingLabel(State.FirstPersonFacing)
     end
   end;
 
@@ -846,6 +983,11 @@ begin
   if not State.HasVisibleState or (State.View = ViewKind.Map) then
   begin
     Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('WASD', 'Move'))
+  end
+  else
+  begin
+    Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('WASD', 'Step'));
+    Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('Q/E', 'Turn'))
   end;
 
   Std.Arrays.Push(Items, TuiStatusItemBuilders.MakeKeyHint('Enter', 'Enter/leave'));
@@ -924,6 +1066,12 @@ begin
   if not State.HasVisibleState or (State.View = ViewKind.Map) then
   begin
     Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('WASD   Move'))
+  end
+  else
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('W/S    Forward/back one field'));
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('A/D    Left/right one field'));
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Q/E    Turn left/right 90 degrees'))
   end;
 
   Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Enter  Enter/leave'));

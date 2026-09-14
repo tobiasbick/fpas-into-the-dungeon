@@ -1,9 +1,8 @@
 # Client UI
 
-This document defines the initial terminal client's presentation and
-interaction foundation. It describes the stable shell shared by the current map
-view and later first-person views without fixing the final visual design or
-gameplay-specific panels.
+This document defines the terminal client's presentation and interaction
+foundation. It describes the stable shell shared by the map and first-person
+views without fixing the final visual design or gameplay-specific panels.
 
 Every client screen, frame, panel, menu, and overlay is implemented with
 Functional Pascal's TUI facilities. The client has no separate GUI or web
@@ -132,11 +131,20 @@ separate simulation.
 ## First-person view
 
 Entered interiors and dungeons use a first-person view. The initial dungeon is
-rendered as a framed placeholder inside the same screen shell. Its server state
-contains only a title and instruction; it has no map dimensions, rows, or
-coordinates. `Enter` returns to the exact outdoor entrance. Terminal raycasting
-and first-person movement begin with the next roadmap stage; map rows are never
-reinterpreted as first-person geometry by the client.
+rendered with terminal raycasting inside the same framed screen shell. Its
+server state supplies validated bounded field rows, dimensions, the area-local
+player coordinate, cardinal facing, title, and status. The client derives a
+cardinal camera and fills the primary view with colored ceiling, floor, and
+distance-shaded walls. The exit is visible with a gold tint. Outdoor map rows
+are never reinterpreted as first-person geometry.
+
+First-person movement remains tile-based and server-authoritative. `W` and `S`
+request a move by exactly one field forward or backward relative to the current
+facing direction. `A` and `D` request a one-field step to the left or right.
+`Q` and `E` request a 90-degree turn on the occupied field. A blocked move
+leaves both position and facing unchanged. Holding a key may produce separate
+intentions, but it never creates continuous movement, fractional coordinates,
+or arbitrary viewing angles.
 
 ## System menu
 
@@ -150,10 +158,13 @@ server or other players that may exist later.
 
 ## Controls
 
-- `W`, `A`, `S`, and `D` request cardinal movement in the map view.
-- `Enter` activates an entrance under the player or leaves the current
-  placeholder dungeon. Walking onto an entrance does not activate it.
-- `Q` and `E` are reserved for the later first-person movement scheme.
+- `W`, `A`, `S`, and `D` request cardinal one-field movement in the map view.
+- `Enter` activates an entrance under the player or leaves a first-person area
+  while the player occupies its exit field. Walking onto an entrance or exit
+  does not activate it.
+- In the first-person view, `W` and `S` move one field forward or backward,
+  `A` and `D` step one field left or right, and `Q` and `E` turn 90 degrees
+  left or right without changing fields.
 - `Ctrl+P` opens or closes the system menu.
 - `Escape` closes the active overlay.
 - `Alt+X` requests a clean disconnect and exits the client.
@@ -170,12 +181,13 @@ Mouse input and remappable keys are not yet defined.
 
 ## Terminal size
 
-The client derives its requested world-cell width from the primary view's
-terminal columns divided by two, after panel and border space. It similarly
-accounts for the framed status view, map border, and optional message panel when
-requesting height. It sends this size on connect and whenever terminal size or
-docked-panel visibility changes. The server may clamp it to its configured
-limit.
+For a map view, the client derives its requested world-cell width from the
+primary view's terminal columns divided by two, after panel and border space.
+For a first-person view, every available primary-view terminal column is one
+rendered ray column. Both view families account for the framed status view,
+primary border, and optional message panel when requesting height. The client
+sends this size on connect and whenever terminal size or docked-panel
+visibility changes. The server may clamp it to its configured limit.
 
 The client hides the context panel first when horizontal space is insufficient
 and hides the optional message panel when vertical space is insufficient. The
@@ -201,6 +213,6 @@ The client UI foundation is complete when:
 - client projects do not import server-owned game rules; and
 - the implementation and this document describe the same behavior.
 
-Title artwork, complete inventory, combat UI, dialogue UI, first-person
-styling, and accessibility conventions are deferred until their corresponding
-gameplay slices are planned.
+Title artwork, complete inventory, combat UI, dialogue UI, textured or final
+first-person styling, and accessibility conventions are deferred until their
+corresponding gameplay slices are planned.

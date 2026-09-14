@@ -71,13 +71,101 @@ begin
          (MaximumIntersectingChunks(Config.MaximumViewHeight) + 2)
 end;
 
+function ProtocolFacing(Value: FacingDirection): FirstPersonFacing;
+begin
+  case Value of
+    FacingDirection.North:
+    begin
+      return FirstPersonFacing.North
+    end;
+    FacingDirection.East:
+    begin
+      return FirstPersonFacing.East
+    end;
+    FacingDirection.South:
+    begin
+      return FirstPersonFacing.South
+    end;
+    FacingDirection.West:
+    begin
+      return FirstPersonFacing.West
+    end
+  end
+end;
+
+function GameStep(Value: FirstPersonStepDirection): RelativeStep;
+begin
+  case Value of
+    FirstPersonStepDirection.Forward:
+    begin
+      return RelativeStep.Forward
+    end;
+    FirstPersonStepDirection.Backward:
+    begin
+      return RelativeStep.Backward
+    end;
+    FirstPersonStepDirection.Left:
+    begin
+      return RelativeStep.Left
+    end;
+    FirstPersonStepDirection.Right:
+    begin
+      return RelativeStep.Right
+    end
+  end
+end;
+
+function GameTurn(Value: FirstPersonTurnDirection): RelativeTurn;
+begin
+  case Value of
+    FirstPersonTurnDirection.Left:
+    begin
+      return RelativeTurn.TurnLeft
+    end;
+    FirstPersonTurnDirection.Right:
+    begin
+      return RelativeTurn.TurnRight
+    end
+  end
+end;
+
+function InteriorRows(Map: InteriorMap): array of string;
+begin
+  mutable var Rows: array of string := [];
+  for Y: integer := 0 to Map.Height - 1 do
+  begin
+    mutable var Row: string := '';
+    for X: integer := 0 to Map.Width - 1 do
+    begin
+      Row := Row + InteriorCellCode(Map.Cells[(Y * Map.Width) + X])
+    end;
+
+    Std.Arrays.Push(Rows, Row)
+  end;
+
+  return Rows
+end;
+
 function ProjectSession(World: WorldSession; State: GameState; Viewport: ViewportSize): result of SessionProjection, string;
 begin
   if State.Area = AreaKind.Dungeon then
   begin
+    var Map: InteriorMap := try InitialDungeonMap();
+    var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
+    mutable var Status: string := 'Find the gold exit field.';
+    if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
+    begin
+      Status := 'Press Enter to return to the outdoor region.'
+    end;
     var FirstPersonValue: FirstPersonVisibleState := record
       Title := World.Metadata.DungeonAreaLabel;
-      Status := 'Press Enter to return to the outdoor region.';
+      Status := Status;
+      Width := Map.Width;
+      Height := Map.Height;
+      Rows := InteriorRows(Map);
+      PlayerX := Pose.Position.X;
+      PlayerY := Pose.Position.Y;
+      Facing := ProtocolFacing(Pose.Facing);
     end;
 
     return Ok(record
@@ -86,6 +174,7 @@ begin
     end)
   end;
   var Loaded: WindowLoad := try LoadVisibleWindow(World, State, Viewport.Width, Viewport.Height);
+  var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(State);
   var MapValue: MapVisibleState := record
     OriginX := Loaded.Window.OriginX;
     OriginY := Loaded.Window.OriginY;
@@ -94,8 +183,8 @@ begin
     Rows := Loaded.Window.Rows;
     PlayerX := Loaded.Window.PlayerX;
     PlayerY := Loaded.Window.PlayerY;
-    WorldX := State.Player.X;
-    WorldY := State.Player.Y;
+    WorldX := OutdoorPosition.X;
+    WorldY := OutdoorPosition.Y;
   end;
 
   return Ok(record
@@ -246,6 +335,34 @@ begin
                   Error(Reason):
                   begin
                     var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                  end
+                end
+              end;
+              ClientMessage.StepFirstPerson(Direction):
+              begin
+                case Dungeon.Game.StepFirstPerson(World.Metadata, State, GameStep(Direction)) of
+                  Ok(Stepped):
+                  begin
+                    State := Stepped;
+                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
+                  end;
+                  Error(Reason):
+                  begin
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                  end
+                end
+              end;
+              ClientMessage.TurnFirstPerson(Direction):
+              begin
+                case Dungeon.Game.TurnFirstPerson(World.Metadata, State, GameTurn(Direction)) of
+                  Ok(Turned):
+                  begin
+                    State := Turned;
+                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
+                  end;
+                  Error(Reason):
+                  begin
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('turn_rejected', Reason), Token)
                   end
                 end
               end;

@@ -1,0 +1,226 @@
+// Pure terminal raycasting for validated first-person protocol states.
+unit Dungeon.Client.Raycast;
+
+uses Dungeon.Protocol, Std.Arrays, Std.Conv, Std.Math, Std.Str, Std.Tui;
+
+public type
+  // Nearest wall intersection for one camera-plane ray.
+  FirstPersonRayHit = record
+    // Perpendicular grid distance used for perspective-correct wall height.
+    public Distance: real;
+    // Client-safe code of the intersected opaque field.
+    public FieldCode: string;
+    // Whether the ray crossed a vertical wall plane rather than a horizontal one.
+    public VerticalSide: boolean;
+    // Whether the ray crossed the traversable exit before reaching the wall.
+    public SawExit: boolean;
+  end;
+
+const
+  CameraPlaneScale: real := 0.66;
+  MinimumRayDistance: real := 0.0001;
+  TerminalAspectCorrection: real := 0.58;
+
+function FieldAt(Value: FirstPersonVisibleState; X: integer; Y: integer): string;
+begin
+  if ((X < 0) or (X >= Value.Width)) or ((Y < 0) or (Y >= Value.Height)) then
+  begin
+    return '#'
+  end;
+
+  return Std.Str.CharAt(Value.Rows[Y], X)
+end;
+
+function CameraDirection(Value: FirstPersonFacing): array of real;
+begin
+  case Value of
+    FirstPersonFacing.North:
+    begin
+      return [0.0, -1.0, CameraPlaneScale, 0.0]
+    end;
+    FirstPersonFacing.East:
+    begin
+      return [1.0, 0.0, 0.0, CameraPlaneScale]
+    end;
+    FirstPersonFacing.South:
+    begin
+      return [0.0, 1.0, - CameraPlaneScale, 0.0]
+    end;
+    FirstPersonFacing.West:
+    begin
+      return [-1.0, 0.0, 0.0, - CameraPlaneScale]
+    end
+  end
+end;
+
+// Casts one ray through camera-plane coordinate -1 through 1 in a validated state.
+public function CastFirstPersonRay(Value: FirstPersonVisibleState; CameraX: real): FirstPersonRayHit;
+begin
+  var Camera: array of real := CameraDirection(Value.Facing);
+  var PositionX: real := IntToReal(Value.PlayerX) + 0.5;
+  var PositionY: real := IntToReal(Value.PlayerY) + 0.5;
+  var RayDirectionX: real := Camera[0] + (Camera[2] * CameraX);
+  var RayDirectionY: real := Camera[1] + (Camera[3] * CameraX);
+  mutable var MapX: integer := Value.PlayerX;
+  mutable var MapY: integer := Value.PlayerY;
+  mutable var DeltaDistanceX: real := 1000000.0;
+  mutable var DeltaDistanceY: real := 1000000.0;
+  if RayDirectionX <> 0.0 then
+  begin
+    DeltaDistanceX := Std.Math.Abs(1.0 / RayDirectionX)
+  end;
+
+  if RayDirectionY <> 0.0 then
+  begin
+    DeltaDistanceY := Std.Math.Abs(1.0 / RayDirectionY)
+  end;
+  mutable var StepX: integer := 1;
+  mutable var SideDistanceX: real := (IntToReal(MapX + 1) - PositionX) * DeltaDistanceX;
+  if RayDirectionX < 0.0 then
+  begin
+    StepX := -1;
+    SideDistanceX := (PositionX - IntToReal(MapX)) * DeltaDistanceX
+  end;
+  mutable var StepY: integer := 1;
+  mutable var SideDistanceY: real := (IntToReal(MapY + 1) - PositionY) * DeltaDistanceY;
+  if RayDirectionY < 0.0 then
+  begin
+    StepY := -1;
+    SideDistanceY := (PositionY - IntToReal(MapY)) * DeltaDistanceY
+  end;
+  mutable var VerticalSide: boolean := false;
+  mutable var Hit: boolean := false;
+  mutable var FieldCode: string := '#';
+  mutable var SawExit: boolean := FieldAt(Value, MapX, MapY) = 'x';
+  mutable var Iterations: integer := 0;
+  while (not Hit) and (Iterations <= (Value.Width * Value.Height) + 1) do
+  begin
+    if SideDistanceX < SideDistanceY then
+    begin
+      SideDistanceX := SideDistanceX + DeltaDistanceX;
+      MapX := MapX + StepX;
+      VerticalSide := true
+    end
+    else
+    begin
+      SideDistanceY := SideDistanceY + DeltaDistanceY;
+      MapY := MapY + StepY;
+      VerticalSide := false
+    end;
+
+    FieldCode := FieldAt(Value, MapX, MapY);
+    if FieldCode = 'x' then
+    begin
+      SawExit := true
+    end;
+
+    Hit := FieldCode = '#';
+    Iterations := Iterations + 1
+  end;
+  mutable var Distance: real := SideDistanceY - DeltaDistanceY;
+  if VerticalSide then
+  begin
+    Distance := SideDistanceX - DeltaDistanceX
+  end;
+
+  if Distance < MinimumRayDistance then
+  begin
+    Distance := MinimumRayDistance
+  end;
+
+  return record
+    Distance := Distance;
+    FieldCode := FieldCode;
+    VerticalSide := VerticalSide;
+    SawExit := SawExit;
+  end
+end;
+
+function SolidCell(Red: integer; Green: integer; Blue: integer): TuiCell;
+begin
+  var Color: TuiColor := TuiColor.FromRgb(Red, Green, Blue);
+  return TuiCell.Styled(' ', TuiStyle.FromColors(Color, Color))
+end;
+
+function WallCell(Hit: FirstPersonRayHit): TuiCell;
+begin
+  mutable var Shade: integer := 218 - Trunc(Hit.Distance * 22.0);
+  Shade := Std.Math.Clamp(Shade, 48, 218);
+  if Hit.VerticalSide then
+  begin
+    Shade := (Shade * 4) div 5
+  end;
+
+  if Hit.SawExit then
+  begin
+    return SolidCell(Shade, (Shade * 3) div 4, Shade div 5)
+  end;
+
+  return SolidCell(Shade, (Shade * 9) div 10, (Shade * 4) div 5)
+end;
+
+// Renders a complete ceiling, wall, and floor grid for a non-negative terminal size.
+public function RenderFirstPersonGrid(Value: FirstPersonVisibleState; Width: integer; Height: integer): TuiCellGrid;
+begin
+  mutable var SafeWidth: integer := Width;
+  mutable var SafeHeight: integer := Height;
+  if SafeWidth < 0 then
+  begin
+    SafeWidth := 0
+  end;
+
+  if SafeHeight < 0 then
+  begin
+    SafeHeight := 0
+  end;
+  mutable var Cells: array of TuiCell := [];
+  for Y: integer := 0 to SafeHeight - 1 do
+  begin
+    for X: integer := 0 to SafeWidth - 1 do
+    begin
+      mutable var CameraX: real := 0.0;
+      if SafeWidth > 1 then
+      begin
+        CameraX := ((2.0 * IntToReal(X)) / IntToReal(SafeWidth - 1)) - 1.0
+      end;
+      var Hit: FirstPersonRayHit := CastFirstPersonRay(Value, CameraX);
+      mutable var WallHeight: integer := Trunc((IntToReal(SafeHeight) * TerminalAspectCorrection) /
+                                               Hit.Distance);
+      if WallHeight < 1 then
+      begin
+        WallHeight := 1
+      end;
+
+      if WallHeight > SafeHeight then
+      begin
+        WallHeight := SafeHeight
+      end;
+      var WallTop: integer := (SafeHeight - WallHeight) div 2;
+      var WallBottom: integer := WallTop + WallHeight;
+      if Y < WallTop then
+      begin
+        Std.Arrays.Push(Cells, SolidCell(12, 16, 25))
+      end
+      else
+      begin
+        if Y < WallBottom then
+        begin
+          Std.Arrays.Push(Cells, WallCell(Hit))
+        end
+        else
+        begin
+          if FieldAt(Value, Value.PlayerX, Value.PlayerY) = 'x' then
+          begin
+            Std.Arrays.Push(Cells, SolidCell(92, 68, 20))
+          end
+          else
+          begin
+            Std.Arrays.Push(Cells, SolidCell(38, 34, 31))
+          end
+        end
+      end
+    end
+  end;
+
+  return TuiCellGrid.Create(SafeWidth, SafeHeight, Cells)
+end;

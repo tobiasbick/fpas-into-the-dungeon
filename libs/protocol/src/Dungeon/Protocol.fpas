@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 3;
+  ProtocolVersion: integer := 4;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
 
@@ -14,6 +14,25 @@ public type
   ViewKind = enum
     Map;
     FirstPerson;
+  end;
+  // Cardinal player orientation carried by a first-person visible state.
+  FirstPersonFacing = enum
+    North;
+    East;
+    South;
+    West;
+  end;
+  // Relative one-field first-person translation requested by the client.
+  FirstPersonStepDirection = enum
+    Forward;
+    Backward;
+    Left;
+    Right;
+  end;
+  // Relative 90-degree first-person rotation requested by the client.
+  FirstPersonTurnDirection = enum
+    Left;
+    Right;
   end;
   // Client-safe map projection; dimensions, rows, and player coordinates must agree.
   MapVisibleState = record
@@ -27,10 +46,16 @@ public type
     public WorldX: integer;
     public WorldY: integer;
   end;
-  // Minimal presentation supplied while finite first-person geometry is deferred.
+  // Client-safe bounded interior geometry and pose used by the first-person renderer.
   FirstPersonVisibleState = record
     public Title: string;
     public Status: string;
+    public Width: integer;
+    public Height: integer;
+    public Rows: array of string;
+    public PlayerX: integer;
+    public PlayerY: integer;
+    public Facing: FirstPersonFacing;
   end;
   // View-specific server projection; map-only fields cannot occur in a first-person state.
   VisibleState = enum
@@ -42,6 +67,8 @@ public type
     Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
     Viewport(Width: integer; Height: integer);
     Move(DeltaX: integer; DeltaY: integer);
+    StepFirstPerson(Direction: FirstPersonStepDirection);
+    TurnFirstPerson(Direction: FirstPersonTurnDirection);
     ActivateAreaTransition;
     Disconnect;
   end;
@@ -99,6 +126,134 @@ begin
   end
 end;
 
+function FirstPersonFacingName(Value: FirstPersonFacing): string;
+begin
+  case Value of
+    FirstPersonFacing.North:
+    begin
+      return 'north'
+    end;
+    FirstPersonFacing.East:
+    begin
+      return 'east'
+    end;
+    FirstPersonFacing.South:
+    begin
+      return 'south'
+    end;
+    FirstPersonFacing.West:
+    begin
+      return 'west'
+    end
+  end
+end;
+
+function DecodeFirstPersonFacing(Value: string): result of FirstPersonFacing, string;
+begin
+  case Value of
+    'north':
+    begin
+      return Ok(FirstPersonFacing.North)
+    end;
+    'east':
+    begin
+      return Ok(FirstPersonFacing.East)
+    end;
+    'south':
+    begin
+      return Ok(FirstPersonFacing.South)
+    end;
+    'west':
+    begin
+      return Ok(FirstPersonFacing.West)
+    end
+    else
+    begin
+      return Error('unknown first-person facing direction')
+    end
+  end
+end;
+
+function FirstPersonStepName(Value: FirstPersonStepDirection): string;
+begin
+  case Value of
+    FirstPersonStepDirection.Forward:
+    begin
+      return 'forward'
+    end;
+    FirstPersonStepDirection.Backward:
+    begin
+      return 'backward'
+    end;
+    FirstPersonStepDirection.Left:
+    begin
+      return 'left'
+    end;
+    FirstPersonStepDirection.Right:
+    begin
+      return 'right'
+    end
+  end
+end;
+
+function DecodeFirstPersonStep(Value: string): result of FirstPersonStepDirection, string;
+begin
+  case Value of
+    'forward':
+    begin
+      return Ok(FirstPersonStepDirection.Forward)
+    end;
+    'backward':
+    begin
+      return Ok(FirstPersonStepDirection.Backward)
+    end;
+    'left':
+    begin
+      return Ok(FirstPersonStepDirection.Left)
+    end;
+    'right':
+    begin
+      return Ok(FirstPersonStepDirection.Right)
+    end
+    else
+    begin
+      return Error('unknown first-person step direction')
+    end
+  end
+end;
+
+function FirstPersonTurnName(Value: FirstPersonTurnDirection): string;
+begin
+  case Value of
+    FirstPersonTurnDirection.Left:
+    begin
+      return 'left'
+    end;
+    FirstPersonTurnDirection.Right:
+    begin
+      return 'right'
+    end
+  end
+end;
+
+function DecodeFirstPersonTurn(Value: string): result of FirstPersonTurnDirection, string;
+begin
+  case Value of
+    'left':
+    begin
+      return Ok(FirstPersonTurnDirection.Left)
+    end;
+    'right':
+    begin
+      return Ok(FirstPersonTurnDirection.Right)
+    end
+    else
+    begin
+      return Error('unknown first-person turn direction')
+    end
+  end
+end;
+
 function IsVisibleCellCode(Value: string): boolean;
 begin
   case Value of
@@ -147,6 +302,11 @@ begin
       return false
     end
   end
+end;
+
+function IsFirstPersonCellCode(Value: string): boolean;
+begin
+  return (Value = '#') or ((Value = '.') or (Value = 'x'))
 end;
 
 function EncodeRows(Rows: array of string): array of JsonValue;
@@ -245,6 +405,54 @@ begin
     return Error('first-person state status must not be empty')
   end;
 
+  if (Value.Width <= 0) or (Value.Height <= 0) then
+  begin
+    return Error('first-person dimensions must be positive')
+  end;
+
+  if Std.Arrays.Length(Value.Rows) <> Value.Height then
+  begin
+    return Error('first-person row count must match height')
+  end;
+  mutable var ExitCount: integer := 0;
+  for Row: string in Value.Rows do
+  begin
+    if Std.Str.Length(Row) <> Value.Width then
+    begin
+      return Error('first-person row width must match width')
+    end;
+
+    for Index: integer := 0 to Std.Str.Length(Row) - 1 do
+    begin
+      var Code: string := Std.Str.CharAt(Row, Index);
+      if not IsFirstPersonCellCode(Code) then
+      begin
+        return Error('first-person row contains an unknown field code')
+      end;
+
+      if Code = 'x' then
+      begin
+        ExitCount := ExitCount + 1
+      end
+    end
+  end;
+
+  if ExitCount <> 1 then
+  begin
+    return Error('first-person state must contain exactly one exit field')
+  end;
+
+  if (((Value.PlayerX < 0) or (Value.PlayerX >= Value.Width)) or (Value.PlayerY < 0)) or
+     (Value.PlayerY >= Value.Height) then
+  begin
+    return Error('first-person player position is outside the area')
+  end;
+
+  if Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#' then
+  begin
+    return Error('first-person player position must be traversable')
+  end;
+
   return Ok(Value)
 end;
 
@@ -327,6 +535,14 @@ begin
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('move'), 'dx': JsonValue.Number(IntToReal(DeltaX)), 'dy': JsonValue.Number(IntToReal(DeltaY))]))
     end;
+    ClientMessage.StepFirstPerson(Direction):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('first_person_step'), 'direction': JsonValue.String(FirstPersonStepName(Direction))]))
+    end;
+    ClientMessage.TurnFirstPerson(Direction):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('first_person_turn'), 'direction': JsonValue.String(FirstPersonTurnName(Direction))]))
+    end;
     ClientMessage.ActivateAreaTransition:
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('activate_area_transition')]))
@@ -354,6 +570,24 @@ begin
     'move':
     begin
       return Ok(ClientMessage.Move(try IntegerField(Fields, 'dx'), try IntegerField(Fields, 'dy')))
+    end;
+    'first_person_step':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 2 then
+      begin
+        return Error('first_person_step must contain only type and direction')
+      end;
+
+      return Ok(ClientMessage.StepFirstPerson(try DecodeFirstPersonStep(try StringField(Fields, 'direction'))))
+    end;
+    'first_person_turn':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 2 then
+      begin
+        return Error('first_person_turn must contain only type and direction')
+      end;
+
+      return Ok(ClientMessage.TurnFirstPerson(try DecodeFirstPersonTurn(try StringField(Fields, 'direction'))))
     end;
     'activate_area_transition':
     begin
@@ -392,7 +626,7 @@ begin
         end;
         VisibleState.FirstPersonState(FirstPersonValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status)]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing))]))
         end
       end
     end;
@@ -437,13 +671,19 @@ begin
         end;
         ViewKind.FirstPerson:
         begin
-          if Std.Dictionaries.Length(Fields) <> 4 then
+          if Std.Dictionaries.Length(Fields) <> 10 then
           begin
-            return Error('first-person state must contain only type, view, title, and status')
+            return Error('first-person state has an unexpected field set')
           end;
           var FirstPersonValue: FirstPersonVisibleState := record
             Title := try StringField(Fields, 'title');
             Status := try StringField(Fields, 'status');
+            Width := try IntegerField(Fields, 'width');
+            Height := try IntegerField(Fields, 'height');
+            Rows := try StringArrayField(Fields, 'rows');
+            PlayerX := try IntegerField(Fields, 'x');
+            PlayerY := try IntegerField(Fields, 'y');
+            Facing := try DecodeFirstPersonFacing(try StringField(Fields, 'facing'));
           end;
 
           return Ok(ServerMessage.State(VisibleState.FirstPersonState(try ValidateFirstPersonVisibleState(FirstPersonValue))))

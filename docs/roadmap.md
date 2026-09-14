@@ -65,22 +65,32 @@ area rules.
 
 The first implementation places one deterministic dungeon entrance exactly
 three traversable steps from spawn. `Enter` changes between the outdoor map and
-a framed first-person placeholder while the server retains the exact return
+a distinct first-person state while the server retains the exact return
 location. World, protocol, TUI, and loopback tests cover both directions.
 
 See [area transitions](architecture/area-transitions.md).
 
-## 6. First-person interior slice — NEXT
+## 6. First-person interior slice — DONE
 
-Render one small entered interior with terminal raycasting and support the
-minimum movement needed to explore it. The same view family will later serve
-houses, castles, and dungeons.
+Render one small entered interior with terminal raycasting and grid-based
+first-person movement. The player always occupies one whole field. A movement
+intention advances by at most one field, and turning changes the cardinal
+facing direction in 90-degree steps without changing position. Free,
+continuous movement and arbitrary view angles are explicitly outside the game
+model. The same view family will later serve houses, castles, and dungeons.
 
-This stage is complete when the interior can be entered, navigated, and left in
-an end-to-end test. Final visual style, combat, and generated dungeons remain
-outside this stage.
+This stage is complete when the interior can be entered, navigated one field at
+a time, turned through all four facing directions, blocked by solid fields, and
+left in an end-to-end test. Final visual style, combat, and generated dungeons
+remain outside this stage.
 
-## 7. Persistent game state — LATER
+The implemented slice uses one validated 11 by 9 dungeon, server-authoritative
+relative steps and cardinal turns, a visible exit field, and a pure truecolor
+terminal raycaster. Unit, protocol, headless-TUI, loopback, full-session, and
+real-process smoke tests cover the complete path. See
+[first-person interior](architecture/first-person-interior.md).
+
+## 7. Persistent game state — NEXT
 
 Save and restore the selected world and authoritative player state below the
 configured runtime-data root. The storage format must be versioned and updates
