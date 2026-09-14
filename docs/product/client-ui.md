@@ -56,7 +56,7 @@ and a persistent framed status view:
 ├──────────────────────────────────────┴───────────────────┤
 │ Optional message panel                                   │
 ├──────────────────────────────────────────────────────────┤
-│ Connection, action status, message, or error             │
+│ ctrl-p | Connection, action status, message, or error    │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -66,9 +66,10 @@ It contains summaries rather than the complete inventory or another full game
 screen.
 
 The context and message panels can be shown or hidden. The framed status view
-remains visible with one content line because it carries connection feedback,
-pending actions, and errors. Hidden panels remain reachable as overlays when
-the terminal cannot fit them beside or below the primary view.
+remains visible with one content line in the form `ctrl-p | <current message>`.
+The current message carries connection feedback, pending actions, and errors;
+detailed key bindings remain in the system menu. Hidden panels remain reachable
+as overlays when the terminal cannot fit them beside or below the primary view.
 
 ## Client states
 
