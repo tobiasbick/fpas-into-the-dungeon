@@ -20,7 +20,7 @@ succeeds.
 
 ## Protocol and server projection
 
-Protocol version `4` carries distinct intentions for a relative one-field step
+Protocol version `5` carries distinct intentions for a relative one-field step
 (`forward`, `backward`, `left`, or `right`) and a 90-degree turn (`left` or
 `right`). Outdoor cardinal movement remains a separate message.
 
@@ -49,8 +49,8 @@ view.
 
 ## Persistence and lifecycle
 
-This slice does not change the persisted world or chunk schemas. The fixed
-interior is current program data and the active interior pose is session state,
-so world format `2`, chunk format `2`, and generator version `5` remain
-unchanged. Reconnecting deliberately starts a new session at the stable outdoor
-spawn; player-session persistence belongs to roadmap point 7.
+The fixed interior remains current program data, so world format `2`, chunk
+format `2`, and generator version `5` remain unchanged. Savegame format `1`
+persists the active interior area ID, local field, cardinal facing, and exact
+outdoor return location. Reconnecting does not restore it implicitly: the
+connected start screen requires an explicit new-game or load choice.

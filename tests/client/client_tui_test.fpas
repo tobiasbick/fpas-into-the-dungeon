@@ -2,7 +2,8 @@
 program DungeonClientTuiTest;
 
 uses
-  Dungeon.Client, Dungeon.Protocol, Std.Options, Std.Results, Std.Str, Std.Task, Std.Test, Std.Tui;
+  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Options, Std.Results, Std.Str, Std.Task,
+  Std.Test, Std.Tui;
 
 const
   ConnectControlId: integer := 1;
@@ -36,7 +37,7 @@ end;
 begin
   var StartRequests: channel of ClientMessage := CreateChannel(2);
   var StartEvents: channel of ClientEvent := CreateChannel(2);
-  mutable var StartModel: ClientModel := NewClientModel('127.0.0.1', 4040, StartRequests, StartEvents);
+  mutable var StartModel: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), StartRequests, StartEvents);
   var StartApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
   StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 0, 0);
   var StartSurface: TuiSurfaceSnapshot := StartApp.SurfaceSnapshot();
@@ -55,17 +56,26 @@ begin
   StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 1, 0);
   AssertTrue(StartModel.Overlay = ClientOverlay.NoOverlay);
   AssertTrue(ScreenContains(StartApp.SurfaceSnapshot(), 'Connect'));
+  StartModel := UpdateClientEvent(StartModel, ClientEvent.Connected(false, false), TuiCmdOutput.Create());
+  StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(StartApp.SurfaceSnapshot(), 'New game'));
+  AssertFalse(ScreenContains(StartApp.SurfaceSnapshot(), 'Load'));
+  StartModel := UpdateClientEvent(StartModel, ClientEvent.Connected(false, true), TuiCmdOutput.Create());
+  StartModel := StartApp.RunIterations(StartModel, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(StartApp.SurfaceSnapshot(), 'Invalid saved game was removed.'));
+  AssertTrue(ScreenContains(StartApp.SurfaceSnapshot(), 'New game'));
+  AssertFalse(ScreenContains(StartApp.SurfaceSnapshot(), 'Load'));
   StartApp.Close();
   CloseChannel(StartRequests);
   CloseChannel(StartEvents);
   var ConnectingRequests: channel of ClientMessage := CreateChannel(2);
   var ConnectingEvents: channel of ClientEvent := CreateChannel(2);
-  mutable var ConnectingModel: ClientModel := NewClientModel('127.0.0.1', 4040, ConnectingRequests, ConnectingEvents);
+  mutable var ConnectingModel: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), ConnectingRequests, ConnectingEvents);
   var ConnectingCmd: TuiCmdOutput := TuiCmdOutput.Create();
   ConnectingModel := UpdateClient(ConnectingModel, TuiMsg.Action(TuiControlId.Create(ConnectControlId), TuiAction.Create(ConnectAction)), ConnectingCmd);
   var ConnectingApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
   ConnectingModel := ConnectingApp.RunIterations(ConnectingModel, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ConnectingModel.Screen = ClientScreen.GameScreen);
+  AssertTrue(ConnectingModel.Screen = ClientScreen.StartScreen);
   AssertTrue(ConnectingModel.ConnectionPhase = ClientConnectionPhase.Connecting);
   AssertTrue(ScreenContains(ConnectingApp.SurfaceSnapshot(), 'Connecting to 127.0.0.1:4040'));
   ConnectingApp.Close();
@@ -73,15 +83,31 @@ begin
   CloseChannel(ConnectingEvents);
   var Requests: channel of ClientMessage := CreateChannel(8);
   var Events: channel of ClientEvent := CreateChannel(2);
-  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, Requests, Events);
-  Model.Screen := ClientScreen.GameScreen;
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
   Model.FocusedControl := 0;
   Model.ViewportWidth := 180;
   Model.ViewportHeight := 30;
   Model.RequestedWorldWidth := 59;
   Model.RequestedWorldHeight := 25;
   var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
-  Model := UpdateClientEvent(Model, ClientEvent.Connected, Cmd);
+  Model := UpdateClientEvent(Model, ClientEvent.Connected(true, false), Cmd);
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(180, 30));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.AwaitingSession);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'New game'));
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Load'));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Enter, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.Pending);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.StartNewGame:
+    begin
+    end
+    else
+    begin
+      panic('expected new-game intention')
+    end
+  end;
   var MapValue: MapVisibleState := record
     OriginX := -3;
     OriginY := -1;
@@ -95,7 +121,6 @@ begin
   end;
   var StateValue: VisibleState := VisibleState.MapState(MapValue);
   Model := UpdateClientEvent(Model, ClientEvent.State(StateValue), Cmd);
-  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(180, 30));
   Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
   var GameSurface: TuiSurfaceSnapshot := App.SurfaceSnapshot();
   var ContextColumn: integer := Std.Str.IndexOf(GameSurface.LineAt(0), 'Context');
@@ -185,12 +210,43 @@ begin
   AssertTrue(Model.Overlay = ClientOverlay.SystemMenuOverlay);
   AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'System menu'));
   AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'WASD'));
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Save'));
   App.InjectKeyForTest(MakeKey(TuiKeyKind.Character, 'd', false, false));
   Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
   AssertTrue(Std.Results.IsError(ReceiveWithTimeout(Requests, 0)));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Down, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Down, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Enter, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.Overlay = ClientOverlay.SaveConfirmationOverlay);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Overwrite save?'));
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'existing save for this world'));
   App.InjectKeyForTest(MakeKey(TuiKeyKind.Escape, '', false, false));
   Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.Overlay = ClientOverlay.SystemMenuOverlay);
+  AssertTrue(Std.Results.IsError(ReceiveWithTimeout(Requests, 0)));
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Enter, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  App.InjectKeyForTest(MakeKey(TuiKeyKind.Enter, '', false, false));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertTrue(Model.Pending);
   AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.SaveGame:
+    begin
+    end
+    else
+    begin
+      panic('expected one confirmed save request')
+    end
+  end;
+
+  Model := UpdateClientEvent(Model, ClientEvent.SaveCompleted, Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(Model.SaveAvailable);
+  AssertEquals('Game saved.', Model.Status);
   var FirstPersonValue: FirstPersonVisibleState := record
     Title := 'Initial dungeon';
     Status := 'Find the gold exit field.';
@@ -363,7 +419,7 @@ begin
   CloseChannel(Events);
   var TinyRequests: channel of ClientMessage := CreateChannel(1);
   var TinyEvents: channel of ClientEvent := CreateChannel(1);
-  mutable var TinyModel: ClientModel := NewClientModel('127.0.0.1', 4040, TinyRequests, TinyEvents);
+  mutable var TinyModel: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), TinyRequests, TinyEvents);
   TinyModel.Screen := ClientScreen.GameScreen;
   TinyModel.FocusedControl := 0;
   TinyModel.ViewportWidth := 20;

@@ -10,7 +10,8 @@ test seams without defining the wider game.
   deterministic chunks below the runtime-data root.
 - `dungeon-client` connects to that address and requests a visible window that
   fits its current primary view.
-- The server creates one player at the world's stable spawn coordinate.
+- After connecting, the client explicitly starts a new game at the stable spawn
+  or loads the selected world's existing savegame.
 - `W`, `A`, `S`, and `D` send cardinal movement intentions.
 - The server validates movement and returns the resulting visible state.
 - `Alt+X` cleanly disconnects and quits the client. A disconnected client does
@@ -18,28 +19,36 @@ test seams without defining the wider game.
 - The initial server accepts one active client at a time.
 
 No game time passes without a player intention. The slice has no combat,
-mutable world state, player savegames, authentication, TLS, multiplayer state,
-or LLM integration.
+mutable-world persistence, authentication, TLS, multiplayer state, or LLM
+integration.
 
 ## Protocol
 
 The transport is TCP with one UTF-8 JSON object per LF-delimited line. Each
 line is limited to 64 KiB. The client starts with `hello`; the server answers
-with `welcome` followed by the initial `state`.
+with `welcome`, the availability of the selected world's save, and whether an
+invalid save was removed during inspection. A complete initial `state` follows
+only after `new_game` or `load_game`.
 
 ```text
-Client: hello, viewport, move, first_person_step, first_person_turn,
-        activate_area_transition, disconnect
-Server: welcome, state, rejected, error
+Client: hello, new_game, load_game, save_game, viewport, move,
+        first_person_step, first_person_turn, activate_area_transition,
+        disconnect
+Server: welcome, state, save_completed, rejected, error
 ```
 
-Protocol version `4` is included in the handshake. `hello` includes the initial
+Protocol version `5` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.
 Player intentions are request-response: every accepted or rejected movement,
 turn, or area-transition activation receives one server message before the
 next intention is sent.
+
+Session selection and save intentions are also request-response operations.
+The server acknowledges a save only after the atomic replacement succeeds.
+Before session selection it rejects projection and gameplay intentions with a
+stable lifecycle error.
 
 Each `state` message identifies its view family. A map state contains its world
 origin, dimensions, compact server-produced terrain rows, and the player's

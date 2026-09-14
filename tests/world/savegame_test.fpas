@@ -1,0 +1,146 @@
+// Verifies versioned outdoor and first-person savegame persistence.
+program DungeonSaveGameTest;
+
+uses
+  Dungeon.Game, Dungeon.World, Dungeon.World.Savegame, Std.Conv, Std.Fs, Std.Path, Std.Results,
+  Std.Str, Std.Test, Std.Time;
+
+function RequireLoaded(Value: SaveGameLoad): GameState;
+begin
+  case Value of
+    SaveGameLoad.Loaded(State):
+    begin
+      return State
+    end
+    else
+    begin
+      panic('expected a loaded savegame')
+    end
+  end
+end;
+
+procedure AssertInvalidSaveIsRemoved(World: WorldSession; Text: string);
+begin
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(SaveGamePath(World), Text)));
+  case Std.Results.Unwrap(LoadSaveGame(World)) of
+    SaveGameLoad.InvalidRemoved(Reason):
+    begin
+      AssertFalse(Reason = '')
+    end
+    else
+    begin
+      panic('expected invalid savegame to be removed')
+    end
+  end;
+
+  AssertFalse(Std.Fs.Exists(SaveGamePath(World)))
+end;
+
+begin
+  var Root: string := '.temp-data/savegame-test-' + IntToStr(TimestampMillis());
+  if not Std.Fs.Exists('.temp-data') then
+  begin
+    AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDir('.temp-data')))
+  end;
+  var World: WorldSession := Std.Results.Unwrap(OpenWorld(Root, 'saves', 24680, 16));
+  AssertTrue(SaveGamePath(World) = Std.Path.Join([World.Directory, 'saves', 'default.json']));
+  case Std.Results.Unwrap(LoadSaveGame(World)) of
+    SaveGameLoad.Missing:
+    begin
+    end
+    else
+    begin
+      panic('new world must not contain a savegame')
+    end
+  end;
+  var Outdoor: GameState := record
+    Area := AreaKind.OutdoorRegion;
+    AreaId := World.Metadata.OutdoorAreaId;
+    Player := PlayerPosition.Outdoor(record
+    X := -321;
+    Y := 654;
+  end);
+    ReturnLocation := ReturnLocation.NoReturnLocation;
+  end;
+
+  AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Outdoor)));
+  var EncodedOutdoor: string := Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
+  AssertFalse(Std.Str.Contains(EncodedOutdoor, 'viewport'));
+  AssertFalse(Std.Str.Contains(EncodedOutdoor, 'status'));
+  AssertFalse(Std.Str.Contains(EncodedOutdoor, 'rows'));
+  var LoadedOutdoor: GameState := RequireLoaded(Std.Results.Unwrap(LoadSaveGame(World)));
+  AssertTrue(LoadedOutdoor.Area = AreaKind.OutdoorRegion);
+  AssertEquals(World.Metadata.OutdoorAreaId, LoadedOutdoor.AreaId);
+  AssertEquals(-321, Std.Results.Unwrap(OutdoorPlayerPosition(LoadedOutdoor)).X);
+  AssertEquals(654, Std.Results.Unwrap(OutdoorPlayerPosition(LoadedOutdoor)).Y);
+  mutable var Interior: GameState := Std.Results.Unwrap(ActivateAreaTransition(World.Metadata, record
+    Area := AreaKind.OutdoorRegion;
+    AreaId := World.Metadata.OutdoorAreaId;
+    Player := PlayerPosition.Outdoor(World.Metadata.Entrance);
+    ReturnLocation := ReturnLocation.NoReturnLocation;
+  end));
+  Interior := Std.Results.Unwrap(TurnFirstPerson(World.Metadata, Interior, RelativeTurn.TurnRight));
+  AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Interior)));
+  var LoadedInterior: GameState := RequireLoaded(Std.Results.Unwrap(LoadSaveGame(World)));
+  AssertTrue(LoadedInterior.Area = AreaKind.Dungeon);
+  AssertEquals(World.Metadata.DungeonAreaId, LoadedInterior.AreaId);
+  var Pose: FirstPersonPose := Std.Results.Unwrap(FirstPersonPlayerPose(LoadedInterior));
+  AssertEquals(9, Pose.Position.X);
+  AssertEquals(1, Pose.Position.Y);
+  AssertTrue(Pose.Facing = FacingDirection.North);
+  case LoadedInterior.ReturnLocation of
+    ReturnLocation.ReturnTo(AreaId, Position):
+    begin
+      AssertEquals(World.Metadata.OutdoorAreaId, AreaId);
+      AssertEquals(World.Metadata.Entrance.X, Position.X);
+      AssertEquals(World.Metadata.Entrance.Y, Position.Y)
+    end
+    else
+    begin
+      panic('loaded interior must retain its outdoor return location')
+    end
+  end;
+  var InvalidState: GameState := record
+    Area := AreaKind.OutdoorRegion;
+    AreaId := World.Metadata.DungeonAreaId;
+    Player := PlayerPosition.Outdoor(record
+    X := 1;
+    Y := 2;
+  end);
+    ReturnLocation := ReturnLocation.NoReturnLocation;
+  end;
+
+  AssertTrue(Std.Results.IsError(WriteSaveGame(World, InvalidState)));
+  var PreservedInterior: GameState := RequireLoaded(Std.Results.Unwrap(LoadSaveGame(World)));
+  AssertTrue(PreservedInterior.Area = AreaKind.Dungeon);
+  AssertTrue(Std.Results.Unwrap(FirstPersonPlayerPose(PreservedInterior)).Facing =
+             FacingDirection.North);
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":2,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"world_id":"other","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"},"extra":1}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0,"extra":1},"return_location":{"kind":"none"}}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none","extra":1}}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"world_id":"saves","area_kind":"unknown","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}', World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"world_id":"saves","area_kind":"dungeon","area_id":"saves:dungeon:initial","player":{"kind":"first_person","x":0,"y":0,"facing":"north"},"return_location":{"kind":"none"}}', World.Metadata)));
+  var MetadataPath: string := Std.Path.Join([World.Directory, 'world.json']);
+  var MetadataBefore: string := Std.Results.Unwrap(Std.Fs.ReadText(MetadataPath));
+  var UnrelatedPath: string := Std.Path.Join([World.Directory, 'saves', 'keep.txt']);
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(UnrelatedPath, 'keep')));
+  AssertInvalidSaveIsRemoved(World, '{');
+  AssertInvalidSaveIsRemoved(World, '{"format_version":1}');
+  AssertInvalidSaveIsRemoved(World, '{"format_version":2,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}');
+  AssertInvalidSaveIsRemoved(World, '{"format_version":1,"world_id":"other","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}');
+  AssertInvalidSaveIsRemoved(World, '{"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"},"extra":1}');
+  AssertInvalidSaveIsRemoved(World, '{"format_version":1,"world_id":"saves","area_kind":"unknown","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}');
+  AssertInvalidSaveIsRemoved(World, '{"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:dungeon:initial","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}');
+  AssertInvalidSaveIsRemoved(World, '{"format_version":1,"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}');
+  AssertEquals(MetadataBefore, Std.Results.Unwrap(Std.Fs.ReadText(MetadataPath)));
+  AssertEquals('keep', Std.Results.Unwrap(Std.Fs.ReadText(UnrelatedPath)));
+  AssertFalse(Std.Results.Unwrap(DeleteSaveGame(World)));
+  AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Outdoor)));
+  AssertTrue(Std.Results.Unwrap(DeleteSaveGame(World)));
+  AssertFalse(Std.Fs.Exists(SaveGamePath(World)))
+end.

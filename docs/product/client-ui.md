@@ -35,10 +35,13 @@ Before a session, the client shows a framed menu centered in the terminal:
 ```
 
 The frame remains centered as the terminal changes size. Initially the menu
-contains connect, information, and quit. Loading becomes available only after a
-server connection because the server owns saved games. Saving belongs in the
-system menu during a session. Load and save entries appear only when those
-server operations exist.
+contains connect, information, and quit. A successful connection keeps this
+screen visible and enables `New game`; `Load` appears only when the server
+reports a valid savegame. Choosing either action shows its pending status until
+the first complete visible state arrives. A rejected load remains on the start
+screen with the server's explanation. If the server removes an invalid save
+during connection, the status explains the removal and only `New game` is
+offered.
 
 ## Game screen
 
@@ -75,14 +78,21 @@ as overlays when the terminal cannot fit them beside or below the primary view.
 
 ### Connecting
 
-The client shows that it is connecting and that it is waiting for initial world
-state. Movement input is ignored until the server has completed the handshake.
-Quit remains available.
+The client shows that it is connecting and waiting for the server handshake.
+Movement input is ignored, and the start screen remains visible. Quit remains
+available.
 
 ### Active
 
 The latest visible state fills the primary view. The status shows that the
 client is connected, and controls appropriate to the current view are enabled.
+
+### Connected without a game session
+
+The framed start screen offers `New game`, optional `Load`, disconnect,
+information, and quit. Movement, turning, transitions, viewport projection, and
+saving remain disabled until the server accepts a session choice and returns
+the initial visible state.
 
 ### Request pending
 
@@ -150,7 +160,11 @@ or arbitrary viewing angles.
 ## System menu
 
 `Ctrl+P` opens a framed overlay above the game screen. It contains at least
-resume, current key bindings, information, available session actions, and quit.
+resume, save, current key bindings, information, available session actions, and
+quit. A first save is sent directly. When the server reports that a save already
+exists, `Save` opens a confirmation that clearly names the overwrite; cancel
+sends nothing. The status reports success only after the server acknowledges
+the completed atomic write, and a rejected save can be retried.
 While the overlay is open, movement keys operate the menu and no player
 intention is sent to the server. `Escape` or another `Ctrl+P` closes it.
 

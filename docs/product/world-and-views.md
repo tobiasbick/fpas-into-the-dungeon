@@ -46,6 +46,12 @@ or character progression.
   authoritative result.
 - **Visible state** is the server-produced, client-safe projection of the
   current area and player state. It is not the complete world.
+- **Game session** is one connected, server-authoritative period of play. A
+  connection waits for an explicit new-game or load choice before it becomes
+  an active game session.
+- **Savegame** is the selected world's single versioned snapshot of resumable
+  authoritative game state. It is server-owned and distinct from generated
+  world data and client preferences.
 - **Transition** is the server-authoritative move from one area to another,
   such as entering or leaving a building or dungeon.
 - **Grid-based first-person movement** is discrete movement through a

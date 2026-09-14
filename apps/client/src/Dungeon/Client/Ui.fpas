@@ -2,27 +2,38 @@
 unit Dungeon.Client.Ui;
 
 uses
-  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Client.Raycast, Dungeon.Protocol, Std.Arrays,
-  Std.Console, Std.Conv, Std.Options, Std.Str, Std.Task, Std.Tui;
+  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Client.Raycast, Dungeon.Protocol,
+  Dungeon.RuntimeData, Std.Arrays, Std.Console, Std.Conv, Std.Options, Std.Str, Std.Task, Std.Tui;
 
 const
   NetworkSubscriptionId: integer := 1;
   ConnectControlId: integer := 1;
   StartInformationControlId: integer := 2;
   StartQuitControlId: integer := 3;
+  NewGameControlId: integer := 4;
+  LoadGameControlId: integer := 5;
+  StartDisconnectControlId: integer := 6;
   ResumeControlId: integer := 10;
   SystemInformationControlId: integer := 11;
   DisconnectControlId: integer := 12;
   SystemQuitControlId: integer := 13;
+  SaveControlId: integer := 14;
   OverlayBackControlId: integer := 20;
   PanelCloseControlId: integer := 21;
+  ConfirmSaveControlId: integer := 30;
+  CancelSaveControlId: integer := 31;
   ConnectAction: integer := 101;
   InformationAction: integer := 102;
   QuitAction: integer := 103;
+  NewGameAction: integer := 104;
+  LoadGameAction: integer := 105;
   ResumeAction: integer := 110;
   DisconnectAction: integer := 111;
+  SaveAction: integer := 112;
   BackAction: integer := 120;
   ClosePanelAction: integer := 121;
+  ConfirmSaveAction: integer := 130;
+  CancelSaveAction: integer := 131;
   MinimumDockedContextWidth: integer := 72;
   MinimumDockedMessagesHeight: integer := 18;
   MaximumMessages: integer := 8;
@@ -150,11 +161,25 @@ end;
 function CloseOverlay(State: ClientModel): ClientModel;
 begin
   mutable var Next: ClientModel := State;
+  if State.Overlay = ClientOverlay.SaveConfirmationOverlay then
+  begin
+    Next.Overlay := ClientOverlay.SystemMenuOverlay;
+    Next.FocusedControl := SaveControlId;
+    return Next
+  end;
+
   if State.Overlay = ClientOverlay.InformationOverlay then
   begin
     if State.Screen = ClientScreen.StartScreen then
     begin
-      Next.FocusedControl := ConnectControlId
+      if State.ConnectionPhase = ClientConnectionPhase.AwaitingSession then
+      begin
+        Next.FocusedControl := NewGameControlId
+      end
+      else
+      begin
+        Next.FocusedControl := ConnectControlId
+      end
     end
     else
     begin
@@ -168,7 +193,14 @@ begin
   Next.FocusedControl := 0;
   if State.Screen = ClientScreen.StartScreen then
   begin
-    Next.FocusedControl := ConnectControlId
+    if State.ConnectionPhase = ClientConnectionPhase.AwaitingSession then
+    begin
+      Next.FocusedControl := NewGameControlId
+    end
+    else
+    begin
+      Next.FocusedControl := ConnectControlId
+    end
   end;
 
   return Next
@@ -176,7 +208,8 @@ end;
 
 function RequestQuit(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
 begin
-  if State.ConnectionPhase = ClientConnectionPhase.Active then
+  if ((State.ConnectionPhase = ClientConnectionPhase.Active) or (State.ConnectionPhase = ClientConnectionPhase.AwaitingSession)) or
+     (State.ConnectionPhase = ClientConnectionPhase.Connecting) then
   begin
     TrySend(State.Requests, ClientMessage.Disconnect)
   end;
@@ -196,7 +229,7 @@ begin
     return Dungeon.Client.Network.RunNetwork(Host, Port, Viewport.Width, Viewport.Height, Requests, Events, Token)
   end);
   mutable var Next: ClientModel := State;
-  Next.Screen := ClientScreen.GameScreen;
+  Next.Screen := ClientScreen.StartScreen;
   Next.Overlay := ClientOverlay.NoOverlay;
   Next.ConnectionPhase := ClientConnectionPhase.Connecting;
   Next.FocusedControl := 0;
@@ -210,7 +243,7 @@ end;
 
 function ReturnToStart(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
 begin
-  if (State.ConnectionPhase = ClientConnectionPhase.Active) or
+  if ((State.ConnectionPhase = ClientConnectionPhase.Active) or (State.ConnectionPhase = ClientConnectionPhase.AwaitingSession)) or
      (State.ConnectionPhase = ClientConnectionPhase.Connecting) then
   begin
     TrySend(State.Requests, ClientMessage.Disconnect);
@@ -223,8 +256,89 @@ begin
   Next.FocusedControl := ConnectControlId;
   Next.Pending := false;
   Next.HasVisibleState := false;
+  Next.SaveAvailable := false;
   Next.Status := 'Ready';
   return Next
+end;
+
+function QueueSessionChoice(State: ClientModel; Message: ClientMessage; Status: string): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession) or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, Message) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.FocusedControl := 0;
+      Next.Status := Status;
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+function QueueSave(State: ClientModel): ClientModel;
+begin
+  if ((State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending) or
+     not State.HasVisibleState then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.SaveGame) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Overlay := ClientOverlay.NoOverlay;
+      Next.FocusedControl := 0;
+      Next.Pending := true;
+      Next.Status := 'Saving game...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+function PersistPanelPreferences(State: ClientModel): ClientModel;
+begin
+  if Std.Str.Length(State.ClientConfigPath) = 0 then
+  begin
+    return State
+  end;
+
+  case SaveClientPreferences(State.ClientConfigPath, record
+    ContextPanelVisible := State.ContextPanelVisible;
+    MessagePanelVisible := State.MessagePanelVisible;
+  end) of
+    Ok(Written):
+    begin
+      return State
+    end;
+    Error(Message):
+    begin
+      mutable var Next: ClientModel := State;
+      Next.Status := 'Cannot save client preferences: ' + Message;
+      return AppendMessage(Next, Next.Status)
+    end
+  end
 end;
 
 function QueueMove(State: ClientModel; DeltaX: integer; DeltaY: integer): ClientModel;
@@ -337,7 +451,8 @@ begin
   if ContextCanDock(State) then
   begin
     Next.ContextPanelVisible := not State.ContextPanelVisible;
-    return QueueViewport(Next)
+    Next := QueueViewport(Next);
+    return PersistPanelPreferences(Next)
   end;
 
   if State.Overlay = ClientOverlay.ContextOverlay then
@@ -356,7 +471,8 @@ begin
   if MessagesCanDock(State) then
   begin
     Next.MessagePanelVisible := not State.MessagePanelVisible;
-    return QueueViewport(Next)
+    Next := QueueViewport(Next);
+    return PersistPanelPreferences(Next)
   end;
 
   if State.Overlay = ClientOverlay.MessageOverlay then
@@ -384,6 +500,21 @@ begin
     return Next
   end;
 
+  if Action.Value = NewGameAction then
+  begin
+    return QueueSessionChoice(State, ClientMessage.StartNewGame, 'Starting new game...')
+  end;
+
+  if Action.Value = LoadGameAction then
+  begin
+    if not State.SaveAvailable then
+    begin
+      return State
+    end;
+
+    return QueueSessionChoice(State, ClientMessage.LoadGame, 'Loading game...')
+  end;
+
   if Action.Value = QuitAction then
   begin
     return RequestQuit(State, Cmd)
@@ -392,6 +523,32 @@ begin
   if Action.Value = ResumeAction then
   begin
     return CloseOverlay(State)
+  end;
+
+  if Action.Value = SaveAction then
+  begin
+    if State.SaveAvailable then
+    begin
+      mutable var Next: ClientModel := State;
+      Next.Overlay := ClientOverlay.SaveConfirmationOverlay;
+      Next.FocusedControl := ConfirmSaveControlId;
+      return Next
+    end;
+
+    return QueueSave(State)
+  end;
+
+  if Action.Value = ConfirmSaveAction then
+  begin
+    return QueueSave(State)
+  end;
+
+  if Action.Value = CancelSaveAction then
+  begin
+    mutable var Next: ClientModel := State;
+    Next.Overlay := ClientOverlay.SystemMenuOverlay;
+    Next.FocusedControl := SaveControlId;
+    return Next
   end;
 
   if Action.Value = DisconnectAction then
@@ -598,14 +755,26 @@ begin
   Cmd.Set(TuiCmd.NoCommand);
   mutable var Next: ClientModel := State;
   case Value of
-    ClientEvent.Connected:
+    ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved):
     begin
-      Next.ConnectionPhase := ClientConnectionPhase.Active;
-      Next.Status := 'Connected';
+      Next.Screen := ClientScreen.StartScreen;
+      Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
+      Next.SaveAvailable := SaveAvailable;
+      Next.FocusedControl := NewGameControlId;
+      if InvalidSaveRemoved then
+      begin
+        Next.Status := 'Invalid saved game was removed. Start a new game.';
+        return AppendMessage(Next, Next.Status)
+      end;
+
+      Next.Status := 'Connected. Choose a game session.';
       return AppendMessage(Next, 'Connected')
     end;
     ClientEvent.State(Value):
     begin
+      Next.Screen := ClientScreen.GameScreen;
+      Next.ConnectionPhase := ClientConnectionPhase.Active;
+      Next.FocusedControl := 0;
       Next.HasVisibleState := true;
       Next.View := ViewForVisibleState(Value);
       case Value of
@@ -652,9 +821,22 @@ begin
 
       return QueueViewport(Next)
     end;
-    ClientEvent.Rejected(Message):
+    ClientEvent.SaveCompleted:
     begin
       Next.Pending := false;
+      Next.SaveAvailable := true;
+      Next.Status := 'Game saved.';
+      return AppendMessage(Next, Next.Status)
+    end;
+    ClientEvent.Rejected(Code, Message):
+    begin
+      Next.Pending := false;
+      if Code = 'save_removed' then
+      begin
+        Next.SaveAvailable := false;
+        Next.FocusedControl := NewGameControlId
+      end;
+
       Next.Status := Message;
       return AppendMessage(Next, 'Rejected: ' + Message)
     end;
@@ -1032,15 +1214,32 @@ begin
                                                        ])
 end;
 
-function ViewStartScreen(): TuiElement;
+function ViewStartScreen(State: ClientModel): TuiElement;
 begin
-  return TuiElementBuilders.MakeOverlay('INTO THE DUNGEON', [
-                                                              TuiElementBuilders.MakeColumn([
-                                                                                              TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(ConnectControlId), 'Connect', '', TuiAction.Create(ConnectAction)),
-                                                                                              TuiElementBuilders.MakeButton(TuiControlId.Create(StartInformationControlId), 'Information', TuiAction.Create(InformationAction)),
-                                                                                              TuiElementBuilders.MakeButton(TuiControlId.Create(StartQuitControlId), 'Quit', TuiAction.Create(QuitAction))
-                                                                                            ])
-                                                            ])
+  mutable var Items: array of TuiElement := [];
+  if State.ConnectionPhase = ClientConnectionPhase.Connecting then
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel(State.Status))
+  end
+  else if State.ConnectionPhase = ClientConnectionPhase.AwaitingSession then
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel(State.Status));
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(NewGameControlId), 'New game', '', TuiAction.Create(NewGameAction)));
+    if State.SaveAvailable then
+    begin
+      Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(LoadGameControlId), 'Load', TuiAction.Create(LoadGameAction)))
+    end;
+
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartDisconnectControlId), 'Disconnect', TuiAction.Create(DisconnectAction)))
+  end
+  else
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(ConnectControlId), 'Connect', '', TuiAction.Create(ConnectAction)))
+  end;
+
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartInformationControlId), 'Information', TuiAction.Create(InformationAction)));
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartQuitControlId), 'Quit', TuiAction.Create(QuitAction)));
+  return TuiElementBuilders.MakeOverlay('INTO THE DUNGEON', [TuiElementBuilders.MakeColumn(Items)])
 end;
 
 function ViewSystemMenu(State: ClientModel): TuiElement;
@@ -1048,6 +1247,7 @@ begin
   mutable var Items: array of TuiElement := [
                                               TuiElementBuilders.MakeButton(TuiControlId.Create(ResumeControlId), 'Resume', TuiAction.Create(ResumeAction)),
                                               TuiElementBuilders.MakeButton(TuiControlId.Create(SystemInformationControlId), 'Information', TuiAction.Create(InformationAction)),
+                                              TuiElementBuilders.MakeButton(TuiControlId.Create(SaveControlId), 'Save', TuiAction.Create(SaveAction)),
                                               TuiElementBuilders.MakeRule('Key bindings')
                                             ];
   if not State.HasVisibleState or (State.View = ViewKind.Map) then
@@ -1082,6 +1282,17 @@ begin
   return TuiElementBuilders.MakeOverlay('System menu', [TuiElementBuilders.MakeColumn(Items)])
 end;
 
+function ViewSaveConfirmation(): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay('Overwrite save?', [
+                                                             TuiElementBuilders.MakeColumn([
+                                                                                             TuiElementBuilders.MakeLabel('The existing save for this world will be replaced.'),
+                                                                                             TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(ConfirmSaveControlId), 'Overwrite', '', TuiAction.Create(ConfirmSaveAction)),
+                                                                                             TuiElementBuilders.MakeButton(TuiControlId.Create(CancelSaveControlId), 'Cancel', TuiAction.Create(CancelSaveAction))
+                                                                                           ])
+                                                           ])
+end;
+
 function ViewPanelOverlay(State: ClientModel; Title: string; Content: TuiElement): TuiElement;
 begin
   return TuiElementBuilders.MakeOverlay(Title, [
@@ -1100,6 +1311,10 @@ begin
     ClientOverlay.SystemMenuOverlay:
     begin
       return ViewSystemMenu(State)
+    end;
+    ClientOverlay.SaveConfirmationOverlay:
+    begin
+      return ViewSaveConfirmation()
     end;
     ClientOverlay.ContextOverlay:
     begin
@@ -1136,7 +1351,7 @@ begin
       return TuiElementBuilders.MakeDesktop(Focus(State), [ViewInformation()])
     end;
 
-    return TuiElementBuilders.MakeDesktop(Focus(State), [ViewStartScreen()])
+    return TuiElementBuilders.MakeDesktop(Focus(State), [ViewStartScreen(State)])
   end;
 
   return TuiElementBuilders.MakeDesktop(Focus(State), [ViewGameShell(State), ViewOverlay(State)])

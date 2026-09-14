@@ -2,8 +2,9 @@
 unit Dungeon.Server;
 
 uses
-  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.World, Std.Arrays, Std.Console,
-  Std.Conv, Std.Net, Std.Results, Std.Server, Std.Task, Std.Time;
+  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame,
+  Std.Arrays, Std.Console, Std.Conv, Std.Net, Std.Options, Std.Results, Std.Server, Std.Task,
+  Std.Time;
 
 public type
   // Immutable server policy and selected persistent world used by each session.
@@ -69,6 +70,54 @@ function RequiredCacheCapacity(Config: ServerConfig): integer;
 begin
   return (MaximumIntersectingChunks(Config.MaximumViewWidth) + 2) *
          (MaximumIntersectingChunks(Config.MaximumViewHeight) + 2)
+end;
+
+function RequiresActiveSession(Message: ClientMessage): boolean;
+begin
+  case Message of
+    ClientMessage.Viewport(Width, Height):
+    begin
+      return true
+    end;
+    ClientMessage.Move(DeltaX, DeltaY):
+    begin
+      return true
+    end;
+    ClientMessage.StepFirstPerson(Direction):
+    begin
+      return true
+    end;
+    ClientMessage.TurnFirstPerson(Direction):
+    begin
+      return true
+    end;
+    ClientMessage.ActivateAreaTransition:
+    begin
+      return true
+    end;
+    ClientMessage.SaveGame:
+    begin
+      return true
+    end
+    else
+    begin
+      return false
+    end
+  end
+end;
+
+function RequireActiveState(State: option of GameState): result of GameState, string;
+begin
+  case State of
+    Some(Value):
+    begin
+      return Ok(Value)
+    end;
+    None:
+    begin
+      return Error('server session has no active game state')
+    end
+  end
 end;
 
 function ProtocolFacing(Value: FacingDirection): FirstPersonFacing;
@@ -278,9 +327,23 @@ begin
     end
   end;
   mutable var World: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit);
-  mutable var State: GameState := NewGame(World.Metadata);
-  var WelcomeSent: boolean := try Send(ConnectionValue, ServerMessage.Welcome(ProtocolVersion), Token);
-  World := try SendProjection(ConnectionValue, World, State, Viewport, Token);
+  mutable var SaveAvailable: boolean := false;
+  mutable var InvalidSaveRemoved: boolean := false;
+  case try LoadSaveGame(World) of
+    SaveGameLoad.Missing:
+    begin
+    end;
+    SaveGameLoad.InvalidRemoved(Reason):
+    begin
+      InvalidSaveRemoved := true
+    end;
+    SaveGameLoad.Loaded(SavedState):
+    begin
+      SaveAvailable := true
+    end
+  end;
+  mutable var State: option of GameState := None;
+  var WelcomeSent: boolean := try Send(ConnectionValue, ServerMessage.Welcome(ProtocolVersion, SaveAvailable, InvalidSaveRemoved), Token);
   while not IsCancellationRequested(Token) do
   begin
     case ReadLine(Reader, Token) of
@@ -299,84 +362,161 @@ begin
           end;
           Ok(ClientMessageValue):
           begin
-            case ClientMessageValue of
-              ClientMessage.Disconnect:
-              begin
-                return Ok(true)
-              end;
-              ClientMessage.Hello(Version, Width, Height):
-              begin
-                var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
-                return Ok(true)
-              end;
-              ClientMessage.Viewport(Width, Height):
-              begin
-                case ResolveViewport(Width, Height, Config) of
-                  Ok(Value):
+            if not Std.Options.IsSome(State) and RequiresActiveSession(ClientMessageValue) then
+            begin
+              var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('session_not_started', 'Start or load a game first.'), Token)
+            end
+            else
+            begin
+              case ClientMessageValue of
+                ClientMessage.Disconnect:
+                begin
+                  return Ok(true)
+                end;
+                ClientMessage.Hello(Version, Width, Height):
+                begin
+                  var Sent: boolean := try Send(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
+                  return Ok(true)
+                end;
+                ClientMessage.StartNewGame:
+                begin
+                  if Std.Options.IsSome(State) then
                   begin
-                    Viewport := Value;
-                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
-                  end;
-                  Error(Message):
-                  begin
-                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('invalid_viewport', Message), Token)
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('session_already_started', 'A game session is already active.'), Token)
                   end
-                end
-              end;
-              ClientMessage.Move(DeltaX, DeltaY):
-              begin
-                case MoveInWorld(World, State, DeltaX, DeltaY) of
-                  Ok(Moved):
+                  else
                   begin
-                    World := Moved.World;
-                    State := Moved.State;
-                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
-                  end;
-                  Error(Reason):
-                  begin
-                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                    var StartedState: GameState := NewGame(World.Metadata);
+                    State := Some(StartedState);
+                    World := try SendProjection(ConnectionValue, World, StartedState, Viewport, Token)
                   end
-                end
-              end;
-              ClientMessage.StepFirstPerson(Direction):
-              begin
-                case Dungeon.Game.StepFirstPerson(World.Metadata, State, GameStep(Direction)) of
-                  Ok(Stepped):
+                end;
+                ClientMessage.LoadGame:
+                begin
+                  if Std.Options.IsSome(State) then
                   begin
-                    State := Stepped;
-                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
-                  end;
-                  Error(Reason):
-                  begin
-                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('session_already_started', 'A game session is already active.'), Token)
                   end
-                end
-              end;
-              ClientMessage.TurnFirstPerson(Direction):
-              begin
-                case Dungeon.Game.TurnFirstPerson(World.Metadata, State, GameTurn(Direction)) of
-                  Ok(Turned):
+                  else
                   begin
-                    State := Turned;
-                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
-                  end;
-                  Error(Reason):
-                  begin
-                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('turn_rejected', Reason), Token)
+                    case LoadSaveGame(World) of
+                      Error(Message):
+                      begin
+                        var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('load_failed', Message), Token)
+                      end;
+                      Ok(LoadedSave):
+                      begin
+                        case LoadedSave of
+                          SaveGameLoad.Missing:
+                          begin
+                            SaveAvailable := false;
+                            var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('save_unavailable', 'No saved game is available for this world.'), Token)
+                          end;
+                          SaveGameLoad.InvalidRemoved(Reason):
+                          begin
+                            SaveAvailable := false;
+                            var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('save_removed', 'Invalid saved game was removed. Start a new game.'), Token)
+                          end;
+                          SaveGameLoad.Loaded(SavedState):
+                          begin
+                            State := Some(SavedState);
+                            World := try SendProjection(ConnectionValue, World, SavedState, Viewport, Token)
+                          end
+                        end
+                      end
+                    end
                   end
-                end
-              end;
-              ClientMessage.ActivateAreaTransition:
-              begin
-                case Dungeon.Game.ActivateAreaTransition(World.Metadata, State) of
-                  Ok(Transitioned):
+                end;
+                ClientMessage.SaveGame:
+                begin
+                  if not Std.Options.IsSome(State) then
                   begin
-                    State := Transitioned;
-                    World := try SendProjection(ConnectionValue, World, State, Viewport, Token)
-                  end;
-                  Error(Reason):
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('session_not_started', 'Start or load a game before saving.'), Token)
+                  end
+                  else
                   begin
-                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('transition_rejected', Reason), Token)
+                    case WriteSaveGame(World, try RequireActiveState(State)) of
+                      Ok(Written):
+                      begin
+                        SaveAvailable := true;
+                        var Sent: boolean := try Send(ConnectionValue, ServerMessage.SaveCompleted, Token)
+                      end;
+                      Error(Message):
+                      begin
+                        var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('save_failed', Message), Token)
+                      end
+                    end
+                  end
+                end;
+                ClientMessage.Viewport(Width, Height):
+                begin
+                  case ResolveViewport(Width, Height, Config) of
+                    Ok(Value):
+                    begin
+                      Viewport := Value;
+                      World := try SendProjection(ConnectionValue, World, try RequireActiveState(State), Viewport, Token)
+                    end;
+                    Error(Message):
+                    begin
+                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('invalid_viewport', Message), Token)
+                    end
+                  end
+                end;
+                ClientMessage.Move(DeltaX, DeltaY):
+                begin
+                  case MoveInWorld(World, try RequireActiveState(State), DeltaX, DeltaY) of
+                    Ok(Moved):
+                    begin
+                      World := Moved.World;
+                      State := Some(Moved.State);
+                      World := try SendProjection(ConnectionValue, World, Moved.State, Viewport, Token)
+                    end;
+                    Error(Reason):
+                    begin
+                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                    end
+                  end
+                end;
+                ClientMessage.StepFirstPerson(Direction):
+                begin
+                  case Dungeon.Game.StepFirstPerson(World.Metadata, try RequireActiveState(State), GameStep(Direction)) of
+                    Ok(Stepped):
+                    begin
+                      State := Some(Stepped);
+                      World := try SendProjection(ConnectionValue, World, Stepped, Viewport, Token)
+                    end;
+                    Error(Reason):
+                    begin
+                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('movement_rejected', Reason), Token)
+                    end
+                  end
+                end;
+                ClientMessage.TurnFirstPerson(Direction):
+                begin
+                  case Dungeon.Game.TurnFirstPerson(World.Metadata, try RequireActiveState(State), GameTurn(Direction)) of
+                    Ok(Turned):
+                    begin
+                      State := Some(Turned);
+                      World := try SendProjection(ConnectionValue, World, Turned, Viewport, Token)
+                    end;
+                    Error(Reason):
+                    begin
+                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('turn_rejected', Reason), Token)
+                    end
+                  end
+                end;
+                ClientMessage.ActivateAreaTransition:
+                begin
+                  case Dungeon.Game.ActivateAreaTransition(World.Metadata, try RequireActiveState(State)) of
+                    Ok(Transitioned):
+                    begin
+                      State := Some(Transitioned);
+                      World := try SendProjection(ConnectionValue, World, Transitioned, Viewport, Token)
+                    end;
+                    Error(Reason):
+                    begin
+                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('transition_rejected', Reason), Token)
+                    end
                   end
                 end
               end

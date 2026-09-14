@@ -2,8 +2,8 @@
 program DungeonFullSessionTest;
 
 uses
-  Dungeon.Client, Dungeon.Game, Dungeon.Protocol, Dungeon.Server, Std.Conv, Std.Fs, Std.Net,
-  Std.Options, Std.Results, Std.Task, Std.Test, Std.Time, Std.Tui;
+  Dungeon.Client, Dungeon.Game, Dungeon.Protocol, Dungeon.RuntimeData, Dungeon.Server, Std.Conv,
+  Std.Fs, Std.Net, Std.Options, Std.Results, Std.Task, Std.Test, Std.Time, Std.Tui;
 
 function TestConfig(WorldsRoot: string): ServerConfig;
 begin
@@ -65,13 +65,13 @@ begin
   var Events: channel of ClientEvent := CreateChannel(8);
   var ClientTask: task := go RunNetwork('127.0.0.1', Address.Port, 13, 7, Requests, Events, Token);
   var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
-  mutable var Model: ClientModel := NewClientModel('127.0.0.1', Address.Port, Requests, Events);
-  Model.Screen := ClientScreen.GameScreen;
-  Model.FocusedControl := 0;
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', Address.Port, '', DefaultClientPreferences(), Requests, Events);
   case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
-    ClientEvent.Connected:
+    ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved):
     begin
-      Model := UpdateClientEvent(Model, ClientEvent.Connected, Cmd)
+      AssertFalse(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved);
+      Model := UpdateClientEvent(Model, ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved), Cmd)
     end
     else
     begin
@@ -79,6 +79,7 @@ begin
     end
   end;
 
+  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.StartNewGame, 1000)));
   case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
     ClientEvent.State(Value):
     begin
@@ -209,6 +210,20 @@ begin
   AssertTrue(Std.Options.Unwrap(FirstPersonApp.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle).Background.Kind =
              TuiColorKind.Rgb);
   FirstPersonApp.Close();
+  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.SaveGame, 1000)));
+  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+    ClientEvent.SaveCompleted:
+    begin
+      Model := UpdateClientEvent(Model, ClientEvent.SaveCompleted, Cmd);
+      AssertTrue(Model.SaveAvailable);
+      AssertEquals('Game saved.', Model.Status)
+    end
+    else
+    begin
+      panic('expected client save-completed event')
+    end
+  end;
+
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), 1000)));
   case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
     ClientEvent.State(VisibleValue):

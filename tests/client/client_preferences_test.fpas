@@ -1,0 +1,65 @@
+// Verifies client panel preferences are loaded and persisted outside gameplay state.
+program DungeonClientPreferencesTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Conv, Std.Fs, Std.Options, Std.Results,
+  Std.Task, Std.Test, Std.Time, Std.Tui;
+
+function FunctionKey(Kind: TuiKeyKind): TuiKeyEvent;
+begin
+  return record
+    kind := Kind;
+    ch := '';
+    shift := false;
+    ctrl := false;
+    alt := false;
+    meta := false;
+  end
+end;
+
+begin
+  var Root: string := '.temp-data/client-preferences-' + IntToStr(TimestampMillis());
+  if not Std.Fs.Exists('.temp-data') then
+  begin
+    AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDir('.temp-data')))
+  end;
+  mutable var Runtime: RuntimeSettings := Std.Results.Unwrap(LoadClientRuntime(Some(Root)));
+  var Requests: channel of ClientMessage := CreateChannel(4);
+  var Events: channel of ClientEvent := CreateChannel(1);
+  mutable var Model: ClientModel := NewClientModel('temporary.example', 5050, Runtime.Paths.ClientConfig, Runtime.Preferences, Requests, Events);
+  AssertTrue(Model.ContextPanelVisible);
+  AssertFalse(Model.MessagePanelVisible);
+  Model.Screen := ClientScreen.GameScreen;
+  Model.ConnectionPhase := ClientConnectionPhase.Active;
+  Model.ViewportWidth := 120;
+  Model.ViewportHeight := 30;
+  Model.RequestedWorldWidth := 39;
+  Model.RequestedWorldHeight := 25;
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  Model := UpdateClient(Model, TuiMsg.Key(FunctionKey(TuiKeyKind.F2)), Cmd);
+  AssertFalse(Model.ContextPanelVisible);
+  Runtime := Std.Results.Unwrap(LoadClientRuntime(Some(Root)));
+  AssertFalse(Runtime.Preferences.ContextPanelVisible);
+  AssertFalse(Runtime.Preferences.MessagePanelVisible);
+  AssertEquals('127.0.0.1', Runtime.Network.Host);
+  AssertEquals(4040, Runtime.Network.Port);
+  Model.Pending := false;
+  Model := UpdateClient(Model, TuiMsg.Key(FunctionKey(TuiKeyKind.F3)), Cmd);
+  AssertTrue(Model.MessagePanelVisible);
+  Runtime := Std.Results.Unwrap(LoadClientRuntime(Some(Root)));
+  AssertFalse(Runtime.Preferences.ContextPanelVisible);
+  AssertTrue(Runtime.Preferences.MessagePanelVisible);
+  AssertEquals('127.0.0.1', Runtime.Network.Host);
+  AssertEquals(4040, Runtime.Network.Port);
+  var ReconnectedRequests: channel of ClientMessage := CreateChannel(1);
+  var ReconnectedEvents: channel of ClientEvent := CreateChannel(1);
+  var Reconnected: ClientModel := NewClientModel('temporary.example', 5050, Runtime.Paths.ClientConfig, Runtime.Preferences, ReconnectedRequests, ReconnectedEvents);
+  AssertFalse(Reconnected.ContextPanelVisible);
+  AssertTrue(Reconnected.MessagePanelVisible);
+  AssertFalse(Reconnected.HasVisibleState);
+  AssertTrue(Reconnected.ConnectionPhase = ClientConnectionPhase.Offline);
+  CloseChannel(Requests);
+  CloseChannel(Events);
+  CloseChannel(ReconnectedRequests);
+  CloseChannel(ReconnectedEvents)
+end.

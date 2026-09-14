@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 4;
+  ProtocolVersion: integer := 5;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
 
@@ -65,6 +65,9 @@ public type
   // Session setup, player intentions, and lifecycle messages accepted by the server.
   ClientMessage = enum
     Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
+    StartNewGame;
+    LoadGame;
+    SaveGame;
     Viewport(Width: integer; Height: integer);
     Move(DeltaX: integer; DeltaY: integer);
     StepFirstPerson(Direction: FirstPersonStepDirection);
@@ -72,10 +75,11 @@ public type
     ActivateAreaTransition;
     Disconnect;
   end;
-  // Handshake, visible state, and structured outcomes returned by the server.
+  // Handshake, including save availability/removal, visible state, and structured outcomes.
   ServerMessage = enum
-    Welcome(Version: integer);
+    Welcome(Version: integer; SaveAvailable: boolean; InvalidSaveRemoved: boolean);
     State(Value: VisibleState);
+    SaveCompleted;
     Rejected(Code: string; Message: string);
     ErrorMessage(Code: string; Message: string);
   end;
@@ -505,6 +509,20 @@ begin
   end
 end;
 
+function BooleanField(Fields: dict of string to JsonValue; Name: string): result of boolean, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.Bool(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error(('message field ' + Name) + ' must be a boolean')
+    end
+  end
+end;
+
 function ObjectFields(Text: string): result of dict of string to JsonValue, string;
 begin
   case try Std.Json.Parse(Text) of
@@ -526,6 +544,18 @@ begin
     ClientMessage.Hello(Version, ViewWidth, ViewHeight):
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('hello'), 'version': JsonValue.Number(IntToReal(Version)), 'width': JsonValue.Number(IntToReal(ViewWidth)), 'height': JsonValue.Number(IntToReal(ViewHeight))]))
+    end;
+    ClientMessage.StartNewGame:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('new_game')]))
+    end;
+    ClientMessage.LoadGame:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('load_game')]))
+    end;
+    ClientMessage.SaveGame:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('save_game')]))
     end;
     ClientMessage.Viewport(Width, Height):
     begin
@@ -561,14 +591,56 @@ begin
   case try StringField(Fields, 'type') of
     'hello':
     begin
+      if Std.Dictionaries.Length(Fields) <> 4 then
+      begin
+        return Error('hello must contain only type, version, width, and height')
+      end;
+
       return Ok(ClientMessage.Hello(try IntegerField(Fields, 'version'), try IntegerField(Fields, 'width'), try IntegerField(Fields, 'height')))
+    end;
+    'new_game':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('new_game must not contain additional fields')
+      end;
+
+      return Ok(ClientMessage.StartNewGame)
+    end;
+    'load_game':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('load_game must not contain additional fields')
+      end;
+
+      return Ok(ClientMessage.LoadGame)
+    end;
+    'save_game':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('save_game must not contain additional fields')
+      end;
+
+      return Ok(ClientMessage.SaveGame)
     end;
     'viewport':
     begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('viewport must contain only type, width, and height')
+      end;
+
       return Ok(ClientMessage.Viewport(try IntegerField(Fields, 'width'), try IntegerField(Fields, 'height')))
     end;
     'move':
     begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('move must contain only type, dx, and dy')
+      end;
+
       return Ok(ClientMessage.Move(try IntegerField(Fields, 'dx'), try IntegerField(Fields, 'dy')))
     end;
     'first_person_step':
@@ -600,6 +672,11 @@ begin
     end;
     'disconnect':
     begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('disconnect must not contain additional fields')
+      end;
+
       return Ok(ClientMessage.Disconnect)
     end
     else
@@ -613,9 +690,9 @@ end;
 public function EncodeServer(Message: ServerMessage): string;
 begin
   case Message of
-    ServerMessage.Welcome(Version):
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
     begin
-      return Stringify(JsonValue.Object(['type': JsonValue.String('welcome'), 'version': JsonValue.Number(IntToReal(Version))]))
+      return Stringify(JsonValue.Object(['type': JsonValue.String('welcome'), 'version': JsonValue.Number(IntToReal(Version)), 'save_available': JsonValue.Bool(SaveAvailable), 'invalid_save_removed': JsonValue.Bool(InvalidSaveRemoved)]))
     end;
     ServerMessage.State(Value):
     begin
@@ -629,6 +706,10 @@ begin
           return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing))]))
         end
       end
+    end;
+    ServerMessage.SaveCompleted:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('save_completed')]))
     end;
     ServerMessage.Rejected(Code, MessageText):
     begin
@@ -648,7 +729,21 @@ begin
   case try StringField(Fields, 'type') of
     'welcome':
     begin
-      return Ok(ServerMessage.Welcome(try IntegerField(Fields, 'version')))
+      if Std.Dictionaries.Length(Fields) <> 4 then
+      begin
+        return Error('welcome must contain only type, version, save_available, and invalid_save_removed')
+      end;
+
+      return Ok(ServerMessage.Welcome(try IntegerField(Fields, 'version'), try BooleanField(Fields, 'save_available'), try BooleanField(Fields, 'invalid_save_removed')))
+    end;
+    'save_completed':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('save_completed must not contain additional fields')
+      end;
+
+      return Ok(ServerMessage.SaveCompleted)
     end;
     'state':
     begin
@@ -692,10 +787,20 @@ begin
     end;
     'rejected':
     begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('rejected must contain only type, code, and message')
+      end;
+
       return Ok(ServerMessage.Rejected(try StringField(Fields, 'code'), try StringField(Fields, 'message')))
     end;
     'error':
     begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('error must contain only type, code, and message')
+      end;
+
       return Ok(ServerMessage.ErrorMessage(try StringField(Fields, 'code'), try StringField(Fields, 'message')))
     end
     else

@@ -1,0 +1,412 @@
+// Versioned, server-owned persistence for one authoritative savegame per world.
+unit Dungeon.World.Savegame;
+
+uses
+  Dungeon.Game, Dungeon.World, Std.Conv, Std.Dictionaries, Std.Fs, Std.Json, Std.Math, Std.Options,
+  Std.Path;
+
+public const
+  // Current-only savegame schema written below each selected world.
+  SaveGameFormatVersion: integer := 1;
+
+public type
+  // Inspection result: absent, invalid and deleted with its reason, or fully validated state.
+  SaveGameLoad = enum
+    Missing;
+    InvalidRemoved(Reason: string);
+    Loaded(State: GameState);
+  end;
+
+function RequiredField(Fields: dict of string to JsonValue; Name: string): result of JsonValue, string;
+begin
+  case Std.Dictionaries.Get(Fields, Name) of
+    Some(Value):
+    begin
+      return Ok(Value)
+    end;
+    None:
+    begin
+      return Error('savegame is missing field ' + Name)
+    end
+  end
+end;
+
+function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.String(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error(('savegame field ' + Name) + ' must be a string')
+    end
+  end
+end;
+
+function IntegerField(Fields: dict of string to JsonValue; Name: string): result of integer, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.Number(Value):
+    begin
+      var IntegerValue: integer := Trunc(Value);
+      if IntToReal(IntegerValue) <> Value then
+      begin
+        return Error(('savegame field ' + Name) + ' must be an integer')
+      end;
+
+      return Ok(IntegerValue)
+    end
+    else
+    begin
+      return Error(('savegame field ' + Name) + ' must be a number')
+    end
+  end
+end;
+
+function ObjectField(Fields: dict of string to JsonValue; Name: string): result of dict of string to JsonValue, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.Object(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error(('savegame field ' + Name) + ' must be an object')
+    end
+  end
+end;
+
+function ObjectFields(Text: string): result of dict of string to JsonValue, string;
+begin
+  case try Std.Json.Parse(Text) of
+    JsonValue.Object(Fields):
+    begin
+      return Ok(Fields)
+    end
+    else
+    begin
+      return Error('savegame root must be an object')
+    end
+  end
+end;
+
+function AreaKindName(Value: AreaKind): string;
+begin
+  case Value of
+    AreaKind.OutdoorRegion:
+    begin
+      return 'outdoor_region'
+    end;
+    AreaKind.Settlement:
+    begin
+      return 'settlement'
+    end;
+    AreaKind.Interior:
+    begin
+      return 'interior'
+    end;
+    AreaKind.Dungeon:
+    begin
+      return 'dungeon'
+    end
+  end
+end;
+
+function DecodeAreaKind(Value: string): result of AreaKind, string;
+begin
+  case Value of
+    'outdoor_region':
+    begin
+      return Ok(AreaKind.OutdoorRegion)
+    end;
+    'settlement':
+    begin
+      return Ok(AreaKind.Settlement)
+    end;
+    'interior':
+    begin
+      return Ok(AreaKind.Interior)
+    end;
+    'dungeon':
+    begin
+      return Ok(AreaKind.Dungeon)
+    end
+    else
+    begin
+      return Error('savegame contains an unknown area kind')
+    end
+  end
+end;
+
+function FacingName(Value: FacingDirection): string;
+begin
+  case Value of
+    FacingDirection.North:
+    begin
+      return 'north'
+    end;
+    FacingDirection.East:
+    begin
+      return 'east'
+    end;
+    FacingDirection.South:
+    begin
+      return 'south'
+    end;
+    FacingDirection.West:
+    begin
+      return 'west'
+    end
+  end
+end;
+
+function DecodeFacing(Value: string): result of FacingDirection, string;
+begin
+  case Value of
+    'north':
+    begin
+      return Ok(FacingDirection.North)
+    end;
+    'east':
+    begin
+      return Ok(FacingDirection.East)
+    end;
+    'south':
+    begin
+      return Ok(FacingDirection.South)
+    end;
+    'west':
+    begin
+      return Ok(FacingDirection.West)
+    end
+    else
+    begin
+      return Error('savegame contains an unknown facing direction')
+    end
+  end
+end;
+
+function EncodePlayer(Value: PlayerPosition): JsonValue;
+begin
+  case Value of
+    PlayerPosition.Outdoor(Position):
+    begin
+      return JsonValue.Object(['kind': JsonValue.String('outdoor'), 'x': JsonValue.Number(IntToReal(Position.X)), 'y': JsonValue.Number(IntToReal(Position.Y))])
+    end;
+    PlayerPosition.FirstPerson(Pose):
+    begin
+      return JsonValue.Object(['kind': JsonValue.String('first_person'), 'x': JsonValue.Number(IntToReal(Pose.Position.X)), 'y': JsonValue.Number(IntToReal(Pose.Position.Y)), 'facing': JsonValue.String(FacingName(Pose.Facing))])
+    end
+  end
+end;
+
+function DecodePlayer(Fields: dict of string to JsonValue): result of PlayerPosition, string;
+begin
+  case try StringField(Fields, 'kind') of
+    'outdoor':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('outdoor player must contain only kind, x, and y')
+      end;
+
+      return Ok(PlayerPosition.Outdoor(record
+        X := try IntegerField(Fields, 'x');
+        Y := try IntegerField(Fields, 'y');
+      end))
+    end;
+    'first_person':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 4 then
+      begin
+        return Error('first-person player must contain only kind, x, y, and facing')
+      end;
+
+      return Ok(PlayerPosition.FirstPerson(record
+        Position := record
+          X := try IntegerField(Fields, 'x');
+          Y := try IntegerField(Fields, 'y');
+        end;
+        Facing := try DecodeFacing(try StringField(Fields, 'facing'));
+      end))
+    end
+    else
+    begin
+      return Error('savegame contains an unknown player position kind')
+    end
+  end
+end;
+
+function EncodeReturnLocation(Value: ReturnLocation): JsonValue;
+begin
+  case Value of
+    ReturnLocation.NoReturnLocation:
+    begin
+      return JsonValue.Object(['kind': JsonValue.String('none')])
+    end;
+    ReturnLocation.ReturnTo(AreaId, Position):
+    begin
+      return JsonValue.Object(['kind': JsonValue.String('outdoor'), 'area_id': JsonValue.String(AreaId), 'x': JsonValue.Number(IntToReal(Position.X)), 'y': JsonValue.Number(IntToReal(Position.Y))])
+    end
+  end
+end;
+
+function DecodeReturnLocation(Fields: dict of string to JsonValue): result of ReturnLocation, string;
+begin
+  case try StringField(Fields, 'kind') of
+    'none':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('empty return location must contain only kind')
+      end;
+
+      return Ok(ReturnLocation.NoReturnLocation)
+    end;
+    'outdoor':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 4 then
+      begin
+        return Error('outdoor return location must contain only kind, area_id, x, and y')
+      end;
+
+      return Ok(ReturnLocation.ReturnTo(try StringField(Fields, 'area_id'), record
+        X := try IntegerField(Fields, 'x');
+        Y := try IntegerField(Fields, 'y');
+      end))
+    end
+    else
+    begin
+      return Error('savegame contains an unknown return-location kind')
+    end
+  end
+end;
+
+function EnsureDirectory(Path: string): result of boolean, string;
+begin
+  if Std.Fs.Exists(Path) then
+  begin
+    if Std.Fs.IsDir(Path) then
+    begin
+      return Ok(true)
+    end;
+
+    return Error('savegame path exists but is not a directory: ' + Path)
+  end;
+
+  return Std.Fs.CreateDir(Path)
+end;
+
+function SaveGameDirectory(World: WorldSession): string;
+begin
+  return Std.Path.Join([World.Directory, 'saves'])
+end;
+
+// Returns the sole savegame path owned by the selected world.
+public function SaveGamePath(World: WorldSession): string;
+begin
+  return Std.Path.Join([SaveGameDirectory(World), 'default.json'])
+end;
+
+// Deletes only the selected world's single save, returning false when it is already absent.
+public function DeleteSaveGame(World: WorldSession): result of boolean, string;
+begin
+  var Path: string := SaveGamePath(World);
+  if not Std.Fs.Exists(Path) then
+  begin
+    return Ok(false)
+  end;
+
+  if not Std.Fs.IsFile(Path) then
+  begin
+    return Error('savegame path exists but is not a file: ' + Path)
+  end;
+
+  return Std.Fs.DeleteFile(Path)
+end;
+
+// Encodes only authoritative resumable state using the current savegame schema.
+public function EncodeSaveGame(WorldId: string; State: GameState): string;
+begin
+  return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation)]))
+end;
+
+// Decodes an exact current-version save and validates it against selected-world invariants.
+public function DecodeSaveGame(Text: string; Metadata: WorldMetadata): result of GameState, string;
+begin
+  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  if Std.Dictionaries.Length(Fields) <> 6 then
+  begin
+    return Error('savegame has an unexpected field set')
+  end;
+
+  if try IntegerField(Fields, 'format_version') <> SaveGameFormatVersion then
+  begin
+    return Error('unsupported savegame format version')
+  end;
+
+  if try StringField(Fields, 'world_id') <> Metadata.Id then
+  begin
+    return Error('savegame world id does not match selected world')
+  end;
+  var State: GameState := record
+    Area := try DecodeAreaKind(try StringField(Fields, 'area_kind'));
+    AreaId := try StringField(Fields, 'area_id');
+    Player := try DecodePlayer(try ObjectField(Fields, 'player'));
+    ReturnLocation := try DecodeReturnLocation(try ObjectField(Fields, 'return_location'));
+  end;
+
+  return ValidateGameState(Metadata, State)
+end;
+
+// Loads the selected world's save, distinguishing a missing file from invalid or failed I/O.
+public function LoadSaveGame(World: WorldSession): result of SaveGameLoad, string;
+begin
+  var Path: string := SaveGamePath(World);
+  if not Std.Fs.Exists(Path) then
+  begin
+    return Ok(SaveGameLoad.Missing)
+  end;
+
+  if not Std.Fs.IsFile(Path) then
+  begin
+    return Error('savegame path exists but is not a file: ' + Path)
+  end;
+  var Text: string := try Std.Fs.ReadText(Path);
+  case DecodeSaveGame(Text, World.Metadata) of
+    Ok(State):
+    begin
+      return Ok(SaveGameLoad.Loaded(State))
+    end;
+    Error(Message):
+    begin
+      case DeleteSaveGame(World) of
+        Ok(Deleted):
+        begin
+          if not Deleted then
+          begin
+            return Error('invalid savegame disappeared before it could be removed: ' + Message)
+          end;
+
+          return Ok(SaveGameLoad.InvalidRemoved(Message))
+        end;
+        Error(DeleteMessage):
+        begin
+          return Error((('invalid savegame could not be removed: ' + DeleteMessage) + '; validation failed: ') +
+                       Message)
+        end
+      end
+    end
+  end
+end;
+
+// Atomically replaces the selected world's single save after validating the state.
+public function WriteSaveGame(World: WorldSession; State: GameState): result of boolean, string;
+begin
+  var Valid: GameState := try ValidateGameState(World.Metadata, State);
+  var DirectoryReady: boolean := try EnsureDirectory(SaveGameDirectory(World));
+  return Std.Fs.WriteTextAtomic(SaveGamePath(World), EncodeSaveGame(World.Metadata.Id, Valid))
+end;

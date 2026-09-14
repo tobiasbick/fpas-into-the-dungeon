@@ -35,6 +35,8 @@ function RunNetworkSession(
 begin
   var ConnectionValue: Connection := try ConnectWithCancellation(Host, Port, 5000, Token);
   mutable var Reader: LineReader := NewLineReader(ConnectionValue);
+  mutable var SaveAvailable: boolean := false;
+  mutable var InvalidSaveRemoved: boolean := false;
   var HelloSent: boolean := try WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion, ViewWidth, ViewHeight)), Token);
   case ReadServer(Reader, Token) of
     Error(Message):
@@ -46,12 +48,17 @@ begin
     begin
       Reader := ReadValue.Reader;
       case ReadValue.Message of
-        ServerMessage.Welcome(Version):
+        ServerMessage.Welcome(Version, Available, Removed):
         begin
           if Version <> ProtocolVersion then
           begin
             var Closed: boolean := try Close(ConnectionValue);
             return Error('server selected an unsupported protocol version')
+          end
+          else
+          begin
+            SaveAvailable := Available;
+            InvalidSaveRemoved := Removed
           end
         end
         else
@@ -62,30 +69,7 @@ begin
       end
     end
   end;
-  var Published: boolean := try Publish(Events, ClientEvent.Connected, Token);
-  case ReadServer(Reader, Token) of
-    Error(Message):
-    begin
-      var Closed: boolean := try Close(ConnectionValue);
-      return Error(Message)
-    end;
-    Ok(ReadValue):
-    begin
-      Reader := ReadValue.Reader;
-      case ReadValue.Message of
-        ServerMessage.State(Value):
-        begin
-          var PublishedState: boolean := try Publish(Events, ClientEvent.State(Value), Token)
-        end
-        else
-        begin
-          var Closed: boolean := try Close(ConnectionValue);
-          return Error('server did not send initial state')
-        end
-      end
-    end
-  end;
-
+  var Published: boolean := try Publish(Events, ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved), Token);
   while not IsCancellationRequested(Token) do
   begin
     case ReceiveWithCancellation(Requests, Token) of
@@ -102,6 +86,111 @@ begin
           begin
             var Closed: boolean := try Close(ConnectionValue);
             return Ok(true)
+          end;
+          ClientMessage.StartNewGame:
+          begin
+            case ReadServer(Reader, Token) of
+              Error(Message):
+              begin
+                var Closed: boolean := try Close(ConnectionValue);
+                return Error(Message)
+              end;
+              Ok(ReadValue):
+              begin
+                Reader := ReadValue.Reader;
+                case ReadValue.Message of
+                  ServerMessage.State(Value):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.State(Value), Token)
+                  end;
+                  ServerMessage.Rejected(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
+                  end;
+                  ServerMessage.ErrorMessage(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Ok(true)
+                  end
+                  else
+                  begin
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Error('unexpected new-game response')
+                  end
+                end
+              end
+            end
+          end;
+          ClientMessage.LoadGame:
+          begin
+            case ReadServer(Reader, Token) of
+              Error(Message):
+              begin
+                var Closed: boolean := try Close(ConnectionValue);
+                return Error(Message)
+              end;
+              Ok(ReadValue):
+              begin
+                Reader := ReadValue.Reader;
+                case ReadValue.Message of
+                  ServerMessage.State(Value):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.State(Value), Token)
+                  end;
+                  ServerMessage.Rejected(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
+                  end;
+                  ServerMessage.ErrorMessage(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Ok(true)
+                  end
+                  else
+                  begin
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Error('unexpected load-game response')
+                  end
+                end
+              end
+            end
+          end;
+          ClientMessage.SaveGame:
+          begin
+            case ReadServer(Reader, Token) of
+              Error(Message):
+              begin
+                var Closed: boolean := try Close(ConnectionValue);
+                return Error(Message)
+              end;
+              Ok(ReadValue):
+              begin
+                Reader := ReadValue.Reader;
+                case ReadValue.Message of
+                  ServerMessage.SaveCompleted:
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.SaveCompleted, Token)
+                  end;
+                  ServerMessage.Rejected(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
+                  end;
+                  ServerMessage.ErrorMessage(Code, Message):
+                  begin
+                    var Sent: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Ok(true)
+                  end
+                  else
+                  begin
+                    var Closed: boolean := try Close(ConnectionValue);
+                    return Error('unexpected save-game response')
+                  end
+                end
+              end
+            end
           end;
           ClientMessage.Move(DeltaX, DeltaY):
           begin
@@ -121,7 +210,7 @@ begin
                   end;
                   ServerMessage.Rejected(Code, Message):
                   begin
-                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
                   end;
                   ServerMessage.ErrorMessage(Code, Message):
                   begin
@@ -156,7 +245,7 @@ begin
                   end;
                   ServerMessage.Rejected(Code, Message):
                   begin
-                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
                   end;
                   ServerMessage.ErrorMessage(Code, Message):
                   begin
@@ -191,7 +280,7 @@ begin
                   end;
                   ServerMessage.Rejected(Code, Message):
                   begin
-                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
                   end;
                   ServerMessage.ErrorMessage(Code, Message):
                   begin
@@ -226,7 +315,7 @@ begin
                   end;
                   ServerMessage.Rejected(Code, Message):
                   begin
-                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
                   end;
                   ServerMessage.ErrorMessage(Code, Message):
                   begin
@@ -261,7 +350,7 @@ begin
                   end;
                   ServerMessage.Rejected(Code, Message):
                   begin
-                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Message), Token)
+                    var Sent: boolean := try Publish(Events, ClientEvent.Rejected(Code, Message), Token)
                   end;
                   ServerMessage.ErrorMessage(Code, Message):
                   begin

@@ -11,7 +11,9 @@ default data root is:
 ├── worlds/
 │   └── <world-id>/
 │       ├── world.json
-│       └── chunks/
+│       ├── chunks/
+│       └── saves/
+│           └── default.json
 ├── logs/
 └── cache/
 ```
@@ -36,11 +38,14 @@ relative override is resolved from the process working directory.
 ## Configuration
 
 The client and server create their configuration file with defaults when it is
-missing, then load it as TOML. The client file contains its endpoint:
+missing, then load it as TOML. The client file contains its endpoint and local
+panel preferences:
 
 ```toml
 host = "127.0.0.1"
 port = 4040
+context_panel_visible = true
+message_panel_visible = false
 ```
 
 The server file additionally selects its authoritative world and bounds client
@@ -61,18 +66,28 @@ The server's `--world ID` selects another world without changing the stored
 default. Use `--data-dir PATH` to select a different data root before
 configuration is loaded.
 
-Runtime configuration and world formats support only their current schema and
-generator version. After an incompatible development change, select a new world
-id or delete the obsolete world's directory so it can be generated again. The
-application reports the incompatibility and does not migrate or overwrite the
-old data.
+Runtime configuration, world, chunk, and savegame formats support only their
+current schema and generator version. After an incompatible development change,
+select a new world id or delete the obsolete configuration or world data as
+instructed by the reported error. Configuration is never deleted automatically.
+Invalid or incompatible savegames are an exception during development: the
+server removes only the selected world's `saves/default.json`, reports the
+removal, and then advertises no loadable save. No schema migration or
+compatibility fallback is provided.
 
 ## Ownership
 
-- `config` contains persistent client and server settings.
-- `worlds` contains versioned authoritative world metadata and generated chunk
-  files and is owned by the server.
+- `config` contains persistent client and server settings. The client's panel
+  visibility changes are written atomically; command-line host and port
+  overrides are not written back.
+- `worlds` contains versioned authoritative world metadata, generated chunk
+  files, and one atomic `saves/default.json` savegame per world. It is owned by
+  the server.
 - `logs` contains diagnostic output and is not part of a saved world.
 - `cache` contains disposable data that the application can rebuild.
 - Tests use a temporary data root supplied through the same interface and do
   not write to the user's default directory.
+
+The savegame contains only the authoritative state needed to resume a session.
+See [persistent game state](persistent-game-state.md) for its lifecycle and
+validation rules.

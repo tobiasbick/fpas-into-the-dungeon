@@ -45,11 +45,12 @@ exit reuse the same selected world session and chunk cache.
 
 ## Versions and lifecycle
 
-World and chunk format version `2`, generator version `5`, and protocol version
-`4` are required. Development data from older schemas is rejected. The project
-does not provide migrations, fallbacks, or compatibility paths. Player session
-state and active transitions are not persisted across reconnects yet; each new
-connection starts at the world's stable spawn.
+World and chunk format version `2`, generator version `5`, protocol version `5`,
+and savegame format `1` are required. Development data from older schemas is
+rejected without migrations, fallbacks, or compatibility paths. The retained
+return location is part of the authoritative savegame, so a saved interior can
+be loaded and later return to its exact outdoor coordinate. Connecting alone
+does not implicitly start or load a session.
 
 Interior navigation and projection are detailed in
 [first-person interior](first-person-interior.md).

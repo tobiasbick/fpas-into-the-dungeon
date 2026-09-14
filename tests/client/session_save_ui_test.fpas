@@ -1,0 +1,99 @@
+// Verifies connected session selection and retryable save status through the pure client update seam.
+program DungeonClientSessionSaveUiTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Results, Std.Task, Std.Test, Std.Tui;
+
+function Action(ControlId: integer; ActionId: integer): TuiMsg;
+begin
+  return TuiMsg.Action(TuiControlId.Create(ControlId), TuiAction.Create(ActionId))
+end;
+
+begin
+  var Requests: channel of ClientMessage := CreateChannel(4);
+  var Events: channel of ClientEvent := CreateChannel(1);
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  Model := UpdateClientEvent(Model, ClientEvent.Connected(true, false), Cmd);
+  AssertTrue(Model.Screen = ClientScreen.StartScreen);
+  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.AwaitingSession);
+  AssertTrue(Model.SaveAvailable);
+  Model := UpdateClient(Model, Action(5, 105), Cmd);
+  AssertTrue(Model.Pending);
+  AssertEquals('Loading game...', Model.Status);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.LoadGame:
+    begin
+    end
+    else
+    begin
+      panic('expected load-game intention')
+    end
+  end;
+
+  Model := UpdateClient(Model, Action(5, 105), Cmd);
+  AssertTrue(Std.Results.IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClientEvent(Model, ClientEvent.Rejected('load_failed', 'Saved game could not be loaded.'), Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(Model.Screen = ClientScreen.StartScreen);
+  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.AwaitingSession);
+  AssertEquals('Saved game could not be loaded.', Model.Status);
+  Model := UpdateClient(Model, Action(4, 104), Cmd);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.StartNewGame:
+    begin
+    end
+    else
+    begin
+      panic('expected new-game intention after load failure')
+    end
+  end;
+  var MapValue: MapVisibleState := record
+    OriginX := -1;
+    OriginY := -1;
+    Width := 3;
+    Height := 3;
+    Rows := ['ggg', 'ggg', 'ggg'];
+    PlayerX := 1;
+    PlayerY := 1;
+    WorldX := 0;
+    WorldY := 0;
+  end;
+
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.MapState(MapValue)), Cmd);
+  AssertTrue(Model.Screen = ClientScreen.GameScreen);
+  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.Active);
+  Model.SaveAvailable := false;
+  Model := UpdateClient(Model, Action(14, 112), Cmd);
+  AssertTrue(Model.Pending);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  AssertEquals('Saving game...', Model.Status);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.SaveGame:
+    begin
+    end
+    else
+    begin
+      panic('expected direct first save without overwrite confirmation')
+    end
+  end;
+
+  Model := UpdateClient(Model, Action(14, 112), Cmd);
+  AssertTrue(Std.Results.IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClientEvent(Model, ClientEvent.Rejected('save_failed', 'Save failed; retry is available.'), Cmd);
+  AssertFalse(Model.Pending);
+  AssertEquals('Save failed; retry is available.', Model.Status);
+  Model := UpdateClient(Model, Action(14, 112), Cmd);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.SaveGame:
+    begin
+    end
+    else
+    begin
+      panic('expected save retry after a recoverable failure')
+    end
+  end;
+
+  CloseChannel(Requests);
+  CloseChannel(Events)
+end.

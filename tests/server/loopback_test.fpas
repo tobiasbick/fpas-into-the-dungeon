@@ -2,13 +2,14 @@
 program DungeonServerLoopbackTest;
 
 uses
-  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Std.Conv, Std.Fs,
-  Std.Net, Std.Path, Std.Results, Std.Task, Std.Test;
+  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.World,
+  Dungeon.World.Savegame, Std.Conv, Std.Fs, Std.Net, Std.Path, Std.Results, Std.Task, Std.Test,
+  Std.Time;
 
-function TestConfig(): ServerConfig;
+function TestConfig(WorldsRoot: string): ServerConfig;
 begin
   return record
-    WorldsRoot := '.temp-data/server-loopback-generator-v' + IntToStr(WorldGeneratorVersion);
+    WorldsRoot := WorldsRoot;
     WorldId := 'loopback';
     WorldSeed := 12345;
     ChunkCacheLimit := 32;
@@ -64,32 +65,33 @@ begin
   end
 end;
 
-procedure EnsureWorldRoot();
+procedure EnsureWorldRoot(Config: ServerConfig);
 begin
   AssertTrue(EnsureDirectory('.temp-data'));
-  AssertTrue(EnsureDirectory(TestConfig().WorldsRoot))
+  AssertTrue(EnsureDirectory(Config.WorldsRoot))
 end;
 
-function ServeOne(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
+function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
 begin
   var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
   var Configured: boolean := try SetTimeout(Client, 2000);
-  var Outcome: result of boolean, string := ServeConnection(Client, TestConfig(), Token);
+  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
   var Closed: boolean := try Close(Client);
   return Outcome
 end;
 
 begin
-  EnsureWorldRoot();
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(TestConfig().WorldId, TestConfig()
-                                                                                 .WorldSeed));
+  var WorldsRoot: string := '.temp-data/server-loopback-' + IntToStr(TimestampMillis());
+  var Config: ServerConfig := TestConfig(WorldsRoot);
+  EnsureWorldRoot(Config);
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
   var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
   var Source: CancellationSource := CreateCancellationSource();
   var Token: CancellationToken := GetCancellationToken(Source);
-  var ServerTask: task := go ServeOne(ListenerValue, Token);
+  var ServerTask: task := go ServeOne(ListenerValue, Config, Token);
   var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(Client, 30000)));
+  AssertTrue(Unwrap(SetTimeout(Client, 120000)));
   mutable var Reader: LineReader := NewLineReader(Client);
   AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)));
   var WelcomeRead: LineRead := Unwrap(ReadLine(Reader, Token));
@@ -98,9 +100,11 @@ begin
     Ok(WelcomeMessage):
     begin
       case WelcomeMessage of
-        ServerMessage.Welcome(Version):
+        ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
         begin
-          AssertEquals(ProtocolVersion, Version)
+          AssertEquals(ProtocolVersion, Version);
+          AssertFalse(SaveAvailable);
+          AssertFalse(InvalidSaveRemoved)
         end
         else
         begin
@@ -113,6 +117,78 @@ begin
       panic('unexpected welcome: ' + WelcomeRead.Line)
     end
   end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token)));
+  var BeforeSessionRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := BeforeSessionRead.Reader;
+  case Unwrap(DecodeServer(BeforeSessionRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('session_not_started', Code)
+    end
+    else
+    begin
+      panic('expected movement rejection before session selection')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.SaveGame), Token)));
+  var BeforeSessionSaveRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := BeforeSessionSaveRead.Reader;
+  case Unwrap(DecodeServer(BeforeSessionSaveRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('session_not_started', Code)
+    end
+    else
+    begin
+      panic('expected save rejection before session selection')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Viewport(20, 10)), Token)));
+  var BeforeSessionViewportRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := BeforeSessionViewportRead.Reader;
+  case Unwrap(DecodeServer(BeforeSessionViewportRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('session_not_started', Code)
+    end
+    else
+    begin
+      panic('expected viewport rejection before session selection')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left)), Token)));
+  var BeforeSessionTurnRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := BeforeSessionTurnRead.Reader;
+  case Unwrap(DecodeServer(BeforeSessionTurnRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('session_not_started', Code)
+    end
+    else
+    begin
+      panic('expected turn rejection before session selection')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ActivateAreaTransition), Token)));
+  var BeforeSessionTransitionRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := BeforeSessionTransitionRead.Reader;
+  case Unwrap(DecodeServer(BeforeSessionTransitionRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('session_not_started', Code)
+    end
+    else
+    begin
+      panic('expected transition rejection before session selection')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StartNewGame), Token)));
   var InitialRead: LineRead := Unwrap(ReadLine(Reader, Token));
   Reader := InitialRead.Reader;
   case DecodeServer(InitialRead.Line) of
@@ -140,6 +216,20 @@ begin
     else
     begin
       panic('unexpected initial state: ' + InitialRead.Line)
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StartNewGame), Token)));
+  var SecondStartRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := SecondStartRead.Reader;
+  case Unwrap(DecodeServer(SecondStartRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('session_already_started', Code)
+    end
+    else
+    begin
+      panic('expected repeated session selection to be rejected')
     end
   end;
 
@@ -366,6 +456,19 @@ begin
     end
   end;
 
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.SaveGame), Token)));
+  var SavedRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := SavedRead.Reader;
+  case Unwrap(DecodeServer(SavedRead.Line)) of
+    ServerMessage.SaveCompleted:
+    begin
+    end
+    else
+    begin
+      panic('expected save completion after atomic persistence')
+    end
+  end;
+
   AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right)), Token)));
   var ExitTurnRead: LineRead := Unwrap(ReadLine(Reader, Token));
   Reader := ExitTurnRead.Reader;
@@ -380,7 +483,37 @@ begin
     end
   end;
 
-  for InteriorStep: integer := 1 to 8 do
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
+  var BeforeReplacementSaveRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := BeforeReplacementSaveRead.Reader;
+  case Unwrap(DecodeServer(BeforeReplacementSaveRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
+      AssertEquals(8, FirstPersonValue.PlayerX);
+      AssertEquals(7, FirstPersonValue.PlayerY);
+      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West)
+    end
+    else
+    begin
+      panic('expected state before replacement save')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.SaveGame), Token)));
+  var ReplacementSavedRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := ReplacementSavedRead.Reader;
+  case Unwrap(DecodeServer(ReplacementSavedRead.Line)) of
+    ServerMessage.SaveCompleted:
+    begin
+    end
+    else
+    begin
+      panic('expected second save completion after atomic replacement')
+    end
+  end;
+
+  for InteriorStep: integer := 1 to 7 do
   begin
     AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
     var StepRead: LineRead := Unwrap(ReadLine(Reader, Token));
@@ -389,7 +522,7 @@ begin
       ServerMessage.State(Value):
       begin
         var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-        AssertEquals(9 - InteriorStep, FirstPersonValue.PlayerX);
+        AssertEquals(8 - InteriorStep, FirstPersonValue.PlayerX);
         AssertEquals(7, FirstPersonValue.PlayerY)
       end
       else
@@ -485,7 +618,7 @@ begin
   AssertTrue(Unwrap(Close(Client)));
   AssertTrue(Unwrap(Wait(ServerTask)));
   AssertTrue(Unwrap(CloseListener(ListenerValue)));
-  var WorldPath: string := Std.Path.Join([TestConfig().WorldsRoot, TestConfig().WorldId]);
+  var WorldPath: string := Std.Path.Join([Config.WorldsRoot, Config.WorldId]);
   var MetadataPath: string := Std.Path.Join([WorldPath, 'world.json']);
   var ChunkPath: string := Std.Path.Join([
                                            WorldPath,
@@ -497,16 +630,186 @@ begin
   var ChunkBefore: string := Unwrap(Std.Fs.ReadText(ChunkPath));
   var RestartListener: Listener := Unwrap(Listen('127.0.0.1', 0));
   var RestartAddress: NetworkAddress := Unwrap(ListenerLocalAddress(RestartListener));
-  var RestartTask: task := go ServeOne(RestartListener, Token);
+  var RestartTask: task := go ServeOne(RestartListener, Config, Token);
   var RestartClient: Connection := Unwrap(Connect('127.0.0.1', RestartAddress.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(RestartClient, 30000)));
+  AssertTrue(Unwrap(SetTimeout(RestartClient, 120000)));
   mutable var RestartReader: LineReader := NewLineReader(RestartClient);
   AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 1, 1)), Token)));
   var RestartWelcome: LineRead := Unwrap(ReadLine(RestartReader, Token));
   RestartReader := RestartWelcome.Reader;
+  case Unwrap(DecodeServer(RestartWelcome.Line)) of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertEquals(ProtocolVersion, Version);
+      AssertTrue(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected restart welcome with saved-game availability')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.LoadGame), Token)));
   var RestartState: LineRead := Unwrap(ReadLine(RestartReader, Token));
   RestartReader := RestartState.Reader;
   case Unwrap(DecodeServer(RestartState.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
+      AssertEquals(8, FirstPersonValue.PlayerX);
+      AssertEquals(7, FirstPersonValue.PlayerY);
+      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West)
+    end
+    else
+    begin
+      panic('expected saved first-person state after server restart')
+    end
+  end;
+
+  for LoadedStep: integer := 1 to 7 do
+  begin
+    AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
+    var LoadedStepRead: LineRead := Unwrap(ReadLine(RestartReader, Token));
+    RestartReader := LoadedStepRead.Reader;
+    case Unwrap(DecodeServer(LoadedStepRead.Line)) of
+      ServerMessage.State(Value):
+      begin
+        var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
+        AssertEquals(8 - LoadedStep, FirstPersonValue.PlayerX);
+        AssertEquals(7, FirstPersonValue.PlayerY)
+      end
+      else
+      begin
+        panic('expected loaded interior movement toward exit')
+      end
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.ActivateAreaTransition), Token)));
+  var LoadedExitRead: LineRead := Unwrap(ReadLine(RestartReader, Token));
+  RestartReader := LoadedExitRead.Reader;
+  case Unwrap(DecodeServer(LoadedExitRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(Metadata.Entrance.X, MapValue.WorldX);
+      AssertEquals(Metadata.Entrance.Y, MapValue.WorldY)
+    end
+    else
+    begin
+      panic('expected loaded interior to return to saved outdoor location')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.SaveGame), Token)));
+  var OutdoorSavedRead: LineRead := Unwrap(ReadLine(RestartReader, Token));
+  RestartReader := OutdoorSavedRead.Reader;
+  case Unwrap(DecodeServer(OutdoorSavedRead.Line)) of
+    ServerMessage.SaveCompleted:
+    begin
+    end
+    else
+    begin
+      panic('expected outdoor save completion after leaving loaded interior')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(RestartClient)));
+  AssertTrue(Unwrap(Wait(RestartTask)));
+  AssertTrue(Unwrap(CloseListener(RestartListener)));
+  var OutdoorRestartListener: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var OutdoorRestartAddress: NetworkAddress := Unwrap(ListenerLocalAddress(OutdoorRestartListener));
+  var OutdoorRestartTask: task := go ServeOne(OutdoorRestartListener, Config, Token);
+  var OutdoorRestartClient: Connection := Unwrap(Connect('127.0.0.1', OutdoorRestartAddress.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(OutdoorRestartClient, 120000)));
+  mutable var OutdoorRestartReader: LineReader := NewLineReader(OutdoorRestartClient);
+  AssertTrue(Unwrap(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)));
+  var OutdoorRestartWelcome: LineRead := Unwrap(ReadLine(OutdoorRestartReader, Token));
+  OutdoorRestartReader := OutdoorRestartWelcome.Reader;
+  case Unwrap(DecodeServer(OutdoorRestartWelcome.Line)) of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertEquals(ProtocolVersion, Version);
+      AssertTrue(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected outdoor restart welcome with saved-game availability')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.LoadGame), Token)));
+  var OutdoorRestartState: LineRead := Unwrap(ReadLine(OutdoorRestartReader, Token));
+  OutdoorRestartReader := OutdoorRestartState.Reader;
+  case Unwrap(DecodeServer(OutdoorRestartState.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(Metadata.Entrance.X, MapValue.WorldX);
+      AssertEquals(Metadata.Entrance.Y, MapValue.WorldY)
+    end
+    else
+    begin
+      panic('expected exact saved outdoor position after another server restart')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(OutdoorRestartClient)));
+  AssertTrue(Unwrap(Wait(OutdoorRestartTask)));
+  AssertTrue(Unwrap(CloseListener(OutdoorRestartListener)));
+  var SavedWorld: WorldSession := Unwrap(OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit));
+  var SavePath: string := SaveGamePath(SavedWorld);
+  var KeepPath: string := Std.Path.Join([SavedWorld.Directory, 'saves', 'keep.txt']);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(KeepPath, 'keep')));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(SavePath, '{broken')));
+  var InvalidListener: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var InvalidAddress: NetworkAddress := Unwrap(ListenerLocalAddress(InvalidListener));
+  var InvalidTask: task := go ServeOne(InvalidListener, Config, Token);
+  var InvalidClient: Connection := Unwrap(Connect('127.0.0.1', InvalidAddress.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(InvalidClient, 120000)));
+  mutable var InvalidReader: LineReader := NewLineReader(InvalidClient);
+  AssertTrue(Unwrap(WriteLine(InvalidClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)));
+  var InvalidWelcome: LineRead := Unwrap(ReadLine(InvalidReader, Token));
+  InvalidReader := InvalidWelcome.Reader;
+  case Unwrap(DecodeServer(InvalidWelcome.Line)) of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertEquals(ProtocolVersion, Version);
+      AssertFalse(SaveAvailable);
+      AssertTrue(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected invalid-save removal in welcome')
+    end
+  end;
+
+  AssertFalse(Std.Fs.Exists(SavePath));
+  AssertEquals(MetadataBefore, Unwrap(Std.Fs.ReadText(MetadataPath)));
+  AssertEquals(ChunkBefore, Unwrap(Std.Fs.ReadText(ChunkPath)));
+  AssertEquals('keep', Unwrap(Std.Fs.ReadText(KeepPath)));
+  AssertTrue(Unwrap(WriteLine(InvalidClient, EncodeClient(ClientMessage.LoadGame), Token)));
+  var MissingRead: LineRead := Unwrap(ReadLine(InvalidReader, Token));
+  InvalidReader := MissingRead.Reader;
+  case Unwrap(DecodeServer(MissingRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('save_unavailable', Code)
+    end
+    else
+    begin
+      panic('expected load to remain unavailable after removal')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(InvalidClient, EncodeClient(ClientMessage.StartNewGame), Token)));
+  var FreshStateRead: LineRead := Unwrap(ReadLine(InvalidReader, Token));
+  InvalidReader := FreshStateRead.Reader;
+  case Unwrap(DecodeServer(FreshStateRead.Line)) of
     ServerMessage.State(Value):
     begin
       var MapValue: MapVisibleState := RequireMap(Value);
@@ -515,14 +818,70 @@ begin
     end
     else
     begin
-      panic('expected state after server-session restart')
+      panic('expected a fresh outdoor state after invalid-save removal')
     end
   end;
 
-  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.Disconnect), Token)));
-  AssertTrue(Unwrap(Close(RestartClient)));
-  AssertTrue(Unwrap(Wait(RestartTask)));
-  AssertTrue(Unwrap(CloseListener(RestartListener)));
+  AssertTrue(Unwrap(WriteLine(InvalidClient, EncodeClient(ClientMessage.SaveGame), Token)));
+  var FreshSavedRead: LineRead := Unwrap(ReadLine(InvalidReader, Token));
+  InvalidReader := FreshSavedRead.Reader;
+  case Unwrap(DecodeServer(FreshSavedRead.Line)) of
+    ServerMessage.SaveCompleted:
+    begin
+    end
+    else
+    begin
+      panic('expected a fresh save after invalid-save removal')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(InvalidClient, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(InvalidClient)));
+  AssertTrue(Unwrap(Wait(InvalidTask)));
+  AssertTrue(Unwrap(CloseListener(InvalidListener)));
+  var FreshRestartListener: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var FreshRestartAddress: NetworkAddress := Unwrap(ListenerLocalAddress(FreshRestartListener));
+  var FreshRestartTask: task := go ServeOne(FreshRestartListener, Config, Token);
+  var FreshRestartClient: Connection := Unwrap(Connect('127.0.0.1', FreshRestartAddress.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(FreshRestartClient, 120000)));
+  mutable var FreshRestartReader: LineReader := NewLineReader(FreshRestartClient);
+  AssertTrue(Unwrap(WriteLine(FreshRestartClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)));
+  var FreshRestartWelcome: LineRead := Unwrap(ReadLine(FreshRestartReader, Token));
+  FreshRestartReader := FreshRestartWelcome.Reader;
+  case Unwrap(DecodeServer(FreshRestartWelcome.Line)) of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertEquals(ProtocolVersion, Version);
+      AssertTrue(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected fresh save availability after restart')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(FreshRestartClient, EncodeClient(ClientMessage.LoadGame), Token)));
+  var FreshLoadedRead: LineRead := Unwrap(ReadLine(FreshRestartReader, Token));
+  FreshRestartReader := FreshLoadedRead.Reader;
+  case Unwrap(DecodeServer(FreshLoadedRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+      AssertEquals(Metadata.Spawn.Y, MapValue.WorldY)
+    end
+    else
+    begin
+      panic('expected fresh save to load after restart')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(FreshRestartClient, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(FreshRestartClient)));
+  AssertTrue(Unwrap(Wait(FreshRestartTask)));
+  AssertTrue(Unwrap(CloseListener(FreshRestartListener)));
   AssertEquals(MetadataBefore, Unwrap(Std.Fs.ReadText(MetadataPath)));
-  AssertEquals(ChunkBefore, Unwrap(Std.Fs.ReadText(ChunkPath)))
+  AssertEquals(ChunkBefore, Unwrap(Std.Fs.ReadText(ChunkPath)));
+  AssertEquals('keep', Unwrap(Std.Fs.ReadText(KeepPath)))
 end.

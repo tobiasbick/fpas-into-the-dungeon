@@ -1,0 +1,157 @@
+// Verifies that an atomic save failure preserves active state and leaves the connection usable.
+program DungeonServerSaveFailureTest;
+
+uses
+  Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.World, Std.Conv, Std.Fs,
+  Std.Net, Std.Path, Std.Results, Std.Task, Std.Test, Std.Time;
+
+function TestConfig(WorldsRoot: string): ServerConfig;
+begin
+  return record
+    WorldsRoot := WorldsRoot;
+    WorldId := 'save-failure';
+    WorldSeed := 45678;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 80;
+    MaximumViewHeight := 24;
+  end
+end;
+
+function EnsureDirectory(Path: string): boolean;
+begin
+  if Std.Fs.IsDir(Path) then
+  begin
+    return true
+  end;
+
+  case Std.Fs.CreateDir(Path) of
+    Ok(Created):
+    begin
+      return true
+    end
+    else
+    begin
+      return Std.Fs.IsDir(Path)
+    end
+  end
+end;
+
+function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Configured: boolean := try SetTimeout(Client, 2000);
+  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
+  var Closed: boolean := try Close(Client);
+  return Outcome
+end;
+
+function RequireMap(Value: VisibleState): MapVisibleState;
+begin
+  case Value of
+    VisibleState.MapState(MapValue):
+    begin
+      return MapValue
+    end
+    else
+    begin
+      panic('expected map visible state')
+    end
+  end
+end;
+
+begin
+  AssertTrue(EnsureDirectory('.temp-data'));
+  var WorldsRoot: string := '.temp-data/server-save-failure-' + IntToStr(TimestampMillis());
+  AssertTrue(EnsureDirectory(WorldsRoot));
+  var Config: ServerConfig := TestConfig(WorldsRoot);
+  var World: WorldSession := Unwrap(OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit));
+  var BlockingPath: string := Std.Path.Join([World.Directory, 'saves']);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(BlockingPath, 'not a directory')));
+  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var ServerTask: task := go ServeOne(ListenerValue, Config, Token);
+  var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(Client, 120000)));
+  mutable var Reader: LineReader := NewLineReader(Client);
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)));
+  var WelcomeRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := WelcomeRead.Reader;
+  case Unwrap(DecodeServer(WelcomeRead.Line)) of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertEquals(ProtocolVersion, Version);
+      AssertFalse(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected welcome before save-failure test')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StartNewGame), Token)));
+  var InitialRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := InitialRead.Reader;
+  mutable var InitialMap: MapVisibleState := record
+    OriginX := 0;
+    OriginY := 0;
+    Width := 0;
+    Height := 0;
+    Rows := [];
+    PlayerX := 0;
+    PlayerY := 0;
+    WorldX := 0;
+    WorldY := 0;
+  end;
+
+  case Unwrap(DecodeServer(InitialRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      InitialMap := RequireMap(Value)
+    end
+    else
+    begin
+      panic('expected initial game state')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.SaveGame), Token)));
+  var SaveRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := SaveRead.Reader;
+  case Unwrap(DecodeServer(SaveRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('save_failed', Code)
+    end
+    else
+    begin
+      panic('expected recoverable save failure')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Viewport(15, 9)), Token)));
+  var AfterFailureRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := AfterFailureRead.Reader;
+  case Unwrap(DecodeServer(AfterFailureRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(InitialMap.WorldX, MapValue.WorldX);
+      AssertEquals(InitialMap.WorldY, MapValue.WorldY);
+      AssertEquals(15, MapValue.Width);
+      AssertEquals(9, MapValue.Height)
+    end
+    else
+    begin
+      panic('expected usable connection and unchanged state after save failure')
+    end
+  end;
+
+  AssertEquals('not a directory', Unwrap(Std.Fs.ReadText(BlockingPath)));
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(Client)));
+  AssertTrue(Unwrap(Wait(ServerTask)));
+  AssertTrue(Unwrap(CloseListener(ListenerValue)))
+end.

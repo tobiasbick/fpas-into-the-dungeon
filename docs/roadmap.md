@@ -90,16 +90,25 @@ terminal raycaster. Unit, protocol, headless-TUI, loopback, full-session, and
 real-process smoke tests cover the complete path. See
 [first-person interior](architecture/first-person-interior.md).
 
-## 7. Persistent game state — NEXT
+## 7. Persistent game state — DONE
 
-Save and restore the selected world and authoritative player state below the
-configured runtime-data root. The storage format must be versioned and updates
-must not leave a partially written save.
+Give each selected world one server-owned, versioned savegame below the
+configured runtime-data root. Connecting keeps the client on the start screen
+until the player explicitly starts a new game or loads the existing save.
+Saving is manual, atomic, and confirmed before overwriting; disconnect and quit
+never save implicitly. Client persistence remains limited to endpoint and panel
+preferences.
 
-A database is introduced only if concrete access or recovery requirements make
-the file-based approach insufficient.
+This stage is complete when outdoor and first-person state survive a server
+restart with exact position, facing, area identity, and return location;
+invalid development saves are removed without touching other world data; and
+unit, protocol, headless-TUI, restart, and real-process tests pass. A database
+is introduced only if concrete access or recovery requirements make the
+file-based approach insufficient.
 
-## 8. First RPG interaction — OPEN
+See [persistent game state](architecture/persistent-game-state.md).
+
+## 8. First RPG interaction — NEXT
 
 Choose one small interaction only after movement, views, transitions, and
 persistence have stable seams. Possible candidates include examining an

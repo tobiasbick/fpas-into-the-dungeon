@@ -51,8 +51,9 @@ these projects.
   connection to the game simulation.
 - `apps/server` owns the server program entry point and server lifetime.
 - `libs/game` owns the authoritative world model, rules, and simulation.
-- `libs/world` owns validated world/chunk persistence, missing-chunk generation,
-  visible-window composition, prefetching, and bounded caching.
+- `libs/world` owns validated world, chunk, and savegame persistence,
+  missing-chunk generation, visible-window composition, prefetching, and
+  bounded caching.
 - `libs/protocol` owns commands and visible-state messages shared by client and
   server. It contains no game rules.
 - `libs/persistence` currently owns the shared runtime path and configuration
@@ -77,10 +78,12 @@ The server-owned seam between areas and view-specific protocol states is
 described in [area transitions](area-transitions.md).
 The ownership and rendering seams for discrete indoor navigation are described
 in [first-person interior](first-person-interior.md).
+The explicit server-owned save lifecycle is described in
+[persistent game state](persistent-game-state.md).
 
 ## Runtime data
 
-Configuration, saved worlds, logs, and caches live outside the repository. See
+Configuration, worlds, savegames, logs, and caches live outside the repository. See
 the [runtime data layout](runtime-data.md) for the default location, overrides,
 and ownership rules.
 
