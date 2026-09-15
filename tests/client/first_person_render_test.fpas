@@ -1,7 +1,7 @@
 // Verifies deterministic first-person ray intersections and complete terminal-cell rendering.
 program DungeonFirstPersonRenderTest;
 
-uses Dungeon.Client.Raycast, Dungeon.Protocol, Std.Arrays, Std.Options, Std.Test, Std.Tui;
+uses Dungeon.Client.Raycast, Dungeon.Protocol, Std.Arrays, Std.Options, Std.Str, Std.Test, Std.Tui;
 
 function FixedState(Facing: FirstPersonFacing): FirstPersonVisibleState;
 begin
@@ -21,6 +21,17 @@ begin
               '#x........#',
               '###########'
             ];
+    KnowledgeRows := [
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv',
+                       'vvvvvvvvvvv'
+                     ];
     PlayerX := 9;
     PlayerY := 1;
     Facing := Facing;
@@ -32,7 +43,68 @@ begin
   return Std.Options.Unwrap(Cell.ConcreteStyle).Background.Red
 end;
 
+function BackgroundBlue(Cell: TuiCell): integer;
 begin
+  return Std.Options.Unwrap(Cell.ConcreteStyle).Background.Blue
+end;
+
+// Removing a traversable exit may change floor pixels only, never walls or sky.
+function VerifyExitMaterial(Value: FirstPersonVisibleState; Width: integer; Height: integer): integer;
+begin
+  mutable var Plain: FirstPersonVisibleState := Value;
+  Plain.Rows[7] := '#.........#';
+  var Actual: TuiCellGrid := RenderFirstPersonGrid(Value, Width, Height);
+  var Expected: TuiCellGrid := RenderFirstPersonGrid(Plain, Width, Height);
+  mutable var GoldCount: integer := 0;
+  for I: integer := 0 to Std.Arrays.Length(Actual.Cells) - 1 do
+  begin
+    var A: TuiColor := Std.Options.Unwrap(Actual.Cells[I].ConcreteStyle).Background;
+    var B: TuiColor := Std.Options.Unwrap(Expected.Cells[I].ConcreteStyle).Background;
+    if ((A.Red <> B.Red) or (A.Green <> B.Green)) or (A.Blue <> B.Blue) then
+    begin
+      AssertEquals(92, A.Red);
+      AssertEquals(68, A.Green);
+      AssertEquals(20, A.Blue);
+      AssertEquals(38, B.Red);
+      AssertEquals(34, B.Green);
+      AssertEquals(31, B.Blue);
+      GoldCount := GoldCount + 1
+    end
+  end;
+
+  return GoldCount
+end;
+
+begin
+  // Covers ordinary raycasting, close-wall lanes, junctions, and each facing.
+  for Facing: FirstPersonFacing in [
+                                     FirstPersonFacing.North,
+                                     FirstPersonFacing.East,
+                                     FirstPersonFacing.South,
+                                     FirstPersonFacing.West
+                                   ] do
+  begin
+    mutable var Pose: FirstPersonVisibleState := FixedState(Facing);
+    for Y: integer := 1 to 7 do
+    begin
+      for X: integer := 1 to 9 do
+      begin
+        if Std.Str.CharAt(Pose.Rows[Y], X) <> '#' then
+        begin
+          Pose.PlayerX := X;
+          Pose.PlayerY := Y;
+          var Changed: integer := VerifyExitMaterial(Pose, 21, 11);
+          AssertTrue(Changed >= 0)
+        end
+      end
+    end
+  end;
+  mutable var Approach: FirstPersonVisibleState := FixedState(FirstPersonFacing.West);
+  Approach.PlayerX := 2;
+  Approach.PlayerY := 7;
+  AssertTrue(VerifyExitMaterial(Approach, 101, 39) > 0);
+  Approach.PlayerX := 1;
+  AssertTrue(VerifyExitMaterial(Approach, 101, 39) > 0);
   var North: FirstPersonRayHit := CastFirstPersonRay(FixedState(FirstPersonFacing.North), 0.0);
   var East: FirstPersonRayHit := CastFirstPersonRay(FixedState(FirstPersonFacing.East), 0.0);
   var South: FirstPersonRayHit := CastFirstPersonRay(FixedState(FirstPersonFacing.South), 0.0);
@@ -51,6 +123,7 @@ begin
     Width := 7;
     Height := 5;
     Rows := ['#######', '#.....#', '#.#x#.#', '#.....#', '#######'];
+    KnowledgeRows := ['vvvvvvv', 'vvvvvvv', 'vvvvvvv', 'vvvvvvv', 'vvvvvvv'];
     PlayerX := 1;
     PlayerY := 2;
     Facing := FirstPersonFacing.East;
@@ -64,6 +137,7 @@ begin
     Width := 7;
     Height := 5;
     Rows := ['#######', '#.....#', '#.x...#', '#.....#', '#######'];
+    KnowledgeRows := ['vvvvvvv', 'vvvvvvv', 'vvvvvvv', 'vvvvvvv', 'vvvvvvv'];
     PlayerX := 1;
     PlayerY := 2;
     Facing := FirstPersonFacing.East;
@@ -71,6 +145,94 @@ begin
   var ExitHit: FirstPersonRayHit := CastFirstPersonRay(VisibleExit, 0.0);
   AssertTrue((ExitHit.Distance > 4.49) and (ExitHit.Distance < 4.51));
   AssertTrue(ExitHit.SawExit);
+  var Fogged: FirstPersonVisibleState := record
+    Title := 'Fogged';
+    Status := 'Unknown ahead.';
+    Width := 5;
+    Height := 3;
+    Rows := ['?????', '?.???', '?????'];
+    KnowledgeRows := ['uuuuu', 'uvuuu', 'uuuuu'];
+    PlayerX := 1;
+    PlayerY := 1;
+    Facing := FirstPersonFacing.East;
+  end;
+  var FogHit: FirstPersonRayHit := CastFirstPersonRay(Fogged, 0.0);
+  AssertEquals('?', FogHit.FieldCode);
+  AssertFalse(FogHit.SawExit);
+  var FogGrid: TuiCellGrid := RenderFirstPersonGrid(Fogged, 5, 5);
+  AssertEquals(18, BackgroundRed(FogGrid.Cells[(2 * 5) + 2]));
+  var FrontWallWithSidePaths: FirstPersonVisibleState := record
+    Title := 'Side paths';
+    Status := '';
+    Width := 5;
+    Height := 5;
+    Rows := ['#####', '#.#.#', '#...#', '#...#', '#####'];
+    KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv', 'vvvvv', 'vvvvv'];
+    PlayerX := 2;
+    PlayerY := 2;
+    Facing := FirstPersonFacing.North;
+  end;
+  var SidePathGrid: TuiCellGrid := RenderFirstPersonGrid(FrontWallWithSidePaths, 21, 11);
+  var FrontWallRed: integer := BackgroundRed(SidePathGrid.Cells[(5 * 21) + 10]);
+  AssertEquals(12, BackgroundRed(SidePathGrid.Cells[10]));
+  AssertTrue(FrontWallRed > 100);
+  AssertEquals(38, BackgroundRed(SidePathGrid.Cells[(10 * 21) + 10]));
+  AssertEquals(12, BackgroundRed(SidePathGrid.Cells[1 * 21]));
+  AssertTrue(BackgroundRed(SidePathGrid.Cells[5 * 21]) > 100);
+  AssertEquals(38, BackgroundRed(SidePathGrid.Cells[9 * 21]));
+  mutable var LeftBlocked: FirstPersonVisibleState := FrontWallWithSidePaths;
+  LeftBlocked.Rows[2] := '##..#';
+  var OneSidePathGrid: TuiCellGrid := RenderFirstPersonGrid(LeftBlocked, 21, 11);
+  AssertTrue(BackgroundRed(OneSidePathGrid.Cells[1 * 21]) > 100);
+  AssertEquals(12, BackgroundRed(OneSidePathGrid.Cells[(1 * 21) + 20]));
+  AssertTrue(BackgroundRed(OneSidePathGrid.Cells[(5 * 21) + 20]) > 100);
+  mutable var UnknownSide: FirstPersonVisibleState := LeftBlocked;
+  UnknownSide.Rows[2] := '#?..#';
+  UnknownSide.KnowledgeRows[2] := 'vuvvv';
+  var UnknownSideGrid: TuiCellGrid := RenderFirstPersonGrid(UnknownSide, 21, 11);
+  AssertEquals(18, BackgroundRed(UnknownSideGrid.Cells[5 * 21]));
+  AssertEquals(25, BackgroundBlue(UnknownSideGrid.Cells[5 * 21]));
+  mutable var ScreenshotState: FirstPersonVisibleState := FixedState(FirstPersonFacing.West);
+  ScreenshotState.PlayerX := 1;
+  ScreenshotState.PlayerY := 1;
+  var ScreenshotGrid: TuiCellGrid := RenderFirstPersonGrid(ScreenshotState, 21, 11);
+  // The western boundary continues south: its front plane must remain seamless.
+  for Y: integer := 0 to 10 do
+  begin
+    AssertEquals(BackgroundRed(ScreenshotGrid.Cells[(Y * 21) + 10]), BackgroundRed(ScreenshotGrid.Cells[Y *
+                                                                                                        21]))
+  end;
+
+  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[3 * 21]) > 100);
+  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[5 * 21]) > 100);
+  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[9 * 21]) > 100);
+  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[(1 * 21) + 20]) > 100);
+  AssertEquals(12, BackgroundRed(ScreenshotGrid.Cells[10]));
+  AssertEquals(38, BackgroundRed(ScreenshotGrid.Cells[(10 * 21) + 10]));
+  mutable var BothSidePathsState: FirstPersonVisibleState := FixedState(FirstPersonFacing.East);
+  BothSidePathsState.PlayerX := 7;
+  BothSidePathsState.PlayerY := 5;
+  var BothSidePathsGrid: TuiCellGrid := RenderFirstPersonGrid(BothSidePathsState, 21, 11);
+  // Both branches run alongside the same eastern wall plane.
+  for Y: integer := 0 to 10 do
+  begin
+    AssertEquals(BackgroundRed(BothSidePathsGrid.Cells[(Y * 21) + 10]), BackgroundRed(BothSidePathsGrid.Cells[Y *
+                                                                                                              21]));
+    AssertEquals(BackgroundRed(BothSidePathsGrid.Cells[(Y * 21) + 10]), BackgroundRed(BothSidePathsGrid.Cells[(Y * 21) +
+                                                                                                              20]))
+  end;
+
+  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[4 * 21]) > 100);
+  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[5 * 21]) > 100);
+  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[(5 * 21) + 20]) > 100);
+  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[9 * 21]) > 100);
+  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[(9 * 21) + 20]) > 100);
+  mutable var ExitState: FirstPersonVisibleState := FixedState(FirstPersonFacing.South);
+  ExitState.PlayerX := 1;
+  ExitState.PlayerY := 7;
+  var ExitGrid: TuiCellGrid := RenderFirstPersonGrid(ExitState, 21, 11);
+  AssertTrue(BackgroundBlue(ExitGrid.Cells[(5 * 21) + 10]) > 100);
+  AssertEquals(92, BackgroundRed(ExitGrid.Cells[(10 * 21) + 10]));
   var NearGrid: TuiCellGrid := RenderFirstPersonGrid(FixedState(FirstPersonFacing.East), 9, 20);
   var FarGrid: TuiCellGrid := RenderFirstPersonGrid(FixedState(FirstPersonFacing.West), 9, 20);
   AssertEquals(9, NearGrid.Width);

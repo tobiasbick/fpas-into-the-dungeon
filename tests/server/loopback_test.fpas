@@ -3,20 +3,23 @@ program DungeonServerLoopbackTest;
 
 uses
   Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.World,
-  Dungeon.World.Savegame, Std.Conv, Std.Fs, Std.Net, Std.Path, Std.Results, Std.Task, Std.Test,
-  Std.Time;
+  Dungeon.World.Savegame, Std.Arrays, Std.Conv, Std.Fs, Std.Net, Std.Path, Std.Results, Std.Str,
+  Std.Task, Std.Test, Std.Time;
 
 function TestConfig(WorldsRoot: string): ServerConfig;
 begin
   return record
     WorldsRoot := WorldsRoot;
     WorldId := 'loopback';
-    WorldSeed := 12345;
+    WorldSeed := 56789;
     ChunkCacheLimit := 32;
     MaximumViewWidth := 240;
     MaximumViewHeight := 20;
   end
 end;
+
+// This seed places the spawn on a signed chunk boundary so restart coverage
+// also proves discovery persistence across adjacent outdoor chunks.
 
 function RequireMap(Value: VisibleState): MapVisibleState;
 begin
@@ -85,6 +88,7 @@ begin
   var Config: ServerConfig := TestConfig(WorldsRoot);
   EnsureWorldRoot(Config);
   var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
+  AssertEquals(0, LocalForCoordinate(Metadata.Spawn.X));
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
   var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
   var Source: CancellationSource := CreateCancellationSource();
@@ -188,6 +192,20 @@ begin
     end
   end;
 
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ExplorationMap(0, 0, 5, 5)), Token)));
+  var BeforeSessionMapRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := BeforeSessionMapRead.Reader;
+  case Unwrap(DecodeServer(BeforeSessionMapRead.Line)) of
+    ServerMessage.Rejected(Code, Message):
+    begin
+      AssertEquals('session_not_started', Code)
+    end
+    else
+    begin
+      panic('expected exploration-map rejection before session selection')
+    end
+  end;
+
   AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StartNewGame), Token)));
   var InitialRead: LineRead := Unwrap(ReadLine(Reader, Token));
   Reader := InitialRead.Reader;
@@ -205,7 +223,9 @@ begin
           AssertEquals(6, MapValue.PlayerX);
           AssertEquals(3, MapValue.PlayerY);
           AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
-          AssertEquals(Metadata.Spawn.Y, MapValue.WorldY)
+          AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
+          AssertEquals('vvvvvvvvvvvvv', MapValue.KnowledgeRows[0]);
+          AssertFalse(Std.Str.Contains(MapValue.Rows[0], '?'))
         end
         else
         begin
@@ -218,7 +238,31 @@ begin
       panic('unexpected initial state: ' + InitialRead.Line)
     end
   end;
-
+  var FarOriginX: integer := 1280000;
+  var FarOriginY: integer := -1280000;
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ExplorationMap(FarOriginX, FarOriginY, 3, 2)), Token)));
+  var FarMapRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := FarMapRead.Reader;
+  case Unwrap(DecodeServer(FarMapRead.Line)) of
+    ServerMessage.ExplorationMap(Value):
+    begin
+      AssertEquals('???', Value.Rows[0]);
+      AssertEquals('???', Value.Rows[1]);
+      AssertEquals('uuu', Value.KnowledgeRows[0]);
+      AssertFalse(Value.PlayerInWindow);
+      AssertEquals(Metadata.Spawn.X, Value.PlayerWorldX);
+      AssertEquals(Metadata.Spawn.Y, Value.PlayerWorldY)
+    end
+    else
+    begin
+      panic('expected undiscovered exploration-map window')
+    end
+  end;
+  var InspectionWorld: WorldSession := Unwrap(OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit));
+  AssertFalse(Std.Fs.Exists(WorldChunkPath(InspectionWorld, record
+    X := ChunkForCoordinate(FarOriginX);
+    Y := ChunkForCoordinate(FarOriginY);
+  end)));
   AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StartNewGame), Token)));
   var SecondStartRead: LineRead := Unwrap(ReadLine(Reader, Token));
   Reader := SecondStartRead.Reader;
@@ -305,12 +349,34 @@ begin
       AssertEquals(9, FirstPersonValue.PlayerX);
       AssertEquals(1, FirstPersonValue.PlayerY);
       AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West);
-      AssertEquals('###########', FirstPersonValue.Rows[0]);
-      AssertEquals('#x........#', FirstPersonValue.Rows[7])
+      AssertTrue(Std.Str.Contains(FirstPersonValue.Rows[0], '?'));
+      AssertEquals('v', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[1], 9));
+      AssertEquals('?', Std.Str.CharAt(FirstPersonValue.Rows[7], 1));
+      AssertEquals('u', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[7], 1))
     end
     else
     begin
       panic('expected first-person state after entry')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ExplorationMap(0, 0, 11, 9)), Token)));
+  var InteriorMapRead: LineRead := Unwrap(ReadLine(Reader, Token));
+  Reader := InteriorMapRead.Reader;
+  case Unwrap(DecodeServer(InteriorMapRead.Line)) of
+    ServerMessage.ExplorationMap(Value):
+    begin
+      AssertTrue(Value.View = ViewKind.FirstPerson);
+      AssertEquals(Metadata.DungeonAreaLabel, Value.LabelText);
+      AssertTrue(Value.PlayerInWindow);
+      AssertEquals(9, Value.PlayerWorldX);
+      AssertEquals(1, Value.PlayerWorldY);
+      AssertEquals('?', Std.Str.CharAt(Value.Rows[7], 1));
+      AssertEquals('u', Std.Str.CharAt(Value.KnowledgeRows[7], 1))
+    end
+    else
+    begin
+      panic('expected current interior exploration map')
     end
   end;
 
@@ -492,7 +558,9 @@ begin
       var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
       AssertEquals(8, FirstPersonValue.PlayerX);
       AssertEquals(7, FirstPersonValue.PlayerY);
-      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West)
+      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West);
+      AssertEquals('r', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[1], 9));
+      AssertFalse(Std.Str.CharAt(FirstPersonValue.Rows[1], 9) = '?')
     end
     else
     begin
@@ -757,15 +825,86 @@ begin
     end
   end;
 
+  AssertTrue(Unwrap(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.ExplorationMap(Metadata.Spawn.X -
+                                                                                              8, Metadata.Spawn.Y -
+                                                                                                 8, 17, 17)), Token)));
+  var OutdoorMapRead: LineRead := Unwrap(ReadLine(OutdoorRestartReader, Token));
+  OutdoorRestartReader := OutdoorMapRead.Reader;
+  case Unwrap(DecodeServer(OutdoorMapRead.Line)) of
+    ServerMessage.ExplorationMap(Value):
+    begin
+      mutable var HasRemembered: boolean := false;
+      for KnowledgeRow: string in Value.KnowledgeRows do
+      begin
+        if Std.Str.Contains(KnowledgeRow, 'r') then
+        begin
+          HasRemembered := true
+        end
+      end;
+
+      AssertTrue(HasRemembered);
+      AssertEquals(Metadata.Entrance.X, Value.PlayerWorldX);
+      AssertEquals(Metadata.Entrance.Y, Value.PlayerWorldY)
+    end
+    else
+    begin
+      panic('expected persisted outdoor discovery after restart')
+    end
+  end;
+
   AssertTrue(Unwrap(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.Disconnect), Token)));
   AssertTrue(Unwrap(Close(OutdoorRestartClient)));
   AssertTrue(Unwrap(Wait(OutdoorRestartTask)));
   AssertTrue(Unwrap(CloseListener(OutdoorRestartListener)));
   var SavedWorld: WorldSession := Unwrap(OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit));
   var SavePath: string := SaveGamePath(SavedWorld);
+  var SavedBeforeNewGame: string := Unwrap(Std.Fs.ReadText(SavePath));
+  var NewGameListener: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var NewGameAddress: NetworkAddress := Unwrap(ListenerLocalAddress(NewGameListener));
+  var NewGameTask: task := go ServeOne(NewGameListener, Config, Token);
+  var NewGameClient: Connection := Unwrap(Connect('127.0.0.1', NewGameAddress.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(NewGameClient, 120000)));
+  mutable var NewGameReader: LineReader := NewLineReader(NewGameClient);
+  AssertTrue(Unwrap(WriteLine(NewGameClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)));
+  var NewGameWelcome: LineRead := Unwrap(ReadLine(NewGameReader, Token));
+  NewGameReader := NewGameWelcome.Reader;
+  case Unwrap(DecodeServer(NewGameWelcome.Line)) of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertEquals(ProtocolVersion, Version);
+      AssertTrue(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected existing save before starting a separate new game')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(NewGameClient, EncodeClient(ClientMessage.StartNewGame), Token)));
+  var NewGameStateRead: LineRead := Unwrap(ReadLine(NewGameReader, Token));
+  NewGameReader := NewGameStateRead.Reader;
+  case Unwrap(DecodeServer(NewGameStateRead.Line)) of
+    ServerMessage.State(Value):
+    begin
+      var MapValue: MapVisibleState := RequireMap(Value);
+      AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+      AssertEquals(Metadata.Spawn.Y, MapValue.WorldY)
+    end
+    else
+    begin
+      panic('expected independent new-game state while a save exists')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(NewGameClient, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(NewGameClient)));
+  AssertTrue(Unwrap(Wait(NewGameTask)));
+  AssertTrue(Unwrap(CloseListener(NewGameListener)));
+  AssertEquals(SavedBeforeNewGame, Unwrap(Std.Fs.ReadText(SavePath)));
   var KeepPath: string := Std.Path.Join([SavedWorld.Directory, 'saves', 'keep.txt']);
   AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(KeepPath, 'keep')));
-  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(SavePath, '{broken')));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(SavePath, '{"format_version":2,"world_id":"loopback","area_kind":"outdoor_region","area_id":"loopback:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"},"exploration":{"outdoor_chunks":[{"chunk_x":0,"chunk_y":0,"rows":["1"]}],"interior_areas":[]}}')));
   var InvalidListener: Listener := Unwrap(Listen('127.0.0.1', 0));
   var InvalidAddress: NetworkAddress := Unwrap(ListenerLocalAddress(InvalidListener));
   var InvalidTask: task := go ServeOne(InvalidListener, Config, Token);

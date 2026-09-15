@@ -80,6 +80,9 @@ The ownership and rendering seams for discrete indoor navigation are described
 in [first-person interior](first-person-interior.md).
 The explicit server-owned save lifecycle is described in
 [persistent game state](persistent-game-state.md).
+Server-owned discovery, visibility derivation, Fog of War projections, and the
+client-owned map overlay are described in
+[exploration and map](exploration-and-map.md).
 
 ## Runtime data
 

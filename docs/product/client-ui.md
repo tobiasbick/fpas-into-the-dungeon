@@ -38,10 +38,13 @@ The frame remains centered as the terminal changes size. Initially the menu
 contains connect, information, and quit. A successful connection keeps this
 screen visible and enables `New game`; `Load` appears only when the server
 reports a valid savegame. Choosing either action shows its pending status until
-the first complete visible state arrives. A rejected load remains on the start
-screen with the server's explanation. If the server removes an invalid save
-during connection, the status explains the removal and only `New game` is
-offered.
+the first complete visible state arrives. While the session choice is pending,
+the menu is replaced by the status, `Please wait.`, and a single `Cancel`
+button. Cancel requires confirmation because it closes the connection and
+returns to the initial start menu; it does not roll back server work that may
+already have completed. A rejected load restores the session menu with the
+server's explanation. If the server removes an invalid save during connection,
+the status explains the removal and only `New game` is offered.
 
 ## Game screen
 
@@ -96,11 +99,13 @@ the initial visible state.
 
 ### Request pending
 
-After sending a movement, transition activation, or viewport intention, the existing complete view
-remains visible and the status shows that an update is pending. Further
-movement is ignored until the server returns either a new visible state or a
-rejection. This preserves the request-response protocol and avoids speculative
-local movement or partially painted resizes.
+While a new or loaded session is starting, the framed start screen shows only
+the pending status, a wait message, and the confirmed cancel action described
+above. After sending a movement, transition activation, or viewport intention,
+the existing complete view remains visible and the status shows that an update
+is pending. Further movement is ignored until the server returns either a new
+visible state or a rejection. This preserves the request-response protocol and
+avoids speculative local movement or partially painted resizes.
 
 ### Rejected
 
@@ -139,6 +144,49 @@ The first implementation is top-down. A later isometric renderer may present
 the same kind of outdoor state differently, but isometric presentation is not a
 separate simulation.
 
+## Exploration map
+
+The exploration map is distinct from the primary map view. It presents only
+the current area's world knowledge retained through exploration and opens as a
+framed overlay above either view family. There is no additional map in the
+right-hand context panel. Outdoors the overlay can pan across discovered
+chunks; inside it shows the discovered part of the current floor.
+
+The map distinguishes currently visible, discovered but no longer visible, and
+undiscovered fields. Visible fields use the normal palette, remembered fields
+use half-intensity foreground and background RGB colors, and undiscovered fields are dark and contain no terrain or geometry
+information. Fog of War applies to the exploration map, the outdoor primary
+view, and undiscovered first-person geometry. Outdoor fields become visible
+within a fixed radius of eight fields; terrain does not occlude that radius.
+Interior visibility uses a facing-aware line of sight with a range of eight
+fields. A blocking wall remains visible while fields behind it do not.
+
+`M` opens or closes the overlay. WASD and the arrow keys pan it, `Home`
+recenters it on the player, and `Escape` closes it. These controls never move
+the player or send movement intentions. The overlay uses one terminal cell per
+world field and has no zoom in this stage; the primary map view retains its
+two-column fields. On a sufficiently large terminal, its requested dimensions
+use roughly four fifths of the terminal before accounting for the overlay frame
+and controls. This leaves the game screen visible around the centered map.
+Small terminals retain compact margins so map content remains useful. The
+result is clamped to at least one field and at most 240 by 120 fields. Outdoor
+windows accept signed origins. An interior window may extend beyond the current
+finite floor; those positions appear as undiscovered padding rather than
+changing the window.
+
+Only one map request is in flight. Additional pan input changes the desired
+origin and is coalesced into the next request. The overlay shows
+`Loading map...` before its first projection. While updating, it retains the
+previous valid projection and shows `Updating map...` in the status view without
+adding an overlay row or changing its size; a recoverable rejection
+also retains it and reports the error in the status view.
+
+The overlay derives entirely from server-owned discovered-area state; the
+client does not reconstruct unknown world cells. Requesting or panning a map
+window never discovers fields and never generates unknown outdoor terrain. A
+new game starts with an empty discovered area. Explicit saving persists it and
+retains the existing save until overwrite is confirmed.
+
 ## First-person view
 
 Entered interiors and dungeons use a first-person view. The initial dungeon is
@@ -146,8 +194,22 @@ rendered with terminal raycasting inside the same framed screen shell. Its
 server state supplies validated bounded field rows, dimensions, the area-local
 player coordinate, cardinal facing, title, and status. The client derives a
 cardinal camera and fills the primary view with colored ceiling, floor, and
-distance-shaded walls. The exit is visible with a gold tint. Outdoor map rows
-are never reinterpreted as first-person geometry.
+distance-shaded walls. The exit is a gold floor field, projected at its actual
+location. Walls keep their stone material even when a view ray crosses the
+exit. Moving onto the exit colors only the visible part of that floor field.
+Outdoor map rows
+are never reinterpreted as first-person geometry. When a wall occupies the
+field directly ahead, its frontal plane is inset from every screen edge. An
+open field immediately to the player's left or right shows ceiling, floor, and
+the forward-facing geometry of the adjacent lane. All three lanes use the
+same facing and projection scale: a wall continuing across a branch retains
+continuous upper and lower edges. A recessed wall appears smaller only when
+it is actually farther ahead. The side strips never insert a rotated view
+down a branching corridor. A blocked side is drawn
+as a darker perspective wall that widens toward the corresponding screen edge.
+This keeps discrete movement choices readable without widening the general
+field of view; an unknown side remains closed and uses the unknown-geometry
+color rather than the stone material.
 
 First-person movement remains tile-based and server-authoritative. `W` and `S`
 request a move by exactly one field forward or backward relative to the current
@@ -181,6 +243,8 @@ server or other players that may exist later.
   `A` and `D` step one field left or right, and `Q` and `E` turn 90 degrees
   left or right without changing fields.
 - `Ctrl+P` opens or closes the system menu.
+- `M` opens or closes the exploration map. While it is open, WASD and the arrow
+  keys pan, and `Home` recenters on the player.
 - `Escape` closes the active overlay.
 - `Alt+X` requests a clean disconnect and exits the client.
 - Arrow keys and `Enter` navigate and activate menu entries while a menu owns

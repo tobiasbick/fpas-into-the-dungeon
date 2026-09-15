@@ -2,9 +2,9 @@
 unit Dungeon.Server;
 
 uses
-  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame,
-  Std.Arrays, Std.Console, Std.Conv, Std.Net, Std.Options, Std.Results, Std.Server, Std.Task,
-  Std.Time;
+  Dungeon.Exploration, Dungeon.Exploration.Model, Dungeon.Game, Dungeon.Protocol,
+  Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Console,
+  Std.Conv, Std.Net, Std.Options, Std.Results, Std.Server, Std.Str, Std.Task, Std.Time;
 
 public type
   // Immutable server policy and selected persistent world used by each session.
@@ -25,6 +25,10 @@ type
   SessionProjection = record
     World: WorldSession;
     State: VisibleState;
+  end;
+  MaskedRows = record
+    Rows: array of string;
+    KnowledgeRows: array of string;
   end;
 
 function Send(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
@@ -76,6 +80,10 @@ function RequiresActiveSession(Message: ClientMessage): boolean;
 begin
   case Message of
     ClientMessage.Viewport(Width, Height):
+    begin
+      return true
+    end;
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
     begin
       return true
     end;
@@ -195,6 +203,222 @@ begin
   return Rows
 end;
 
+function KnowledgeCode(Value: FieldKnowledge): string;
+begin
+  case Value of
+    FieldKnowledge.Undiscovered:
+    begin
+      return 'u'
+    end;
+    FieldKnowledge.Remembered:
+    begin
+      return 'r'
+    end;
+    FieldKnowledge.Visible:
+    begin
+      return 'v'
+    end
+  end
+end;
+
+function MaskOutdoorRows(
+  State: GameState;
+  TerrainRows: array of string;
+  OriginX: integer;
+  OriginY: integer;
+  Width: integer;
+  Height: integer;
+  Player: WorldPosition
+): MaskedRows;
+begin
+  var VisibleFields: array of boolean := OutdoorVisibility(OriginX, OriginY, Width, Height, Player);
+  mutable var Rows: array of string := [];
+  mutable var KnowledgeRows: array of string := [];
+  for Y: integer := 0 to Height - 1 do
+  begin
+    mutable var Row: string := '';
+    mutable var KnowledgeRow: string := '';
+    for X: integer := 0 to Width - 1 do
+    begin
+      var WorldX: integer := OriginX + X;
+      var WorldY: integer := OriginY + Y;
+      var Knowledge: FieldKnowledge := ClassifyField(OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[(Y * Width) +
+                                                                                                                           X]);
+      if Knowledge = FieldKnowledge.Undiscovered then
+      begin
+        Row := Row + '?'
+      end
+      else
+      begin
+        Row := Row + Std.Str.CharAt(TerrainRows[Y], X)
+      end;
+
+      KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
+    end;
+
+    Std.Arrays.Push(Rows, Row);
+    Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
+  end;
+
+  return record
+    Rows := Rows;
+    KnowledgeRows := KnowledgeRows;
+  end
+end;
+
+function MaskInteriorRows(State: GameState; Map: InteriorMap; Pose: FirstPersonPose): MaskedRows;
+begin
+  var TerrainRows: array of string := InteriorRows(Map);
+  var VisibleFields: array of boolean := InteriorVisibility(Map, Pose);
+  mutable var Rows: array of string := [];
+  mutable var KnowledgeRows: array of string := [];
+  for Y: integer := 0 to Map.Height - 1 do
+  begin
+    mutable var Row: string := '';
+    mutable var KnowledgeRow: string := '';
+    for X: integer := 0 to Map.Width - 1 do
+    begin
+      var Knowledge: FieldKnowledge := ClassifyField(InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y), VisibleFields[(Y * Map.Width) +
+                                                                                                                                           X]);
+      if Knowledge = FieldKnowledge.Undiscovered then
+      begin
+        Row := Row + '?'
+      end
+      else
+      begin
+        Row := Row + Std.Str.CharAt(TerrainRows[Y], X)
+      end;
+
+      KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
+    end;
+
+    Std.Arrays.Push(Rows, Row);
+    Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
+  end;
+
+  return record
+    Rows := Rows;
+    KnowledgeRows := KnowledgeRows;
+  end
+end;
+
+function PlayerInWindow(
+  PlayerX: integer;
+  PlayerY: integer;
+  OriginX: integer;
+  OriginY: integer;
+  Width: integer;
+  Height: integer
+): boolean;
+begin
+  return (((PlayerX >= OriginX) and (PlayerX < OriginX + Width)) and (PlayerY >= OriginY)) and
+         (PlayerY < OriginY + Height)
+end;
+
+function ProjectExplorationMap(
+  State: GameState;
+  Metadata: WorldMetadata;
+  OriginX: integer;
+  OriginY: integer;
+  Width: integer;
+  Height: integer
+): result of ExplorationMapState, string;
+begin
+  mutable var Rows: array of string := [];
+  mutable var KnowledgeRows: array of string := [];
+  if State.Area = AreaKind.OutdoorRegion then
+  begin
+    var Player: WorldPosition := try OutdoorPlayerPosition(State);
+    var VisibleFields: array of boolean := OutdoorVisibility(OriginX, OriginY, Width, Height, Player);
+    for Y: integer := 0 to Height - 1 do
+    begin
+      mutable var Row: string := '';
+      mutable var KnowledgeRow: string := '';
+      for X: integer := 0 to Width - 1 do
+      begin
+        var WorldX: integer := OriginX + X;
+        var WorldY: integer := OriginY + Y;
+        var Knowledge: FieldKnowledge := ClassifyField(OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[(Y * Width) +
+                                                                                                                             X]);
+        if Knowledge = FieldKnowledge.Undiscovered then
+        begin
+          Row := Row + '?'
+        end
+        else
+        begin
+          Row := Row + VisibleCellCode(GenerateWorldCell(Metadata, WorldX, WorldY))
+        end;
+
+        KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
+      end;
+
+      Std.Arrays.Push(Rows, Row);
+      Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
+    end;
+
+    return Ok(record
+      View := ViewKind.Map;
+      LabelText := Metadata.OutdoorAreaLabel;
+      OriginX := OriginX;
+      OriginY := OriginY;
+      Width := Width;
+      Height := Height;
+      Rows := Rows;
+      KnowledgeRows := KnowledgeRows;
+      PlayerWorldX := Player.X;
+      PlayerWorldY := Player.Y;
+      PlayerInWindow := PlayerInWindow(Player.X, Player.Y, OriginX, OriginY, Width, Height);
+    end)
+  end;
+  var Map: InteriorMap := try InitialDungeonMap();
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
+  var VisibleFields: array of boolean := InteriorVisibility(Map, Pose);
+  for LocalY: integer := 0 to Height - 1 do
+  begin
+    mutable var Row: string := '';
+    mutable var KnowledgeRow: string := '';
+    for LocalX: integer := 0 to Width - 1 do
+    begin
+      var X: integer := OriginX + LocalX;
+      var Y: integer := OriginY + LocalY;
+      mutable var Knowledge: FieldKnowledge := FieldKnowledge.Undiscovered;
+      if (((X >= 0) and (X < Map.Width)) and (Y >= 0)) and (Y < Map.Height) then
+      begin
+        Knowledge := ClassifyField(InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y), VisibleFields[(Y * Map.Width) +
+                                                                                                                         X])
+      end;
+
+      if Knowledge = FieldKnowledge.Undiscovered then
+      begin
+        Row := Row + '?'
+      end
+      else
+      begin
+        Row := Row + InteriorCellCode(Map.Cells[(Y * Map.Width) + X])
+      end;
+
+      KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
+    end;
+
+    Std.Arrays.Push(Rows, Row);
+    Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
+  end;
+
+  return Ok(record
+    View := ViewKind.FirstPerson;
+    LabelText := Metadata.DungeonAreaLabel;
+    OriginX := OriginX;
+    OriginY := OriginY;
+    Width := Width;
+    Height := Height;
+    Rows := Rows;
+    KnowledgeRows := KnowledgeRows;
+    PlayerWorldX := Pose.Position.X;
+    PlayerWorldY := Pose.Position.Y;
+    PlayerInWindow := PlayerInWindow(Pose.Position.X, Pose.Position.Y, OriginX, OriginY, Width, Height);
+  end)
+end;
+
 function ProjectSession(World: WorldSession; State: GameState; Viewport: ViewportSize): result of SessionProjection, string;
 begin
   if State.Area = AreaKind.Dungeon then
@@ -206,12 +430,14 @@ begin
     begin
       Status := 'Press Enter to return to the outdoor region.'
     end;
+    var Masked: MaskedRows := MaskInteriorRows(State, Map, Pose);
     var FirstPersonValue: FirstPersonVisibleState := record
       Title := World.Metadata.DungeonAreaLabel;
       Status := Status;
       Width := Map.Width;
       Height := Map.Height;
-      Rows := InteriorRows(Map);
+      Rows := Masked.Rows;
+      KnowledgeRows := Masked.KnowledgeRows;
       PlayerX := Pose.Position.X;
       PlayerY := Pose.Position.Y;
       Facing := ProtocolFacing(Pose.Facing);
@@ -224,12 +450,14 @@ begin
   end;
   var Loaded: WindowLoad := try LoadVisibleWindow(World, State, Viewport.Width, Viewport.Height);
   var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(State);
+  var Masked: MaskedRows := MaskOutdoorRows(State, Loaded.Window.Rows, Loaded.Window.OriginX, Loaded.Window.OriginY, Loaded.Window.Width, Loaded.Window.Height, OutdoorPosition);
   var MapValue: MapVisibleState := record
     OriginX := Loaded.Window.OriginX;
     OriginY := Loaded.Window.OriginY;
     Width := Loaded.Window.Width;
     Height := Loaded.Window.Height;
-    Rows := Loaded.Window.Rows;
+    Rows := Masked.Rows;
+    KnowledgeRows := Masked.KnowledgeRows;
     PlayerX := Loaded.Window.PlayerX;
     PlayerY := Loaded.Window.PlayerY;
     WorldX := OutdoorPosition.X;
@@ -386,7 +614,7 @@ begin
                   end
                   else
                   begin
-                    var StartedState: GameState := NewGame(World.Metadata);
+                    var StartedState: GameState := try RevealCurrentArea(World.Metadata, NewGame(World.Metadata));
                     State := Some(StartedState);
                     World := try SendProjection(ConnectionValue, World, StartedState, Viewport, Token)
                   end
@@ -419,8 +647,9 @@ begin
                           end;
                           SaveGameLoad.Loaded(SavedState):
                           begin
-                            State := Some(SavedState);
-                            World := try SendProjection(ConnectionValue, World, SavedState, Viewport, Token)
+                            var RevealedState: GameState := try RevealCurrentArea(World.Metadata, SavedState);
+                            State := Some(RevealedState);
+                            World := try SendProjection(ConnectionValue, World, RevealedState, Viewport, Token)
                           end
                         end
                       end
@@ -462,14 +691,27 @@ begin
                     end
                   end
                 end;
+                ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+                begin
+                  if (Width > Config.MaximumViewWidth) or (Height > Config.MaximumViewHeight) then
+                  begin
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('invalid_map_window', 'Exploration map dimensions exceed server limits.'), Token)
+                  end
+                  else
+                  begin
+                    var MapValue: ExplorationMapState := try ProjectExplorationMap(try RequireActiveState(State), World.Metadata, OriginX, OriginY, Width, Height);
+                    var Sent: boolean := try Send(ConnectionValue, ServerMessage.ExplorationMap(MapValue), Token)
+                  end
+                end;
                 ClientMessage.Move(DeltaX, DeltaY):
                 begin
                   case MoveInWorld(World, try RequireActiveState(State), DeltaX, DeltaY) of
                     Ok(Moved):
                     begin
                       World := Moved.World;
-                      State := Some(Moved.State);
-                      World := try SendProjection(ConnectionValue, World, Moved.State, Viewport, Token)
+                      var RevealedState: GameState := try RevealCurrentArea(World.Metadata, Moved.State);
+                      State := Some(RevealedState);
+                      World := try SendProjection(ConnectionValue, World, RevealedState, Viewport, Token)
                     end;
                     Error(Reason):
                     begin
@@ -482,8 +724,9 @@ begin
                   case Dungeon.Game.StepFirstPerson(World.Metadata, try RequireActiveState(State), GameStep(Direction)) of
                     Ok(Stepped):
                     begin
-                      State := Some(Stepped);
-                      World := try SendProjection(ConnectionValue, World, Stepped, Viewport, Token)
+                      var RevealedState: GameState := try RevealCurrentArea(World.Metadata, Stepped);
+                      State := Some(RevealedState);
+                      World := try SendProjection(ConnectionValue, World, RevealedState, Viewport, Token)
                     end;
                     Error(Reason):
                     begin
@@ -496,8 +739,9 @@ begin
                   case Dungeon.Game.TurnFirstPerson(World.Metadata, try RequireActiveState(State), GameTurn(Direction)) of
                     Ok(Turned):
                     begin
-                      State := Some(Turned);
-                      World := try SendProjection(ConnectionValue, World, Turned, Viewport, Token)
+                      var RevealedState: GameState := try RevealCurrentArea(World.Metadata, Turned);
+                      State := Some(RevealedState);
+                      World := try SendProjection(ConnectionValue, World, RevealedState, Viewport, Token)
                     end;
                     Error(Reason):
                     begin
@@ -510,8 +754,9 @@ begin
                   case Dungeon.Game.ActivateAreaTransition(World.Metadata, try RequireActiveState(State)) of
                     Ok(Transitioned):
                     begin
-                      State := Some(Transitioned);
-                      World := try SendProjection(ConnectionValue, World, Transitioned, Viewport, Token)
+                      var RevealedState: GameState := try RevealCurrentArea(World.Metadata, Transitioned);
+                      State := Some(RevealedState);
+                      World := try SendProjection(ConnectionValue, World, RevealedState, Viewport, Token)
                     end;
                     Error(Reason):
                     begin

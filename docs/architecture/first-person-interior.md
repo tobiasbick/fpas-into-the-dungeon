@@ -20,12 +20,12 @@ succeeds.
 
 ## Protocol and server projection
 
-Protocol version `5` carries distinct intentions for a relative one-field step
+Protocol version `6` carries distinct intentions for a relative one-field step
 (`forward`, `backward`, `left`, or `right`) and a 90-degree turn (`left` or
 `right`). Outdoor cardinal movement remains a separate message.
 
 The first-person visible-state variant contains only the bounded field rows,
-dimensions, area-local player coordinate, cardinal facing, title, and status.
+dimensions, knowledge rows, area-local player coordinate, cardinal facing, title, and status.
 It excludes area identities, the outdoor return location, persistence paths,
 and other server-owned state. The server returns a complete projection after
 each accepted intention and a structured rejection after an invalid one.
@@ -38,8 +38,11 @@ outdoor chunks.
 camera and fixed field of view from a validated first-person state, finds the
 nearest opaque field for each terminal column with grid DDA, corrects wall
 distance for perspective, and fills every output cell with ceiling, wall, or
-floor. Walls use deterministic distance and side shading. A ray that crosses
-the traversable exit uses a restrained gold tint.
+floor. Walls use deterministic distance and side shading. Only the projected
+exit floor field is gold; rays crossing it never recolor walls. Adjacent front
+walls use inset geometry with forward-facing side lanes and closed-side wedges.
+Unknown fields remain masked. See the client UI specification for presentation
+details.
 
 Rendering never changes game state and does not infer collision or hidden
 geometry. The first-person cell grid fills the primary panel at its available
@@ -50,7 +53,7 @@ view.
 ## Persistence and lifecycle
 
 The fixed interior remains current program data, so world format `2`, chunk
-format `2`, and generator version `5` remain unchanged. Savegame format `1`
+format `2`, and generator version `5` remain unchanged. Savegame format `2`
 persists the active interior area ID, local field, cardinal facing, and exact
-outdoor return location. Reconnecting does not restore it implicitly: the
+outdoor return location, together with accumulated discovery. Reconnecting does not restore it implicitly: the
 connected start screen requires an explicit new-game or load choice.

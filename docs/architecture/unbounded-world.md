@@ -102,6 +102,29 @@ lake, `p` path, and `e` entrance. These codes carry presentation meaning only.
 The richer base, feature, water-classification, entrance relationship, and
 passability values remain server-owned.
 
+## Terrain distribution check
+
+Generation uses correlated fields and ordered terrain rules, not fixed
+percentage quotas. A vegetation threshold of 650 is not a 35% forest quota.
+Water is selected first, then mountains, desert, vegetation, and paths.
+
+A reproducible version-5 sample uses seeds 12345, 42, and 98765, centered at
+0,0 with 129 by 129 samples at step 127 (49,923 samples in total):
+
+```powershell
+fpas run tools/world-preview/world-preview.fpasprj -- terrain 12345 127 129 129 0 0
+```
+
+Repeat with the other seeds. Observed per-seed ranges are sea 27.53–40.88%,
+grass 29.16–38.25%, trees 10.46–11.79%, forest 7.43–9.43%, mountains
+5.72–7.93%, desert 3.61–5.75%, lakes 0.36–0.46%, rivers 0.17–0.22%,
+and paths 0.21–0.29%. These are sampled visible-cell categories, not additive
+layer probabilities or guarantees for every chunk. The sparse sample cannot
+measure river continuity or local variety; generation tests cover those
+separately. Spawn selection intentionally biases the initial area toward
+traversable temperate land. Changing the terrain balance requires a deliberate
+generator-version change, rather than reinterpreting already stored chunks.
+
 ## Loading and cache policy
 
 For each visible window the server computes every intersecting chunk. It also

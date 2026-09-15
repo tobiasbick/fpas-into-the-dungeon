@@ -2,8 +2,9 @@
 program DungeonSaveGameTest;
 
 uses
-  Dungeon.Game, Dungeon.World, Dungeon.World.Savegame, Std.Conv, Std.Fs, Std.Path, Std.Results,
-  Std.Str, Std.Test, Std.Time;
+  Dungeon.Exploration, Dungeon.Exploration.Model, Dungeon.Game, Dungeon.World,
+  Dungeon.World.Savegame, Std.Arrays, Std.Conv, Std.Fs, Std.Path, Std.Results, Std.Str, Std.Test,
+  Std.Time;
 
 function RequireLoaded(Value: SaveGameLoad): GameState;
 begin
@@ -42,7 +43,7 @@ begin
   begin
     AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDir('.temp-data')))
   end;
-  var World: WorldSession := Std.Results.Unwrap(OpenWorld(Root, 'saves', 24680, 16));
+  mutable var World: WorldSession := Std.Results.Unwrap(OpenWorld(Root, 'saves', 24680, 16));
   AssertTrue(SaveGamePath(World) = Std.Path.Join([World.Directory, 'saves', 'default.json']));
   case Std.Results.Unwrap(LoadSaveGame(World)) of
     SaveGameLoad.Missing:
@@ -53,6 +54,24 @@ begin
       panic('new world must not contain a savegame')
     end
   end;
+  mutable var OutdoorDiscovery: ExplorationState := RevealOutdoor(RevealOutdoor(RevealOutdoor(EmptyExploration(), record
+    X := -1;
+    Y := -1;
+  end), record
+    X := 129;
+    Y := 129;
+  end), record
+    X := -321;
+    Y := 654;
+  end);
+  // Tangent chunk corners must survive the same save/load path as normal exploration.
+  for Coordinate: integer in [7, 120, -8, -121] do
+  begin
+    OutdoorDiscovery := RevealOutdoor(OutdoorDiscovery, record
+      X := Coordinate;
+      Y := Coordinate;
+    end)
+  end;
   var Outdoor: GameState := record
     Area := AreaKind.OutdoorRegion;
     AreaId := World.Metadata.OutdoorAreaId;
@@ -61,25 +80,38 @@ begin
     Y := 654;
   end);
     ReturnLocation := ReturnLocation.NoReturnLocation;
+    Exploration := OutdoorDiscovery;
   end;
 
   AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Outdoor)));
   var EncodedOutdoor: string := Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
   AssertFalse(Std.Str.Contains(EncodedOutdoor, 'viewport'));
   AssertFalse(Std.Str.Contains(EncodedOutdoor, 'status'));
-  AssertFalse(Std.Str.Contains(EncodedOutdoor, 'rows'));
+  AssertTrue(Std.Str.Contains(EncodedOutdoor, '"exploration"'));
+  AssertTrue(Std.Str.Contains(EncodedOutdoor, '"rows"'));
   var LoadedOutdoor: GameState := RequireLoaded(Std.Results.Unwrap(LoadSaveGame(World)));
   AssertTrue(LoadedOutdoor.Area = AreaKind.OutdoorRegion);
   AssertEquals(World.Metadata.OutdoorAreaId, LoadedOutdoor.AreaId);
   AssertEquals(-321, Std.Results.Unwrap(OutdoorPlayerPosition(LoadedOutdoor)).X);
   AssertEquals(654, Std.Results.Unwrap(OutdoorPlayerPosition(LoadedOutdoor)).Y);
+  AssertTrue(OutdoorIsDiscovered(LoadedOutdoor.Exploration, -321, 654));
+  AssertTrue(OutdoorIsDiscovered(LoadedOutdoor.Exploration, -1, -1));
+  AssertTrue(OutdoorIsDiscovered(LoadedOutdoor.Exploration, 129, 129));
+  AssertTrue(Std.Arrays.Length(LoadedOutdoor.Exploration.OutdoorChunks) > 0);
+  for Coordinate: integer in [7, 120, -8, -121] do
+  begin
+    AssertTrue(OutdoorIsDiscovered(LoadedOutdoor.Exploration, Coordinate, Coordinate))
+  end;
   mutable var Interior: GameState := Std.Results.Unwrap(ActivateAreaTransition(World.Metadata, record
     Area := AreaKind.OutdoorRegion;
     AreaId := World.Metadata.OutdoorAreaId;
     Player := PlayerPosition.Outdoor(World.Metadata.Entrance);
     ReturnLocation := ReturnLocation.NoReturnLocation;
+    Exploration := Outdoor.Exploration;
   end));
   Interior := Std.Results.Unwrap(TurnFirstPerson(World.Metadata, Interior, RelativeTurn.TurnRight));
+  var InteriorMapValue: InteriorMap := Std.Results.Unwrap(InitialDungeonMap());
+  Interior.Exploration := Std.Results.Unwrap(RevealInterior(Interior.Exploration, Interior.AreaId, InteriorMapValue, Std.Results.Unwrap(FirstPersonPlayerPose(Interior))));
   AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Interior)));
   var LoadedInterior: GameState := RequireLoaded(Std.Results.Unwrap(LoadSaveGame(World)));
   AssertTrue(LoadedInterior.Area = AreaKind.Dungeon);
@@ -88,6 +120,7 @@ begin
   AssertEquals(9, Pose.Position.X);
   AssertEquals(1, Pose.Position.Y);
   AssertTrue(Pose.Facing = FacingDirection.North);
+  AssertTrue(InteriorIsDiscovered(LoadedInterior.Exploration, LoadedInterior.AreaId, InteriorMapValue.Width, Pose.Position.X, Pose.Position.Y));
   case LoadedInterior.ReturnLocation of
     ReturnLocation.ReturnTo(AreaId, Position):
     begin
@@ -108,6 +141,7 @@ begin
     Y := 2;
   end);
     ReturnLocation := ReturnLocation.NoReturnLocation;
+    Exploration := EmptyExploration();
   end;
 
   AssertTrue(Std.Results.IsError(WriteSaveGame(World, InvalidState)));
@@ -115,6 +149,33 @@ begin
   AssertTrue(PreservedInterior.Area = AreaKind.Dungeon);
   AssertTrue(Std.Results.Unwrap(FirstPersonPlayerPose(PreservedInterior)).Facing =
              FacingDirection.North);
+  AssertTrue(InteriorIsDiscovered(PreservedInterior.Exploration, World.Metadata.DungeonAreaId, InteriorMapValue.Width, 9, 1));
+  var EmptyCurrentSave: string := '{"format_version":2,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"},"exploration":{"outdoor_chunks":[],"interior_areas":[]}}';
+  AssertTrue(Std.Results.IsOk(DecodeSaveGame(EmptyCurrentSave, World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame(Std.Str.Replace(EmptyCurrentSave, '"interior_areas":[]', '"interior_areas":[],"extra":1'), World.Metadata)));
+  AssertTrue(Std.Results.IsError(DecodeSaveGame(Std.Str.Replace(EmptyCurrentSave, '"outdoor_chunks":[]', '"outdoor_chunks":[],"outdoor_chunks":[]'), World.Metadata)));
+  mutable var DuplicateDiscovery: GameState := Outdoor;
+  DuplicateDiscovery.Exploration.OutdoorChunks := [
+                                                    Outdoor.Exploration.OutdoorChunks[0],
+                                                    Outdoor.Exploration.OutdoorChunks[0]
+                                                  ];
+  AssertTrue(Std.Results.IsError(DecodeSaveGame(EncodeSaveGame(World.Metadata.Id, DuplicateDiscovery), World.Metadata)));
+  mutable var WrongMaskDiscovery: GameState := Outdoor;
+  mutable var WrongMaskChunk: OutdoorDiscoveryChunk := WrongMaskDiscovery.Exploration.OutdoorChunks[0];
+  WrongMaskChunk.Fields := [true];
+  WrongMaskDiscovery.Exploration.OutdoorChunks := [WrongMaskChunk];
+  AssertTrue(Std.Results.IsError(WriteSaveGame(World, WrongMaskDiscovery)));
+  mutable var UnorderedDiscovery: GameState := Outdoor;
+  var OutdoorCount: integer := Std.Arrays.Length(Outdoor.Exploration.OutdoorChunks);
+  UnorderedDiscovery.Exploration.OutdoorChunks := [
+                                                    Outdoor.Exploration.OutdoorChunks[OutdoorCount - 1],
+                                                    Outdoor.Exploration.OutdoorChunks[0]
+                                                  ];
+  AssertTrue(Std.Results.IsError(DecodeSaveGame(EncodeSaveGame(World.Metadata.Id, UnorderedDiscovery), World.Metadata)));
+  var InvalidAlphabet: string := Std.Str.Replace(EncodedOutdoor, '00000000', 'q0000000');
+  AssertTrue(Std.Results.IsError(DecodeSaveGame(InvalidAlphabet, World.Metadata)));
+  var InvalidWidth: string := Std.Str.Replace(EncodedOutdoor, '00000000', '0000000');
+  AssertTrue(Std.Results.IsError(DecodeSaveGame(InvalidWidth, World.Metadata)));
   AssertTrue(Std.Results.IsError(DecodeSaveGame('{', World.Metadata)));
   AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}', World.Metadata)));
   AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1}', World.Metadata)));
@@ -127,6 +188,16 @@ begin
   AssertTrue(Std.Results.IsError(DecodeSaveGame('{"format_version":1,"world_id":"saves","area_kind":"dungeon","area_id":"saves:dungeon:initial","player":{"kind":"first_person","x":0,"y":0,"facing":"north"},"return_location":{"kind":"none"}}', World.Metadata)));
   var MetadataPath: string := Std.Path.Join([World.Directory, 'world.json']);
   var MetadataBefore: string := Std.Results.Unwrap(Std.Fs.ReadText(MetadataPath));
+  var StoredChunk: ChunkLoad := Std.Results.Unwrap(LoadWorldChunk(World, record
+    X := 7;
+    Y := -3;
+  end));
+  World := StoredChunk.World;
+  var StoredChunkPath: string := WorldChunkPath(World, record
+    X := 7;
+    Y := -3;
+  end);
+  var StoredChunkBefore: string := Std.Results.Unwrap(Std.Fs.ReadText(StoredChunkPath));
   var UnrelatedPath: string := Std.Path.Join([World.Directory, 'saves', 'keep.txt']);
   AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(UnrelatedPath, 'keep')));
   AssertInvalidSaveIsRemoved(World, '{');
@@ -138,9 +209,19 @@ begin
   AssertInvalidSaveIsRemoved(World, '{"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:dungeon:initial","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}');
   AssertInvalidSaveIsRemoved(World, '{"format_version":1,"format_version":1,"world_id":"saves","area_kind":"outdoor_region","area_id":"saves:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"}}');
   AssertEquals(MetadataBefore, Std.Results.Unwrap(Std.Fs.ReadText(MetadataPath)));
+  AssertEquals(StoredChunkBefore, Std.Results.Unwrap(Std.Fs.ReadText(StoredChunkPath)));
   AssertEquals('keep', Std.Results.Unwrap(Std.Fs.ReadText(UnrelatedPath)));
   AssertFalse(Std.Results.Unwrap(DeleteSaveGame(World)));
   AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Outdoor)));
+  mutable var Replacement: GameState := Outdoor;
+  Replacement.Exploration := RevealOutdoor(EmptyExploration(), record
+    X := 500;
+    Y := -500;
+  end);
+  AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Replacement)));
+  var Replaced: GameState := RequireLoaded(Std.Results.Unwrap(LoadSaveGame(World)));
+  AssertFalse(OutdoorIsDiscovered(Replaced.Exploration, -1, -1));
+  AssertTrue(OutdoorIsDiscovered(Replaced.Exploration, 500, -500));
   AssertTrue(Std.Results.Unwrap(DeleteSaveGame(World)));
   AssertFalse(Std.Fs.Exists(SaveGamePath(World)))
 end.

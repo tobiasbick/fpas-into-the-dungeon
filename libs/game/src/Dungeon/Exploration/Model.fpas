@@ -1,0 +1,144 @@
+// Persistent discovery data shared by exploration rules, savegames, and game state.
+unit Dungeon.Exploration.Model;
+
+uses Std.Arrays, Std.Math, Std.Results, Std.Str;
+
+public type
+  // Persistent discovered fields for one signed outdoor chunk in row-major order.
+  OutdoorDiscoveryChunk = record
+    public ChunkX: integer;
+    public ChunkY: integer;
+    public Fields: array of boolean;
+  end;
+  // Persistent discovered fields for one stable finite area in row-major order.
+  InteriorDiscoveryArea = record
+    public AreaId: string;
+    public Width: integer;
+    public Height: integer;
+    public Fields: array of boolean;
+  end;
+  // Server-owned exploration memory; current visibility is deliberately not retained here.
+  ExplorationState = record
+    public OutdoorChunks: array of OutdoorDiscoveryChunk;
+    public InteriorAreas: array of InteriorDiscoveryArea;
+  end;
+  // Client-visible knowledge classification for one projected field.
+  FieldKnowledge = enum
+    Undiscovered;
+    Remembered;
+    Visible;
+  end;
+
+// Creates exploration memory with no discovered fields.
+public function EmptyExploration(): ExplorationState;
+begin
+  return record
+    OutdoorChunks := [];
+    InteriorAreas := [];
+  end
+end;
+
+function OutdoorChunkComesBefore(Left: OutdoorDiscoveryChunk; Right: OutdoorDiscoveryChunk): boolean;
+begin
+  return (Left.ChunkY < Right.ChunkY) or
+         ((Left.ChunkY = Right.ChunkY) and (Left.ChunkX < Right.ChunkX))
+end;
+
+function StringComesBefore(Left: string; Right: string): boolean;
+begin
+  var SharedLength: integer := Std.Math.Min(Std.Str.Length(Left), Std.Str.Length(Right));
+  for Index: integer := 0 to SharedLength - 1 do
+  begin
+    var LeftCode: integer := Std.Str.Ord(Std.Str.CharAt(Left, Index));
+    var RightCode: integer := Std.Str.Ord(Std.Str.CharAt(Right, Index));
+    if LeftCode < RightCode then
+    begin
+      return true
+    end;
+
+    if LeftCode > RightCode then
+    begin
+      return false
+    end
+  end;
+
+  return Std.Str.Length(Left) < Std.Str.Length(Right)
+end;
+
+function HasDiscoveredField(Fields: array of boolean): boolean;
+begin
+  for Value: boolean in Fields do
+  begin
+    if Value then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+// Validates non-empty masks, exact dimensions, and unique Y/X and area-ID canonical ordering.
+public function ValidateExploration(State: ExplorationState; OutdoorChunkSize: integer): result of ExplorationState, string;
+begin
+  if OutdoorChunkSize < 1 then
+  begin
+    return Error('outdoor discovery chunk size must be positive')
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(State.OutdoorChunks) - 1 do
+  begin
+    var Chunk: OutdoorDiscoveryChunk := State.OutdoorChunks[Index];
+    if Std.Arrays.Length(Chunk.Fields) <> OutdoorChunkSize * OutdoorChunkSize then
+    begin
+      return Error('outdoor discovery mask must match the world chunk dimensions')
+    end;
+
+    if not HasDiscoveredField(Chunk.Fields) then
+    begin
+      return Error('outdoor discovery must not retain an empty chunk')
+    end;
+
+    if Index > 0 then
+    begin
+      if not OutdoorChunkComesBefore(State.OutdoorChunks[Index - 1], Chunk) then
+      begin
+        return Error('outdoor discovery chunks must be unique and canonically ordered')
+      end
+    end
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(State.InteriorAreas) - 1 do
+  begin
+    var Area: InteriorDiscoveryArea := State.InteriorAreas[Index];
+    if Area.AreaId = '' then
+    begin
+      return Error('interior discovery area id must not be empty')
+    end;
+
+    if (Area.Width < 1) or (Area.Height < 1) then
+    begin
+      return Error('interior discovery dimensions must be positive')
+    end;
+
+    if Std.Arrays.Length(Area.Fields) <> Area.Width * Area.Height then
+    begin
+      return Error('interior discovery mask must match its area dimensions')
+    end;
+
+    if not HasDiscoveredField(Area.Fields) then
+    begin
+      return Error('interior discovery must not retain an empty area')
+    end;
+
+    if Index > 0 then
+    begin
+      if not StringComesBefore(State.InteriorAreas[Index - 1].AreaId, Area.AreaId) then
+      begin
+        return Error('interior discovery areas must be unique and canonically ordered')
+      end
+    end
+  end;
+
+  return Ok(State)
+end;

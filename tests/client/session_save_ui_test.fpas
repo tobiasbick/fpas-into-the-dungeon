@@ -2,11 +2,25 @@
 program DungeonClientSessionSaveUiTest;
 
 uses
-  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Results, Std.Task, Std.Test, Std.Tui;
+  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Results, Std.Str, Std.Task, Std.Test,
+  Std.Tui;
 
 function Action(ControlId: integer; ActionId: integer): TuiMsg;
 begin
   return TuiMsg.Action(TuiControlId.Create(ControlId), TuiAction.Create(ActionId))
+end;
+
+function ScreenContains(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Snapshot.Height - 1 do
+  begin
+    if Std.Str.Contains(Snapshot.LineAt(Row), Text) then
+    begin
+      return true
+    end
+  end;
+
+  return false
 end;
 
 begin
@@ -54,6 +68,7 @@ begin
     Width := 3;
     Height := 3;
     Rows := ['ggg', 'ggg', 'ggg'];
+    KnowledgeRows := ['vvv', 'vvv', 'vvv'];
     PlayerX := 1;
     PlayerY := 1;
     WorldX := 0;
@@ -95,5 +110,56 @@ begin
   end;
 
   CloseChannel(Requests);
-  CloseChannel(Events)
+  CloseChannel(Events);
+  var CancelRequests: channel of ClientMessage := CreateChannel(4);
+  var CancelEvents: channel of ClientEvent := CreateChannel(1);
+  var CancelCmd: TuiCmdOutput := TuiCmdOutput.Create();
+  mutable var CancelModel: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), CancelRequests, CancelEvents);
+  CancelModel := UpdateClientEvent(CancelModel, ClientEvent.Connected(false, false), CancelCmd);
+  CancelModel := UpdateClient(CancelModel, Action(4, 104), CancelCmd);
+  AssertTrue(CancelModel.Pending);
+  case Std.Results.Unwrap(ReceiveWithTimeout(CancelRequests, 0)) of
+    ClientMessage.StartNewGame:
+    begin
+    end
+    else
+    begin
+      panic('expected new-game intention before cancellation')
+    end
+  end;
+
+  CancelModel := UpdateClient(CancelModel, Action(7, 132), CancelCmd);
+  AssertTrue(CancelModel.Overlay = ClientOverlay.SessionCancelConfirmationOverlay);
+  AssertTrue(CancelModel.Pending);
+  var CancelApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
+  CancelModel := CancelApp.RunIterations(CancelModel, UpdateClient, ViewClient, 0, 0);
+  var CancelSurface: TuiSurfaceSnapshot := CancelApp.SurfaceSnapshot();
+  AssertTrue(ScreenContains(CancelSurface, 'Cancel session start?'));
+  AssertTrue(ScreenContains(CancelSurface, 'The connection will be closed.'));
+  AssertTrue(ScreenContains(CancelSurface, 'Continue waiting'));
+  AssertTrue(ScreenContains(CancelSurface, 'Cancel and disconnect'));
+  CancelApp.Close();
+  CancelModel := UpdateClient(CancelModel, Action(33, 134), CancelCmd);
+  AssertTrue(CancelModel.Overlay = ClientOverlay.NoOverlay);
+  AssertEquals(7, CancelModel.FocusedControl);
+  AssertTrue(CancelModel.Pending);
+  CancelModel := UpdateClient(CancelModel, Action(7, 132), CancelCmd);
+  CancelModel := UpdateClient(CancelModel, Action(32, 133), CancelCmd);
+  AssertTrue(CancelModel.Screen = ClientScreen.StartScreen);
+  AssertTrue(CancelModel.ConnectionPhase = ClientConnectionPhase.Offline);
+  AssertTrue(CancelModel.Overlay = ClientOverlay.NoOverlay);
+  AssertFalse(CancelModel.Pending);
+  AssertEquals('Ready', CancelModel.Status);
+  case Std.Results.Unwrap(ReceiveWithTimeout(CancelRequests, 0)) of
+    ClientMessage.Disconnect:
+    begin
+    end
+    else
+    begin
+      panic('expected disconnect after confirmed session cancellation')
+    end
+  end;
+
+  CloseChannel(CancelRequests);
+  CloseChannel(CancelEvents)
 end.

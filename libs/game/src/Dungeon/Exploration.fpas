@@ -1,0 +1,427 @@
+// Authoritative outdoor sight, interior line of sight, and persistent discovery rules.
+unit Dungeon.Exploration;
+
+uses Dungeon.Exploration.Model, Dungeon.Game, Std.Arrays, Std.Math, Std.Results, Std.Str;
+
+public const
+  // Circular outdoor sight radius in world fields.
+  OutdoorSightRadius: integer := 8;
+  // Maximum first-person sight distance inside a finite area.
+  InteriorSightRadius: integer := 8;
+
+function OutdoorChunkComesBefore(Left: OutdoorDiscoveryChunk; Right: OutdoorDiscoveryChunk): boolean;
+begin
+  return (Left.ChunkY < Right.ChunkY) or
+         ((Left.ChunkY = Right.ChunkY) and (Left.ChunkX < Right.ChunkX))
+end;
+
+function StringComesBefore(Left: string; Right: string): boolean;
+begin
+  var SharedLength: integer := Std.Math.Min(Std.Str.Length(Left), Std.Str.Length(Right));
+  for Index: integer := 0 to SharedLength - 1 do
+  begin
+    var LeftCode: integer := Std.Str.Ord(Std.Str.CharAt(Left, Index));
+    var RightCode: integer := Std.Str.Ord(Std.Str.CharAt(Right, Index));
+    if LeftCode < RightCode then
+    begin
+      return true
+    end;
+
+    if LeftCode > RightCode then
+    begin
+      return false
+    end
+  end;
+
+  return Std.Str.Length(Left) < Std.Str.Length(Right)
+end;
+
+function FindOutdoorChunk(Chunks: array of OutdoorDiscoveryChunk; ChunkX: integer; ChunkY: integer): integer;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(Chunks) - 1 do
+  begin
+    if (Chunks[Index].ChunkX = ChunkX) and (Chunks[Index].ChunkY = ChunkY) then
+    begin
+      return Index
+    end
+  end;
+
+  return -1
+end;
+
+function FindInteriorArea(Areas: array of InteriorDiscoveryArea; AreaId: string): integer;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(Areas) - 1 do
+  begin
+    if Areas[Index].AreaId = AreaId then
+    begin
+      return Index
+    end
+  end;
+
+  return -1
+end;
+
+function SortedOutdoorChunks(Values: array of OutdoorDiscoveryChunk): array of OutdoorDiscoveryChunk;
+begin
+  mutable var Sorted: array of OutdoorDiscoveryChunk := Values;
+  for Right: integer := 1 to Std.Arrays.Length(Sorted) - 1 do
+  begin
+    mutable var Index: integer := Right;
+    mutable var Moving: boolean := true;
+    while (Index > 0) and Moving do
+    begin
+      if OutdoorChunkComesBefore(Sorted[Index], Sorted[Index - 1]) then
+      begin
+        var Previous: OutdoorDiscoveryChunk := Sorted[Index - 1];
+        Sorted[Index - 1] := Sorted[Index];
+        Sorted[Index] := Previous;
+        Index := Index - 1
+      end
+      else
+      begin
+        Moving := false
+      end
+    end
+  end;
+
+  return Sorted
+end;
+
+function SortedInteriorAreas(Values: array of InteriorDiscoveryArea): array of InteriorDiscoveryArea;
+begin
+  mutable var Sorted: array of InteriorDiscoveryArea := Values;
+  for Right: integer := 1 to Std.Arrays.Length(Sorted) - 1 do
+  begin
+    mutable var Index: integer := Right;
+    mutable var Moving: boolean := true;
+    while (Index > 0) and Moving do
+    begin
+      if StringComesBefore(Sorted[Index].AreaId, Sorted[Index - 1].AreaId) then
+      begin
+        var Previous: InteriorDiscoveryArea := Sorted[Index - 1];
+        Sorted[Index - 1] := Sorted[Index];
+        Sorted[Index] := Previous;
+        Index := Index - 1
+      end
+      else
+      begin
+        Moving := false
+      end
+    end
+  end;
+
+  return Sorted
+end;
+
+// Returns whether one signed outdoor world coordinate was discovered earlier.
+public function OutdoorIsDiscovered(State: ExplorationState; X: integer; Y: integer): boolean;
+begin
+  var Index: integer := FindOutdoorChunk(State.OutdoorChunks, ChunkForCoordinate(X), ChunkForCoordinate(Y));
+  if Index < 0 then
+  begin
+    return false
+  end;
+
+  return State.OutdoorChunks[Index].Fields[(LocalForCoordinate(Y) * WorldChunkSize) +
+                                           LocalForCoordinate(X)]
+end;
+
+// Derives current outdoor sight as a row-major Euclidean circle; negative dimensions yield no fields.
+public function OutdoorVisibility(
+  OriginX: integer;
+  OriginY: integer;
+  Width: integer;
+  Height: integer;
+  Player: WorldPosition
+): array of boolean;
+begin
+  if (Width < 0) or (Height < 0) then
+  begin
+    return []
+  end;
+  mutable var VisibleFields: array of boolean := Std.Arrays.Fill(false, Width * Height);
+  for LocalY: integer := 0 to Height - 1 do
+  begin
+    for LocalX: integer := 0 to Width - 1 do
+    begin
+      var DeltaX: integer := (OriginX + LocalX) - Player.X;
+      var DeltaY: integer := (OriginY + LocalY) - Player.Y;
+      VisibleFields[(LocalY * Width) + LocalX] := (DeltaX * DeltaX) + (DeltaY * DeltaY) <=
+                                                  OutdoorSightRadius * OutdoorSightRadius
+    end
+  end;
+
+  return VisibleFields
+end;
+
+// Merges the current outdoor sight circle into persistent discovery memory.
+public function RevealOutdoor(State: ExplorationState; Player: WorldPosition): ExplorationState;
+begin
+  mutable var Chunks: array of OutdoorDiscoveryChunk := State.OutdoorChunks;
+  var MinimumChunkX: integer := ChunkForCoordinate(Player.X - OutdoorSightRadius);
+  var MaximumChunkX: integer := ChunkForCoordinate(Player.X + OutdoorSightRadius);
+  var MinimumChunkY: integer := ChunkForCoordinate(Player.Y - OutdoorSightRadius);
+  var MaximumChunkY: integer := ChunkForCoordinate(Player.Y + OutdoorSightRadius);
+  for ChunkY: integer := MinimumChunkY to MaximumChunkY do
+  begin
+    for ChunkX: integer := MinimumChunkX to MaximumChunkX do
+    begin
+      // Skip bounding-square corners that do not intersect the circular sight field.
+      var NearestX: integer := Std.Math.Clamp(Player.X, ChunkX * WorldChunkSize, (ChunkX + 1) * WorldChunkSize -
+                                                                                 1);
+      var NearestY: integer := Std.Math.Clamp(Player.Y, ChunkY * WorldChunkSize, (ChunkY + 1) * WorldChunkSize -
+                                                                                 1);
+      var DistanceX: integer := NearestX - Player.X;
+      var DistanceY: integer := NearestY - Player.Y;
+      if DistanceX * DistanceX + DistanceY * DistanceY <= OutdoorSightRadius * OutdoorSightRadius then
+      begin
+        mutable var ChunkIndex: integer := FindOutdoorChunk(Chunks, ChunkX, ChunkY);
+        if ChunkIndex < 0 then
+        begin
+          Std.Arrays.Push(Chunks, record
+            ChunkX := ChunkX;
+            ChunkY := ChunkY;
+            Fields := Std.Arrays.Fill(false, WorldChunkSize * WorldChunkSize);
+          end);
+          ChunkIndex := Std.Arrays.Length(Chunks) - 1
+        end;
+        mutable var Chunk: OutdoorDiscoveryChunk := Chunks[ChunkIndex];
+        mutable var Fields: array of boolean := Chunk.Fields;
+        for DeltaY: integer := - OutdoorSightRadius to OutdoorSightRadius do
+        begin
+          for DeltaX: integer := - OutdoorSightRadius to OutdoorSightRadius do
+          begin
+            var WorldX: integer := Player.X + DeltaX;
+            var WorldY: integer := Player.Y + DeltaY;
+            if (((DeltaX * DeltaX) + (DeltaY * DeltaY) <= OutdoorSightRadius * OutdoorSightRadius) and (ChunkForCoordinate(WorldX) = ChunkX)) and
+               (ChunkForCoordinate(WorldY) = ChunkY) then
+            begin
+              Fields[(LocalForCoordinate(WorldY) * WorldChunkSize) + LocalForCoordinate(WorldX)] := true
+            end
+          end
+        end;
+
+        Chunk.Fields := Fields;
+        Chunks[ChunkIndex] := Chunk
+      end
+    end
+  end;
+
+  return record
+    OutdoorChunks := SortedOutdoorChunks(Chunks);
+    InteriorAreas := State.InteriorAreas;
+  end
+end;
+
+function FacingCoordinates(Pose: FirstPersonPose; Target: InteriorPosition): array of integer;
+begin
+  var DeltaX: integer := Target.X - Pose.Position.X;
+  var DeltaY: integer := Target.Y - Pose.Position.Y;
+  case Pose.Facing of
+    FacingDirection.North:
+    begin
+      return [- DeltaY, DeltaX]
+    end;
+    FacingDirection.East:
+    begin
+      return [DeltaX, DeltaY]
+    end;
+    FacingDirection.South:
+    begin
+      return [DeltaY, - DeltaX]
+    end;
+    FacingDirection.West:
+    begin
+      return [- DeltaX, - DeltaY]
+    end
+  end
+end;
+
+function HasLineOfSight(Map: InteriorMap; FromPosition: InteriorPosition; Target: InteriorPosition): boolean;
+begin
+  mutable var X: integer := FromPosition.X;
+  mutable var Y: integer := FromPosition.Y;
+  var DeltaX: integer := Abs(Target.X - X);
+  mutable var StepX: integer := -1;
+  if X < Target.X then
+  begin
+    StepX := 1
+  end;
+  var DeltaY: integer := - Abs(Target.Y - Y);
+  mutable var StepY: integer := -1;
+  if Y < Target.Y then
+  begin
+    StepY := 1
+  end;
+  mutable var ErrorValue: integer := DeltaX + DeltaY;
+  while (X <> Target.X) or (Y <> Target.Y) do
+  begin
+    var TwiceError: integer := 2 * ErrorValue;
+    if TwiceError >= DeltaY then
+    begin
+      ErrorValue := ErrorValue + DeltaY;
+      X := X + StepX
+    end;
+
+    if TwiceError <= DeltaX then
+    begin
+      ErrorValue := ErrorValue + DeltaX;
+      Y := Y + StepY
+    end;
+
+    if (X <> Target.X) or (Y <> Target.Y) then
+    begin
+      case InteriorCellAt(Map, record
+        X := X;
+        Y := Y;
+      end) of
+        Ok(Cell):
+        begin
+          if Cell = InteriorCellKind.Wall then
+          begin
+            return false
+          end
+        end;
+        Error(Message):
+        begin
+          return false
+        end
+        else
+        begin
+        end
+      end
+    end
+  end;
+
+  return true
+end;
+
+// Derives bounded, facing-aware interior line of sight; the blocking wall remains visible.
+public function InteriorVisibility(Map: InteriorMap; Pose: FirstPersonPose): array of boolean;
+begin
+  mutable var VisibleFields: array of boolean := Std.Arrays.Fill(false, Map.Width * Map.Height);
+  for Y: integer := 0 to Map.Height - 1 do
+  begin
+    for X: integer := 0 to Map.Width - 1 do
+    begin
+      var Target: InteriorPosition := record
+        X := X;
+        Y := Y;
+      end;
+      var Relative: array of integer := FacingCoordinates(Pose, Target);
+      var DeltaX: integer := X - Pose.Position.X;
+      var DeltaY: integer := Y - Pose.Position.Y;
+      var InRange: boolean := (DeltaX * DeltaX) + (DeltaY * DeltaY) <=
+                              InteriorSightRadius * InteriorSightRadius;
+      var InView: boolean := ((X = Pose.Position.X) and (Y = Pose.Position.Y)) or
+                             ((Relative[0] > 0) and (Abs(Relative[1]) <= Relative[0]));
+      if (InRange and InView) and HasLineOfSight(Map, Pose.Position, Target) then
+      begin
+        VisibleFields[(Y * Map.Width) + X] := true
+      end
+    end
+  end;
+
+  return VisibleFields
+end;
+
+// Returns whether one bounded field in a stable area was discovered earlier.
+public function InteriorIsDiscovered(
+  State: ExplorationState;
+  AreaId: string;
+  Width: integer;
+  X: integer;
+  Y: integer
+): boolean;
+begin
+  var Index: integer := FindInteriorArea(State.InteriorAreas, AreaId);
+  if (((Index < 0) or (X < 0)) or (Y < 0)) or (X >= Width) then
+  begin
+    return false
+  end;
+  var Area: InteriorDiscoveryArea := State.InteriorAreas[Index];
+  if (Area.Width <> Width) or (Y >= Area.Height) then
+  begin
+    return false
+  end;
+
+  return Area.Fields[(Y * Width) + X]
+end;
+
+// Merges facing-aware interior visibility, rejecting an existing mask with different dimensions.
+public function RevealInterior(
+  State: ExplorationState;
+  AreaId: string;
+  Map: InteriorMap;
+  Pose: FirstPersonPose
+): result of ExplorationState, string;
+begin
+  mutable var Areas: array of InteriorDiscoveryArea := State.InteriorAreas;
+  mutable var Index: integer := FindInteriorArea(Areas, AreaId);
+  if Index < 0 then
+  begin
+    Std.Arrays.Push(Areas, record
+      AreaId := AreaId;
+      Width := Map.Width;
+      Height := Map.Height;
+      Fields := Std.Arrays.Fill(false, Map.Width * Map.Height);
+    end);
+    Areas := SortedInteriorAreas(Areas);
+    Index := FindInteriorArea(Areas, AreaId)
+  end;
+  mutable var Area: InteriorDiscoveryArea := Areas[Index];
+  if (Area.Width <> Map.Width) or (Area.Height <> Map.Height) then
+  begin
+    return Error('interior discovery dimensions do not match the authoritative area')
+  end;
+  mutable var Fields: array of boolean := Area.Fields;
+  var Visible: array of boolean := InteriorVisibility(Map, Pose);
+  for FieldIndex: integer := 0 to Std.Arrays.Length(Fields) - 1 do
+  begin
+    Fields[FieldIndex] := Fields[FieldIndex] or Visible[FieldIndex]
+  end;
+
+  Area.Fields := Fields;
+  Areas[Index] := Area;
+  return Ok(record
+    OutdoorChunks := State.OutdoorChunks;
+    InteriorAreas := Areas;
+  end)
+end;
+
+// Classifies one field without retaining derived current visibility.
+public function ClassifyField(Discovered: boolean; Visible: boolean): FieldKnowledge;
+begin
+  if Visible then
+  begin
+    return FieldKnowledge.Visible
+  end;
+
+  if Discovered then
+  begin
+    return FieldKnowledge.Remembered
+  end;
+
+  return FieldKnowledge.Undiscovered
+end;
+
+// Reveals exactly the current authoritative sight field after an accepted game event.
+public function RevealCurrentArea(Metadata: WorldMetadata; State: GameState): result of GameState, string;
+begin
+  mutable var RevealedState: GameState := try ValidateGameState(Metadata, State);
+  if RevealedState.Area = AreaKind.OutdoorRegion then
+  begin
+    RevealedState.Exploration := RevealOutdoor(RevealedState.Exploration, try OutdoorPlayerPosition(RevealedState));
+    return Ok(RevealedState)
+  end;
+
+  if RevealedState.Area = AreaKind.Dungeon then
+  begin
+    var Map: InteriorMap := try InitialDungeonMap();
+    RevealedState.Exploration := try RevealInterior(RevealedState.Exploration, RevealedState.AreaId, Map, try FirstPersonPlayerPose(RevealedState));
+    return Ok(RevealedState)
+  end;
+
+  return Error('exploration is unavailable for the current area kind')
+end;

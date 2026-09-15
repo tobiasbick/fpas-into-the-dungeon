@@ -13,6 +13,7 @@ const
   NewGameControlId: integer := 4;
   LoadGameControlId: integer := 5;
   StartDisconnectControlId: integer := 6;
+  CancelSessionStartControlId: integer := 7;
   ResumeControlId: integer := 10;
   SystemInformationControlId: integer := 11;
   DisconnectControlId: integer := 12;
@@ -22,6 +23,8 @@ const
   PanelCloseControlId: integer := 21;
   ConfirmSaveControlId: integer := 30;
   CancelSaveControlId: integer := 31;
+  ConfirmCancelSessionControlId: integer := 32;
+  ContinueSessionStartControlId: integer := 33;
   ConnectAction: integer := 101;
   InformationAction: integer := 102;
   QuitAction: integer := 103;
@@ -34,12 +37,19 @@ const
   ClosePanelAction: integer := 121;
   ConfirmSaveAction: integer := 130;
   CancelSaveAction: integer := 131;
+  RequestCancelSessionAction: integer := 132;
+  ConfirmCancelSessionAction: integer := 133;
+  ContinueSessionStartAction: integer := 134;
   MinimumDockedContextWidth: integer := 72;
   MinimumDockedMessagesHeight: integer := 18;
   MaximumMessages: integer := 8;
   DockedMessageLines: integer := 4;
   MessagePanelHeight: integer := 6;
   StatusPanelHeight: integer := 3;
+  MinimumScaledMapWidth: integer := 60;
+  MinimumScaledMapHeight: integer := 20;
+  MapScaleNumerator: integer := 4;
+  MapScaleDenominator: integer := 5;
 
 type
   WorldViewport = record
@@ -158,9 +168,133 @@ begin
   end
 end;
 
+function DesiredMapViewport(State: ClientModel): WorldViewport;
+begin
+  mutable var Width: integer := State.ViewportWidth - 4;
+  mutable var Height: integer := State.ViewportHeight - 6;
+  if State.ViewportWidth >= MinimumScaledMapWidth then
+  begin
+    Width := ((State.ViewportWidth * MapScaleNumerator) div MapScaleDenominator) - 4
+  end;
+
+  if State.ViewportHeight >= MinimumScaledMapHeight then
+  begin
+    Height := ((State.ViewportHeight * MapScaleNumerator) div MapScaleDenominator) - 6
+  end;
+
+  if Width < 1 then
+  begin
+    Width := 1
+  end;
+
+  if Height < 1 then
+  begin
+    Height := 1
+  end;
+
+  if Width > MaximumExplorationMapWidth then
+  begin
+    Width := MaximumExplorationMapWidth
+  end;
+
+  if Height > MaximumExplorationMapHeight then
+  begin
+    Height := MaximumExplorationMapHeight
+  end;
+
+  return record
+    Width := Width;
+    Height := Height;
+  end
+end;
+
+function QueueExplorationMap(State: ClientModel): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.MapRequestPending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.ExplorationMap(State.MapDesiredOriginX, State.MapDesiredOriginY, State.MapDesiredWidth, State.MapDesiredHeight)) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.MapRequestPending := true;
+      Next.Status := 'Loading map...';
+      if State.MapHasState then
+      begin
+        Next.Status := 'Updating map...'
+      end;
+
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+function CenterMap(State: ClientModel): ClientModel;
+begin
+  mutable var Next: ClientModel := State;
+  var Size: WorldViewport := DesiredMapViewport(State);
+  Next.MapDesiredWidth := Size.Width;
+  Next.MapDesiredHeight := Size.Height;
+  mutable var PlayerX: integer := State.WorldX;
+  mutable var PlayerY: integer := State.WorldY;
+  if State.View = ViewKind.FirstPerson then
+  begin
+    PlayerX := State.PlayerX;
+    PlayerY := State.PlayerY
+  end;
+
+  Next.MapDesiredOriginX := PlayerX - (Size.Width div 2);
+  Next.MapDesiredOriginY := PlayerY - (Size.Height div 2);
+  return QueueExplorationMap(Next)
+end;
+
+function OpenExplorationMap(State: ClientModel): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or not State.HasVisibleState then
+  begin
+    return State
+  end;
+  mutable var Next: ClientModel := State;
+  Next.Overlay := ClientOverlay.ExplorationMapOverlay;
+  Next.FocusedControl := 0;
+  Next.MapHasState := false;
+  return CenterMap(Next)
+end;
+
+function PanExplorationMap(State: ClientModel; DeltaX: integer; DeltaY: integer): ClientModel;
+begin
+  mutable var Next: ClientModel := State;
+  Next.MapDesiredOriginX := State.MapDesiredOriginX + DeltaX;
+  Next.MapDesiredOriginY := State.MapDesiredOriginY + DeltaY;
+  if State.MapRequestPending then
+  begin
+    Next.Status := 'Map update queued.';
+    return Next
+  end;
+
+  return QueueExplorationMap(Next)
+end;
+
 function CloseOverlay(State: ClientModel): ClientModel;
 begin
   mutable var Next: ClientModel := State;
+  if State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
+  begin
+    Next.Overlay := ClientOverlay.NoOverlay;
+    Next.FocusedControl := CancelSessionStartControlId;
+    return Next
+  end;
+
   if State.Overlay = ClientOverlay.SaveConfirmationOverlay then
   begin
     Next.Overlay := ClientOverlay.SystemMenuOverlay;
@@ -277,7 +411,7 @@ begin
       end;
       mutable var Next: ClientModel := State;
       Next.Pending := true;
-      Next.FocusedControl := 0;
+      Next.FocusedControl := CancelSessionStartControlId;
       Next.Status := Status;
       return Next
     end
@@ -515,6 +649,39 @@ begin
     return QueueSessionChoice(State, ClientMessage.LoadGame, 'Loading game...')
   end;
 
+  if Action.Value = RequestCancelSessionAction then
+  begin
+    if ((State.Screen <> ClientScreen.StartScreen) or (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession)) or
+       not State.Pending then
+    begin
+      return State
+    end;
+    mutable var Next: ClientModel := State;
+    Next.Overlay := ClientOverlay.SessionCancelConfirmationOverlay;
+    Next.FocusedControl := ContinueSessionStartControlId;
+    return Next
+  end;
+
+  if Action.Value = ConfirmCancelSessionAction then
+  begin
+    if (State.Overlay <> ClientOverlay.SessionCancelConfirmationOverlay) or not State.Pending then
+    begin
+      return State
+    end;
+
+    return ReturnToStart(State, Cmd)
+  end;
+
+  if Action.Value = ContinueSessionStartAction then
+  begin
+    if State.Overlay <> ClientOverlay.SessionCancelConfirmationOverlay then
+    begin
+      return State
+    end;
+
+    return CloseOverlay(State)
+  end;
+
   if Action.Value = QuitAction then
   begin
     return RequestQuit(State, Cmd)
@@ -591,6 +758,56 @@ begin
     Next.Overlay := ClientOverlay.SystemMenuOverlay;
     Next.FocusedControl := ResumeControlId;
     return Next
+  end;
+
+  if HasCharacter(Key, 'm', 'M') then
+  begin
+    if State.Overlay = ClientOverlay.ExplorationMapOverlay then
+    begin
+      return CloseOverlay(State)
+    end;
+
+    if State.Overlay = ClientOverlay.NoOverlay then
+    begin
+      return OpenExplorationMap(State)
+    end;
+
+    return State
+  end;
+
+  if State.Overlay = ClientOverlay.ExplorationMapOverlay then
+  begin
+    if Key.kind = TuiKeyKind.Escape then
+    begin
+      return CloseOverlay(State)
+    end;
+
+    if Key.kind = TuiKeyKind.Home then
+    begin
+      return CenterMap(State)
+    end;
+
+    if (Key.kind = TuiKeyKind.Left) or HasCharacter(Key, 'a', 'A') then
+    begin
+      return PanExplorationMap(State, -1, 0)
+    end;
+
+    if (Key.kind = TuiKeyKind.Right) or HasCharacter(Key, 'd', 'D') then
+    begin
+      return PanExplorationMap(State, 1, 0)
+    end;
+
+    if (Key.kind = TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W') then
+    begin
+      return PanExplorationMap(State, 0, -1)
+    end;
+
+    if (Key.kind = TuiKeyKind.Down) or HasCharacter(Key, 's', 'S') then
+    begin
+      return PanExplorationMap(State, 0, 1)
+    end;
+
+    return State
   end;
 
   if Key.kind = TuiKeyKind.F2 then
@@ -729,6 +946,8 @@ begin
     begin
       mutable var Next: ClientModel := State;
       Next.ConnectionPhase := ClientConnectionPhase.Failed;
+      Next.Overlay := ClientOverlay.NoOverlay;
+      Next.FocusedControl := ConnectControlId;
       Next.Pending := false;
       Next.Status := 'Connection failed: ' + Message;
       return AppendMessage(Next, Next.Status)
@@ -773,6 +992,7 @@ begin
     ClientEvent.State(Value):
     begin
       Next.Screen := ClientScreen.GameScreen;
+      Next.Overlay := ClientOverlay.NoOverlay;
       Next.ConnectionPhase := ClientConnectionPhase.Active;
       Next.FocusedControl := 0;
       Next.HasVisibleState := true;
@@ -785,6 +1005,7 @@ begin
           Next.Width := MapValue.Width;
           Next.Height := MapValue.Height;
           Next.Rows := MapValue.Rows;
+          Next.KnowledgeRows := MapValue.KnowledgeRows;
           Next.PlayerX := MapValue.PlayerX;
           Next.PlayerY := MapValue.PlayerY;
           Next.WorldX := MapValue.WorldX;
@@ -799,6 +1020,7 @@ begin
           Next.Width := FirstPersonValue.Width;
           Next.Height := FirstPersonValue.Height;
           Next.Rows := FirstPersonValue.Rows;
+          Next.KnowledgeRows := FirstPersonValue.KnowledgeRows;
           Next.PlayerX := FirstPersonValue.PlayerX;
           Next.PlayerY := FirstPersonValue.PlayerY;
           Next.WorldX := 0;
@@ -821,6 +1043,30 @@ begin
 
       return QueueViewport(Next)
     end;
+    ClientEvent.ExplorationMap(Value):
+    begin
+      Next.MapRequestPending := false;
+      Next.MapHasState := true;
+      Next.MapView := Value.View;
+      Next.MapLabel := Value.LabelText;
+      Next.MapOriginX := Value.OriginX;
+      Next.MapOriginY := Value.OriginY;
+      Next.MapWidth := Value.Width;
+      Next.MapHeight := Value.Height;
+      Next.MapRows := Value.Rows;
+      Next.MapKnowledgeRows := Value.KnowledgeRows;
+      Next.MapPlayerWorldX := Value.PlayerWorldX;
+      Next.MapPlayerWorldY := Value.PlayerWorldY;
+      Next.MapPlayerInWindow := Value.PlayerInWindow;
+      Next.Status := 'Map ready.';
+      if (Next.Overlay = ClientOverlay.ExplorationMapOverlay) and
+         (((Next.MapDesiredOriginX <> Value.OriginX) or (Next.MapDesiredOriginY <> Value.OriginY)) or ((Next.MapDesiredWidth <> Value.Width) or (Next.MapDesiredHeight <> Value.Height))) then
+      begin
+        return QueueExplorationMap(Next)
+      end;
+
+      return Next
+    end;
     ClientEvent.SaveCompleted:
     begin
       Next.Pending := false;
@@ -831,6 +1077,13 @@ begin
     ClientEvent.Rejected(Code, Message):
     begin
       Next.Pending := false;
+      Next.MapRequestPending := false;
+      if Next.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
+      begin
+        Next.Overlay := ClientOverlay.NoOverlay;
+        Next.FocusedControl := NewGameControlId
+      end;
+
       if Code = 'save_removed' then
       begin
         Next.SaveAvailable := false;
@@ -843,6 +1096,8 @@ begin
     ClientEvent.Failed(Message):
     begin
       Next.ConnectionPhase := ClientConnectionPhase.Failed;
+      Next.Overlay := ClientOverlay.NoOverlay;
+      Next.FocusedControl := ConnectControlId;
       Next.Pending := false;
       Next.Status := 'Connection failed: ' + Message;
       return AppendMessage(Next, Next.Status)
@@ -850,6 +1105,8 @@ begin
     ClientEvent.Disconnected:
     begin
       Next.ConnectionPhase := ClientConnectionPhase.Disconnected;
+      Next.Overlay := ClientOverlay.NoOverlay;
+      Next.FocusedControl := ConnectControlId;
       Next.Pending := false;
       Next.Status := 'Disconnected';
       return AppendMessage(Next, 'Disconnected')
@@ -981,6 +1238,61 @@ begin
   return ColoredCell('●', 255, 250, 210, 150, 68, 24)
 end;
 
+function KnowledgeCell(Cell: TuiCell; KnowledgeCode: string): TuiCell;
+begin
+  if KnowledgeCode = 'u' then
+  begin
+    return ColoredCell(' ', 52, 58, 64, 9, 12, 16)
+  end;
+
+  if KnowledgeCode = 'r' then
+  begin
+    case Cell.ConcreteStyle of
+      Some(Style):
+      begin
+        mutable var RememberedStyle: TuiStyle := Style;
+        // Dim both halves of a terrain cell independently of terminal dim support.
+        RememberedStyle.Foreground := TuiColor.FromRgb(Style.Foreground.Red div 2, Style.Foreground.Green div
+                                                                                   2, Style.Foreground.Blue div
+                                                                                      2);
+        RememberedStyle.Background := TuiColor.FromRgb(Style.Background.Red div 2, Style.Background.Green div
+                                                                                   2, Style.Background.Blue div
+                                                                                      2);
+        RememberedStyle.Dim := false;
+        return TuiCell.Styled(Cell.Glyph, RememberedStyle)
+      end
+      else
+      begin
+        return Cell
+      end
+    end
+  end;
+
+  return Cell
+end;
+
+function InteriorMapCell(Code: string): TuiCell;
+begin
+  case Code of
+    '#':
+    begin
+      return ColoredCell('█', 184, 178, 168, 62, 58, 55)
+    end;
+    '.':
+    begin
+      return ColoredCell('·', 136, 130, 118, 30, 28, 27)
+    end;
+    'x':
+    begin
+      return ColoredCell('◆', 255, 221, 112, 72, 42, 92)
+    end
+    else
+    begin
+      return ColoredCell(' ', 52, 58, 64, 9, 12, 16)
+    end
+  end
+end;
+
 function MapGrid(State: ClientModel): TuiCellGrid;
 begin
   mutable var Cells: array of TuiCell := [];
@@ -990,6 +1302,7 @@ begin
     begin
       var IsPlayer: boolean := (X = State.PlayerX) and (Y = State.PlayerY);
       var Code: string := Std.Str.CharAt(State.Rows[Y], X);
+      var Knowledge: string := Std.Str.CharAt(State.KnowledgeRows[Y], X);
       if IsPlayer then
       begin
         Std.Arrays.Push(Cells, PlayerCell(false));
@@ -997,8 +1310,8 @@ begin
       end
       else
       begin
-        Std.Arrays.Push(Cells, TerrainCell(Code, false));
-        Std.Arrays.Push(Cells, TerrainCell(Code, true))
+        Std.Arrays.Push(Cells, KnowledgeCell(TerrainCell(Code, false), Knowledge));
+        Std.Arrays.Push(Cells, KnowledgeCell(TerrainCell(Code, true), Knowledge))
       end
     end
   end;
@@ -1030,6 +1343,7 @@ begin
     Width := State.Width;
     Height := State.Height;
     Rows := State.Rows;
+    KnowledgeRows := State.KnowledgeRows;
     PlayerX := State.PlayerX;
     PlayerY := State.PlayerY;
     Facing := State.FirstPersonFacing;
@@ -1224,21 +1538,33 @@ begin
   else if State.ConnectionPhase = ClientConnectionPhase.AwaitingSession then
   begin
     Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel(State.Status));
-    Std.Arrays.Push(Items, TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(NewGameControlId), 'New game', '', TuiAction.Create(NewGameAction)));
-    if State.SaveAvailable then
+    if State.Pending then
     begin
-      Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(LoadGameControlId), 'Load', TuiAction.Create(LoadGameAction)))
-    end;
+      Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Please wait.'));
+      Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(CancelSessionStartControlId), 'Cancel', TuiAction.Create(RequestCancelSessionAction)))
+    end
+    else
+    begin
+      Std.Arrays.Push(Items, TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(NewGameControlId), 'New game', '', TuiAction.Create(NewGameAction)));
+      if State.SaveAvailable then
+      begin
+        Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(LoadGameControlId), 'Load', TuiAction.Create(LoadGameAction)))
+      end;
 
-    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartDisconnectControlId), 'Disconnect', TuiAction.Create(DisconnectAction)))
+      Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartDisconnectControlId), 'Disconnect', TuiAction.Create(DisconnectAction)))
+    end
   end
   else
   begin
     Std.Arrays.Push(Items, TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(ConnectControlId), 'Connect', '', TuiAction.Create(ConnectAction)))
   end;
 
-  Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartInformationControlId), 'Information', TuiAction.Create(InformationAction)));
-  Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartQuitControlId), 'Quit', TuiAction.Create(QuitAction)));
+  if not State.Pending then
+  begin
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartInformationControlId), 'Information', TuiAction.Create(InformationAction)));
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(StartQuitControlId), 'Quit', TuiAction.Create(QuitAction)))
+  end;
+
   return TuiElementBuilders.MakeOverlay('INTO THE DUNGEON', [TuiElementBuilders.MakeColumn(Items)])
 end;
 
@@ -1263,6 +1589,7 @@ begin
 
   Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Enter  Enter/leave'));
   Items := Std.Arrays.Concat(Items, [
+                                      TuiElementBuilders.MakeLabel('M      Map'),
                                       TuiElementBuilders.MakeLabel('F2     Context'),
                                       TuiElementBuilders.MakeLabel('F3     Messages'),
                                       TuiElementBuilders.MakeLabel('Ctrl+P Menu'),
@@ -1293,12 +1620,76 @@ begin
                                                            ])
 end;
 
+function ViewSessionCancelConfirmation(): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay('Cancel session start?', [
+                                                                   TuiElementBuilders.MakeColumn([
+                                                                                                   TuiElementBuilders.MakeLabel('The connection will be closed.'),
+                                                                                                   TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(ContinueSessionStartControlId), 'Continue waiting', '', TuiAction.Create(ContinueSessionStartAction)),
+                                                                                                   TuiElementBuilders.MakeButton(TuiControlId.Create(ConfirmCancelSessionControlId), 'Cancel and disconnect', TuiAction.Create(ConfirmCancelSessionAction))
+                                                                                                 ])
+                                                                 ])
+end;
+
 function ViewPanelOverlay(State: ClientModel; Title: string; Content: TuiElement): TuiElement;
 begin
   return TuiElementBuilders.MakeOverlay(Title, [
                                                  Content,
                                                  TuiElementBuilders.MakeButton(TuiControlId.Create(PanelCloseControlId), 'Close', TuiAction.Create(ClosePanelAction))
                                                ])
+end;
+
+function ExplorationMapGrid(State: ClientModel): TuiCellGrid;
+begin
+  mutable var Cells: array of TuiCell := [];
+  for Y: integer := 0 to State.MapHeight - 1 do
+  begin
+    for X: integer := 0 to State.MapWidth - 1 do
+    begin
+      var WorldX: integer := State.MapOriginX + X;
+      var WorldY: integer := State.MapOriginY + Y;
+      var IsPlayer: boolean := (State.MapPlayerInWindow and (WorldX = State.MapPlayerWorldX)) and
+                               (WorldY = State.MapPlayerWorldY);
+      var Code: string := Std.Str.CharAt(State.MapRows[Y], X);
+      var Knowledge: string := Std.Str.CharAt(State.MapKnowledgeRows[Y], X);
+      if IsPlayer then
+      begin
+        Std.Arrays.Push(Cells, PlayerCell(false))
+      end
+      else if State.MapView = ViewKind.Map then
+      begin
+        Std.Arrays.Push(Cells, KnowledgeCell(TerrainCell(Code, false), Knowledge))
+      end
+      else
+      begin
+        Std.Arrays.Push(Cells, KnowledgeCell(InteriorMapCell(Code), Knowledge))
+      end
+    end
+  end;
+
+  return TuiCellGrid.Create(State.MapWidth, State.MapHeight, Cells)
+end;
+
+function ViewExplorationMap(State: ClientModel): TuiElement;
+begin
+  mutable var Content: array of TuiElement := [];
+  if State.MapHasState then
+  begin
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeCellGrid(ExplorationMapGrid(State)))
+  end
+  else
+  begin
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('Loading map...'))
+  end;
+
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('WASD/arrows pan  Home center  M/Esc close'));
+  mutable var Title: string := 'Map';
+  if State.MapLabel <> '' then
+  begin
+    Title := 'Map - ' + State.MapLabel
+  end;
+
+  return TuiElementBuilders.MakeOverlay(Title, [TuiElementBuilders.MakeColumn(Content)])
 end;
 
 function ViewOverlay(State: ClientModel): TuiElement;
@@ -1316,6 +1707,10 @@ begin
     begin
       return ViewSaveConfirmation()
     end;
+    ClientOverlay.SessionCancelConfirmationOverlay:
+    begin
+      return ViewSessionCancelConfirmation()
+    end;
     ClientOverlay.ContextOverlay:
     begin
       return ViewPanelOverlay(State, 'Context', ViewContext(State))
@@ -1323,6 +1718,10 @@ begin
     ClientOverlay.MessageOverlay:
     begin
       return ViewPanelOverlay(State, 'Messages', ViewMessages(State))
+    end;
+    ClientOverlay.ExplorationMapOverlay:
+    begin
+      return ViewExplorationMap(State)
     end;
     ClientOverlay.NoOverlay:
     begin
@@ -1349,6 +1748,14 @@ begin
     if State.Overlay = ClientOverlay.InformationOverlay then
     begin
       return TuiElementBuilders.MakeDesktop(Focus(State), [ViewInformation()])
+    end;
+
+    if State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
+    begin
+      return TuiElementBuilders.MakeDesktop(Focus(State), [
+                                                            ViewStartScreen(State),
+                                                            ViewOverlay(State)
+                                                          ])
     end;
 
     return TuiElementBuilders.MakeDesktop(Focus(State), [ViewStartScreen(State)])

@@ -5,9 +5,14 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 5;
+  ProtocolVersion: integer := 6;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
+  // Largest exploration-map window that remains below the line-size limit with two row planes.
+  MaximumExplorationMapWidth: integer := 240;
+  MaximumExplorationMapHeight: integer := 120;
+  // Symmetric wire bound that keeps origin-plus-dimension arithmetic inside the integer domain.
+  MaximumExplorationMapOriginMagnitude: integer := 1000000000;
 
 public type
   // Selects the renderer the client must use for a visible state.
@@ -41,6 +46,8 @@ public type
     public Width: integer;
     public Height: integer;
     public Rows: array of string;
+    // One u, r, or v code per terrain field: undiscovered, remembered, or visible.
+    public KnowledgeRows: array of string;
     public PlayerX: integer;
     public PlayerY: integer;
     public WorldX: integer;
@@ -53,6 +60,8 @@ public type
     public Width: integer;
     public Height: integer;
     public Rows: array of string;
+    // One u, r, or v code per geometry field: undiscovered, remembered, or visible.
+    public KnowledgeRows: array of string;
     public PlayerX: integer;
     public PlayerY: integer;
     public Facing: FirstPersonFacing;
@@ -62,6 +71,20 @@ public type
     MapState(Value: MapVisibleState);
     FirstPersonState(Value: FirstPersonVisibleState);
   end;
+  // Client-safe current-area map window; u fields must contain ? and dimensions match both row planes.
+  ExplorationMapState = record
+    public View: ViewKind;
+    public LabelText: string;
+    public OriginX: integer;
+    public OriginY: integer;
+    public Width: integer;
+    public Height: integer;
+    public Rows: array of string;
+    public KnowledgeRows: array of string;
+    public PlayerWorldX: integer;
+    public PlayerWorldY: integer;
+    public PlayerInWindow: boolean;
+  end;
   // Session setup, player intentions, and lifecycle messages accepted by the server.
   ClientMessage = enum
     Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
@@ -69,6 +92,8 @@ public type
     LoadGame;
     SaveGame;
     Viewport(Width: integer; Height: integer);
+    // Requests a read-only current-area map window; this never changes discovery or player state.
+    ExplorationMap(OriginX: integer; OriginY: integer; Width: integer; Height: integer);
     Move(DeltaX: integer; DeltaY: integer);
     StepFirstPerson(Direction: FirstPersonStepDirection);
     TurnFirstPerson(Direction: FirstPersonTurnDirection);
@@ -79,6 +104,7 @@ public type
   ServerMessage = enum
     Welcome(Version: integer; SaveAvailable: boolean; InvalidSaveRemoved: boolean);
     State(Value: VisibleState);
+    ExplorationMap(Value: ExplorationMapState);
     SaveCompleted;
     Rejected(Code: string; Message: string);
     ErrorMessage(Code: string; Message: string);
@@ -261,6 +287,10 @@ end;
 function IsVisibleCellCode(Value: string): boolean;
 begin
   case Value of
+    '?':
+    begin
+      return true
+    end;
     'g':
     begin
       return true
@@ -310,7 +340,55 @@ end;
 
 function IsFirstPersonCellCode(Value: string): boolean;
 begin
-  return (Value = '#') or ((Value = '.') or (Value = 'x'))
+  return (Value = '?') or ((Value = '#') or ((Value = '.') or (Value = 'x')))
+end;
+
+function IsKnowledgeCode(Value: string): boolean;
+begin
+  return (Value = 'u') or ((Value = 'r') or (Value = 'v'))
+end;
+
+function ValidateKnowledgeRows(
+  Rows: array of string;
+  KnowledgeRows: array of string;
+  Width: integer;
+  Height: integer
+): result of boolean, string;
+begin
+  if Std.Arrays.Length(KnowledgeRows) <> Height then
+  begin
+    return Error('knowledge row count must match height')
+  end;
+
+  for Y: integer := 0 to Height - 1 do
+  begin
+    if Std.Str.Length(KnowledgeRows[Y]) <> Width then
+    begin
+      return Error('knowledge row width must match width')
+    end;
+
+    for X: integer := 0 to Width - 1 do
+    begin
+      var KnowledgeCode: string := Std.Str.CharAt(KnowledgeRows[Y], X);
+      var TerrainCode: string := Std.Str.CharAt(Rows[Y], X);
+      if not IsKnowledgeCode(KnowledgeCode) then
+      begin
+        return Error('knowledge row contains an unknown field code')
+      end;
+
+      if (KnowledgeCode = 'u') and (TerrainCode <> '?') then
+      begin
+        return Error('undiscovered field must not expose terrain')
+      end;
+
+      if (KnowledgeCode <> 'u') and (TerrainCode = '?') then
+      begin
+        return Error('known field must include terrain')
+      end
+    end
+  end;
+
+  return Ok(true)
 end;
 
 function EncodeRows(Rows: array of string): array of JsonValue;
@@ -381,7 +459,7 @@ begin
       end
     end
   end;
-
+  var KnowledgeValid: boolean := try ValidateKnowledgeRows(Value.Rows, Value.KnowledgeRows, Value.Width, Value.Height);
   if (((Value.PlayerX < 0) or (Value.PlayerX >= Value.Width)) or (Value.PlayerY < 0)) or
      (Value.PlayerY >= Value.Height) then
   begin
@@ -392,6 +470,11 @@ begin
      (Value.OriginY + Value.PlayerY <> Value.WorldY) then
   begin
     return Error('visible-state local and world player positions disagree')
+  end;
+
+  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> 'v' then
+  begin
+    return Error('visible-state player field must be currently visible')
   end;
 
   return Ok(Value)
@@ -440,10 +523,10 @@ begin
       end
     end
   end;
-
-  if ExitCount <> 1 then
+  var KnowledgeValid: boolean := try ValidateKnowledgeRows(Value.Rows, Value.KnowledgeRows, Value.Width, Value.Height);
+  if ExitCount > 1 then
   begin
-    return Error('first-person state must contain exactly one exit field')
+    return Error('first-person state must not contain duplicate exit fields')
   end;
 
   if (((Value.PlayerX < 0) or (Value.PlayerX >= Value.Width)) or (Value.PlayerY < 0)) or
@@ -452,9 +535,90 @@ begin
     return Error('first-person player position is outside the area')
   end;
 
-  if Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#' then
+  if (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#') or
+     (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '?') then
   begin
     return Error('first-person player position must be traversable')
+  end;
+
+  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> 'v' then
+  begin
+    return Error('first-person player field must be currently visible')
+  end;
+
+  return Ok(Value)
+end;
+
+function ValidateExplorationMapState(Value: ExplorationMapState): result of ExplorationMapState, string;
+begin
+  if Std.Str.Length(Value.LabelText) = 0 then
+  begin
+    return Error('exploration map label must not be empty')
+  end;
+
+  if (Value.Width <= 0) or (Value.Height <= 0) then
+  begin
+    return Error('exploration map dimensions must be positive')
+  end;
+
+  if (Value.Width > MaximumExplorationMapWidth) or (Value.Height > MaximumExplorationMapHeight) then
+  begin
+    return Error('exploration map dimensions exceed protocol limits')
+  end;
+
+  if (((Value.OriginX < - MaximumExplorationMapOriginMagnitude) or (Value.OriginX > MaximumExplorationMapOriginMagnitude)) or (Value.OriginY < - MaximumExplorationMapOriginMagnitude)) or
+     (Value.OriginY > MaximumExplorationMapOriginMagnitude) then
+  begin
+    return Error('exploration map origin exceeds protocol limits')
+  end;
+
+  if Std.Arrays.Length(Value.Rows) <> Value.Height then
+  begin
+    return Error('exploration map row count must match height')
+  end;
+
+  for Row: string in Value.Rows do
+  begin
+    if Std.Str.Length(Row) <> Value.Width then
+    begin
+      return Error('exploration map row width must match width')
+    end;
+
+    for X: integer := 0 to Value.Width - 1 do
+    begin
+      var Code: string := Std.Str.CharAt(Row, X);
+      if Value.View = ViewKind.Map then
+      begin
+        if not IsVisibleCellCode(Code) then
+        begin
+          return Error('exploration map contains an unknown outdoor field code')
+        end
+      end
+      else
+      begin
+        if not IsFirstPersonCellCode(Code) then
+        begin
+          return Error('exploration map contains an unknown interior field code')
+        end
+      end
+    end
+  end;
+  var KnowledgeValid: boolean := try ValidateKnowledgeRows(Value.Rows, Value.KnowledgeRows, Value.Width, Value.Height);
+  var ContainsPlayer: boolean := (((Value.PlayerWorldX >= Value.OriginX) and (Value.PlayerWorldX < Value.OriginX + Value.Width)) and (Value.PlayerWorldY >= Value.OriginY)) and
+                                 (Value.PlayerWorldY < Value.OriginY + Value.Height);
+  if ContainsPlayer <> Value.PlayerInWindow then
+  begin
+    return Error('exploration map player-in-window flag is inconsistent')
+  end;
+
+  if Value.PlayerInWindow then
+  begin
+    var PlayerLocalX: integer := Value.PlayerWorldX - Value.OriginX;
+    var PlayerLocalY: integer := Value.PlayerWorldY - Value.OriginY;
+    if Std.Str.CharAt(Value.KnowledgeRows[PlayerLocalY], PlayerLocalX) <> 'v' then
+    begin
+      return Error('exploration map player field must be currently visible')
+    end
   end;
 
   return Ok(Value)
@@ -561,6 +725,10 @@ begin
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('viewport'), 'width': JsonValue.Number(IntToReal(Width)), 'height': JsonValue.Number(IntToReal(Height))]))
     end;
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('exploration_map'), 'origin_x': JsonValue.Number(IntToReal(OriginX)), 'origin_y': JsonValue.Number(IntToReal(OriginY)), 'width': JsonValue.Number(IntToReal(Width)), 'height': JsonValue.Number(IntToReal(Height))]))
+    end;
     ClientMessage.Move(DeltaX, DeltaY):
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('move'), 'dx': JsonValue.Number(IntToReal(DeltaX)), 'dy': JsonValue.Number(IntToReal(DeltaY))]))
@@ -634,6 +802,29 @@ begin
 
       return Ok(ClientMessage.Viewport(try IntegerField(Fields, 'width'), try IntegerField(Fields, 'height')))
     end;
+    'exploration_map':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 5 then
+      begin
+        return Error('exploration_map must contain only type, origin_x, origin_y, width, and height')
+      end;
+      var Width: integer := try IntegerField(Fields, 'width');
+      var Height: integer := try IntegerField(Fields, 'height');
+      if (((Width < 1) or (Height < 1)) or (Width > MaximumExplorationMapWidth)) or
+         (Height > MaximumExplorationMapHeight) then
+      begin
+        return Error('exploration_map dimensions are outside protocol limits')
+      end;
+      var OriginX: integer := try IntegerField(Fields, 'origin_x');
+      var OriginY: integer := try IntegerField(Fields, 'origin_y');
+      if (((OriginX < - MaximumExplorationMapOriginMagnitude) or (OriginX > MaximumExplorationMapOriginMagnitude)) or (OriginY < - MaximumExplorationMapOriginMagnitude)) or
+         (OriginY > MaximumExplorationMapOriginMagnitude) then
+      begin
+        return Error('exploration_map origin is outside protocol limits')
+      end;
+
+      return Ok(ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height))
+    end;
     'move':
     begin
       if Std.Dictionaries.Length(Fields) <> 3 then
@@ -699,13 +890,17 @@ begin
       case Value of
         VisibleState.MapState(MapValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY))]))
         end;
         VisibleState.FirstPersonState(FirstPersonValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing))]))
         end
       end
+    end;
+    ServerMessage.ExplorationMap(Value):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('exploration_map'), 'view': JsonValue.String(ViewName(Value.View)), 'label': JsonValue.String(Value.LabelText), 'origin_x': JsonValue.Number(IntToReal(Value.OriginX)), 'origin_y': JsonValue.Number(IntToReal(Value.OriginY)), 'width': JsonValue.Number(IntToReal(Value.Width)), 'height': JsonValue.Number(IntToReal(Value.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(Value.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(Value.KnowledgeRows)), 'player_world_x': JsonValue.Number(IntToReal(Value.PlayerWorldX)), 'player_world_y': JsonValue.Number(IntToReal(Value.PlayerWorldY)), 'player_in_window': JsonValue.Bool(Value.PlayerInWindow)]))
     end;
     ServerMessage.SaveCompleted:
     begin
@@ -750,12 +945,17 @@ begin
       case try DecodeView(try StringField(Fields, 'view')) of
         ViewKind.Map:
         begin
+          if Std.Dictionaries.Length(Fields) <> 12 then
+          begin
+            return Error('map state has an unexpected field set')
+          end;
           var MapValue: MapVisibleState := record
             OriginX := try IntegerField(Fields, 'origin_x');
             OriginY := try IntegerField(Fields, 'origin_y');
             Width := try IntegerField(Fields, 'width');
             Height := try IntegerField(Fields, 'height');
             Rows := try StringArrayField(Fields, 'rows');
+            KnowledgeRows := try StringArrayField(Fields, 'knowledge_rows');
             PlayerX := try IntegerField(Fields, 'x');
             PlayerY := try IntegerField(Fields, 'y');
             WorldX := try IntegerField(Fields, 'world_x');
@@ -766,7 +966,7 @@ begin
         end;
         ViewKind.FirstPerson:
         begin
-          if Std.Dictionaries.Length(Fields) <> 10 then
+          if Std.Dictionaries.Length(Fields) <> 11 then
           begin
             return Error('first-person state has an unexpected field set')
           end;
@@ -776,6 +976,7 @@ begin
             Width := try IntegerField(Fields, 'width');
             Height := try IntegerField(Fields, 'height');
             Rows := try StringArrayField(Fields, 'rows');
+            KnowledgeRows := try StringArrayField(Fields, 'knowledge_rows');
             PlayerX := try IntegerField(Fields, 'x');
             PlayerY := try IntegerField(Fields, 'y');
             Facing := try DecodeFirstPersonFacing(try StringField(Fields, 'facing'));
@@ -784,6 +985,28 @@ begin
           return Ok(ServerMessage.State(VisibleState.FirstPersonState(try ValidateFirstPersonVisibleState(FirstPersonValue))))
         end
       end
+    end;
+    'exploration_map':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 12 then
+      begin
+        return Error('exploration map has an unexpected field set')
+      end;
+      var Value: ExplorationMapState := record
+        View := try DecodeView(try StringField(Fields, 'view'));
+        LabelText := try StringField(Fields, 'label');
+        OriginX := try IntegerField(Fields, 'origin_x');
+        OriginY := try IntegerField(Fields, 'origin_y');
+        Width := try IntegerField(Fields, 'width');
+        Height := try IntegerField(Fields, 'height');
+        Rows := try StringArrayField(Fields, 'rows');
+        KnowledgeRows := try StringArrayField(Fields, 'knowledge_rows');
+        PlayerWorldX := try IntegerField(Fields, 'player_world_x');
+        PlayerWorldY := try IntegerField(Fields, 'player_world_y');
+        PlayerInWindow := try BooleanField(Fields, 'player_in_window');
+      end;
+
+      return Ok(ServerMessage.ExplorationMap(try ValidateExplorationMapState(Value)))
     end;
     'rejected':
     begin

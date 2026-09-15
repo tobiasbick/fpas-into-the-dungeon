@@ -108,20 +108,52 @@ file-based approach insufficient.
 
 See [persistent game state](architecture/persistent-game-state.md).
 
-## 8. First RPG interaction — NEXT
+## 8. Exploration and map — DONE
+
+Fog of War and an exploration map now show only places the player has
+discovered. Discovery is server-owned game state and survives explicit
+save and load. The exploration map exists only as an overlay; the context panel
+is not split to contain another map. It shows the current area and can pan
+independently of the player without issuing movement intentions.
+
+World knowledge has three states: currently visible, discovered but no longer
+visible, and undiscovered. Outdoor visibility initially uses a fixed radius
+without terrain occlusion. Interior visibility uses line of sight and does not
+reveal fields through walls. Fog of War also masks the outdoor primary view so
+a large terminal cannot reveal distant cells automatically.
+
+The overlay uses one terminal cell per world field, opens and closes with `M`,
+pans with WASD or the arrow keys, recenters on the player with `Home`, and closes
+with `Escape`. Zoom is outside this stage. A new game begins with no discovered
+area; an existing save remains unchanged until explicit confirmed saving.
+
+This stage is complete when all three knowledge states have deliberate
+presentation, outdoor and interior discovery survive a server restart, opening
+and panning the overlay cannot move the player, and protocol, persistence,
+client/server, and headless-TUI tests cover the complete behavior.
+
+The implemented slice uses a non-occluded outdoor sight radius of eight fields
+and facing-aware interior line of sight. Protocol version 6 masks hidden
+terrain, savegame format 2 persists sparse outdoor and bounded interior
+discovery masks, and the one-cell-per-field overlay serializes and coalesces
+pan requests. Unit, protocol, persistence, headless-TUI, loopback, restart, and
+real-process smoke tests cover the complete path. See
+[exploration and map](architecture/exploration-and-map.md).
+
+## 9. First RPG interaction — NEXT
 
 Choose one small interaction only after movement, views, transitions, and
 persistence have stable seams. Possible candidates include examining an
 object, picking up an item, or speaking to one character. The choice is
 deliberately not made in this roadmap.
 
-## 9. Further game systems — LATER
+## 10. Further game systems — LATER
 
 Inventory, combat, character progression, multiplayer behavior, content
 generation, and broader world simulation will each require their own small
 slice. Their order is intentionally undecided.
 
-## 10. LLM integration — LATER
+## 11. LLM integration — LATER
 
 LLM integration is explicitly postponed. Its authority boundaries, failure
 behavior, cost controls, and effect on deterministic game rules will be

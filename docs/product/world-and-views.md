@@ -76,6 +76,22 @@ area.
 - **Message panel** is an optional, larger history area above the status view.
 - **System menu** is the overlay for information, controls, session actions,
   and quitting.
+- **Currently visible** describes a location inside the player's present
+  outdoor sight radius or unobstructed interior line of sight.
+- **Discovered but not visible** describes a previously visible location
+  retained as world knowledge without claiming that its current contents are
+  visible.
+- **Undiscovered** describes a location never made visible in the current game.
+- **Discovered area** is the persistent, server-owned set of currently visible
+  and previously discovered locations.
+- **Sight field** is the currently derived set of visible locations for the
+  player's area, position, and, inside, cardinal facing. It is not persisted.
+- **Fog of War** is the rule that masks undiscovered locations and visually
+  distinguishes remembered locations from currently visible ones in both the
+  primary map view and the exploration map.
+- **Exploration map** is an overlay showing the current area's discovered
+  world knowledge. It may be panned independently of the player and does not
+  replace the primary view or issue movement intentions.
 
 ## View families
 
@@ -97,6 +113,12 @@ movement across several fields from one intention.
 The server owns the area kind, geometry, rules, and visible state. The client
 does not receive the complete world. It selects the required view family from
 the visible state and renders it without owning or duplicating game rules.
+
+The current implementation retains discovered areas separately for the
+outdoor region and each entered finite area. Current visibility is derived from
+the player's authoritative state: outdoors as a non-occluded radius and inside
+as facing-aware line of sight. Viewport size and exploration-map position are
+presentation concerns and never expand the discovered area.
 
 ## Current implementation
 

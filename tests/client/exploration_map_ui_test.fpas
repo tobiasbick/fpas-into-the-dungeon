@@ -1,0 +1,357 @@
+// Verifies three-state map styling, overlay controls, serialized panning, and compact rendering.
+program DungeonExplorationMapUiTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Arrays, Std.Options, Std.Results,
+  Std.Str, Std.Task, Std.Test, Std.Tui;
+
+function MakeKey(Kind: TuiKeyKind; Character: string): TuiKeyEvent;
+begin
+  return record
+    kind := Kind;
+    ch := Character;
+    shift := false;
+    ctrl := false;
+    alt := false;
+    meta := false;
+  end
+end;
+
+function UniformRows(Width: integer; Height: integer; Code: string): array of string;
+begin
+  mutable var Rows: array of string := [];
+  for Y: integer := 0 to Height - 1 do
+  begin
+    Std.Arrays.Push(Rows, Std.Str.RepeatStr(Code, Width))
+  end;
+
+  return Rows
+end;
+
+function MapResponse(
+  OriginX: integer;
+  OriginY: integer;
+  Width: integer;
+  Height: integer;
+  PlayerX: integer;
+  PlayerY: integer;
+  PlayerInWindow: boolean
+): ExplorationMapState;
+begin
+  mutable var KnowledgeRows: array of string := UniformRows(Width, Height, 'r');
+  if PlayerInWindow then
+  begin
+    var LocalX: integer := PlayerX - OriginX;
+    var LocalY: integer := PlayerY - OriginY;
+    KnowledgeRows[LocalY] := Std.Str.SetCharAt(KnowledgeRows[LocalY], LocalX, 'v')
+  end;
+
+  return record
+    View := ViewKind.Map;
+    LabelText := 'Outdoor region';
+    OriginX := OriginX;
+    OriginY := OriginY;
+    Width := Width;
+    Height := Height;
+    Rows := UniformRows(Width, Height, 'g');
+    KnowledgeRows := KnowledgeRows;
+    PlayerWorldX := PlayerX;
+    PlayerWorldY := PlayerY;
+    PlayerInWindow := PlayerInWindow;
+  end
+end;
+
+function SurfaceContains(Surface: TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Y: integer := 0 to Surface.Height - 1 do
+  begin
+    if Std.Str.Contains(Surface.LineAt(Y), Text) then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+function CountGlyph(Surface: TuiSurfaceSnapshot; Glyph: string): integer;
+begin
+  mutable var Count: integer := 0;
+  for Y: integer := 0 to Surface.Height - 1 do
+  begin
+    for X: integer := 0 to Surface.Width - 1 do
+    begin
+      if Surface.CellAt(X, Y).Glyph = Glyph then
+      begin
+        Count := Count + 1
+      end
+    end
+  end;
+
+  return Count
+end;
+
+begin
+  var Requests: channel of ClientMessage := CreateChannel(4);
+  var Events: channel of ClientEvent := CreateChannel(4);
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  Model.ViewportWidth := 30;
+  Model.ViewportHeight := 12;
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.MapState(record
+    OriginX := 9;
+    OriginY := 20;
+    Width := 3;
+    Height := 1;
+    Rows := ['?ge'];
+    KnowledgeRows := ['urv'];
+    PlayerX := 2;
+    PlayerY := 0;
+    WorldX := 11;
+    WorldY := 20;
+  end)), Cmd);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.Viewport(Width, Height):
+    begin
+    end
+    else
+    begin
+      panic('expected initial viewport synchronization')
+    end
+  end;
+
+  Model.Pending := false;
+  mutable var WideModel: ClientModel := Model;
+  WideModel.ViewportWidth := 100;
+  WideModel.ViewportHeight := 40;
+  WideModel.MapRequestPending := false;
+  WideModel := UpdateClient(WideModel, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      AssertEquals(76, Width);
+      AssertEquals(26, Height)
+    end
+    else
+    begin
+      panic('expected proportionally inset exploration-map request')
+    end
+  end;
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(30, 12));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertEquals(' ', App.SurfaceSnapshot().CellAt(1, 1).Glyph);
+  AssertEquals(9, Std.Options.Unwrap(App.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle)
+                    .Background
+                    .Red);
+  var Remembered: TuiStyle := Std.Options.Unwrap(App.SurfaceSnapshot().CellAt(3, 1).ConcreteStyle);
+  AssertFalse(Remembered.Dim);
+  AssertEquals(20, Remembered.Background.Red);
+  AssertEquals(46, Remembered.Background.Green);
+  AssertEquals(26, Remembered.Background.Blue);
+  AssertEquals(68, Remembered.Foreground.Red);
+  AssertEquals(93, Remembered.Foreground.Green);
+  AssertEquals(55, Remembered.Foreground.Blue);
+  AssertEquals('●', App.SurfaceSnapshot().CellAt(5, 1).Glyph);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.ExplorationMapOverlay);
+  AssertTrue(Model.MapRequestPending);
+  AssertEquals(-2, Model.MapDesiredOriginX);
+  AssertEquals(17, Model.MapDesiredOriginY);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      AssertEquals(-2, OriginX);
+      AssertEquals(17, OriginY);
+      AssertEquals(26, Width);
+      AssertEquals(6, Height)
+    end
+    else
+    begin
+      panic('expected centered exploration-map request')
+    end
+  end;
+
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'w')), Cmd);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Right, '')), Cmd);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Down, '')), Cmd);
+  AssertEquals(-1, Model.MapDesiredOriginX);
+  AssertEquals(17, Model.MapDesiredOriginY);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(-2, 17, 26, 6, 11, 20, true)), Cmd);
+  AssertTrue(Model.MapRequestPending);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      AssertEquals(-1, OriginX);
+      AssertEquals(17, OriginY)
+    end
+    else
+    begin
+      panic('expected one coalesced latest map request')
+    end
+  end;
+
+  Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(-1, 17, 26, 6, 11, 20, true)), Cmd);
+  AssertFalse(Model.MapRequestPending);
+  AssertTrue(Model.MapHasState);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  // Resize and Home must keep the received dimensions until replacement arrives.
+  mutable var Resized: ClientModel := Model;
+  Resized.Pending := true;
+  Resized := UpdateClient(Resized, TuiMsg.Resize(TuiSize.Create(100, 40)), Cmd);
+  Resized := UpdateClient(Resized, TuiMsg.Key(MakeKey(TuiKeyKind.Home, '')), Cmd);
+  AssertEquals(26, Resized.MapWidth);
+  AssertEquals(6, Resized.MapHeight);
+  AssertEquals(76, Resized.MapDesiredWidth);
+  AssertEquals(26, Resized.MapDesiredHeight);
+  Resized := App.RunIterations(Resized, UpdateClient, ViewClient, 0, 0);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OX, OY, W, H):
+    begin
+      Resized := UpdateClientEvent(Resized, ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)), Cmd)
+    end
+    else
+    begin
+      panic('expected resized map request')
+    end
+  end;
+
+  AssertEquals(76, Resized.MapWidth);
+  AssertEquals(26, Resized.MapHeight);
+  // Closing and reopening cannot reset a live request or enqueue another one.
+  mutable var Reopened: ClientModel := Model;
+  Reopened := UpdateClient(Reopened, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'd')), Cmd);
+  var Outstanding: ClientMessage := Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0));
+  Reopened := UpdateClient(Reopened, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  Reopened := UpdateClient(Reopened, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  AssertTrue(Reopened.MapRequestPending);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  case Outstanding of
+    ClientMessage.ExplorationMap(OX, OY, W, H):
+    begin
+      Reopened := UpdateClientEvent(Reopened, ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)), Cmd)
+    end
+    else
+    begin
+      panic('expected outstanding map request')
+    end
+  end;
+
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OX, OY, W, H):
+    begin
+      Reopened := UpdateClientEvent(Reopened, ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)), Cmd)
+    end
+    else
+    begin
+      panic('expected one coalesced reopen request')
+    end
+  end;
+
+  AssertFalse(Reopened.MapRequestPending);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(SurfaceContains(App.SurfaceSnapshot(), 'Map - Outdoor region'));
+  AssertEquals(1, CountGlyph(App.SurfaceSnapshot(), '●'));
+  // Pending updates must not move or resize the already displayed map overlay.
+  var ReadySurface: TuiSurfaceSnapshot := App.SurfaceSnapshot();
+  mutable var Updating: ClientModel := Model;
+  Updating.MapRequestPending := true;
+  Updating.Status := 'Updating map...';
+  Updating := App.RunIterations(Updating, UpdateClient, ViewClient, 0, 0);
+  for Y: integer := 0 to ReadySurface.Height - 4 do
+  begin
+    AssertEquals(ReadySurface.LineAt(Y), App.SurfaceSnapshot().LineAt(Y))
+  end;
+
+  Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(-1, 17, 26, 6, 100, 100, false)), Cmd);
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertEquals(0, CountGlyph(App.SurfaceSnapshot(), '●'));
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Home, '')), Cmd);
+  AssertEquals(-2, Model.MapDesiredOriginX);
+  AssertEquals(17, Model.MapDesiredOriginY);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      AssertEquals(-2, OriginX);
+      AssertEquals(17, OriginY)
+    end
+    else
+    begin
+      panic('expected recentered map request')
+    end
+  end;
+
+  Model := UpdateClientEvent(Model, ClientEvent.Rejected('map_failed', 'Map unavailable.'), Cmd);
+  AssertFalse(Model.MapRequestPending);
+  AssertTrue(Model.MapHasState);
+  AssertEquals('Map unavailable.', Model.Status);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Escape, '')), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.ExplorationMapOverlay);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(OriginX, OriginY, Width, Height, 11, 20, true)), Cmd)
+    end
+    else
+    begin
+      panic('expected map request before M closes the overlay')
+    end
+  end;
+
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.FirstPersonState(record
+    Title := 'Interior';
+    Status := 'Explore.';
+    Width := 3;
+    Height := 3;
+    Rows := ['###', '#.#', '###'];
+    KnowledgeRows := ['vvv', 'vvv', 'vvv'];
+    PlayerX := 1;
+    PlayerY := 1;
+    Facing := FirstPersonFacing.North;
+  end)), Cmd);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.Viewport(Width, Height):
+    begin
+    end
+    else
+    begin
+      panic('expected first-person viewport synchronization')
+    end
+  end;
+
+  Model.Pending := false;
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.ExplorationMapOverlay);
+  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      AssertEquals(-12, OriginX);
+      AssertEquals(-2, OriginY)
+    end
+    else
+    begin
+      panic('expected centered interior map request')
+    end
+  end;
+
+  App.Close();
+  Model.ViewportWidth := 10;
+  Model.ViewportHeight := 5;
+  var TinyApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(10, 5));
+  Model := TinyApp.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertEquals(10, TinyApp.SurfaceSnapshot().Width);
+  AssertEquals(5, TinyApp.SurfaceSnapshot().Height);
+  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Escape, '')), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  TinyApp.Close();
+  mutable var Offline: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  Offline := UpdateClient(Offline, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
+  AssertTrue(Offline.Overlay = ClientOverlay.NoOverlay);
+  CloseChannel(Requests);
+  CloseChannel(Events)
+end.

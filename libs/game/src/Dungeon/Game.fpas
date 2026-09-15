@@ -1,7 +1,7 @@
 // Authoritative coordinates, terrain, generation, movement, and area-transition rules.
 unit Dungeon.Game;
 
-uses Std.Arrays, Std.Math, Std.Results, Std.Str;
+uses Dungeon.Exploration.Model, Std.Arrays, Std.Math, Std.Results, Std.Str;
 
 public const
   // Schema version written to world metadata and chunk files.
@@ -161,6 +161,8 @@ public type
     public AreaId: string;
     public Player: PlayerPosition;
     public ReturnLocation: ReturnLocation;
+    // Persistent server-owned discovery; current visibility is derived by exploration rules.
+    public Exploration: ExplorationState;
   end;
 
 type
@@ -1313,12 +1315,28 @@ begin
     AreaId := Metadata.OutdoorAreaId;
     Player := PlayerPosition.Outdoor(Metadata.Spawn);
     ReturnLocation := ReturnLocation.NoReturnLocation;
+    Exploration := EmptyExploration();
   end
 end;
 
 // Validates current-area and return-location invariants for the selected world.
 public function ValidateGameState(Metadata: WorldMetadata; State: GameState): result of GameState, string;
 begin
+  var ValidExploration: ExplorationState := try ValidateExploration(State.Exploration, WorldChunkSize);
+  var DungeonMap: InteriorMap := try InitialDungeonMap();
+  for Area: InteriorDiscoveryArea in ValidExploration.InteriorAreas do
+  begin
+    if Area.AreaId <> Metadata.DungeonAreaId then
+    begin
+      return Error('game state contains discovery for an unknown interior area')
+    end;
+
+    if (Area.Width <> DungeonMap.Width) or (Area.Height <> DungeonMap.Height) then
+    begin
+      return Error('interior discovery dimensions do not match the authoritative area')
+    end
+  end;
+
   if State.AreaId = Metadata.OutdoorAreaId then
   begin
     if State.Area <> AreaKind.OutdoorRegion then
@@ -1419,6 +1437,7 @@ begin
       Facing := Map.StartFacing;
     end);
       ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, OutdoorPosition);
+      Exploration := Valid.Exploration;
     end)
   end;
   var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
@@ -1436,6 +1455,7 @@ begin
         AreaId := AreaId;
         Player := PlayerPosition.Outdoor(Position);
         ReturnLocation := ReturnLocation.NoReturnLocation;
+        Exploration := Valid.Exploration;
       end)
     end
     else
@@ -1471,6 +1491,7 @@ begin
     Y := Position.Y + DeltaY;
   end);
     ReturnLocation := State.ReturnLocation;
+    Exploration := State.Exploration;
   end)
 end;
 
@@ -1561,6 +1582,7 @@ begin
     Facing := Pose.Facing;
   end);
     ReturnLocation := Valid.ReturnLocation;
+    Exploration := Valid.Exploration;
   end)
 end;
 
@@ -1629,5 +1651,6 @@ begin
     Facing := TurnedFacing(Pose.Facing, Turn);
   end);
     ReturnLocation := Valid.ReturnLocation;
+    Exploration := Valid.Exploration;
   end)
 end;
