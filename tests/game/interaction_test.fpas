@@ -1,0 +1,96 @@
+// Verifies generic interaction targeting, descriptions, and area transitions.
+program DungeonInteractionTest;
+
+uses Dungeon.Game, Std.Results, Std.Test;
+
+function AtEntrance(Metadata: WorldMetadata; State: GameState): GameState;
+begin
+  mutable var Value: GameState := State;
+  Value.Player := PlayerPosition.Outdoor(Metadata.Entrance);
+  return Value
+end;
+
+function AtDungeonPosition(State: GameState; Position: InteriorPosition; Facing: FacingDirection): GameState;
+begin
+  mutable var Value: GameState := State;
+  Value.Player := PlayerPosition.FirstPerson(record
+    Position := Position;
+    Facing := Facing;
+  end);
+  return Value
+end;
+
+begin
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('interaction-test', 9182));
+  var Initial: GameState := NewGame(Metadata);
+  case Unwrap(Interact(Metadata, Initial)) of
+    InteractionOutcome.Described(Title, Text):
+    begin
+      AssertEquals(NoInteractionMessage, Text)
+    end
+    else
+    begin
+      panic('expected a no-target description at spawn')
+    end
+  end;
+  mutable var Entered: GameState := Initial;
+  case Unwrap(Interact(Metadata, AtEntrance(Metadata, Initial))) of
+    InteractionOutcome.Transitioned(State):
+    begin
+      Entered := State;
+      AssertTrue(State.Area = AreaKind.Dungeon)
+    end
+    else
+    begin
+      panic('expected the entrance interaction to change areas')
+    end
+  end;
+  var Map: InteriorMap := Unwrap(InitialDungeonMap());
+  AssertEquals(9, Map.Tablet.X);
+  AssertEquals(0, Map.Tablet.Y);
+  AssertTrue(Unwrap(InteriorCellAt(Map, Map.Tablet)) = InteriorCellKind.Wall);
+  AssertEquals('t', Unwrap(InteriorVisibleCode(Map, Map.Tablet)));
+  AssertEquals('#', Unwrap(InteriorVisibleCode(Map, record
+    X := 0;
+    Y := 0;
+  end)));
+  case Unwrap(Interact(Metadata, Entered)) of
+    InteractionOutcome.Described(Title, Text):
+    begin
+      AssertEquals(NoInteractionMessage, Text)
+    end
+    else
+    begin
+      panic('expected no target while facing west from the dungeon start')
+    end
+  end;
+  var FacingTablet: GameState := AtDungeonPosition(Entered, Map.Start, FacingDirection.North);
+  case Unwrap(Interact(Metadata, FacingTablet)) of
+    InteractionOutcome.Described(Title, Text):
+    begin
+      AssertEquals('Stone tablet', Title);
+      AssertEquals(StoneTabletDescription, Text)
+    end
+    else
+    begin
+      panic('expected the stone tablet description')
+    end
+  end;
+
+  case Unwrap(Interact(Metadata, AtDungeonPosition(Entered, Map.Exit, FacingDirection.West))) of
+    InteractionOutcome.Transitioned(State):
+    begin
+      AssertTrue(State.Area = AreaKind.OutdoorRegion);
+      var Position: WorldPosition := Unwrap(OutdoorPlayerPosition(State));
+      AssertEquals(Metadata.Entrance.X, Position.X);
+      AssertEquals(Metadata.Entrance.Y, Position.Y)
+    end
+    else
+    begin
+      panic('expected the exit interaction to return outdoors')
+    end
+  end;
+  mutable var Invalid: GameState := Entered;
+  Invalid.ReturnLocation := ReturnLocation.NoReturnLocation;
+  AssertTrue(IsError(Interact(Metadata, Invalid)))
+end.

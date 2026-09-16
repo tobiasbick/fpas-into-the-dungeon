@@ -8,9 +8,10 @@ gameplay systems.
 
 `libs/game` owns the bounded 11 by 9 interior map, its field meanings, the
 player's area-local coordinate and cardinal facing, collision, and entry and
-exit rules. The map contains walls, traversable floor, one start field, and one
-visible exit field. Validation requires rectangular geometry, a traversable
-start, exactly one exit, and connectivity between all traversable fields.
+exit rules. The map contains walls, traversable floor, one start field, one
+visible exit field, and one fixed stone tablet mounted on a wall. Validation
+requires rectangular geometry, a traversable start, exactly one exit, a wall
+field for the tablet, and connectivity between all traversable fields.
 
 The player's retained outdoor return location remains separate from the
 interior pose. Entering establishes the fixed start pose. Leaving is accepted
@@ -20,7 +21,7 @@ succeeds.
 
 ## Protocol and server projection
 
-Protocol version `6` carries distinct intentions for a relative one-field step
+Protocol version `8` carries distinct intentions for a relative one-field step
 (`forward`, `backward`, `left`, or `right`) and a 90-degree turn (`left` or
 `right`). Outdoor cardinal movement remains a separate message.
 
@@ -38,7 +39,8 @@ outdoor chunks.
 camera and fixed field of view from a validated first-person state, finds the
 nearest opaque field for each terminal column with grid DDA, corrects wall
 distance for perspective, and fills every output cell with ceiling, wall, or
-floor. Walls use deterministic distance and side shading. Only the projected
+floor. Walls use deterministic distance and side shading. The tablet projection
+is opaque and uses a distinct material without changing the wall geometry. Only the projected
 exit floor field is gold; rays crossing it never recolor walls. Adjacent front
 walls use inset geometry with forward-facing side lanes and closed-side wedges.
 Unknown fields remain masked. See the client UI specification for presentation

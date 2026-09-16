@@ -1,0 +1,49 @@
+// Verifies titled inspection results cross the real client network adapter.
+program DescriptionNetworkTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Net, Std.Results, Std.Task,
+  Std.Test;
+
+function ServeDescription(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
+begin
+  var ConnectionValue: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Reader: LineReader := NewLineReader(ConnectionValue);
+  var Hello: LineRead := try ReadLine(Reader, Token);
+  var Welcomed: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Welcome(ProtocolVersion, false, false)), Token);
+  var Request: LineRead := try ReadLine(Hello.Reader, Token);
+  var Sent: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Interaction('Stone tablet', 'An inscription.')), Token);
+  var FinalRead: LineRead := try ReadLine(Request.Reader, Token);
+  return Close(ConnectionValue)
+end;
+
+begin
+  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var Requests: channel of ClientMessage := CreateChannel(4);
+  var Events: channel of ClientEvent := CreateChannel(4);
+  var ServerTask: task := go ServeDescription(ListenerValue, Token);
+  var ClientTask: task := go RunNetwork('127.0.0.1', Address.Port, 1, 1, Requests, Events, Token);
+  var Welcome: ClientEvent := Unwrap(ReceiveWithTimeout(Events, 5000));
+  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
+  case Unwrap(ReceiveWithTimeout(Events, 5000)) of
+    ClientEvent.Interaction(Title, Message):
+    begin
+      AssertEquals('Stone tablet', Title);
+      AssertEquals('An inscription.', Message)
+    end
+    else
+    begin
+      panic('expected inspection result')
+    end
+  end;
+
+  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.Disconnect, 1000)));
+  AssertTrue(Unwrap(Wait(ClientTask)));
+  AssertTrue(Unwrap(Wait(ServerTask)));
+  AssertTrue(Unwrap(CloseListener(ListenerValue)));
+  CloseChannel(Requests);
+  CloseChannel(Events)
+end.

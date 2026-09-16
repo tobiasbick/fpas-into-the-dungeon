@@ -195,7 +195,9 @@ server state supplies validated bounded field rows, dimensions, the area-local
 player coordinate, cardinal facing, title, and status. The client derives a
 cardinal camera and fills the primary view with colored ceiling, floor, and
 distance-shaded walls. The exit is a gold floor field, projected at its actual
-location. Walls keep their stone material even when a view ray crosses the
+location. A fixed wall-mounted stone tablet uses a distinct blue-gray material
+in the first-person view and a distinct symbol on the exploration map. It
+remains opaque like the wall that carries it. Walls keep their stone material even when a view ray crosses the
 exit. Moving onto the exit colors only the visible part of that floor field.
 Outdoor map rows
 are never reinterpreted as first-person geometry. When a wall occupies the
@@ -236,9 +238,14 @@ server or other players that may exist later.
 ## Controls
 
 - `W`, `A`, `S`, and `D` request cardinal one-field movement in the map view.
-- `Enter` activates an entrance under the player or leaves a first-person area
-  while the player occupies its exit field. Walking onto an entrance or exit
-  does not activate it.
+- `Enter` requests an interaction with the occupied field or the field directly
+  ahead. It activates an entrance under the player, leaves a first-person area
+  from its exit field, or examines an inspectable object ahead. A successful
+  inspection opens a centered, framed overlay with a title and wrapped text.
+  Up/Down scrolls longer descriptions; Enter or Escape closes the overlay.
+  Gameplay input is blocked while reading. Short no-target feedback remains in
+  the status view, and descriptions are retained in message history. Walking onto
+  an entrance or exit does not activate it.
 - In the first-person view, `W` and `S` move one field forward or backward,
   `A` and `D` step one field left or right, and `Q` and `E` turn 90 degrees
   left or right without changing fields.

@@ -44,6 +44,13 @@ or character progression.
   boundaries.
 - **Player intention** is an action requested by the client. It is not an
   authoritative result.
+- **Interaction** is a player intention resolved by the server against the
+  occupied field or the field directly ahead. It may change authoritative
+  state or only return a description.
+- **Inspectable object** is a world feature that can return a description
+  without necessarily changing game state.
+- **Stone tablet** is the first fixed, wall-mounted inspectable object in the
+  initial dungeon.
 - **Visible state** is the server-produced, client-safe projection of the
   current area and player state. It is not the complete world.
 - **Game session** is one connected, server-authoritative period of play. A
@@ -125,12 +132,16 @@ presentation concerns and never expand the discovered area.
 The first world contains a deterministic, chunked outdoor region and one
 initial dungeon. A distinct entrance is generated exactly three traversable
 cardinal steps from the spawn. Walking onto it remains ordinary outdoor
-movement; `Enter` activates the server-authoritative transition. The dungeon is
+movement; `Enter` requests a server-authoritative interaction, which activates
+the transition on that field. The dungeon is
 an 11 by 9 bounded area with a fixed start pose, walls, floor, corridors, and
-one visible exit field. The server accepts `Enter` as an exit only on that field
-and then returns the player to the exact outdoor entrance coordinate.
+one visible exit field. It also contains a fixed stone tablet on a wall directly
+north of the start. Facing the tablet and pressing `Enter` returns its
+description without changing game state. The server accepts the exit
+interaction only on the exit field and then returns the player to the exact
+outdoor entrance coordinate.
 
 Settlements, further entrances, navigable interiors, mutable terrain, broader
-world simulation, isometric rendering, LLM integration, and the first RPG
-action remain outside this slice. Their intended order is tracked in the
+world simulation, isometric rendering, LLM integration, and mutable RPG
+interactions remain outside this slice. Their intended order is tracked in the
 [roadmap](../roadmap.md).

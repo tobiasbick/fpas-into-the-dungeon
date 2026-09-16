@@ -10,6 +10,10 @@ public const
   WorldGeneratorVersion: integer := 5;
   // Fixed cell width and height of every version 5 outdoor chunk.
   WorldChunkSize: integer := 128;
+  // Successful interaction text when neither the current nor forward field offers an action.
+  NoInteractionMessage: string := 'There is nothing to interact with.';
+  // Read-only description returned for the first wall-mounted inspectable object.
+  StoneTabletDescription: string := 'The weathered inscription reads: The dungeon remembers every step.';
 
 public type
   // Distinguishes outdoor maps from finite first-person interiors and dungeons.
@@ -62,6 +66,8 @@ public type
     public Start: InteriorPosition;
     public StartFacing: FacingDirection;
     public Exit: InteriorPosition;
+    // Fixed wall field occupied by the initial dungeon's inspectable stone tablet.
+    public Tablet: InteriorPosition;
   end;
   // Position and facing retained while the player occupies a first-person area.
   FirstPersonPose = record
@@ -163,6 +169,13 @@ public type
     public ReturnLocation: ReturnLocation;
     // Persistent server-owned discovery; current visibility is derived by exploration rules.
     public Exploration: ExplorationState;
+  end;
+  // Successful server-side resolution of one interaction intention.
+  InteractionOutcome = enum
+    // The interaction changed the authoritative area and returns its replacement state.
+    Transitioned(State: GameState);
+    // Read-only information; an empty title denotes short feedback rather than inspection content.
+    Described(Title: string; Text: string);
   end;
 
 type
@@ -1138,6 +1151,18 @@ begin
   return Ok(Map.Cells[(Position.Y * Map.Width) + Position.X])
 end;
 
+// Returns the client-safe visible code for geometry or the fixed stone tablet overlay.
+public function InteriorVisibleCode(Map: InteriorMap; Position: InteriorPosition): result of string, string;
+begin
+  var Cell: InteriorCellKind := try InteriorCellAt(Map, Position);
+  if (Position.X = Map.Tablet.X) and (Position.Y = Map.Tablet.Y) then
+  begin
+    return Ok('t')
+  end;
+
+  return Ok(InteriorCellCode(Cell))
+end;
+
 // Validates bounded shape, unique exit, traversable endpoints, and connected floor space.
 public function ValidateInteriorMap(Map: InteriorMap): result of InteriorMap, string;
 begin
@@ -1159,6 +1184,11 @@ begin
   if ExitCell <> InteriorCellKind.ExitField then
   begin
     return Error('interior exit coordinate must name the exit field')
+  end;
+  var TabletCell: InteriorCellKind := try InteriorCellAt(Map, Map.Tablet);
+  if TabletCell <> InteriorCellKind.Wall then
+  begin
+    return Error('interior tablet coordinate must name a wall field')
   end;
   mutable var ExitCount: integer := 0;
   mutable var TraversableCount: integer := 0;
@@ -1273,6 +1303,10 @@ begin
     Exit := record
       X := 1;
       Y := 7;
+    end;
+    Tablet := record
+      X := 9;
+      Y := 0;
     end;
   end)
 end;
@@ -1552,6 +1586,40 @@ begin
       end
     end
   end
+end;
+
+// Resolves the current-field transition or the field directly ahead without implicit movement.
+public function Interact(Metadata: WorldMetadata; State: GameState): result of InteractionOutcome, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.Area = AreaKind.OutdoorRegion then
+  begin
+    var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(Valid);
+    if (OutdoorPosition.X = Metadata.Entrance.X) and (OutdoorPosition.Y = Metadata.Entrance.Y) then
+    begin
+      return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
+    end;
+
+    return Ok(InteractionOutcome.Described('', NoInteractionMessage))
+  end;
+  var Map: InteriorMap := try InitialDungeonMap();
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
+  begin
+    return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
+  end;
+  var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+  var Target: InteriorPosition := record
+    X := Pose.Position.X + Offset.X;
+    Y := Pose.Position.Y + Offset.Y;
+  end;
+
+  if (Target.X = Map.Tablet.X) and (Target.Y = Map.Tablet.Y) then
+  begin
+    return Ok(InteractionOutcome.Described('Stone tablet', StoneTabletDescription))
+  end;
+
+  return Ok(InteractionOutcome.Described('', NoInteractionMessage))
 end;
 
 // Applies one relative first-person step against the fixed authoritative interior map.

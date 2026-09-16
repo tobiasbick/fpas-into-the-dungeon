@@ -1,8 +1,8 @@
 # Area transitions
 
 The first transition connects the initial outdoor region to one initial
-dungeon and back. It establishes the ownership and protocol seams without
-introducing a generic interaction system.
+dungeon and back. It uses the shared interaction intention described in
+[interaction](interaction.md), while transition validity remains an area rule.
 
 ## Authoritative model
 
@@ -26,12 +26,12 @@ is not repurposed as interior geometry.
 
 ## Intention and projection
 
-The client sends `activate_area_transition` only after `Enter` on the active
-game screen with no request pending and no overlay. In the outdoor area, the
-server accepts it only while the player occupies the entrance. In the dungeon,
-the same narrow intention is accepted only while the player occupies the
-visible exit field, then leaves through the retained return location. Invalid
-activation is a structured rejection and does not close the connection.
+The client sends `interact` after `Enter` on the active game screen with no
+request pending and no overlay. In the outdoor area, the interaction changes
+area only while the player occupies the entrance. In the dungeon, it changes
+area only while the player occupies the visible exit field, then leaves through
+the retained return location. Interacting elsewhere may return a description
+and does not close the connection or alter the area.
 
 The server selects one of two view-specific protocol states:
 
@@ -45,7 +45,7 @@ exit reuse the same selected world session and chunk cache.
 
 ## Versions and lifecycle
 
-World and chunk format version `2`, generator version `5`, protocol version `5`,
+World and chunk format version `2`, generator version `5`, protocol version `8`,
 and savegame format `1` are required. Development data from older schemas is
 rejected without migrations, fallbacks, or compatibility paths. The retained
 return location is part of the authoritative savegame, so a saved interior can

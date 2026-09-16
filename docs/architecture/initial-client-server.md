@@ -32,18 +32,20 @@ only after `new_game` or `load_game`.
 
 ```text
 Client: hello, new_game, load_game, save_game, viewport, move,
-        first_person_step, first_person_turn, activate_area_transition,
+        first_person_step, first_person_turn, interact, exploration_map,
         disconnect
-Server: welcome, state, save_completed, rejected, error
+Server: welcome, state, interaction, exploration_map, save_completed,
+        rejected, error
 ```
 
-Protocol version `5` is included in the handshake. `hello` includes the initial
+Protocol version `8` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.
 Player intentions are request-response: every accepted or rejected movement,
-turn, or area-transition activation receives one server message before the
-next intention is sent.
+turn, or interaction receives one server message before the next intention is
+sent. An interaction can return a replacement visible state or a read-only
+description.
 
 Session selection and save intentions are also request-response operations.
 The server acknowledges a save only after the atomic replacement succeeds.

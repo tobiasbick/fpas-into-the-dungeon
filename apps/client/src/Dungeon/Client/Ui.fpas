@@ -288,6 +288,14 @@ end;
 function CloseOverlay(State: ClientModel): ClientModel;
 begin
   mutable var Next: ClientModel := State;
+  if State.Overlay = ClientOverlay.DescriptionOverlay then
+  begin
+    Next.Status := 'Ready';
+    Next.DescriptionTitle := '';
+    Next.DescriptionText := '';
+    Next.DescriptionOffset := 0
+  end;
+
   if State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
   begin
     Next.Overlay := ClientOverlay.NoOverlay;
@@ -553,14 +561,14 @@ begin
   end
 end;
 
-function QueueAreaTransition(State: ClientModel): ClientModel;
+function QueueInteraction(State: ClientModel): ClientModel;
 begin
   if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
   begin
     return State
   end;
 
-  case TrySend(State.Requests, ClientMessage.ActivateAreaTransition) of
+  case TrySend(State.Requests, ClientMessage.Interact) of
     Ok(Queued):
     begin
       if not Queued then
@@ -569,7 +577,7 @@ begin
       end;
       mutable var Next: ClientModel := State;
       Next.Pending := true;
-      Next.Status := 'Activating entrance...';
+      Next.Status := 'Interacting...';
       return Next
     end
     else
@@ -736,6 +744,73 @@ begin
   return State
 end;
 
+// Wrap inspection text at word boundaries, splitting oversized words on narrow terminals.
+function DescriptionLines(State: ClientModel): array of string;
+begin
+  mutable var Width: integer := State.ViewportWidth - 8;
+  if Width > 64 then
+  begin
+    Width := 64
+  end;
+
+  if Width < 1 then
+  begin
+    Width := 1
+  end;
+  mutable var Lines: array of string := [];
+  mutable var Remaining: string := State.DescriptionText;
+  while Std.Str.Length(Remaining) > 0 do
+  begin
+    mutable var Count: integer := Std.Str.Length(Remaining);
+    if Count > Width then
+    begin
+      Count := Width;
+      mutable var Split: integer := Width;
+      while (Split > 0) and (Std.Str.CharAt(Remaining, Split) <> ' ') do
+      begin
+        Split := Split - 1
+      end;
+
+      if Split > 0 then
+      begin
+        Count := Split
+      end
+    end;
+    mutable var Line: string := '';
+    for I: integer := 0 to Count - 1 do
+    begin
+      Line := Line + Std.Str.CharAt(Remaining, I)
+    end;
+
+    Std.Arrays.Push(Lines, Line);
+    mutable var Rest: string := '';
+    for I: integer := Count to Std.Str.Length(Remaining) - 1 do
+    begin
+      Rest := Rest + Std.Str.CharAt(Remaining, I)
+    end;
+
+    Remaining := Std.Str.Trim(Rest)
+  end;
+
+  return Lines
+end;
+
+function DescriptionPageHeight(State: ClientModel): integer;
+begin
+  mutable var Height: integer := State.ViewportHeight - 8;
+  if Height > 12 then
+  begin
+    Height := 12
+  end;
+
+  if Height < 1 then
+  begin
+    Height := 1
+  end;
+
+  return Height
+end;
+
 function HandleKey(State: ClientModel; Key: TuiKeyEvent; Cmd: TuiCmdOutput): ClientModel;
 begin
   if IsAltCharacter(Key, 'x', 'X') then
@@ -746,6 +821,27 @@ begin
   if State.Screen <> ClientScreen.GameScreen then
   begin
     return State
+  end;
+
+  if State.Overlay = ClientOverlay.DescriptionOverlay then
+  begin
+    if (Key.kind = TuiKeyKind.Enter) or (Key.kind = TuiKeyKind.Escape) then
+    begin
+      return CloseOverlay(State)
+    end;
+    mutable var Next: ClientModel := State;
+    if (Key.kind = TuiKeyKind.Up) and (Next.DescriptionOffset > 0) then
+    begin
+      Next.DescriptionOffset := Next.DescriptionOffset - 1
+    end;
+
+    if (Key.kind = TuiKeyKind.Down) and
+       (Next.DescriptionOffset + DescriptionPageHeight(State) < Std.Arrays.Length(DescriptionLines(State))) then
+    begin
+      Next.DescriptionOffset := Next.DescriptionOffset + 1
+    end;
+
+    return Next
   end;
 
   if IsCtrlCharacter(Key, 'p', 'P') then
@@ -827,7 +923,7 @@ begin
 
   if Key.kind = TuiKeyKind.Enter then
   begin
-    return QueueAreaTransition(State)
+    return QueueInteraction(State)
   end;
 
   if HasCharacter(Key, 'a', 'A') then
@@ -903,6 +999,7 @@ begin
       mutable var Next: ClientModel := State;
       Next.ViewportWidth := Size.Width;
       Next.ViewportHeight := Size.Height;
+      Next.DescriptionOffset := 0;
       if (State.Overlay = ClientOverlay.ContextOverlay) and ContextCanDock(Next) then
       begin
         Next.Overlay := ClientOverlay.NoOverlay;
@@ -993,6 +1090,12 @@ begin
     begin
       Next.Screen := ClientScreen.GameScreen;
       Next.Overlay := ClientOverlay.NoOverlay;
+      // A viewport response during reading must not dismiss the description.
+      if State.Overlay = ClientOverlay.DescriptionOverlay then
+      begin
+        Next.Overlay := ClientOverlay.DescriptionOverlay
+      end;
+
       Next.ConnectionPhase := ClientConnectionPhase.Active;
       Next.FocusedControl := 0;
       Next.HasVisibleState := true;
@@ -1066,6 +1169,25 @@ begin
       end;
 
       return Next
+    end;
+    ClientEvent.Interaction(Title, Message):
+    begin
+      Next.Pending := false;
+      if Title <> '' then
+      begin
+        Next.DescriptionTitle := Title;
+        Next.DescriptionText := Message;
+        Next.DescriptionOffset := 0;
+        Next.Overlay := ClientOverlay.DescriptionOverlay;
+        Next.FocusedControl := 0;
+        Next.Status := 'Reading...'
+      end
+      else
+      begin
+        Next.Status := Message
+      end;
+
+      return AppendMessage(Next, Message)
     end;
     ClientEvent.SaveCompleted:
     begin
@@ -1285,6 +1407,10 @@ begin
     'x':
     begin
       return ColoredCell('◆', 255, 221, 112, 72, 42, 92)
+    end;
+    't':
+    begin
+      return ColoredCell('▣', 176, 205, 232, 45, 55, 75)
     end
     else
     begin
@@ -1587,7 +1713,7 @@ begin
     Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Q/E    Turn left/right 90 degrees'))
   end;
 
-  Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Enter  Enter/leave'));
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Enter  Interact'));
   Items := Std.Arrays.Concat(Items, [
                                       TuiElementBuilders.MakeLabel('M      Map'),
                                       TuiElementBuilders.MakeLabel('F2     Context'),
@@ -1692,9 +1818,48 @@ begin
   return TuiElementBuilders.MakeOverlay(Title, [TuiElementBuilders.MakeColumn(Content)])
 end;
 
+function ViewDescription(State: ClientModel): TuiElement;
+begin
+  var Lines: array of string := DescriptionLines(State);
+  var PageHeight: integer := DescriptionPageHeight(State);
+  mutable var Offset: integer := State.DescriptionOffset;
+  if Offset + PageHeight > Std.Arrays.Length(Lines) then
+  begin
+    Offset := Std.Arrays.Length(Lines) - PageHeight
+  end;
+
+  if Offset < 0 then
+  begin
+    Offset := 0
+  end;
+  mutable var Content: array of TuiElement := [];
+  for I: integer := Offset to Std.Arrays.Length(Lines) - 1 do
+  begin
+    if I < Offset + PageHeight then
+    begin
+      Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(Lines[I]))
+    end
+  end;
+
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(''));
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('Enter/Esc close'));
+  if Std.Arrays.Length(Lines) > PageHeight then
+  begin
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('Up/Down scroll'))
+  end;
+
+  return TuiElementBuilders.MakeOverlay(State.DescriptionTitle, [
+                                                                  TuiElementBuilders.MakeColumn(Content)
+                                                                ])
+end;
+
 function ViewOverlay(State: ClientModel): TuiElement;
 begin
   case State.Overlay of
+    ClientOverlay.DescriptionOverlay:
+    begin
+      return ViewDescription(State)
+    end;
     ClientOverlay.InformationOverlay:
     begin
       return ViewInformation()

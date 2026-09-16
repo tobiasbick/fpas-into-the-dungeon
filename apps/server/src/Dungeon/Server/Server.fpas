@@ -99,7 +99,7 @@ begin
     begin
       return true
     end;
-    ClientMessage.ActivateAreaTransition:
+    ClientMessage.Interact:
     begin
       return true
     end;
@@ -186,7 +186,7 @@ begin
   end
 end;
 
-function InteriorRows(Map: InteriorMap): array of string;
+function InteriorRows(Map: InteriorMap): result of array of string, string;
 begin
   mutable var Rows: array of string := [];
   for Y: integer := 0 to Map.Height - 1 do
@@ -194,13 +194,16 @@ begin
     mutable var Row: string := '';
     for X: integer := 0 to Map.Width - 1 do
     begin
-      Row := Row + InteriorCellCode(Map.Cells[(Y * Map.Width) + X])
+      Row := Row + (try InteriorVisibleCode(Map, record
+        X := X;
+        Y := Y;
+      end))
     end;
 
     Std.Arrays.Push(Rows, Row)
   end;
 
-  return Rows
+  return Ok(Rows)
 end;
 
 function KnowledgeCode(Value: FieldKnowledge): string;
@@ -266,9 +269,9 @@ begin
   end
 end;
 
-function MaskInteriorRows(State: GameState; Map: InteriorMap; Pose: FirstPersonPose): MaskedRows;
+function MaskInteriorRows(State: GameState; Map: InteriorMap; Pose: FirstPersonPose): result of MaskedRows, string;
 begin
-  var TerrainRows: array of string := InteriorRows(Map);
+  var TerrainRows: array of string := try InteriorRows(Map);
   var VisibleFields: array of boolean := InteriorVisibility(Map, Pose);
   mutable var Rows: array of string := [];
   mutable var KnowledgeRows: array of string := [];
@@ -296,10 +299,10 @@ begin
     Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
   end;
 
-  return record
+  return Ok(record
     Rows := Rows;
     KnowledgeRows := KnowledgeRows;
-  end
+  end)
 end;
 
 function PlayerInWindow(
@@ -394,7 +397,10 @@ begin
       end
       else
       begin
-        Row := Row + InteriorCellCode(Map.Cells[(Y * Map.Width) + X])
+        Row := Row + (try InteriorVisibleCode(Map, record
+          X := X;
+          Y := Y;
+        end))
       end;
 
       KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
@@ -430,7 +436,7 @@ begin
     begin
       Status := 'Press Enter to return to the outdoor region.'
     end;
-    var Masked: MaskedRows := MaskInteriorRows(State, Map, Pose);
+    var Masked: MaskedRows := try MaskInteriorRows(State, Map, Pose);
     var FirstPersonValue: FirstPersonVisibleState := record
       Title := World.Metadata.DungeonAreaLabel;
       Status := Status;
@@ -749,18 +755,27 @@ begin
                     end
                   end
                 end;
-                ClientMessage.ActivateAreaTransition:
+                ClientMessage.Interact:
                 begin
-                  case Dungeon.Game.ActivateAreaTransition(World.Metadata, try RequireActiveState(State)) of
-                    Ok(Transitioned):
+                  case Dungeon.Game.Interact(World.Metadata, try RequireActiveState(State)) of
+                    Ok(Outcome):
                     begin
-                      var RevealedState: GameState := try RevealCurrentArea(World.Metadata, Transitioned);
-                      State := Some(RevealedState);
-                      World := try SendProjection(ConnectionValue, World, RevealedState, Viewport, Token)
+                      case Outcome of
+                        InteractionOutcome.Transitioned(Transitioned):
+                        begin
+                          var RevealedState: GameState := try RevealCurrentArea(World.Metadata, Transitioned);
+                          State := Some(RevealedState);
+                          World := try SendProjection(ConnectionValue, World, RevealedState, Viewport, Token)
+                        end;
+                        InteractionOutcome.Described(Title, Text):
+                        begin
+                          var Sent: boolean := try Send(ConnectionValue, ServerMessage.Interaction(Title, Text), Token)
+                        end
+                      end
                     end;
                     Error(Reason):
                     begin
-                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('transition_rejected', Reason), Token)
+                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('interaction_rejected', Reason), Token)
                     end
                   end
                 end

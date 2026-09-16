@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 6;
+  ProtocolVersion: integer := 8;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
   // Largest exploration-map window that remains below the line-size limit with two row planes.
@@ -97,7 +97,8 @@ public type
     Move(DeltaX: integer; DeltaY: integer);
     StepFirstPerson(Direction: FirstPersonStepDirection);
     TurnFirstPerson(Direction: FirstPersonTurnDirection);
-    ActivateAreaTransition;
+    // Requests server-side interaction with the current field or field directly ahead.
+    Interact;
     Disconnect;
   end;
   // Handshake, including save availability/removal, visible state, and structured outcomes.
@@ -105,6 +106,8 @@ public type
     Welcome(Version: integer; SaveAvailable: boolean; InvalidSaveRemoved: boolean);
     State(Value: VisibleState);
     ExplorationMap(Value: ExplorationMapState);
+    // Read-only result; nonempty title opens a description, empty title denotes status feedback.
+    Interaction(Title: string; Message: string);
     SaveCompleted;
     Rejected(Code: string; Message: string);
     ErrorMessage(Code: string; Message: string);
@@ -340,7 +343,7 @@ end;
 
 function IsFirstPersonCellCode(Value: string): boolean;
 begin
-  return (Value = '?') or ((Value = '#') or ((Value = '.') or (Value = 'x')))
+  return (Value = '?') or ((Value = '#') or ((Value = 't') or ((Value = '.') or (Value = 'x'))))
 end;
 
 function IsKnowledgeCode(Value: string): boolean;
@@ -535,7 +538,7 @@ begin
     return Error('first-person player position is outside the area')
   end;
 
-  if (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#') or
+  if ((Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#') or (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = 't')) or
      (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '?') then
   begin
     return Error('first-person player position must be traversable')
@@ -741,9 +744,9 @@ begin
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('first_person_turn'), 'direction': JsonValue.String(FirstPersonTurnName(Direction))]))
     end;
-    ClientMessage.ActivateAreaTransition:
+    ClientMessage.Interact:
     begin
-      return Stringify(JsonValue.Object(['type': JsonValue.String('activate_area_transition')]))
+      return Stringify(JsonValue.Object(['type': JsonValue.String('interact')]))
     end;
     ClientMessage.Disconnect:
     begin
@@ -852,14 +855,14 @@ begin
 
       return Ok(ClientMessage.TurnFirstPerson(try DecodeFirstPersonTurn(try StringField(Fields, 'direction'))))
     end;
-    'activate_area_transition':
+    'interact':
     begin
       if Std.Dictionaries.Length(Fields) <> 1 then
       begin
-        return Error('activate_area_transition must not contain additional fields')
+        return Error('interact must not contain additional fields')
       end;
 
-      return Ok(ClientMessage.ActivateAreaTransition)
+      return Ok(ClientMessage.Interact)
     end;
     'disconnect':
     begin
@@ -901,6 +904,10 @@ begin
     ServerMessage.ExplorationMap(Value):
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('exploration_map'), 'view': JsonValue.String(ViewName(Value.View)), 'label': JsonValue.String(Value.LabelText), 'origin_x': JsonValue.Number(IntToReal(Value.OriginX)), 'origin_y': JsonValue.Number(IntToReal(Value.OriginY)), 'width': JsonValue.Number(IntToReal(Value.Width)), 'height': JsonValue.Number(IntToReal(Value.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(Value.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(Value.KnowledgeRows)), 'player_world_x': JsonValue.Number(IntToReal(Value.PlayerWorldX)), 'player_world_y': JsonValue.Number(IntToReal(Value.PlayerWorldY)), 'player_in_window': JsonValue.Bool(Value.PlayerInWindow)]))
+    end;
+    ServerMessage.Interaction(Title, MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('interaction'), 'title': JsonValue.String(Title), 'message': JsonValue.String(MessageText)]))
     end;
     ServerMessage.SaveCompleted:
     begin
@@ -1007,6 +1014,20 @@ begin
       end;
 
       return Ok(ServerMessage.ExplorationMap(try ValidateExplorationMapState(Value)))
+    end;
+    'interaction':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('interaction must contain only type, title, and message')
+      end;
+      var MessageText: string := try StringField(Fields, 'message');
+      if Std.Str.Length(MessageText) = 0 then
+      begin
+        return Error('interaction message must not be empty')
+      end;
+
+      return Ok(ServerMessage.Interaction(try StringField(Fields, 'title'), MessageText))
     end;
     'rejected':
     begin

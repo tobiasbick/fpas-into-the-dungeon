@@ -133,19 +133,26 @@ and panning the overlay cannot move the player, and protocol, persistence,
 client/server, and headless-TUI tests cover the complete behavior.
 
 The implemented slice uses a non-occluded outdoor sight radius of eight fields
-and facing-aware interior line of sight. Protocol version 6 masks hidden
+and facing-aware interior line of sight. Protocol version 8 masks hidden
 terrain, savegame format 2 persists sparse outdoor and bounded interior
 discovery masks, and the one-cell-per-field overlay serializes and coalesces
 pan requests. Unit, protocol, persistence, headless-TUI, loopback, restart, and
 real-process smoke tests cover the complete path. See
 [exploration and map](architecture/exploration-and-map.md).
 
-## 9. First RPG interaction — NEXT
+## 9. First RPG interaction — DONE
 
-Choose one small interaction only after movement, views, transitions, and
-persistence have stable seams. Possible candidates include examining an
-object, picking up an item, or speaking to one character. The choice is
-deliberately not made in this roadmap.
+`Enter` is one generic server-authoritative interaction with the occupied field
+or the field directly ahead. Existing entrance and exit behavior uses that
+seam. A fixed stone tablet in the initial dungeon proves a read-only inspection
+result without introducing inventory, dialogue, or mutable object persistence.
+Inspection descriptions open a framed overlay with wrapped, scrollable text
+and Enter/Escape dismissal.
+
+The interaction semantics, tablet placement, and presentation are accepted.
+Game, protocol, client, server, raycasting, map-overlay, and end-to-end tests
+cover descriptive and state-changing outcomes. See
+[interaction](architecture/interaction.md).
 
 ## 10. Further game systems — LATER
 

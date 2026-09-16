@@ -83,6 +83,8 @@ The explicit server-owned save lifecycle is described in
 Server-owned discovery, visibility derivation, Fog of War projections, and the
 client-owned map overlay are described in
 [exploration and map](exploration-and-map.md).
+The shared interaction intention and its state-changing or descriptive outcomes
+are described in [interaction](interaction.md).
 
 ## Runtime data
 

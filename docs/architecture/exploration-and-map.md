@@ -48,7 +48,7 @@ are never persisted.
 
 ## Projection and information boundary
 
-Protocol version 6 represents knowledge with one code per projected field:
+Protocol version 8 represents knowledge with one code per projected field:
 `u` for undiscovered, `r` for remembered, and `v` for visible. Terrain and
 interior row data use `?` wherever knowledge is `u`. The primary outdoor view
 and the first-person geometry therefore cannot disclose a hidden field to the
