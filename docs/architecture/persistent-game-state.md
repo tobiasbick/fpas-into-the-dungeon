@@ -23,10 +23,10 @@ reconnect repeats this choice.
 
 ## Savegame contract
 
-Savegame format `2` is an exact JSON object containing the selected world ID,
+Savegame format `3` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
-the return location, plus persistent discovered-area state. Outdoor positions
-use signed world coordinates.
+the return location, persistent discovered-area state, and the complete
+server-owned item state. Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
 their return location contains the exact outdoor area and coordinate.
 
@@ -37,6 +37,12 @@ stable `area_id`, dimensions, and a matching bit mask. `0` means undiscovered
 and `1` means discovered. Currently visible and remembered are not stored as
 separate states: visibility is derived after start or load, and remembered
 means discovered but not currently visible.
+
+Every item record contains its stable ID, kind, and location. The current item
+location is either a validated field in the initial dungeon or the player's
+inventory. The fixed Ancient coin must occur exactly once, so malformed,
+missing, duplicate, unknown, or misplaced item state rejects the complete
+savegame. There is no separate client inventory file.
 
 Rendered rows, visible windows, status and message text, pending requests,
 overlays, chunk caches, and generated chunk contents are deliberately absent.

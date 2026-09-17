@@ -1,4 +1,4 @@
-// Authoritative coordinates, terrain, generation, movement, and area-transition rules.
+// Authoritative coordinates, terrain, generation, movement, interaction, and item rules.
 unit Dungeon.Game;
 
 uses Dungeon.Exploration.Model, Std.Arrays, Std.Math, Std.Results, Std.Str;
@@ -14,6 +14,10 @@ public const
   NoInteractionMessage: string := 'There is nothing to interact with.';
   // Read-only description returned for the first wall-mounted inspectable object.
   StoneTabletDescription: string := 'The weathered inscription reads: The dungeon remembers every step.';
+  // Stable identity and player-facing text of the first collectible item.
+  InitialDungeonItemId: string := 'initial-dungeon:ancient-coin';
+  InitialDungeonItemName: string := 'Ancient coin';
+  InitialDungeonItemDescription: string := 'A heavy, tarnished coin marked with a doorway beneath a crescent moon.';
 
 public type
   // Distinguishes outdoor maps from finite first-person interiors and dungeons.
@@ -32,6 +36,21 @@ public type
   InteriorPosition = record
     public X: integer;
     public Y: integer;
+  end;
+  // Identifies the one item kind introduced by the first inventory slice.
+  ItemKind = enum
+    AncientCoin;
+  end;
+  // Authoritative ownership or exact area-local placement of an item.
+  ItemLocation = enum
+    InInterior(AreaId: string; Position: InteriorPosition);
+    CarriedByPlayer;
+  end;
+  // Stable mutable item state; identity is unique within one game state.
+  GameItem = record
+    public Id: string;
+    public Kind: ItemKind;
+    public Location: ItemLocation;
   end;
   // Cardinal orientation retained for grid-based first-person movement.
   FacingDirection = enum
@@ -68,6 +87,8 @@ public type
     public Exit: InteriorPosition;
     // Fixed wall field occupied by the initial dungeon's inspectable stone tablet.
     public Tablet: InteriorPosition;
+    // Initial floor placement of the first collectible item.
+    public Item: InteriorPosition;
   end;
   // Position and facing retained while the player occupies a first-person area.
   FirstPersonPose = record
@@ -169,11 +190,15 @@ public type
     public ReturnLocation: ReturnLocation;
     // Persistent server-owned discovery; current visibility is derived by exploration rules.
     public Exploration: ExplorationState;
+    // Persistent server-owned item locations and inventory ownership.
+    public Items: array of GameItem;
   end;
   // Successful server-side resolution of one interaction intention.
   InteractionOutcome = enum
     // The interaction changed the authoritative area and returns its replacement state.
     Transitioned(State: GameState);
+    // The interaction changed mutable state without changing areas.
+    StateChanged(State: GameState);
     // Read-only information; an empty title denotes short feedback rather than inspection content.
     Described(Title: string; Text: string);
   end;
@@ -1190,6 +1215,17 @@ begin
   begin
     return Error('interior tablet coordinate must name a wall field')
   end;
+  var ItemCell: InteriorCellKind := try InteriorCellAt(Map, Map.Item);
+  if ItemCell <> InteriorCellKind.Floor then
+  begin
+    return Error('interior item coordinate must name a floor field')
+  end;
+
+  if ((Map.Item.X = Map.Start.X) and (Map.Item.Y = Map.Start.Y)) or
+     ((Map.Item.X = Map.Exit.X) and (Map.Item.Y = Map.Exit.Y)) then
+  begin
+    return Error('interior item coordinate must differ from start and exit')
+  end;
   mutable var ExitCount: integer := 0;
   mutable var TraversableCount: integer := 0;
   for Cell: InteriorCellKind in Map.Cells do
@@ -1268,6 +1304,14 @@ begin
   return Ok(Map)
 end;
 
+function InitialDungeonItemPosition(): InteriorPosition;
+begin
+  return record
+    X := 8;
+    Y := 1;
+  end
+end;
+
 // Creates the fixed, hand-authored initial dungeon used by the first interior slice.
 public function InitialDungeonMap(): result of InteriorMap, string;
 begin
@@ -1308,7 +1352,86 @@ begin
       X := 9;
       Y := 0;
     end;
+    Item := InitialDungeonItemPosition();
   end)
+end;
+
+function InitialDungeonItem(Metadata: WorldMetadata): GameItem;
+begin
+  return record
+    Id := InitialDungeonItemId;
+    Kind := ItemKind.AncientCoin;
+    Location := ItemLocation.InInterior(Metadata.DungeonAreaId, InitialDungeonItemPosition());
+  end
+end;
+
+// Returns the player-facing name of one authoritative item kind.
+public function ItemDisplayName(Kind: ItemKind): string;
+begin
+  case Kind of
+    ItemKind.AncientCoin:
+    begin
+      return InitialDungeonItemName
+    end
+  end
+end;
+
+// Returns the inspectable description of one authoritative item kind.
+public function ItemDescription(Kind: ItemKind): string;
+begin
+  case Kind of
+    ItemKind.AncientCoin:
+    begin
+      return InitialDungeonItemDescription
+    end
+  end
+end;
+
+// Returns carried items in stable game-state order without exposing placement rules.
+public function InventoryItems(State: GameState): array of GameItem;
+begin
+  mutable var Items: array of GameItem := [];
+  for Item: GameItem in State.Items do
+  begin
+    case Item.Location of
+      ItemLocation.CarriedByPlayer:
+      begin
+        Std.Arrays.Push(Items, Item)
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  return Items
+end;
+
+// Overlays a present item on static interior geometry for client-safe projection.
+public function InteriorVisibleCodeForState(
+  Map: InteriorMap;
+  State: GameState;
+  Position: InteriorPosition
+): result of string, string;
+begin
+  for Item: GameItem in State.Items do
+  begin
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, ItemPosition):
+      begin
+        if (AreaId = State.AreaId) and
+           ((ItemPosition.X = Position.X) and (ItemPosition.Y = Position.Y)) then
+        begin
+          return Ok('i')
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  return InteriorVisibleCode(Map, Position)
 end;
 
 // Returns the outdoor coordinate only when the player currently occupies an outdoor area.
@@ -1350,7 +1473,55 @@ begin
     Player := PlayerPosition.Outdoor(Metadata.Spawn);
     ReturnLocation := ReturnLocation.NoReturnLocation;
     Exploration := EmptyExploration();
+    Items := [InitialDungeonItem(Metadata)];
   end
+end;
+
+function ValidateItems(
+  Metadata: WorldMetadata;
+  Map: InteriorMap;
+  Items: array of GameItem
+): result of array of GameItem, string;
+begin
+  if Std.Arrays.Length(Items) <> 1 then
+  begin
+    return Error('game state must contain exactly the initial dungeon item')
+  end;
+  var Item: GameItem := Items[0];
+  if Item.Id <> InitialDungeonItemId then
+  begin
+    return Error('game state contains an unknown item identity')
+  end;
+
+  if Item.Kind <> ItemKind.AncientCoin then
+  begin
+    return Error('game state item identity and kind do not match')
+  end;
+
+  case Item.Location of
+    ItemLocation.InInterior(AreaId, Position):
+    begin
+      if AreaId <> Metadata.DungeonAreaId then
+      begin
+        return Error('initial dungeon item names an unknown area')
+      end;
+
+      if (Position.X <> Map.Item.X) or (Position.Y <> Map.Item.Y) then
+      begin
+        return Error('initial dungeon item is outside its authoritative placement')
+      end;
+
+      if try InteriorCellAt(Map, Position) <> InteriorCellKind.Floor then
+      begin
+        return Error('initial dungeon item must occupy a floor field')
+      end
+    end;
+    ItemLocation.CarriedByPlayer:
+    begin
+    end
+  end;
+
+  return Ok(Items)
 end;
 
 // Validates current-area and return-location invariants for the selected world.
@@ -1358,6 +1529,7 @@ public function ValidateGameState(Metadata: WorldMetadata; State: GameState): re
 begin
   var ValidExploration: ExplorationState := try ValidateExploration(State.Exploration, WorldChunkSize);
   var DungeonMap: InteriorMap := try InitialDungeonMap();
+  var ValidItems: array of GameItem := try ValidateItems(Metadata, DungeonMap, State.Items);
   for Area: InteriorDiscoveryArea in ValidExploration.InteriorAreas do
   begin
     if Area.AreaId <> Metadata.DungeonAreaId then
@@ -1472,6 +1644,7 @@ begin
     end);
       ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, OutdoorPosition);
       Exploration := Valid.Exploration;
+      Items := Valid.Items;
     end)
   end;
   var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
@@ -1490,6 +1663,7 @@ begin
         Player := PlayerPosition.Outdoor(Position);
         ReturnLocation := ReturnLocation.NoReturnLocation;
         Exploration := Valid.Exploration;
+        Items := Valid.Items;
       end)
     end
     else
@@ -1526,6 +1700,7 @@ begin
   end);
     ReturnLocation := State.ReturnLocation;
     Exploration := State.Exploration;
+    Items := State.Items;
   end)
 end;
 
@@ -1588,7 +1763,44 @@ begin
   end
 end;
 
-// Resolves the current-field transition or the field directly ahead without implicit movement.
+// Describes the available item action for a validated interior state; empty means no item target.
+public function ItemInteractionHint(State: GameState): string;
+begin
+  case State.Player of
+    PlayerPosition.FirstPerson(Pose):
+    begin
+      var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+      for Item: GameItem in State.Items do
+      begin
+        case Item.Location of
+          ItemLocation.InInterior(AreaId, Position):
+          begin
+            if AreaId = State.AreaId then
+            begin
+              if (Position.X = Pose.Position.X) and (Position.Y = Pose.Position.Y) then
+              begin
+                return 'At your feet: ' + ItemDisplayName(Item.Kind) + ' — Enter: Pick up'
+              end;
+              if (Position.X = Pose.Position.X + Offset.X) and (Position.Y = Pose.Position.Y + Offset.Y) then
+              begin
+                return ItemDisplayName(Item.Kind) + ' — Enter: Examine'
+              end
+            end
+          end
+          else
+          begin
+          end
+        end
+      end
+    end
+    else
+    begin
+    end
+  end;
+  return ''
+end;
+
+// Resolves current-field transitions or pickup, then inspection ahead, without implicit movement.
 public function Interact(Metadata: WorldMetadata; State: GameState): result of InteractionOutcome, string;
 begin
   var Valid: GameState := try ValidateGameState(Metadata, State);
@@ -1608,6 +1820,26 @@ begin
   begin
     return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
   end;
+  for Index: integer := 0 to Std.Arrays.Length(Valid.Items) - 1 do
+  begin
+    mutable var Item: GameItem := Valid.Items[Index];
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, ItemPosition):
+      begin
+        if (AreaId = Valid.AreaId) and
+           ((ItemPosition.X = Pose.Position.X) and (ItemPosition.Y = Pose.Position.Y)) then
+        begin
+          mutable var Changed: GameState := Valid;
+          Item.Location := ItemLocation.CarriedByPlayer;
+          Changed.Items[Index] := Item;
+          return Ok(InteractionOutcome.StateChanged(try ValidateGameState(Metadata, Changed)))
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
   var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
   var Target: InteriorPosition := record
     X := Pose.Position.X + Offset.X;
@@ -1617,6 +1849,22 @@ begin
   if (Target.X = Map.Tablet.X) and (Target.Y = Map.Tablet.Y) then
   begin
     return Ok(InteractionOutcome.Described('Stone tablet', StoneTabletDescription))
+  end;
+  for Item: GameItem in Valid.Items do
+  begin
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, ItemPosition):
+      begin
+        if (AreaId = Valid.AreaId) and
+           ((ItemPosition.X = Target.X) and (ItemPosition.Y = Target.Y)) then
+        begin
+          return Ok(InteractionOutcome.Described(ItemDisplayName(Item.Kind), ItemDescription(Item.Kind)))
+        end
+      end
+      else
+      begin
+      end
+    end
   end;
 
   return Ok(InteractionOutcome.Described('', NoInteractionMessage))
@@ -1651,6 +1899,7 @@ begin
   end);
     ReturnLocation := Valid.ReturnLocation;
     Exploration := Valid.Exploration;
+    Items := Valid.Items;
   end)
 end;
 
@@ -1720,5 +1969,6 @@ begin
   end);
     ReturnLocation := Valid.ReturnLocation;
     Exploration := Valid.Exploration;
+    Items := Valid.Items;
   end)
 end;

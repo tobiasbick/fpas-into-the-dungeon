@@ -38,7 +38,7 @@ Server: welcome, state, interaction, exploration_map, save_completed,
         rejected, error
 ```
 
-Protocol version `8` is included in the handshake. `hello` includes the initial
+Protocol version `9` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.

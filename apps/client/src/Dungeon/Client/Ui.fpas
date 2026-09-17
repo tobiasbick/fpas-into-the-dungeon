@@ -1113,6 +1113,7 @@ begin
           Next.PlayerY := MapValue.PlayerY;
           Next.WorldX := MapValue.WorldX;
           Next.WorldY := MapValue.WorldY;
+          Next.Inventory := MapValue.Inventory;
           Next.PrimaryTitle := '';
           Next.PrimaryStatus := ''
         end;
@@ -1129,6 +1130,7 @@ begin
           Next.WorldX := 0;
           Next.WorldY := 0;
           Next.FirstPersonFacing := FirstPersonValue.Facing;
+          Next.Inventory := FirstPersonValue.Inventory;
           Next.PrimaryTitle := FirstPersonValue.Title;
           Next.PrimaryStatus := FirstPersonValue.Status
         end
@@ -1137,7 +1139,27 @@ begin
       Next.Pending := false;
       if Next.View = ViewKind.FirstPerson then
       begin
-        Next.Status := Next.PrimaryStatus
+        // A newly carried identity confirms pickup until the next authoritative update.
+        // Initial/load projections do not announce existing inventory as a new pickup.
+        if State.HasVisibleState then
+        begin
+          for Item: VisibleInventoryItem in Next.Inventory do
+          begin
+            mutable var Known: boolean := false;
+            for Previous: VisibleInventoryItem in State.Inventory do
+            begin
+              if Previous.Id = Item.Id then
+              begin
+                Known := true
+              end
+            end;
+            if not Known then
+            begin
+              Next.PrimaryStatus := 'Picked up: ' + Item.Name
+            end
+          end
+        end;
+        Next.Status := 'Connected'
       end
       else
       begin
@@ -1411,6 +1433,10 @@ begin
     't':
     begin
       return ColoredCell('▣', 176, 205, 232, 45, 55, 75)
+    end;
+    'i':
+    begin
+      return ColoredCell('●', 255, 220, 96, 78, 57, 24)
     end
     else
     begin
@@ -1473,10 +1499,25 @@ begin
     PlayerX := State.PlayerX;
     PlayerY := State.PlayerY;
     Facing := State.FirstPersonFacing;
+    Inventory := State.Inventory;
   end;
 
+  mutable var Grid: TuiCellGrid := RenderFirstPersonGrid(Value, Viewport.Width, Viewport.Height);
+  // Paint the contextual hint over the last image row: it never resizes the view or owns input.
+  if (Grid.Width > 0) and (Grid.Height > 0) and (State.PrimaryStatus <> '') then
+  begin
+    for X: integer := 0 to Grid.Width - 1 do
+    begin
+      mutable var Glyph: string := ' ';
+      if X < Std.Str.Length(State.PrimaryStatus) then
+      begin
+        Glyph := Std.Str.CharAt(State.PrimaryStatus, X)
+      end;
+      Grid.Cells[(Grid.Height - 1) * Grid.Width + X] := ColoredCell(Glyph, 255, 220, 96, 18, 21, 25)
+    end
+  end;
   return TuiElementBuilders.MakePanel(State.PrimaryTitle, [
-                                                            TuiElementBuilders.MakeCellGrid(RenderFirstPersonGrid(Value, Viewport.Width, Viewport.Height))
+                                                            TuiElementBuilders.MakeCellGrid(Grid)
                                                           ])
 end;
 
@@ -1530,20 +1571,32 @@ begin
     end
   end;
 
-  return TuiElementBuilders.MakeColumn([
-                                         TuiElementBuilders.MakeLabel('Character'),
-                                         TuiElementBuilders.MakeLabel('Adventurer'),
-                                         TuiElementBuilders.MakeLabel(''),
-                                         TuiElementBuilders.MakeLabel('Location'),
-                                         TuiElementBuilders.MakeLabel(Location),
-                                         TuiElementBuilders.MakeLabel('Position: ' + Position),
-                                         TuiElementBuilders.MakeLabel(''),
-                                         TuiElementBuilders.MakeLabel('Equipment'),
-                                         TuiElementBuilders.MakeLabel('Not available'),
-                                         TuiElementBuilders.MakeLabel(''),
-                                         TuiElementBuilders.MakeLabel('Quick inventory'),
-                                         TuiElementBuilders.MakeLabel('Not available')
-                                       ])
+  mutable var Elements: array of TuiElement := [
+                                                 TuiElementBuilders.MakeLabel('Character'),
+                                                 TuiElementBuilders.MakeLabel('Adventurer'),
+                                                 TuiElementBuilders.MakeLabel(''),
+                                                 TuiElementBuilders.MakeLabel('Location'),
+                                                 TuiElementBuilders.MakeLabel(Location),
+                                                 TuiElementBuilders.MakeLabel('Position: ' + Position),
+                                                 TuiElementBuilders.MakeLabel(''),
+                                                 TuiElementBuilders.MakeLabel('Equipment'),
+                                                 TuiElementBuilders.MakeLabel('Not available'),
+                                                 TuiElementBuilders.MakeLabel(''),
+                                                 TuiElementBuilders.MakeLabel('Quick inventory')
+                                               ];
+  if Std.Arrays.Length(State.Inventory) = 0 then
+  begin
+    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('Empty'))
+  end
+  else
+  begin
+    for Item: VisibleInventoryItem in State.Inventory do
+    begin
+      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Item.Name))
+    end
+  end;
+
+  return TuiElementBuilders.MakeColumn(Elements)
 end;
 
 function ViewMessages(State: ClientModel): TuiElement;

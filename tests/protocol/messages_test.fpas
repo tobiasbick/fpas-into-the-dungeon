@@ -1,7 +1,7 @@
 // Verifies protocol round trips and malformed-message rejection.
 program DungeonProtocolMessagesTest;
 
-uses Dungeon.Protocol, Std.Results, Std.Str, Std.Test;
+uses Dungeon.Protocol, Std.Arrays, Std.Conv, Std.Results, Std.Str, Std.Test;
 
 begin
   case Unwrap(DecodeClient(EncodeClient(ClientMessage.Hello(ProtocolVersion, 80, 24)))) of
@@ -192,6 +192,10 @@ begin
     PlayerY := 1;
     WorldX := -10;
     WorldY := 8;
+    Inventory := [record
+      Id := 'initial-dungeon:ancient-coin';
+      Name := 'Ancient coin';
+    end];
   end;
   var StateValue: VisibleState := VisibleState.MapState(MapValue);
   var EncodedMapState: string := EncodeServer(ServerMessage.State(StateValue));
@@ -214,7 +218,10 @@ begin
           AssertEquals(-12, DecodedMap.OriginX);
           AssertEquals(7, DecodedMap.OriginY);
           AssertEquals(-10, DecodedMap.WorldX);
-          AssertEquals(8, DecodedMap.WorldY)
+          AssertEquals(8, DecodedMap.WorldY);
+          AssertEquals(1, Std.Arrays.Length(DecodedMap.Inventory));
+          AssertEquals('initial-dungeon:ancient-coin', DecodedMap.Inventory[0].Id);
+          AssertEquals('Ancient coin', DecodedMap.Inventory[0].Name)
         end
         else
         begin
@@ -227,16 +234,65 @@ begin
       panic('expected state message')
     end
   end;
+  var EncodedInventory: string := '"inventory":[{"id":"initial-dungeon:ancient-coin","name":"Ancient coin"}]';
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(EncodedMapState, EncodedInventory, '"inventory":42'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(EncodedMapState, EncodedInventory, '"inventory":[42]'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(EncodedMapState, EncodedInventory, '"inventory":[{"id":"coin"}]'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(EncodedMapState, EncodedInventory, '"inventory":[{"id":"coin","name":"Coin","extra":1}]'))));
+  mutable var InvalidInventoryMap: MapVisibleState := MapValue;
+  InvalidInventoryMap.Inventory := [record
+    Id := '';
+    Name := 'Ancient coin';
+  end];
+  AssertTrue(IsError(DecodeServer(EncodeServer(ServerMessage.State(VisibleState.MapState(InvalidInventoryMap))))));
+  InvalidInventoryMap.Inventory := [record
+    Id := 'coin';
+    Name := '';
+  end];
+  AssertTrue(IsError(DecodeServer(EncodeServer(ServerMessage.State(VisibleState.MapState(InvalidInventoryMap))))));
+  InvalidInventoryMap.Inventory := [
+                                     record
+                                       Id := 'coin';
+                                       Name := 'Coin';
+                                     end,
+                                     record
+                                       Id := 'coin';
+                                       Name := 'Duplicate';
+                                     end
+                                   ];
+  AssertTrue(IsError(DecodeServer(EncodeServer(ServerMessage.State(VisibleState.MapState(InvalidInventoryMap))))));
+  InvalidInventoryMap.Inventory := [record
+    Id := Std.Str.RepeatStr('x', MaximumVisibleInventoryTextLength + 1);
+    Name := 'Too long';
+  end];
+  AssertTrue(IsError(DecodeServer(EncodeServer(ServerMessage.State(VisibleState.MapState(InvalidInventoryMap))))));
+  mutable var MaximumInventory: array of VisibleInventoryItem := [];
+  for Index: integer := 0 to MaximumVisibleInventoryItems - 1 do
+  begin
+    Std.Arrays.Push(MaximumInventory, record
+      Id := 'item-' + IntToStr(Index);
+      Name := 'Item ' + IntToStr(Index);
+    end)
+  end;
+  InvalidInventoryMap.Inventory := MaximumInventory;
+  AssertTrue(IsOk(DecodeServer(EncodeServer(ServerMessage.State(VisibleState.MapState(InvalidInventoryMap))))));
+  Std.Arrays.Push(MaximumInventory, record
+    Id := 'one-too-many';
+    Name := 'One too many';
+  end);
+  InvalidInventoryMap.Inventory := MaximumInventory;
+  AssertTrue(IsError(DecodeServer(EncodeServer(ServerMessage.State(VisibleState.MapState(InvalidInventoryMap))))));
   var FirstPersonValue: FirstPersonVisibleState := record
     Title := 'Initial dungeon';
     Status := 'Find the exit.';
     Width := 5;
     Height := 3;
-    Rows := ['#####', '#.x.#', '#####'];
+    Rows := ['#####', '#ix.#', '#####'];
     KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'];
     PlayerX := 1;
     PlayerY := 1;
     Facing := FirstPersonFacing.West;
+    Inventory := [];
   end;
   var EncodedFirstPerson: string := EncodeServer(ServerMessage.State(VisibleState.FirstPersonState(FirstPersonValue)));
   AssertFalse(Std.Str.Contains(EncodedFirstPerson, 'area_id'));
@@ -252,7 +308,7 @@ begin
           AssertEquals('Find the exit.', Value.Status);
           AssertEquals(5, Value.Width);
           AssertEquals(3, Value.Height);
-          AssertEquals('#.x.#', Value.Rows[1]);
+          AssertEquals('#ix.#', Value.Rows[1]);
           AssertEquals('vvvvv', Value.KnowledgeRows[1]);
           AssertEquals(1, Value.PlayerX);
           AssertEquals(1, Value.PlayerY);

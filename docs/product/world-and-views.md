@@ -51,6 +51,13 @@ or character progression.
   without necessarily changing game state.
 - **Stone tablet** is the first fixed, wall-mounted inspectable object in the
   initial dungeon.
+- **Item** is a server-owned game object with stable identity, kind, and exactly
+  one authoritative location.
+- **Inventory** is the set of items whose authoritative location is the player.
+  The visible inventory is only a client-safe projection of that set.
+- **Ancient coin** is the first fixed collectible item in the initial dungeon.
+  It proves inspection, pickup, projection, and persistence without defining a
+  broader loot system.
 - **Visible state** is the server-produced, client-safe projection of the
   current area and player state. It is not the complete world.
 - **Game session** is one connected, server-authoritative period of play. A
@@ -137,11 +144,14 @@ the transition on that field. The dungeon is
 an 11 by 9 bounded area with a fixed start pose, walls, floor, corridors, and
 one visible exit field. It also contains a fixed stone tablet on a wall directly
 north of the start. Facing the tablet and pressing `Enter` returns its
-description without changing game state. The server accepts the exit
+description without changing game state. A fixed Ancient coin can first be
+inspected from the adjacent start field and then picked up with `Enter` while
+standing on its field. The server removes it from the area, exposes it in the
+visible inventory, and persists its carried state. The server accepts the exit
 interaction only on the exit field and then returns the player to the exact
 outdoor entrance coordinate.
 
 Settlements, further entrances, navigable interiors, mutable terrain, broader
-world simulation, isometric rendering, LLM integration, and mutable RPG
-interactions remain outside this slice. Their intended order is tracked in the
+world simulation, isometric rendering, LLM integration, and broader mutable RPG
+systems remain outside this slice. Their intended order is tracked in the
 [roadmap](../roadmap.md).

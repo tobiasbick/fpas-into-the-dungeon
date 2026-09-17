@@ -154,13 +154,92 @@ Game, protocol, client, server, raycasting, map-overlay, and end-to-end tests
 cover descriptive and state-changing outcomes. See
 [interaction](architecture/interaction.md).
 
-## 10. Further game systems — LATER
+## 10. Items and inventory — DONE
 
-Inventory, combat, character progression, multiplayer behavior, content
-generation, and broader world simulation will each require their own small
-slice. Their order is intentionally undecided.
+Build the smallest mutable item loop on top of the generic interaction seam.
+The initial dungeon contains one fixed **Ancient coin**. The server owns its
+stable identity and whether it lies in the dungeon or is carried by the player;
+the client only renders the projected state and sends interaction intentions.
 
-## 11. LLM integration — LATER
+### 10a. Item model and visibility
+
+- [x] Add one stable item identity and one server-owned location state.
+- [x] Place the item deterministically in the initial dungeon.
+- [x] Include visible inventory entries and visible item cells in the protocol.
+- [x] Render the item in the first-person view and exploration map.
+- [x] Complete model, protocol, projection, and rendering edge-case tests.
+
+### 10b. Inspection, pickup, and inventory presentation
+
+- [x] Inspect the item with `Enter` while it is directly ahead.
+- [x] Pick up the item with `Enter` while occupying its field.
+- [x] Remove a picked-up item from the area projection.
+- [x] Replace the context panel placeholder with the carried item list.
+- [x] Show a non-blocking examine/pickup hint inside the first-person view,
+  confirm pickup, and render one small coin instead of covering its floor field.
+- [x] Prove that repeated interaction and reconnects cannot duplicate or lose
+  the item.
+
+### 10c. Persistence and completion proof
+
+- [x] Persist the item location or carried state in the current savegame
+  format.
+- [x] Restore the initial placement when starting a new game.
+- [x] Prove pickup, explicit save, server restart, and load end to end.
+- [x] Cover malformed, missing, duplicate, and incompatible item state with
+  negative and edge-case tests.
+- [x] Synchronize the architecture, interaction, persistence, product, and UI
+  documentation with the accepted behavior.
+- [x] Run the complete workspace and real-process test suite.
+
+Phase 10 is complete only when every item above is checked and game, protocol,
+persistence, client, server, rendering, and end-to-end tests cover the complete
+path.
+
+The implemented slice uses protocol version 9 and savegame format 3. Unit,
+negative, edge-case, protocol, persistence, headless-TUI, loopback, restart,
+full-session, and real-process smoke tests cover the complete path. See
+[items and inventory](architecture/items-and-inventory.md).
+
+Dropping, equipping, using, stacking, capacity limits, random loot, containers,
+shops, and an economy remain outside this phase.
+
+## 11. NPCs and simple dialogue — LATER
+
+Introduce one server-owned NPC and one deterministic conversation without LLM
+involvement. Dialogue structure, persistence, and presentation will be designed
+as a separate slice before implementation.
+
+## 12. Combat — LATER
+
+Introduce one small server-authoritative combat loop with one opponent. Combat
+rules, defeat behavior, and their relationship to grid movement will be
+designed separately before implementation.
+
+## 13. Character progression — LATER
+
+Define character attributes and progression only after interaction, inventory,
+and combat provide concrete requirements. Equipment belongs here unless an
+earlier slice demonstrates that it needs its own stage.
+
+## 14. Generated game content — LATER
+
+Expand beyond the fixed initial dungeon with generated interiors, dungeons,
+locations, and their contents. Generation remains deterministic and
+server-owned.
+
+## 15. Broader world simulation — LATER
+
+Settlements, changing world state, time, weather, and other simulation systems
+will be split further when their first concrete gameplay requirement is known.
+
+## 16. Multiplayer behavior — LATER
+
+Multiple simultaneous players require separate authority, visibility,
+conflict-resolution, lifecycle, and persistence decisions. The current
+single-player client-server model does not imply those rules.
+
+## 17. LLM integration — LATER
 
 LLM integration is explicitly postponed. Its authority boundaries, failure
 behavior, cost controls, and effect on deterministic game rules will be

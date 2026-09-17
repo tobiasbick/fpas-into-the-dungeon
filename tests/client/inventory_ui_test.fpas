@@ -1,0 +1,108 @@
+// Verifies authoritative inventory updates in the client model and context presentation.
+program DungeonInventoryUiTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Arrays, Std.Str, Std.Task, Std.Test,
+  Std.Tui;
+
+function ScreenContains(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Snapshot.Height - 1 do
+  begin
+    if Std.Str.Contains(Snapshot.LineAt(Row), Text) then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+function MapState(Inventory: array of VisibleInventoryItem): VisibleState;
+begin
+  return VisibleState.MapState(record
+    OriginX := -2;
+    OriginY := -1;
+    Width := 5;
+    Height := 3;
+    Rows := ['ggggg', 'ggggg', 'ggggg'];
+    KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'];
+    PlayerX := 2;
+    PlayerY := 1;
+    WorldX := 0;
+    WorldY := 0;
+    Inventory := Inventory;
+  end)
+end;
+
+begin
+  var Requests: channel of ClientMessage := CreateChannel(4);
+  var Events: channel of ClientEvent := CreateChannel(1);
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  Model.ViewportWidth := 120;
+  Model.ViewportHeight := 30;
+  Model.RequestedWorldWidth := 39;
+  Model.RequestedWorldHeight := 25;
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  Model := UpdateClientEvent(Model, ClientEvent.Connected(false, false), Cmd);
+  Model := UpdateClientEvent(Model, ClientEvent.State(MapState([])), Cmd);
+  AssertEquals(0, Std.Arrays.Length(Model.Inventory));
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(120, 30));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Quick inventory'));
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Empty'));
+
+  Model := UpdateClientEvent(Model, ClientEvent.State(MapState([record
+    Id := 'initial-dungeon:ancient-coin';
+    Name := 'Ancient coin';
+  end])), Cmd);
+  AssertEquals(1, Std.Arrays.Length(Model.Inventory));
+  AssertEquals('initial-dungeon:ancient-coin', Model.Inventory[0].Id);
+  AssertEquals('Ancient coin', Model.Inventory[0].Name);
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Ancient coin'));
+  AssertFalse(ScreenContains(App.SurfaceSnapshot(), 'Empty'));
+
+  Model := UpdateClientEvent(Model, ClientEvent.State(MapState([])), Cmd);
+  AssertEquals(0, Std.Arrays.Length(Model.Inventory));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Empty'));
+  mutable var Interior: FirstPersonVisibleState := record
+    Title := 'Initial dungeon';
+    Status := 'At your feet: Ancient coin — Enter: Pick up';
+    Width := 3;
+    Height := 3;
+    Rows := ['###', '#i#', '###'];
+    KnowledgeRows := ['vvv', 'vvv', 'vvv'];
+    PlayerX := 1;
+    PlayerY := 1;
+    Facing := FirstPersonFacing.West;
+    Inventory := [];
+  end;
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.FirstPersonState(Interior)), Cmd);
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.FirstPersonState(Interior)), Cmd);
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'At your feet: Ancient coin'));
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  AssertEquals('Connected', Model.Status);
+  Model.ContextPanelVisible := false;
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'At your feet: Ancient coin'));
+  AssertFalse(ScreenContains(App.SurfaceSnapshot(), 'Quick inventory'));
+  Interior.Rows[1] := '#.#';
+  Interior.Status := 'Find the gold exit field.';
+  Interior.Inventory := [record Id := 'coin'; Name := 'Ancient coin'; end];
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.FirstPersonState(Interior)), Cmd);
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Picked up: Ancient coin'));
+  AssertFalse(ScreenContains(App.SurfaceSnapshot(), 'At your feet:'));
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.FirstPersonState(Interior)), Cmd);
+  AssertEquals('Find the gold exit field.', Model.PrimaryStatus);
+  Model.HasVisibleState := false;
+  Model.Inventory := [];
+  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.FirstPersonState(Interior)), Cmd);
+  AssertEquals('Find the gold exit field.', Model.PrimaryStatus);
+  App.Close();
+  CloseChannel(Requests);
+  CloseChannel(Events)
+end.

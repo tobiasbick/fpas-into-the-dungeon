@@ -48,7 +48,7 @@ are never persisted.
 
 ## Projection and information boundary
 
-Protocol version 8 represents knowledge with one code per projected field:
+Protocol version 9 represents knowledge with one code per projected field:
 `u` for undiscovered, `r` for remembered, and `v` for visible. Terrain and
 interior row data use `?` wherever knowledge is `u`. The primary outdoor view
 and the first-person geometry therefore cannot disclose a hidden field to the
@@ -88,14 +88,14 @@ status view. Overlay input never becomes a movement or transition intention.
 
 ## Persistence
 
-Savegame format 2 stores accumulated discovery in the authoritative game
-snapshot. Outdoor masks are records containing signed `chunk_x`, `chunk_y`,
-and exactly 128 strings of 128 `0` or `1` characters. Interior records contain
+Savegame format 3 stores accumulated discovery in the authoritative game
+snapshot together with item state. Outdoor masks are records containing signed
+`chunk_x`, `chunk_y`, and exactly 128 strings of 128 `0` or `1` characters. Interior records contain
 `area_id`, `width`, `height`, and exactly one equally sized `0`/`1` row per
 field row. Missing, extra, duplicate, unordered, empty, malformed, unknown, or
 wrong-sized records invalidate the complete save.
 
-There is no format-1 reader or migration. An obsolete or invalid development
+There is no legacy reader or migration. An obsolete or invalid development
 save follows the existing removal path and only the selected world's
 `saves/default.json` is deleted. Explicit atomic saving is the only operation
 that persists newly discovered fields.

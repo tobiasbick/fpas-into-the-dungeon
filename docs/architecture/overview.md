@@ -85,6 +85,9 @@ client-owned map overlay are described in
 [exploration and map](exploration-and-map.md).
 The shared interaction intention and its state-changing or descriptive outcomes
 are described in [interaction](interaction.md).
+The server-owned item state, inventory projection, pickup semantics, and
+persistence boundary are described in
+[items and inventory](items-and-inventory.md).
 
 ## Runtime data
 

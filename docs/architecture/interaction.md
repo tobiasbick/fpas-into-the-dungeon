@@ -1,20 +1,22 @@
 # Interaction
 
-The first RPG interaction adds one small server-authoritative seam without
-defining a general object, inventory, dialogue, or scripting system.
+The first RPG interactions use one small server-authoritative seam without
+defining a general scripting system.
 
 ## Semantics
 
-`Enter` sends the protocol version 8 `interact` intention while the game screen
+`Enter` sends the protocol version 9 `interact` intention while the game screen
 is active, no overlay owns input, and no earlier request is pending. The server
-resolves the occupied field first when it can change areas, then the field
+resolves the occupied field first for state-changing actions, then the field
 directly ahead for an inspectable object. Interaction never moves or turns the
 player implicitly.
 
-There are two successful outcomes:
+There are three successful outcomes:
 
 - a transition replaces authoritative game state and returns a complete visible
   state;
+- a state change, such as picking up an item, replaces authoritative game state
+  and returns a complete visible state;
 - a description leaves authoritative game state unchanged and returns an
   `interaction` message containing a title and text. A nonempty title opens a
   centered, framed description overlay. An empty title denotes a short status
@@ -43,9 +45,21 @@ Its placement, description, target rule, and transition behavior are owned by
 `libs/game`; the server only dispatches outcomes and the client only presents
 them.
 
+## First collectible item
+
+The fixed Ancient coin extends the same seam. From the adjacent start field,
+`Enter` inspects it without changing state. After the player moves onto its
+field, `Enter` moves the server-owned item into the player's inventory. The
+updated visible state removes the item from the dungeon and adds it to the
+projected quick inventory. Further interaction cannot create another copy.
+
+The complete ownership, projection, and persistence contract is described in
+[items and inventory](items-and-inventory.md).
+
 ## Deferred systems
 
-Multiple object kinds, interaction menus, reach beyond one field, item pickup,
-inventory, dialogue, mutable object state, scripted actions, and configurable
-bindings remain outside this slice. They should extend or replace this narrow
-model only when a concrete gameplay requirement needs them.
+Multiple item kinds, interaction menus, reach beyond one field, dropping,
+equipping, using, stacking, capacity limits, dialogue, general mutable object
+state, scripted actions, and configurable bindings remain outside this slice.
+They should extend or replace this narrow model only when a concrete gameplay
+requirement needs them.

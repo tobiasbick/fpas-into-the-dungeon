@@ -7,7 +7,7 @@ uses
 
 public const
   // Current-only savegame schema written below each selected world.
-  SaveGameFormatVersion: integer := 2;
+  SaveGameFormatVersion: integer := 3;
 
 public type
   // Inspection result: absent, invalid and deleted with its reason, or fully validated state.
@@ -319,6 +319,124 @@ begin
   end
 end;
 
+function ItemKindName(Value: ItemKind): string;
+begin
+  case Value of
+    ItemKind.AncientCoin:
+    begin
+      return 'ancient_coin'
+    end
+  end
+end;
+
+function DecodeItemKind(Value: string): result of ItemKind, string;
+begin
+  case Value of
+    'ancient_coin':
+    begin
+      return Ok(ItemKind.AncientCoin)
+    end
+    else
+    begin
+      return Error('savegame contains an unknown item kind')
+    end
+  end
+end;
+
+function EncodeItemLocation(Value: ItemLocation): JsonValue;
+begin
+  case Value of
+    ItemLocation.InInterior(AreaId, Position):
+    begin
+      return JsonValue.Object([
+                                'kind': JsonValue.String('interior'),
+                                'area_id': JsonValue.String(AreaId),
+                                'x': JsonValue.Number(IntToReal(Position.X)),
+                                'y': JsonValue.Number(IntToReal(Position.Y))
+                              ])
+    end;
+    ItemLocation.CarriedByPlayer:
+    begin
+      return JsonValue.Object(['kind': JsonValue.String('carried')])
+    end
+  end
+end;
+
+function DecodeItemLocation(Fields: dict of string to JsonValue): result of ItemLocation, string;
+begin
+  case try StringField(Fields, 'kind') of
+    'interior':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 4 then
+      begin
+        return Error('interior item location must contain only kind, area_id, x, and y')
+      end;
+
+      return Ok(ItemLocation.InInterior(try StringField(Fields, 'area_id'), record
+        X := try IntegerField(Fields, 'x');
+        Y := try IntegerField(Fields, 'y');
+      end))
+    end;
+    'carried':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('carried item location must contain only kind')
+      end;
+
+      return Ok(ItemLocation.CarriedByPlayer)
+    end
+    else
+    begin
+      return Error('savegame contains an unknown item-location kind')
+    end
+  end
+end;
+
+function EncodeItems(Items: array of GameItem): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Item: GameItem in Items do
+  begin
+    Std.Arrays.Push(Values, JsonValue.Object([
+                                              'id': JsonValue.String(Item.Id),
+                                              'kind': JsonValue.String(ItemKindName(Item.Kind)),
+                                              'location': EncodeItemLocation(Item.Location)
+                                            ]))
+  end;
+
+  return Values
+end;
+
+function DecodeItems(Items: array of JsonValue): result of array of GameItem, string;
+begin
+  mutable var Values: array of GameItem := [];
+  for Item: JsonValue in Items do
+  begin
+    case Item of
+      JsonValue.Object(Fields):
+      begin
+        if Std.Dictionaries.Length(Fields) <> 3 then
+        begin
+          return Error('savegame item has an unexpected field set')
+        end;
+
+        Std.Arrays.Push(Values, record
+          Id := try StringField(Fields, 'id');
+          Kind := try DecodeItemKind(try StringField(Fields, 'kind'));
+          Location := try DecodeItemLocation(try ObjectField(Fields, 'location'));
+        end)
+      end
+      else
+      begin
+        return Error('savegame items must contain only objects')
+      end
+    end
+  end;
+
+  return Ok(Values)
+end;
+
 function EncodeMaskRows(Fields: array of boolean; Width: integer; Height: integer): array of JsonValue;
 begin
   mutable var Rows: array of JsonValue := [];
@@ -531,14 +649,14 @@ end;
 // Encodes only authoritative resumable state using the current savegame schema.
 public function EncodeSaveGame(WorldId: string; State: GameState): string;
 begin
-  return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation), 'exploration': EncodeExploration(State.Exploration)]))
+  return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation), 'exploration': EncodeExploration(State.Exploration), 'items': JsonValue.ArrayValue(EncodeItems(State.Items))]))
 end;
 
 // Decodes an exact current-version save and validates it against selected-world invariants.
 public function DecodeSaveGame(Text: string; Metadata: WorldMetadata): result of GameState, string;
 begin
   var Fields: dict of string to JsonValue := try ObjectFields(Text);
-  if Std.Dictionaries.Length(Fields) <> 7 then
+  if Std.Dictionaries.Length(Fields) <> 8 then
   begin
     return Error('savegame has an unexpected field set')
   end;
@@ -558,6 +676,7 @@ begin
     Player := try DecodePlayer(try ObjectField(Fields, 'player'));
     ReturnLocation := try DecodeReturnLocation(try ObjectField(Fields, 'return_location'));
     Exploration := try DecodeExploration(try ObjectField(Fields, 'exploration'));
+    Items := try DecodeItems(try ArrayField(Fields, 'items'));
   end;
 
   return ValidateGameState(Metadata, State)

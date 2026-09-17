@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 8;
+  ProtocolVersion: integer := 9;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
   // Largest exploration-map window that remains below the line-size limit with two row planes.
@@ -13,6 +13,9 @@ public const
   MaximumExplorationMapHeight: integer := 120;
   // Symmetric wire bound that keeps origin-plus-dimension arithmetic inside the integer domain.
   MaximumExplorationMapOriginMagnitude: integer := 1000000000;
+  // Defensive bounds for client-safe inventory summaries in visible-state messages.
+  MaximumVisibleInventoryItems: integer := 64;
+  MaximumVisibleInventoryTextLength: integer := 128;
 
 public type
   // Selects the renderer the client must use for a visible state.
@@ -39,6 +42,11 @@ public type
     Left;
     Right;
   end;
+  // Client-safe identity and display name of one carried item.
+  VisibleInventoryItem = record
+    public Id: string;
+    public Name: string;
+  end;
   // Client-safe map projection; dimensions, rows, and player coordinates must agree.
   MapVisibleState = record
     public OriginX: integer;
@@ -52,6 +60,8 @@ public type
     public PlayerY: integer;
     public WorldX: integer;
     public WorldY: integer;
+    // Bounded carried-item summaries; IDs are unique and names are display-only.
+    public Inventory: array of VisibleInventoryItem;
   end;
   // Client-safe bounded interior geometry and pose used by the first-person renderer.
   FirstPersonVisibleState = record
@@ -65,6 +75,8 @@ public type
     public PlayerX: integer;
     public PlayerY: integer;
     public Facing: FirstPersonFacing;
+    // Bounded carried-item summaries; IDs are unique and names are display-only.
+    public Inventory: array of VisibleInventoryItem;
   end;
   // View-specific server projection; map-only fields cannot occur in a first-person state.
   VisibleState = enum
@@ -343,7 +355,7 @@ end;
 
 function IsFirstPersonCellCode(Value: string): boolean;
 begin
-  return (Value = '?') or ((Value = '#') or ((Value = 't') or ((Value = '.') or (Value = 'x'))))
+  return (Value = '?') or ((Value = '#') or ((Value = 't') or ((Value = 'i') or ((Value = '.') or (Value = 'x')))))
 end;
 
 function IsKnowledgeCode(Value: string): boolean;
@@ -405,6 +417,20 @@ begin
   return Values
 end;
 
+function EncodeInventory(Items: array of VisibleInventoryItem): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Item: VisibleInventoryItem in Items do
+  begin
+    Std.Arrays.Push(Values, JsonValue.Object([
+                                              'id': JsonValue.String(Item.Id),
+                                              'name': JsonValue.String(Item.Name)
+                                            ]))
+  end;
+
+  return Values
+end;
+
 function StringArrayField(Fields: dict of string to JsonValue; Name: string): result of array of string, string;
 begin
   case try RequiredField(Fields, Name) of
@@ -434,8 +460,41 @@ begin
   end
 end;
 
+function ValidateInventory(Items: array of VisibleInventoryItem): result of array of VisibleInventoryItem, string;
+begin
+  if Std.Arrays.Length(Items) > MaximumVisibleInventoryItems then
+  begin
+    return Error('visible inventory exceeds the protocol item limit')
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(Items) - 1 do
+  begin
+    var Item: VisibleInventoryItem := Items[Index];
+    if (Std.Str.Length(Item.Id) = 0) or (Std.Str.Length(Item.Id) > MaximumVisibleInventoryTextLength) then
+    begin
+      return Error('visible inventory item id has an invalid length')
+    end;
+
+    if (Std.Str.Length(Item.Name) = 0) or (Std.Str.Length(Item.Name) > MaximumVisibleInventoryTextLength) then
+    begin
+      return Error('visible inventory item name has an invalid length')
+    end;
+
+    for Earlier: integer := 0 to Index - 1 do
+    begin
+      if Items[Earlier].Id = Item.Id then
+      begin
+        return Error('visible inventory contains a duplicate item id')
+      end
+    end
+  end;
+
+  return Ok(Items)
+end;
+
 function ValidateMapVisibleState(Value: MapVisibleState): result of MapVisibleState, string;
 begin
+  var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
   if (Value.Width <= 0) or (Value.Height <= 0) then
   begin
     return Error('visible-state dimensions must be positive')
@@ -485,6 +544,7 @@ end;
 
 function ValidateFirstPersonVisibleState(Value: FirstPersonVisibleState): result of FirstPersonVisibleState, string;
 begin
+  var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
   if Std.Str.Length(Value.Title) = 0 then
   begin
     return Error('first-person state title must not be empty')
@@ -686,6 +746,46 @@ begin
     else
     begin
       return Error(('message field ' + Name) + ' must be a boolean')
+    end
+  end
+end;
+
+function InventoryField(
+  Fields: dict of string to JsonValue;
+  Name: string
+): result of array of VisibleInventoryItem, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.ArrayValue(Values):
+    begin
+      mutable var Items: array of VisibleInventoryItem := [];
+      for Value: JsonValue in Values do
+      begin
+        case Value of
+          JsonValue.Object(ItemFields):
+          begin
+            if Std.Dictionaries.Length(ItemFields) <> 2 then
+            begin
+              return Error('visible inventory item must contain only id and name')
+            end;
+
+            Std.Arrays.Push(Items, record
+              Id := try StringField(ItemFields, 'id');
+              Name := try StringField(ItemFields, 'name');
+            end)
+          end
+          else
+          begin
+            return Error('visible inventory must contain only objects')
+          end
+        end
+      end;
+
+      return ValidateInventory(Items)
+    end
+    else
+    begin
+      return Error('message field inventory must be an array')
     end
   end
 end;
@@ -893,11 +993,11 @@ begin
       case Value of
         VisibleState.MapState(MapValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY)), 'inventory': JsonValue.ArrayValue(EncodeInventory(MapValue.Inventory))]))
         end;
         VisibleState.FirstPersonState(FirstPersonValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing)), 'inventory': JsonValue.ArrayValue(EncodeInventory(FirstPersonValue.Inventory))]))
         end
       end
     end;
@@ -952,7 +1052,7 @@ begin
       case try DecodeView(try StringField(Fields, 'view')) of
         ViewKind.Map:
         begin
-          if Std.Dictionaries.Length(Fields) <> 12 then
+          if Std.Dictionaries.Length(Fields) <> 13 then
           begin
             return Error('map state has an unexpected field set')
           end;
@@ -967,13 +1067,14 @@ begin
             PlayerY := try IntegerField(Fields, 'y');
             WorldX := try IntegerField(Fields, 'world_x');
             WorldY := try IntegerField(Fields, 'world_y');
+            Inventory := try InventoryField(Fields, 'inventory');
           end;
 
           return Ok(ServerMessage.State(VisibleState.MapState(try ValidateMapVisibleState(MapValue))))
         end;
         ViewKind.FirstPerson:
         begin
-          if Std.Dictionaries.Length(Fields) <> 11 then
+          if Std.Dictionaries.Length(Fields) <> 12 then
           begin
             return Error('first-person state has an unexpected field set')
           end;
@@ -987,6 +1088,7 @@ begin
             PlayerX := try IntegerField(Fields, 'x');
             PlayerY := try IntegerField(Fields, 'y');
             Facing := try DecodeFirstPersonFacing(try StringField(Fields, 'facing'));
+            Inventory := try InventoryField(Fields, 'inventory');
           end;
 
           return Ok(ServerMessage.State(VisibleState.FirstPersonState(try ValidateFirstPersonVisibleState(FirstPersonValue))))
