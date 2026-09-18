@@ -46,6 +46,8 @@ const
   DockedMessageLines: integer := 4;
   MessagePanelHeight: integer := 6;
   StatusPanelHeight: integer := 3;
+  // Five content rows plus the frame; independent of current interaction text.
+  EnvironmentPanelHeight: integer := 7;
   MinimumScaledMapWidth: integer := 60;
   MinimumScaledMapHeight: integer := 20;
   MapScaleNumerator: integer := 4;
@@ -87,7 +89,15 @@ end;
 
 function ContextCanDock(State: ClientModel): boolean;
 begin
-  return State.ViewportWidth >= MinimumDockedContextWidth
+  mutable var AvailableHeight: integer := State.ViewportHeight - StatusPanelHeight;
+  if State.MessagePanelVisible and (State.ViewportHeight >= MinimumDockedMessagesHeight) then
+  begin
+    AvailableHeight := AvailableHeight - MessagePanelHeight
+  end;
+
+  // Preserve room for the existing character and inventory summary below the hint.
+  return (State.ViewportWidth >= MinimumDockedContextWidth) and
+         (AvailableHeight >= EnvironmentPanelHeight + 14)
 end;
 
 function MessagesCanDock(State: ClientModel): boolean;
@@ -744,21 +754,16 @@ begin
   return State
 end;
 
-// Wrap inspection text at word boundaries, splitting oversized words on narrow terminals.
-function DescriptionLines(State: ClientModel): array of string;
+// Wrap presentation text at word boundaries, splitting oversized words as needed.
+function WrappedLines(Text: string; AvailableWidth: integer): array of string;
 begin
-  mutable var Width: integer := State.ViewportWidth - 8;
-  if Width > 64 then
-  begin
-    Width := 64
-  end;
-
+  mutable var Width: integer := AvailableWidth;
   if Width < 1 then
   begin
     Width := 1
   end;
   mutable var Lines: array of string := [];
-  mutable var Remaining: string := State.DescriptionText;
+  mutable var Remaining: string := Text;
   while Std.Str.Length(Remaining) > 0 do
   begin
     mutable var Count: integer := Std.Str.Length(Remaining);
@@ -793,6 +798,17 @@ begin
   end;
 
   return Lines
+end;
+
+function DescriptionLines(State: ClientModel): array of string;
+begin
+  mutable var Width: integer := State.ViewportWidth - 8;
+  if Width > 64 then
+  begin
+    Width := 64
+  end;
+
+  return WrappedLines(State.DescriptionText, Width)
 end;
 
 function DescriptionPageHeight(State: ClientModel): integer;
@@ -1153,12 +1169,14 @@ begin
                 Known := true
               end
             end;
+
             if not Known then
             begin
               Next.PrimaryStatus := 'Picked up: ' + Item.Name
             end
           end
         end;
+
         Next.Status := 'Connected'
       end
       else
@@ -1501,10 +1519,10 @@ begin
     Facing := State.FirstPersonFacing;
     Inventory := State.Inventory;
   end;
-
   mutable var Grid: TuiCellGrid := RenderFirstPersonGrid(Value, Viewport.Width, Viewport.Height);
-  // Paint the contextual hint over the last image row: it never resizes the view or owns input.
-  if (Grid.Width > 0) and (Grid.Height > 0) and (State.PrimaryStatus <> '') then
+  // Fallback only: the docked sidebar owns hints while visible.
+  if (((((Grid.Width > 0) and (Grid.Height > 0)) and (State.PrimaryStatus <> '')) and not (State.ContextPanelVisible and ContextCanDock(State))) and (State.Overlay <> ClientOverlay.ContextOverlay)) and
+     (State.PrimaryStatus <> 'Nothing in reach') then
   begin
     for X: integer := 0 to Grid.Width - 1 do
     begin
@@ -1513,12 +1531,12 @@ begin
       begin
         Glyph := Std.Str.CharAt(State.PrimaryStatus, X)
       end;
+
       Grid.Cells[(Grid.Height - 1) * Grid.Width + X] := ColoredCell(Glyph, 255, 220, 96, 18, 21, 25)
     end
   end;
-  return TuiElementBuilders.MakePanel(State.PrimaryTitle, [
-                                                            TuiElementBuilders.MakeCellGrid(Grid)
-                                                          ])
+
+  return TuiElementBuilders.MakePanel(State.PrimaryTitle, [TuiElementBuilders.MakeCellGrid(Grid)])
 end;
 
 function ViewPrimary(State: ClientModel): TuiElement;
@@ -1570,7 +1588,6 @@ begin
                   FacingLabel(State.FirstPersonFacing)
     end
   end;
-
   mutable var Elements: array of TuiElement := [
                                                  TuiElementBuilders.MakeLabel('Character'),
                                                  TuiElementBuilders.MakeLabel('Adventurer'),
@@ -1652,6 +1669,49 @@ begin
   return TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Expanding(), TuiAlignment.Fill(), Stretch)
 end;
 
+// A stable upper panel keeps interaction feedback separate from character data.
+// Text remains server-provided; this view never derives item or interaction rules.
+function ViewSidebar(State: ClientModel): TuiElement;
+begin
+  mutable var Width: integer := (State.ViewportWidth - PrimaryTerminalWidth(State)) - 2;
+  if not ContextCanDock(State) then
+  begin
+    Width := State.ViewportWidth - 8
+  end;
+
+  if Width > 64 then
+  begin
+    Width := 64
+  end;
+  mutable var Text: string := 'Nothing in reach';
+  if (State.HasVisibleState and (State.View = ViewKind.FirstPerson)) and (State.PrimaryStatus <> '') then
+  begin
+    Text := State.PrimaryStatus
+  end;
+  var Lines: array of string := WrappedLines(Text, Width);
+  mutable var Labels: array of TuiElement := [];
+  for I: integer := 0 to EnvironmentPanelHeight - 3 do
+  begin
+    mutable var Line: string := '';
+    if I < Std.Arrays.Length(Lines) then
+    begin
+      Line := Lines[I]
+    end;
+
+    Std.Arrays.Push(Labels, TuiElementBuilders.MakeLabel(Line))
+  end;
+  var Settings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
+                                       .WithFixedHeight(EnvironmentPanelHeight);
+  return TuiElementBuilders.MakeColumn([
+                                         TuiElementBuilders.MakeLayout(Settings, TuiElementBuilders.MakePanel('Environment', [
+                                                                                                                               TuiElementBuilders.MakeColumn(Labels)
+                                                                                                                             ])),
+                                         TuiElementBuilders.MakeLayout(Expanding(1), TuiElementBuilders.MakePanel('Context', [
+                                                                                                                               ViewContext(State)
+                                                                                                                             ]))
+                                       ])
+end;
+
 function GameStatusItems(State: ClientModel): array of TuiStatusItem;
 begin
   return [
@@ -1673,9 +1733,7 @@ begin
   begin
     MainRow := TuiElementBuilders.MakeRow([
                                             Primary,
-                                            TuiElementBuilders.MakeLayout(Expanding(1), TuiElementBuilders.MakePanel('Context', [
-                                                                                                                                  ViewContext(State)
-                                                                                                                                ]))
+                                            TuiElementBuilders.MakeLayout(Expanding(1), ViewSidebar(State))
                                           ])
   end;
   mutable var Rows: array of TuiElement := [TuiElementBuilders.MakeLayout(Expanding(1), MainRow)];
@@ -1931,7 +1989,7 @@ begin
     end;
     ClientOverlay.ContextOverlay:
     begin
-      return ViewPanelOverlay(State, 'Context', ViewContext(State))
+      return ViewPanelOverlay(State, 'Sidebar', ViewSidebar(State))
     end;
     ClientOverlay.MessageOverlay:
     begin

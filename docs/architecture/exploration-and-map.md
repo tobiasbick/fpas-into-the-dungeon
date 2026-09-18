@@ -42,7 +42,10 @@ sent. A rejected action changes neither discovery nor current visibility.
 
 Outdoor sight is a Euclidean circle with radius eight world fields. Terrain
 does not occlude it. Interior sight has a maximum range of eight fields and a
-90-degree cardinal field of view. Line of sight includes the first blocking
+90-degree cardinal forward field of view, plus the two immediately adjacent
+lateral fields. The lateral exception makes junctions readable from the
+rearward rendering eye; it does not reveal fields farther sideways or behind
+the player. Line of sight includes the first blocking
 wall and excludes fields behind it. Currently visible fields are derived and
 are never persisted.
 

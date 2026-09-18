@@ -85,6 +85,9 @@ area.
 - **Primary view** is the map or first-person presentation on the game screen.
 - **Context panel** is the optional right-hand summary of character, location,
   equipment, and immediately relevant inventory information.
+- **Environment panel** is the area above the context panel for current
+  interaction opportunities and immediate interaction feedback. It describes
+  the player's surroundings, not carried inventory or connection state.
 - **Status view** is the persistent framed bottom view with one content line for
   connection state, action progress, messages, and errors.
 - **Message panel** is an optional, larger history area above the status view.
@@ -121,8 +124,10 @@ map view of the surrounding area.
 
 The first-person view uses grid-based first-person movement rather than free or
 continuous movement. Raycasting is the presentation of the discrete area; it
-does not introduce fractional positions, arbitrary view angles, velocity, or
+does not introduce fractional gameplay positions, arbitrary view angles, velocity, or
 movement across several fields from one intention.
+The visual eye is offset backward within the occupied field to make lateral
+openings readable; this does not change the player's position or interaction reach.
 
 The server owns the area kind, geometry, rules, and visible state. The client
 does not receive the complete world. It selects the required view family from

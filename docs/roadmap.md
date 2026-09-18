@@ -90,6 +90,11 @@ terminal raycaster. Unit, protocol, headless-TUI, loopback, full-session, and
 real-process smoke tests cover the complete path. See
 [first-person interior](architecture/first-person-interior.md).
 
+The current presentation checkpoint uses one rearward rendering eye and a
+90-degree horizontal projection for both near and distant walls. Immediate
+lateral fields are visible so junctions can be read without moving or turning.
+This changes presentation, not grid-based movement or interaction reach.
+
 ## 7. Persistent game state — DONE
 
 Give each selected world one server-owned, versioned savegame below the
@@ -175,8 +180,10 @@ the client only renders the projected state and sends interaction intentions.
 - [x] Pick up the item with `Enter` while occupying its field.
 - [x] Remove a picked-up item from the area projection.
 - [x] Replace the context panel placeholder with the carried item list.
-- [x] Show a non-blocking examine/pickup hint inside the first-person view,
-  confirm pickup, and render one small coin instead of covering its floor field.
+- [x] Show examine/pickup hints and pickup confirmation in a fixed-height
+  Environment panel above Context, with a non-blocking in-view fallback when
+  the sidebar is hidden or cannot dock. Render one small coin instead of
+  covering its floor field.
 - [x] Prove that repeated interaction and reconnects cannot duplicate or lose
   the item.
 
@@ -203,6 +210,19 @@ full-session, and real-process smoke tests cover the complete path. See
 
 Dropping, equipping, using, stacking, capacity limits, random loot, containers,
 shops, and an economy remain outside this phase.
+
+### Presentation follow-up — OPEN
+
+The current dungeon projection and split sidebar are retained as an intermediate
+checkpoint, not an accepted final visual design. The item loop remains complete;
+further visual work will be discussed separately.
+
+- [x] Use one coherent wall/floor projection and cover lateral openings with tests.
+- [x] Separate environment hints from character and inventory information.
+- [x] Cover fixed panel height, text wrapping, hidden-sidebar fallback, and
+  narrow/short-terminal behavior.
+- [ ] Revisit the first-person visual presentation and Ancient coin appearance
+  with the user before treating their visual design as final.
 
 ## 11. NPCs and simple dialogue — LATER
 

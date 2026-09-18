@@ -44,8 +44,17 @@ distance for perspective, and fills every output cell with ceiling, wall, or
 floor. Walls use deterministic distance and side shading. The tablet projection
 is opaque and uses a distinct material without changing the wall geometry. The
 projected exit floor and the visible Ancient coin use distinct gold materials;
-rays crossing them never recolor walls. Adjacent front
-walls use inset geometry with forward-facing side lanes and closed-side wedges.
+rays crossing them never recolor walls. The visual eye is shifted 0.35 fields
+back from the occupied field's center, opposite the facing direction. It stays
+inside that field even when a wall is directly behind the player. A camera-plane
+scale of 1.0 gives a 90-degree horizontal view; the vertical projection scale
+remains 0.58 times the terminal height. This intentionally readable presentation
+exposes immediate side branches, including at junctions with an open path ahead.
+Walls and floor samples share this eye and projection. There is no separate
+close-wall renderer or camera placed in a neighboring field. The player's
+authoritative coordinate, collision, interaction reach, and facing do not change.
+Interior visibility includes the immediate left and right fields in addition to
+the existing forward sight cone, without revealing a whole sideways corridor.
 Unknown fields remain masked. See the client UI specification for presentation
 details.
 

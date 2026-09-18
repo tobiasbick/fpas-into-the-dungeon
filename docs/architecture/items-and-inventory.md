@@ -44,13 +44,19 @@ panel lists `Ancient coin` under `Quick inventory`; an empty inventory is shown
 as `Empty`.
 
 The first-person coin occupies a small disc at the center of its floor field.
-A non-blocking hint is painted over the bottom image row without resizing the
-view. The server supplies `Ancient coin — Enter: Examine` when it is directly
+The fixed-height Environment panel above Context displays the interaction hint.
+Only with the sidebar hidden or unable to dock is the hint painted over the
+bottom image row without resizing the view. The server supplies
+`Ancient coin — Enter: Examine` when it is directly
 ahead and `At your feet: Ancient coin — Enter: Pick up` on its field, regardless
 of facing. After an authoritative inventory addition, the client shows
 `Picked up: Ancient coin` until the next visible-state update. Loading existing
 inventory does not announce a pickup. These hints remain available with the
 context panel hidden; movement and inspection controls remain unchanged.
+The server sends `Nothing in reach` when no action is available. This neutral
+text appears in Environment but never as a fallback over the image.
+Both right-hand panels share the existing F2 toggle and
+narrow-screen overlay; no new preference or configuration schema is introduced.
 
 ## Persistence
 

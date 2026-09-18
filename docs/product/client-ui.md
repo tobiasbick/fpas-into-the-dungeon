@@ -53,8 +53,10 @@ and a persistent framed status view:
 
 ```text
 ┌──────────────────────────────────────┬───────────────────┐
+│                                      │ Environment       │
+│                                      │ Object / action   │
+│                                      ├───────────────────┤
 │                                      │ Context           │
-│                                      │                   │
 │             Primary view             │ Character         │
 │                                      │ Location          │
 │                                      │ Equipment         │
@@ -68,7 +70,18 @@ and a persistent framed status view:
 
 The primary view and context panel share the available width in a 2:1 ratio on
 a wide terminal, so the context panel fills roughly one third of the main row.
-It contains summaries rather than another full game screen. Its quick inventory
+The right-hand column has two separately framed sections: a fixed seven-row
+`Environment` panel (five content rows) above an expanding `Context` panel.
+Environment shows server-provided interaction hints and pickup confirmation,
+wrapped to its width, or `Nothing in reach` when no hint exists. Its height
+does not change when the player moves or picks up an item. General connection
+messages and errors stay in the status view and message history.
+Both sections are toggled together with F2; the narrow-screen context overlay
+also includes both sections.
+Docking also requires enough height for both frames and the existing character
+summary; short terminals use the same overlay and hint fallback as narrow ones.
+
+Context contains summaries rather than another full game screen. Its quick inventory
 lists the carried item names projected by the server and displays `Empty` when
 the player carries nothing. Item identity, ownership, and rules never move into
 the client.
@@ -201,27 +214,28 @@ location. A fixed wall-mounted stone tablet uses a distinct blue-gray material
 in the first-person view and a distinct symbol on the exploration map. It
 remains opaque like the wall that carries it. The fixed Ancient coin uses a gold
 marker in the first-person view and exploration map until it is picked up.
-In first person it is a small disc in the field center. A non-blocking hint at
-the bottom of the image identifies the available action: examine while facing
-the adjacent coin, or pick up when standing on it. Pickup confirmation remains
-until the next state update. The hint neither consumes another layout row nor
-depends on the context panel; the status view continues to show connection and
-request feedback.
+In first person it is a small disc in the field center. The Environment panel
+identifies the available action: examine while facing the adjacent coin, or
+pick up when standing on it. Pickup confirmation remains until the next state
+update. With the sidebar hidden or unable to dock, a non-blocking fallback hint
+is painted over the bottom image row without resizing the primary view. No
+dialog opens automatically when stepping onto an item; explicit inspection
+still opens the description overlay. The status view continues to show
+connection and request feedback.
 Walls keep their stone material even when a view ray crosses the exit or coin.
 Moving onto either field colors only the visible part of that floor field.
 Outdoor map rows
-are never reinterpreted as first-person geometry. When a wall occupies the
-field directly ahead, its frontal plane is inset from every screen edge. An
-open field immediately to the player's left or right shows ceiling, floor, and
-the forward-facing geometry of the adjacent lane. All three lanes use the
-same facing and projection scale: a wall continuing across a branch retains
-continuous upper and lower edges. A recessed wall appears smaller only when
-it is actually farther ahead. The side strips never insert a rotated view
-down a branching corridor. A blocked side is drawn
-as a darker perspective wall that widens toward the corresponding screen edge.
-This keeps discrete movement choices readable without widening the general
-field of view; an unknown side remains closed and uses the unknown-geometry
-color rather than the stone material.
+are never reinterpreted as first-person geometry. The visual eye sits 0.35 fields
+behind the field center, still inside the occupied field, with a 90-degree
+horizontal view. This exposes the immediate side openings both before a wall
+and at a junction where the path ahead is open. Closed sides form perspective
+walls toward the screen edges; open sides expose the adjoining space. A
+continuous wall retains continuous edges, and recessed walls shrink with
+distance. Walls, floor, exits, and items use the same projection at every
+distance rather than switching to a special close-wall layout.
+The server exposes the immediately adjacent lateral fields, but not an entire
+side corridor. Unknown geometry stays opaque and uses its own dark material.
+Only the rendering eye moves backward; gameplay still uses the occupied field.
 
 First-person movement remains tile-based and server-authoritative. `W` and `S`
 request a move by exactly one field forward or backward relative to the current

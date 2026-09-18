@@ -17,11 +17,12 @@ public type
   end;
 
 const
-  CameraPlaneScale: real := 0.66;
+  // A 90-degree horizontal projection exposes immediate left/right branches.
+  CameraPlaneScale: real := 1.0;
+  // Visual eye only: remains inside the occupied field, even with a wall behind.
+  CameraBackOffset: real := 0.35;
   MinimumRayDistance: real := 0.0001;
   TerminalAspectCorrection: real := 0.58;
-  FrontWallHorizontalInsetDivisor: integer := 8;
-  FrontWallVerticalInsetDivisor: integer := 10;
 
 function FieldAt(Value: FirstPersonVisibleState; X: integer; Y: integer): string;
 begin
@@ -60,34 +61,13 @@ begin
   end
 end;
 
-function FacingOffsets(Value: FirstPersonFacing): array of integer;
-begin
-  case Value of
-    FirstPersonFacing.North:
-    begin
-      return [0, -1, -1, 0, 1, 0]
-    end;
-    FirstPersonFacing.East:
-    begin
-      return [1, 0, 0, -1, 0, 1]
-    end;
-    FirstPersonFacing.South:
-    begin
-      return [0, 1, 1, 0, -1, 0]
-    end;
-    FirstPersonFacing.West:
-    begin
-      return [-1, 0, 0, 1, 0, -1]
-    end
-  end
-end;
-
 // Casts one ray through camera-plane coordinate -1 through 1 in a validated state.
+// Distance is measured from the rearward rendering eye, not the gameplay field center.
 public function CastFirstPersonRay(Value: FirstPersonVisibleState; CameraX: real): FirstPersonRayHit;
 begin
   var Camera: array of real := CameraDirection(Value.Facing);
-  var PositionX: real := IntToReal(Value.PlayerX) + 0.5;
-  var PositionY: real := IntToReal(Value.PlayerY) + 0.5;
+  var PositionX: real := (IntToReal(Value.PlayerX) + 0.5) - Camera[0] * CameraBackOffset;
+  var PositionY: real := (IntToReal(Value.PlayerY) + 0.5) - Camera[1] * CameraBackOffset;
   var RayDirectionX: real := Camera[0] + (Camera[2] * CameraX);
   var RayDirectionY: real := Camera[1] + (Camera[3] * CameraX);
   mutable var MapX: integer := Value.PlayerX;
@@ -247,8 +227,10 @@ begin
     return FloorCell(false)
   end;
   var Camera: array of real := CameraDirection(Value.Facing);
-  var FloorX: real := (IntToReal(Value.PlayerX) + 0.5) + Distance * (Camera[0] + Camera[2] * CameraX);
-  var FloorY: real := (IntToReal(Value.PlayerY) + 0.5) + Distance * (Camera[1] + Camera[3] * CameraX);
+  var FloorX: real := ((IntToReal(Value.PlayerX) + 0.5) - Camera[0] * CameraBackOffset) +
+                      Distance * (Camera[0] + Camera[2] * CameraX);
+  var FloorY: real := ((IntToReal(Value.PlayerY) + 0.5) - Camera[1] * CameraBackOffset) +
+                      Distance * (Camera[1] + Camera[3] * CameraX);
   var SampleX: integer := Std.Math.Floor(FloorX);
   var SampleY: integer := Std.Math.Floor(FloorY);
   var Code: string := FieldAt(Value, SampleX, SampleY);
@@ -260,8 +242,8 @@ begin
   if Code = 'i' then
   begin
     // One small disc at the field center, rather than tiling the entire floor with coins.
-    var LocalX: real := FloorX - IntToReal(SampleX) - 0.5;
-    var LocalY: real := FloorY - IntToReal(SampleY) - 0.5;
+    var LocalX: real := (FloorX - IntToReal(SampleX)) - 0.5;
+    var LocalY: real := (FloorY - IntToReal(SampleY)) - 0.5;
     if LocalX * LocalX + LocalY * LocalY <= 0.0256 then
     begin
       return ItemFloorCell()
@@ -271,153 +253,7 @@ begin
   return FloorCell(Code = 'x')
 end;
 
-// Side lanes retain the forward direction and the front plane's projection scale.
-// A continuous wall therefore has identical upper and lower edges across lanes.
-function OpenSideCell(
-  Hit: FirstPersonRayHit;
-  Y: integer;
-  Height: integer;
-  VerticalInset: integer;
-  Floor: TuiCell
-): TuiCell;
-begin
-  mutable var WallHeight: integer := Trunc((IntToReal(Height - 2 * VerticalInset) * 0.5) /
-                                           Hit.Distance);
-  if WallHeight < 1 then
-  begin
-    WallHeight := 1
-  end;
-
-  if WallHeight > Height - 2 then
-  begin
-    WallHeight := Height - 2
-  end;
-  var WallTop: integer := (Height - WallHeight) div 2;
-  var WallBottom: integer := WallTop + WallHeight;
-  if Y < WallTop then
-  begin
-    return CeilingCell()
-  end;
-
-  if Y < WallBottom then
-  begin
-    return WallCell(Hit)
-  end;
-
-  return Floor
-end;
-
-function SideWallCell(Code: string): TuiCell;
-begin
-  if Code = '?' then
-  begin
-    return SolidCell(18, 21, 25)
-  end;
-
-  if Code = 't' then
-  begin
-    return SolidCell(90, 120, 150)
-  end;
-
-  return SolidCell(142, (142 * 9) div 10, (142 * 4) div 5)
-end;
-
-function ClosedSideCell(
-  X: integer;
-  Y: integer;
-  Width: integer;
-  Height: integer;
-  FrontLeft: integer;
-  FrontRight: integer;
-  FrontTop: integer;
-  FrontBottom: integer;
-  SideCode: string;
-  Floor: TuiCell
-): TuiCell;
-begin
-  mutable var SideTop: integer := FrontTop;
-  mutable var SideBottom: integer := FrontBottom;
-  if X < FrontLeft then
-  begin
-    SideTop := (FrontTop * X) div FrontLeft;
-    SideBottom := (Height - 1) - (((Height - 1) - FrontBottom) * X) div FrontLeft
-  end
-  else
-  begin
-    var RightWidth: integer := (Width - 1) - FrontRight;
-    var DistanceFromFront: integer := X - FrontRight;
-    SideTop := FrontTop - ((FrontTop * DistanceFromFront) div RightWidth);
-    SideBottom := FrontBottom + ((((Height - 1) - FrontBottom) * DistanceFromFront) div RightWidth)
-  end;
-
-  if Y < SideTop then
-  begin
-    return CeilingCell()
-  end;
-
-  if Y > SideBottom then
-  begin
-    return Floor
-  end;
-
-  return SideWallCell(SideCode)
-end;
-
-function ImmediateFrontWallCell(
-  Hit: FirstPersonRayHit;
-  X: integer;
-  Y: integer;
-  Width: integer;
-  Height: integer;
-  HorizontalInset: integer;
-  VerticalInset: integer;
-  LeftIsOpen: boolean;
-  RightIsOpen: boolean;
-  LeftHit: FirstPersonRayHit;
-  RightHit: FirstPersonRayHit;
-  LeftCode: string;
-  RightCode: string;
-  Floor: TuiCell
-): TuiCell;
-begin
-  var FrontLeft: integer := HorizontalInset;
-  var FrontRight: integer := (Width - HorizontalInset) - 1;
-  var FrontTop: integer := VerticalInset;
-  var FrontBottom: integer := (Height - VerticalInset) - 1;
-  if (X >= FrontLeft) and (X <= FrontRight) then
-  begin
-    if Y < FrontTop then
-    begin
-      return CeilingCell()
-    end;
-
-    if Y > FrontBottom then
-    begin
-      return Floor
-    end;
-
-    return WallCell(Hit)
-  end;
-
-  if X < FrontLeft then
-  begin
-    if LeftIsOpen then
-    begin
-      return OpenSideCell(LeftHit, Y, Height, VerticalInset, Floor)
-    end;
-
-    return ClosedSideCell(X, Y, Width, Height, FrontLeft, FrontRight, FrontTop, FrontBottom, LeftCode, Floor)
-  end;
-
-  if RightIsOpen then
-  begin
-    return OpenSideCell(RightHit, Y, Height, VerticalInset, Floor)
-  end;
-
-  return ClosedSideCell(X, Y, Width, Height, FrontLeft, FrontRight, FrontTop, FrontBottom, RightCode, Floor)
-end;
-
-// Renders a complete ceiling, wall, and floor grid, including inset geometry for an adjacent front wall.
+// Renders walls and floor with the same rearward eye and projection at every distance.
 public function RenderFirstPersonGrid(Value: FirstPersonVisibleState; Width: integer; Height: integer): TuiCellGrid;
 begin
   mutable var SafeWidth: integer := Width;
@@ -431,88 +267,44 @@ begin
   begin
     SafeHeight := 0
   end;
-  var Offsets: array of integer := FacingOffsets(Value.Facing);
-  var FrontCode: string := FieldAt(Value, Value.PlayerX + Offsets[0], Value.PlayerY + Offsets[1]);
-  var LeftCode: string := FieldAt(Value, Value.PlayerX + Offsets[2], Value.PlayerY + Offsets[3]);
-  var RightCode: string := FieldAt(Value, Value.PlayerX + Offsets[4], Value.PlayerY + Offsets[5]);
-  var FrontIsWall: boolean := IsOpaqueCode(FrontCode);
-  var LeftIsOpen: boolean := not IsOpaqueCode(LeftCode);
-  var RightIsOpen: boolean := not IsOpaqueCode(RightCode);
-  mutable var HorizontalInset: integer := 0;
-  if SafeWidth >= 5 then
-  begin
-    HorizontalInset := SafeWidth div FrontWallHorizontalInsetDivisor;
-    if HorizontalInset < 1 then
-    begin
-      HorizontalInset := 1
-    end
-  end;
-  mutable var VerticalInset: integer := 0;
-  if SafeHeight >= 5 then
-  begin
-    VerticalInset := SafeHeight div FrontWallVerticalInsetDivisor;
-    if VerticalInset < 1 then
-    begin
-      VerticalInset := 1
-    end
-  end;
-  var FrontHit: FirstPersonRayHit := CastFirstPersonRay(Value, 0.0);
-  mutable var LeftView: FirstPersonVisibleState := Value;
-  LeftView.PlayerX := Value.PlayerX + Offsets[2];
-  LeftView.PlayerY := Value.PlayerY + Offsets[3];
-  var LeftHit: FirstPersonRayHit := CastFirstPersonRay(LeftView, 0.0);
-  mutable var RightView: FirstPersonVisibleState := Value;
-  RightView.PlayerX := Value.PlayerX + Offsets[4];
-  RightView.PlayerY := Value.PlayerY + Offsets[5];
-  var RightHit: FirstPersonRayHit := CastFirstPersonRay(RightView, 0.0);
   mutable var Cells: array of TuiCell := [];
   for Y: integer := 0 to SafeHeight - 1 do
   begin
     for X: integer := 0 to SafeWidth - 1 do
     begin
-      if (FrontIsWall and (HorizontalInset > 0)) and (VerticalInset > 0) then
+      mutable var CameraX: real := 0.0;
+      if SafeWidth > 1 then
       begin
-        var Floor: TuiCell := ProjectFloor(Value, X, Y, SafeWidth, SafeHeight, IntToReal(SafeHeight -
-                                                                                         2 * VerticalInset) *
-                                                                               0.5);
-        Std.Arrays.Push(Cells, ImmediateFrontWallCell(FrontHit, X, Y, SafeWidth, SafeHeight, HorizontalInset, VerticalInset, LeftIsOpen, RightIsOpen, LeftHit, RightHit, LeftCode, RightCode, Floor))
+        CameraX := ((2.0 * IntToReal(X)) / IntToReal(SafeWidth - 1)) - 1.0
+      end;
+      var Hit: FirstPersonRayHit := CastFirstPersonRay(Value, CameraX);
+      mutable var WallHeight: integer := Trunc((IntToReal(SafeHeight) * TerminalAspectCorrection) /
+                                               Hit.Distance);
+      if WallHeight < 1 then
+      begin
+        WallHeight := 1
+      end;
+
+      if WallHeight > SafeHeight then
+      begin
+        WallHeight := SafeHeight
+      end;
+      var WallTop: integer := (SafeHeight - WallHeight) div 2;
+      var WallBottom: integer := WallTop + WallHeight;
+      if Y < WallTop then
+      begin
+        Std.Arrays.Push(Cells, CeilingCell())
       end
       else
       begin
-        mutable var CameraX: real := 0.0;
-        if SafeWidth > 1 then
+        if Y < WallBottom then
         begin
-          CameraX := ((2.0 * IntToReal(X)) / IntToReal(SafeWidth - 1)) - 1.0
-        end;
-        var Hit: FirstPersonRayHit := CastFirstPersonRay(Value, CameraX);
-        mutable var WallHeight: integer := Trunc((IntToReal(SafeHeight) * TerminalAspectCorrection) /
-                                                 Hit.Distance);
-        if WallHeight < 1 then
-        begin
-          WallHeight := 1
-        end;
-
-        if WallHeight > SafeHeight then
-        begin
-          WallHeight := SafeHeight
-        end;
-        var WallTop: integer := (SafeHeight - WallHeight) div 2;
-        var WallBottom: integer := WallTop + WallHeight;
-        if Y < WallTop then
-        begin
-          Std.Arrays.Push(Cells, CeilingCell())
+          Std.Arrays.Push(Cells, WallCell(Hit))
         end
         else
         begin
-          if Y < WallBottom then
-          begin
-            Std.Arrays.Push(Cells, WallCell(Hit))
-          end
-          else
-          begin
-            Std.Arrays.Push(Cells, ProjectFloor(Value, X, Y, SafeWidth, SafeHeight, IntToReal(SafeHeight) *
-                                                                                    TerminalAspectCorrection))
-          end
+          Std.Arrays.Push(Cells, ProjectFloor(Value, X, Y, SafeWidth, SafeHeight, IntToReal(SafeHeight) *
+                                                                                  TerminalAspectCorrection))
         end
       end
     end
