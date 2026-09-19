@@ -49,13 +49,25 @@ the player. Line of sight includes the first blocking
 wall and excludes fields behind it. Currently visible fields are derived and
 are never persisted.
 
+Wall visibility tests exposed faces rather than only wall-field centers. A
+center ray along a corridor can enter a nearer wall cell even though the next
+cell's corridor-facing surface is visible. Each exposed, player-facing side
+is tested at its midpoint and near its corners with bounded grid DDA rays;
+intervening walls and closed grid-corner contacts block those rays. The
+existing range and facing limits still apply. Traversable fields retain their
+line-of-sight test, so revealing a wall face does not reveal the room behind it.
+
 ## Projection and information boundary
 
 Protocol version 9 represents knowledge with one code per projected field:
 `u` for undiscovered, `r` for remembered, and `v` for visible. Terrain and
 interior row data use `?` wherever knowledge is `u`. The primary outdoor view
 and the first-person geometry therefore cannot disclose a hidden field to the
-client. The client styles `v` normally, dims `r`, and renders `u` as dark fog.
+client. Map views style `v` normally, dim `r`, and render `u` as dark fog.
+The first-person renderer uses only `v` geometry. Both `r` and `u` stop
+wall rays and floor samples as dark fog: remembered walls and objects cannot
+extend current sight beyond the server's visibility mask. Discovery remains
+available on the exploration map and is not erased by this presentation rule.
 
 The exploration-map request names an origin and a positive window size. The
 server limits a window to 240 by 120 fields and bounds signed origins so adding

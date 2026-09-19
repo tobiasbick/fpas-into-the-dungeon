@@ -55,7 +55,12 @@ close-wall renderer or camera placed in a neighboring field. The player's
 authoritative coordinate, collision, interaction reach, and facing do not change.
 Interior visibility includes the immediate left and right fields in addition to
 the existing forward sight cone, without revealing a whole sideways corridor.
-Unknown fields remain masked. See the client UI specification for presentation
+Unknown and remembered-but-not-currently-visible fields both stop first-person
+rays as dark fog. Wall and floor sampling consult the same server-provided
+knowledge mask; map memory never extends current first-person sight.
+The server includes exposed wall faces even when a wall's center is occluded
+by its neighbor, preventing false fog gaps in continuous corridor walls.
+See the client UI specification for presentation
 details.
 
 Rendering never changes game state and does not infer collision or hidden

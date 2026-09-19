@@ -234,7 +234,10 @@ continuous wall retains continuous edges, and recessed walls shrink with
 distance. Walls, floor, exits, and items use the same projection at every
 distance rather than switching to a special close-wall layout.
 The server exposes the immediately adjacent lateral fields, but not an entire
-side corridor. Unknown geometry stays opaque and uses its own dark material.
+side corridor. First-person geometry uses currently visible fields only.
+Unknown and remembered fields both stop the view with dark fog; previously
+visited walls cannot extend the current sight range. Remembered geometry
+remains available, dimmed, on the exploration map.
 Only the rendering eye moves backward; gameplay still uses the occupied field.
 
 First-person movement remains tile-based and server-authoritative. `W` and `S`

@@ -1,7 +1,7 @@
 // Authoritative outdoor sight, interior line of sight, and persistent discovery rules.
 unit Dungeon.Exploration;
 
-uses Dungeon.Exploration.Model, Dungeon.Game, Std.Arrays, Std.Math, Std.Results, Std.Str;
+uses Dungeon.Exploration.Model, Dungeon.Game, Std.Arrays, Std.Conv, Std.Math, Std.Results, Std.Str;
 
 public const
   // Circular outdoor sight radius in world fields.
@@ -297,8 +297,155 @@ begin
   return true
 end;
 
+function OpaqueAt(Map: InteriorMap; X: integer; Y: integer): boolean;
+begin
+  case InteriorCellAt(Map, record
+    X := X;
+    Y := Y;
+  end) of
+    Ok(Cell):
+    begin
+      return Cell = InteriorCellKind.Wall
+    end;
+    Error(Message):
+    begin
+      return true
+    end
+  end
+end;
+
+// Trace to a point just inside a wall face. Unlike a center-to-center raster
+// line, this can see the exposed surface of a wall adjoining the corridor.
+// Grid-corner contacts remain conservative: rays cannot see through wall cracks.
+function HasFaceRay(
+  Map: InteriorMap;
+  FromPosition: InteriorPosition;
+  Target: InteriorPosition;
+  SampleX: real;
+  SampleY: real
+): boolean;
+begin
+  var OriginX: real := IntToReal(FromPosition.X) + 0.5;
+  var OriginY: real := IntToReal(FromPosition.Y) + 0.5;
+  var DX: real := SampleX - OriginX;
+  var DY: real := SampleY - OriginY;
+  mutable var X: integer := FromPosition.X;
+  mutable var Y: integer := FromPosition.Y;
+  mutable var StepX: integer := 1;
+  mutable var StepY: integer := 1;
+  mutable var DeltaX: real := 1000000.0;
+  mutable var DeltaY: real := 1000000.0;
+  if DX <> 0.0 then
+  begin
+    DeltaX := Abs(1.0 / DX)
+  end;
+
+  if DY <> 0.0 then
+  begin
+    DeltaY := Abs(1.0 / DY)
+  end;
+
+  if DX < 0.0 then
+  begin
+    StepX := -1
+  end;
+
+  if DY < 0.0 then
+  begin
+    StepY := -1
+  end;
+  mutable var NextX: real := 0.5 * DeltaX;
+  mutable var NextY: real := 0.5 * DeltaY;
+  for Step: integer := 0 to Map.Width + Map.Height do
+  begin
+    if Abs(NextX - NextY) < 0.000000001 then
+    begin
+      if OpaqueAt(Map, X + StepX, Y) or OpaqueAt(Map, X, Y + StepY) then
+      begin
+        return false
+      end;
+
+      X := X + StepX;
+      Y := Y + StepY;
+      NextX := NextX + DeltaX;
+      NextY := NextY + DeltaY
+    end
+    else if NextX < NextY then
+    begin
+      X := X + StepX;
+      NextX := NextX + DeltaX
+    end
+    else
+    begin
+      Y := Y + StepY;
+      NextY := NextY + DeltaY
+    end;
+
+    if (X = Target.X) and (Y = Target.Y) then
+    begin
+      return true
+    end;
+
+    if OpaqueAt(Map, X, Y) then
+    begin
+      return false
+    end
+  end;
+
+  return false
+end;
+
+// Sample the center and near-corners of exposed faces, never a wall's hidden
+// back surface. Visibility is derived from geometry, not prior discovery.
+function HasVisibleWallFace(
+  Map: InteriorMap;
+  FromPosition: InteriorPosition;
+  Target: InteriorPosition
+): boolean;
+begin
+  var X: real := IntToReal(Target.X);
+  var Y: real := IntToReal(Target.Y);
+  for Along: real in [0.0001, 0.5, 0.9999] do
+  begin
+    if (FromPosition.X < Target.X) and not OpaqueAt(Map, Target.X - 1, Target.Y) then
+    begin
+      if HasFaceRay(Map, FromPosition, Target, X + 0.0001, Y + Along) then
+      begin
+        return true
+      end
+    end;
+
+    if (FromPosition.X > Target.X) and not OpaqueAt(Map, Target.X + 1, Target.Y) then
+    begin
+      if HasFaceRay(Map, FromPosition, Target, X + 0.9999, Y + Along) then
+      begin
+        return true
+      end
+    end;
+
+    if (FromPosition.Y < Target.Y) and not OpaqueAt(Map, Target.X, Target.Y - 1) then
+    begin
+      if HasFaceRay(Map, FromPosition, Target, X + Along, Y + 0.0001) then
+      begin
+        return true
+      end
+    end;
+
+    if (FromPosition.Y > Target.Y) and not OpaqueAt(Map, Target.X, Target.Y + 1) then
+    begin
+      if HasFaceRay(Map, FromPosition, Target, X + Along, Y + 0.9999) then
+      begin
+        return true
+      end
+    end
+  end;
+
+  return false
+end;
+
 // Derives the bounded forward sight cone plus immediate lateral neighbors.
-// The first blocking wall remains visible; fields behind it stay hidden.
+// Exposed wall faces remain visible even when their centers are occluded by
+// neighboring wall cells; fields behind those walls stay hidden.
 public function InteriorVisibility(Map: InteriorMap; Pose: FirstPersonPose): array of boolean;
 begin
   mutable var VisibleFields: array of boolean := Std.Arrays.Fill(false, Map.Width * Map.Height);
@@ -320,9 +467,16 @@ begin
       // Expose just the immediate side fields for readable junctions. The
       // forward cone, occlusion, and hidden fields farther sideways stay unchanged.
       var ImmediateSide: boolean := (Relative[0] = 0) and (Abs(Relative[1]) = 1);
-      if (InRange and (InView or ImmediateSide)) and HasLineOfSight(Map, Pose.Position, Target) then
+      if InRange and (InView or ImmediateSide) then
       begin
-        VisibleFields[(Y * Map.Width) + X] := true
+        if OpaqueAt(Map, X, Y) then
+        begin
+          VisibleFields[(Y * Map.Width) + X] := HasVisibleWallFace(Map, Pose.Position, Target)
+        end
+        else
+        begin
+          VisibleFields[(Y * Map.Width) + X] := HasLineOfSight(Map, Pose.Position, Target)
+        end
       end
     end
   end;
