@@ -19,8 +19,8 @@ test seams without defining the wider game.
 - The initial server accepts one active client at a time.
 
 No game time passes without a player intention. The slice has no combat,
-mutable-world persistence, authentication, TLS, multiplayer state, or LLM
-integration.
+general mutable-world simulation, authentication, TLS, multiplayer state, or
+LLM integration.
 
 ## Protocol
 
@@ -32,13 +32,13 @@ only after `new_game` or `load_game`.
 
 ```text
 Client: hello, new_game, load_game, save_game, viewport, move,
-        first_person_step, first_person_turn, interact, exploration_map,
-        disconnect
-Server: welcome, state, interaction, exploration_map, save_completed,
-        rejected, error
+         first_person_step, first_person_turn, interact, exploration_map,
+         dialogue_choice, end_dialogue, disconnect
+Server: welcome, state, interaction, exploration_map, dialogue,
+        dialogue_ended, save_completed, rejected, error
 ```
 
-Protocol version `9` is included in the handshake. `hello` includes the initial
+Protocol version `10` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.

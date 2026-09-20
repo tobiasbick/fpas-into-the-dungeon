@@ -45,8 +45,8 @@ exit reuse the same selected world session and chunk cache.
 
 ## Versions and lifecycle
 
-World and chunk format version `2`, generator version `5`, protocol version `9`,
-and savegame format `1` are required. Development data from older schemas is
+World and chunk format version `2`, generator version `5`, protocol version `10`,
+and savegame format `4` are required. Development data from older schemas is
 rejected without migrations, fallbacks, or compatibility paths. The retained
 return location is part of the authoritative savegame, so a saved interior can
 be loaded and later return to its exact outdoor coordinate. Connecting alone

@@ -88,6 +88,8 @@ are described in [interaction](interaction.md).
 The server-owned item state, inventory projection, pickup semantics, and
 persistence boundary are described in
 [items and inventory](items-and-inventory.md).
+The fixed NPC, deterministic dialogue graph, session lifecycle, and persistence
+boundary are described in [NPCs and simple dialogue](npcs-and-dialogue.md).
 
 ## Runtime data
 

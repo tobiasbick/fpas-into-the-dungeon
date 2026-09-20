@@ -1,0 +1,121 @@
+// Verifies dialogue wire round trips, strict schemas, bounds, and malformed-message rejection.
+program DungeonDialogueProtocolTest;
+
+uses Dungeon.Protocol, Std.Arrays, Std.Results, Std.Str, Std.Test;
+
+begin
+  case Unwrap(DecodeClient(EncodeClient(ClientMessage.DialogueChoice('identity')))) of
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      AssertEquals('identity', ChoiceId)
+    end
+    else
+    begin
+      panic('expected dialogue-choice message')
+    end
+  end;
+
+  case Unwrap(DecodeClient(EncodeClient(ClientMessage.EndDialogue))) of
+    ClientMessage.EndDialogue:
+    begin
+    end
+    else
+    begin
+      panic('expected end-dialogue message')
+    end
+  end;
+  var Dialogue: VisibleDialogue := record
+    NpcId := 'initial-dungeon:old-adventurer';
+    Speaker := 'Mara, the old adventurer';
+    Text := 'What would you like to know?';
+    Choices := [
+                 record
+                   Id := 'identity';
+                   Text := 'Who are you?';
+                 end,
+                 record
+                   Id := 'goodbye';
+                   Text := 'Goodbye.';
+                 end
+               ];
+  end;
+  var Encoded: string := EncodeServer(ServerMessage.Dialogue(Dialogue));
+  case Unwrap(DecodeServer(Encoded)) of
+    ServerMessage.Dialogue(Value):
+    begin
+      AssertEquals(Dialogue.NpcId, Value.NpcId);
+      AssertEquals(Dialogue.Speaker, Value.Speaker);
+      AssertEquals(Dialogue.Text, Value.Text);
+      AssertEquals(2, Std.Arrays.Length(Value.Choices));
+      AssertEquals('identity', Value.Choices[0].Id);
+      AssertEquals('Goodbye.', Value.Choices[1].Text)
+    end
+    else
+    begin
+      panic('expected dialogue message')
+    end
+  end;
+
+  case Unwrap(DecodeServer(EncodeServer(ServerMessage.DialogueEnded))) of
+    ServerMessage.DialogueEnded:
+    begin
+    end
+    else
+    begin
+      panic('expected dialogue-ended message')
+    end
+  end;
+
+  AssertTrue(IsError(DecodeClient('{"type":"dialogue_choice"}')));
+  AssertTrue(IsError(DecodeClient('{"type":"dialogue_choice","choice_id":""}')));
+  AssertTrue(IsError(DecodeClient('{"type":"dialogue_choice","choice_id":1}')));
+  AssertTrue(IsError(DecodeClient('{"type":"dialogue_choice","choice_id":"identity","extra":1}')));
+  AssertTrue(IsError(DecodeClient(('{"type":"dialogue_choice","choice_id":"' + Std.Str.RepeatStr('x', MaximumDialogueIdLength +
+                                                                                                      1)) +
+                                  '"}')));
+  AssertTrue(IsOk(DecodeClient(('{"type":"dialogue_choice","choice_id":"' + Std.Str.RepeatStr('x', MaximumDialogueIdLength)) +
+                               '"}')));
+  AssertTrue(IsError(DecodeClient('{"type":"end_dialogue","extra":1}')));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"npc_id":"initial-dungeon:old-adventurer",', ''))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"speaker":"Mara, the old adventurer",', ''))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"text":"What would you like to know?",', ''))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"choices":[', '"extra":1,"choices":['))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"npc_id":"initial-dungeon:old-adventurer"', '"npc_id":""'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"speaker":"Mara, the old adventurer"', '"speaker":""'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"text":"What would you like to know?"', '"text":""'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"choices":[{"id":"identity","text":"Who are you?"},{"id":"goodbye","text":"Goodbye."}]', '"choices":[]'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"choices":[', '"choices":42,"unused":['))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '{"id":"identity","text":"Who are you?"}', '42'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"id":"identity"', '"id":""'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"text":"Who are you?"', '"text":""'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"id":"identity"', '"id":1'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"text":"Who are you?"', '"text":1'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"text":"Who are you?"', '"text":"Who are you?","extra":1'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(Encoded, '"id":"goodbye"', '"id":"identity"'))));
+  AssertTrue(IsError(DecodeServer(('{"type":"dialogue","npc_id":"n","speaker":"s","text":"t","choices":[' + '{"id":"1","text":"1"},{"id":"2","text":"2"},{"id":"3","text":"3"},') +
+                                  '{"id":"4","text":"4"},{"id":"5","text":"5"}]}')));
+  AssertTrue(IsOk(DecodeServer(('{"type":"dialogue","npc_id":"n","speaker":"s","text":"t","choices":[' + '{"id":"1","text":"1"},{"id":"2","text":"2"},{"id":"3","text":"3"},') +
+                               '{"id":"4","text":"4"}]}')));
+  AssertTrue(IsError(DecodeServer(('{"type":"dialogue","npc_id":"' + Std.Str.RepeatStr('n', MaximumDialogueIdLength +
+                                                                                            1)) +
+                                  '","speaker":"s","text":"t","choices":[{"id":"c","text":"t"}]}')));
+  AssertTrue(IsError(DecodeServer(('{"type":"dialogue","npc_id":"n","speaker":"' + Std.Str.RepeatStr('s', MaximumDialogueTextLength +
+                                                                                                          1)) +
+                                  '","text":"t","choices":[{"id":"c","text":"t"}]}')));
+  AssertTrue(IsError(DecodeServer(('{"type":"dialogue","npc_id":"n","speaker":"s","text":"' + Std.Str.RepeatStr('t', MaximumDialogueTextLength +
+                                                                                                                     1)) +
+                                  '","choices":[{"id":"c","text":"t"}]}')));
+  AssertTrue(IsError(DecodeServer(('{"type":"dialogue","npc_id":"n","speaker":"s","text":"t","choices":[{"id":"c","text":"' + Std.Str.RepeatStr('t', MaximumDialogueTextLength +
+                                                                                                                                                     1)) +
+                                  '"}]}')));
+  var BoundaryEncoded: string := ((((('{"type":"dialogue","npc_id":"' + Std.Str.RepeatStr('n', MaximumDialogueIdLength)) + ('","speaker":"' + Std.Str.RepeatStr('s', MaximumVisibleInventoryTextLength))) + ('","text":"' + Std.Str.RepeatStr('t', MaximumDialogueTextLength))) + ('","choices":[{"id":"' + Std.Str.RepeatStr('c', MaximumDialogueIdLength))) + ('","text":"' + Std.Str.RepeatStr('v', MaximumVisibleInventoryTextLength))) +
+                                 '"}]}';
+  AssertTrue(IsOk(DecodeServer(BoundaryEncoded)));
+  AssertTrue(IsError(DecodeServer(('{"type":"dialogue","npc_id":"n","speaker":"' + Std.Str.RepeatStr('s', MaximumVisibleInventoryTextLength +
+                                                                                                          1)) +
+                                  '","text":"t","choices":[{"id":"c","text":"t"}]}')));
+  AssertTrue(IsError(DecodeServer(('{"type":"dialogue","npc_id":"n","speaker":"s","text":"t","choices":[{"id":"c","text":"' + Std.Str.RepeatStr('v', MaximumVisibleInventoryTextLength +
+                                                                                                                                                     1)) +
+                                  '"}]}')));
+  AssertTrue(IsError(DecodeServer('{"type":"dialogue_ended","extra":1}')))
+end.

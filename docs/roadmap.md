@@ -203,7 +203,8 @@ Phase 10 is complete only when every item above is checked and game, protocol,
 persistence, client, server, rendering, and end-to-end tests cover the complete
 path.
 
-The implemented slice uses protocol version 9 and savegame format 3. Unit,
+The Phase 10 checkpoint introduced protocol version 9 and savegame format 3;
+the current versions advance with Phase 11. Unit,
 negative, edge-case, protocol, persistence, headless-TUI, loopback, restart,
 full-session, and real-process smoke tests cover the complete path. See
 [items and inventory](architecture/items-and-inventory.md).
@@ -211,24 +212,52 @@ full-session, and real-process smoke tests cover the complete path. See
 Dropping, equipping, using, stacking, capacity limits, random loot, containers,
 shops, and an economy remain outside this phase.
 
-### Presentation follow-up — OPEN
+### Presentation follow-up — ACCEPTED FOR THIS CHECKPOINT
 
-The current dungeon projection and split sidebar are retained as an intermediate
-checkpoint, not an accepted final visual design. The item loop remains complete;
-further visual work will be discussed separately.
+The current dungeon projection and split sidebar are accepted as an intermediate
+checkpoint, not a final visual design. The item loop remains complete; further
+visual work may be discussed separately without reopening Phase 10.
 
 - [x] Use one coherent wall/floor projection and cover lateral openings with tests.
 - [x] Separate environment hints from character and inventory information.
 - [x] Cover fixed panel height, text wrapping, hidden-sidebar fallback, and
   narrow/short-terminal behavior.
-- [ ] Revisit the first-person visual presentation and Ancient coin appearance
-  with the user before treating their visual design as final.
+- [x] Accept the current first-person presentation and Ancient coin appearance
+  as sufficient for the first playable checkpoint.
 
-## 11. NPCs and simple dialogue — LATER
+## 11. NPCs and simple dialogue — IN REVIEW
 
 Introduce one server-owned NPC and one deterministic conversation without LLM
-involvement. Dialogue structure, persistence, and presentation will be designed
-as a separate slice before implementation.
+involvement. The first implementation places **Mara, the old adventurer** at a
+fixed blocking field in the initial dungeon.
+
+- [x] Give the NPC a stable identity, validated placement, blocking collision,
+  and current-visibility-only projection.
+- [x] Start dialogue with `Enter` only while the NPC is directly ahead.
+- [x] Keep the typed dialogue graph and available choices server-authoritative.
+- [x] Offer first/repeat greetings and a conditional Ancient coin question
+  without taking or changing the item.
+- [x] Present dialogue in a framed client overlay with wrapping selection,
+  answer, and explicit leave controls.
+- [x] Block unrelated client input and server intentions while dialogue is active.
+- [x] Persist only whether the NPC has met the player; never persist an active
+  conversation or client selection.
+- [x] Hide dynamic NPC presence from remembered Fog of War fields.
+- [x] Cover success, malformed input, unavailable choices, bounds, collision,
+  visibility, persistence, reconnect, narrow TUI, network adapter, and complete
+  TCP session behavior.
+- [x] Synchronize architecture, product terminology, UI, persistence, and
+  roadmap documentation.
+- [ ] Review the complete NPC and dialogue slice with the user and obtain
+  explicit acceptance.
+
+The implemented slice uses protocol version 10 and savegame format 4. It uses
+ordinary Functional Pascal data and functions rather than a scripting system.
+See [NPCs and simple dialogue](architecture/npcs-and-dialogue.md).
+
+Moving NPCs, schedules, quests, general dialogue scripting, free-text input,
+branching world effects, and LLM-generated behavior remain outside this phase.
+Phase 11 is not complete or approved until the open acceptance item is checked.
 
 ## 12. Combat — LATER
 

@@ -59,7 +59,7 @@ line-of-sight test, so revealing a wall face does not reveal the room behind it.
 
 ## Projection and information boundary
 
-Protocol version 9 represents knowledge with one code per projected field:
+Protocol version 10 represents knowledge with one code per projected field:
 `u` for undiscovered, `r` for remembered, and `v` for visible. Terrain and
 interior row data use `?` wherever knowledge is `u`. The primary outdoor view
 and the first-person geometry therefore cannot disclose a hidden field to the
@@ -68,6 +68,9 @@ The first-person renderer uses only `v` geometry. Both `r` and `u` stop
 wall rays and floor samples as dark fog: remembered walls and objects cannot
 extend current sight beyond the server's visibility mask. Discovery remains
 available on the exploration map and is not erased by this presentation rule.
+Dynamic item and NPC codes occur only in currently visible fields. A remembered
+field projects its static floor or wall instead, so discovery does not claim
+that an object or character is still present.
 
 The exploration-map request names an origin and a positive window size. The
 server limits a window to 240 by 120 fields and bounds signed origins so adding
@@ -103,8 +106,8 @@ status view. Overlay input never becomes a movement or transition intention.
 
 ## Persistence
 
-Savegame format 3 stores accumulated discovery in the authoritative game
-snapshot together with item state. Outdoor masks are records containing signed
+Savegame format 4 stores accumulated discovery in the authoritative game
+snapshot together with item and NPC state. Outdoor masks are records containing signed
 `chunk_x`, `chunk_y`, and exactly 128 strings of 128 `0` or `1` characters. Interior records contain
 `area_id`, `width`, `height`, and exactly one equally sized `0`/`1` row per
 field row. Missing, extra, duplicate, unordered, empty, malformed, unknown, or

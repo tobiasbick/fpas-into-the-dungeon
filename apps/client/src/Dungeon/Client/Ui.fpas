@@ -597,6 +597,59 @@ begin
   end
 end;
 
+function QueueDialogueChoice(State: ClientModel): ClientModel;
+begin
+  if ((State.Overlay <> ClientOverlay.DialogueOverlay) or State.Pending) or
+     ((State.DialogueSelection < 0) or (State.DialogueSelection >= Std.Arrays.Length(State.DialogueChoices))) then
+  begin
+    return State
+  end;
+  var Choice: VisibleDialogueChoice := State.DialogueChoices[State.DialogueSelection];
+  case TrySend(State.Requests, ClientMessage.DialogueChoice(Choice.Id)) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := 'Responding...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
+function QueueDialogueEnd(State: ClientModel): ClientModel;
+begin
+  if (State.Overlay <> ClientOverlay.DialogueOverlay) or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, ClientMessage.EndDialogue) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := 'Ending conversation...';
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
 function ToggleContext(State: ClientModel): ClientModel;
 begin
   mutable var Next: ClientModel := State;
@@ -860,6 +913,49 @@ begin
     return Next
   end;
 
+  if State.Overlay = ClientOverlay.DialogueOverlay then
+  begin
+    if State.Pending then
+    begin
+      return State
+    end;
+
+    if Key.kind = TuiKeyKind.Escape then
+    begin
+      return QueueDialogueEnd(State)
+    end;
+    mutable var Next: ClientModel := State;
+    var ChoiceCount: integer := Std.Arrays.Length(State.DialogueChoices);
+    if ((Key.kind = TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W')) and (ChoiceCount > 0) then
+    begin
+      Next.DialogueSelection := State.DialogueSelection - 1;
+      if Next.DialogueSelection < 0 then
+      begin
+        Next.DialogueSelection := ChoiceCount - 1
+      end;
+
+      return Next
+    end;
+
+    if ((Key.kind = TuiKeyKind.Down) or HasCharacter(Key, 's', 'S')) and (ChoiceCount > 0) then
+    begin
+      Next.DialogueSelection := State.DialogueSelection + 1;
+      if Next.DialogueSelection >= ChoiceCount then
+      begin
+        Next.DialogueSelection := 0
+      end;
+
+      return Next
+    end;
+
+    if Key.kind = TuiKeyKind.Enter then
+    begin
+      return QueueDialogueChoice(State)
+    end;
+
+    return State
+  end;
+
   if IsCtrlCharacter(Key, 'p', 'P') then
   begin
     if State.Overlay = ClientOverlay.SystemMenuOverlay then
@@ -1112,6 +1208,11 @@ begin
         Next.Overlay := ClientOverlay.DescriptionOverlay
       end;
 
+      if State.Overlay = ClientOverlay.DialogueOverlay then
+      begin
+        Next.Overlay := ClientOverlay.DialogueOverlay
+      end;
+
       Next.ConnectionPhase := ClientConnectionPhase.Active;
       Next.FocusedControl := 0;
       Next.HasVisibleState := true;
@@ -1228,6 +1329,32 @@ begin
       end;
 
       return AppendMessage(Next, Message)
+    end;
+    ClientEvent.Dialogue(Value):
+    begin
+      Next.Pending := false;
+      Next.Overlay := ClientOverlay.DialogueOverlay;
+      Next.FocusedControl := 0;
+      Next.DialogueNpcId := Value.NpcId;
+      Next.DialogueSpeaker := Value.Speaker;
+      Next.DialogueText := Value.Text;
+      Next.DialogueChoices := Value.Choices;
+      Next.DialogueSelection := 0;
+      Next.Status := 'Talking to ' + Value.Speaker;
+      return Next
+    end;
+    ClientEvent.DialogueEnded:
+    begin
+      Next.Pending := false;
+      Next.Overlay := ClientOverlay.NoOverlay;
+      Next.FocusedControl := 0;
+      Next.DialogueNpcId := '';
+      Next.DialogueSpeaker := '';
+      Next.DialogueText := '';
+      Next.DialogueChoices := [];
+      Next.DialogueSelection := 0;
+      Next.Status := 'Connected';
+      return Next
     end;
     ClientEvent.SaveCompleted:
     begin
@@ -1455,6 +1582,10 @@ begin
     'i':
     begin
       return ColoredCell('●', 255, 220, 96, 78, 57, 24)
+    end;
+    'n':
+    begin
+      return ColoredCell('♟', 225, 210, 255, 62, 43, 82)
     end
     else
     begin
@@ -1964,6 +2095,38 @@ begin
                                                                 ])
 end;
 
+function ViewDialogue(State: ClientModel): TuiElement;
+begin
+  mutable var Width: integer := State.ViewportWidth - 8;
+  if Width > 64 then
+  begin
+    Width := 64
+  end;
+  mutable var Content: array of TuiElement := [];
+  for Line: string in WrappedLines(State.DialogueText, Width) do
+  begin
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(Line))
+  end;
+
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(''));
+  for Index: integer := 0 to Std.Arrays.Length(State.DialogueChoices) - 1 do
+  begin
+    mutable var Prefix: string := '  ';
+    if Index = State.DialogueSelection then
+    begin
+      Prefix := '> '
+    end;
+
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(Prefix + State.DialogueChoices[Index].Text))
+  end;
+
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(''));
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('W/S or arrows select  Enter answer  Esc leave'));
+  return TuiElementBuilders.MakeOverlay(State.DialogueSpeaker, [
+                                                                 TuiElementBuilders.MakeColumn(Content)
+                                                               ])
+end;
+
 function ViewOverlay(State: ClientModel): TuiElement;
 begin
   case State.Overlay of
@@ -1998,6 +2161,10 @@ begin
     ClientOverlay.ExplorationMapOverlay:
     begin
       return ViewExplorationMap(State)
+    end;
+    ClientOverlay.DialogueOverlay:
+    begin
+      return ViewDialogue(State)
     end;
     ClientOverlay.NoOverlay:
     begin

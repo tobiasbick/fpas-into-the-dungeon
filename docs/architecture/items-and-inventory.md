@@ -33,7 +33,7 @@ requirements justify it.
 
 ## Protocol and presentation
 
-Protocol version 9 projects visible inventory entries as stable ID and display
+Protocol version 10 projects visible inventory entries as stable ID and display
 name pairs. Both map and first-person visible states carry the same bounded,
 validated inventory projection. The dungeon uses cell code `i` only while the
 coin remains on its field and Fog of War permits that field to be shown.
@@ -60,11 +60,11 @@ narrow-screen overlay; no new preference or configuration schema is introduced.
 
 ## Persistence
 
-Savegame format 3 stores the complete item array alongside player, return, and
+Savegame format 4 stores the complete item array alongside player, return, and
 exploration state. Each location is an explicit variant: an interior area and
 field, or carried by the player. Loading validates the full state before it can
-replace the active game. Format 2 and other obsolete schemas are rejected and
-removed according to the current-version-only configuration and save policy.
+replace the active game. Format 3 and all other obsolete schemas are rejected
+and removed according to the current-version-only configuration and save policy.
 
 An explicit save is the only persistence boundary. Disconnecting, reconnecting,
 or rendering cannot change item ownership. Saving and loading a carried coin

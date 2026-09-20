@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, St
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 9;
+  ProtocolVersion: integer := 10;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
   // Largest exploration-map window that remains below the line-size limit with two row planes.
@@ -16,6 +16,10 @@ public const
   // Defensive bounds for client-safe inventory summaries in visible-state messages.
   MaximumVisibleInventoryItems: integer := 64;
   MaximumVisibleInventoryTextLength: integer := 128;
+  // Defensive bounds for one deterministic dialogue frame.
+  MaximumDialogueChoices: integer := 4;
+  MaximumDialogueIdLength: integer := 128;
+  MaximumDialogueTextLength: integer := 2048;
 
 public type
   // Selects the renderer the client must use for a visible state.
@@ -46,6 +50,18 @@ public type
   VisibleInventoryItem = record
     public Id: string;
     public Name: string;
+  end;
+  // One stable server-provided response displayed by the dialogue overlay.
+  VisibleDialogueChoice = record
+    public Id: string;
+    public Text: string;
+  end;
+  // Complete current dialogue frame; the client never derives available choices.
+  VisibleDialogue = record
+    public NpcId: string;
+    public Speaker: string;
+    public Text: string;
+    public Choices: array of VisibleDialogueChoice;
   end;
   // Client-safe map projection; dimensions, rows, and player coordinates must agree.
   MapVisibleState = record
@@ -111,6 +127,10 @@ public type
     TurnFirstPerson(Direction: FirstPersonTurnDirection);
     // Requests server-side interaction with the current field or field directly ahead.
     Interact;
+    // Selects one stable response from the active server-owned dialogue frame.
+    DialogueChoice(ChoiceId: string);
+    // Ends the active dialogue without changing persistent game state.
+    EndDialogue;
     Disconnect;
   end;
   // Handshake, including save availability/removal, visible state, and structured outcomes.
@@ -120,6 +140,10 @@ public type
     ExplorationMap(Value: ExplorationMapState);
     // Read-only result; nonempty title opens a description, empty title denotes status feedback.
     Interaction(Title: string; Message: string);
+    // Starts or advances one server-owned deterministic dialogue.
+    Dialogue(Value: VisibleDialogue);
+    // Acknowledges that no dialogue remains active for this connection.
+    DialogueEnded;
     SaveCompleted;
     Rejected(Code: string; Message: string);
     ErrorMessage(Code: string; Message: string);
@@ -355,7 +379,8 @@ end;
 
 function IsFirstPersonCellCode(Value: string): boolean;
 begin
-  return (Value = '?') or ((Value = '#') or ((Value = 't') or ((Value = 'i') or ((Value = '.') or (Value = 'x')))))
+  return (Value = '?') or
+         ((Value = '#') or ((Value = 't') or ((Value = 'i') or ((Value = 'n') or ((Value = '.') or (Value = 'x'))))))
 end;
 
 function IsKnowledgeCode(Value: string): boolean;
@@ -422,13 +447,71 @@ begin
   mutable var Values: array of JsonValue := [];
   for Item: VisibleInventoryItem in Items do
   begin
-    Std.Arrays.Push(Values, JsonValue.Object([
-                                              'id': JsonValue.String(Item.Id),
-                                              'name': JsonValue.String(Item.Name)
-                                            ]))
+    Std.Arrays.Push(Values, JsonValue.Object(['id': JsonValue.String(Item.Id), 'name': JsonValue.String(Item.Name)]))
   end;
 
   return Values
+end;
+
+function EncodeDialogueChoices(Choices: array of VisibleDialogueChoice): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Choice: VisibleDialogueChoice in Choices do
+  begin
+    Std.Arrays.Push(Values, JsonValue.Object(['id': JsonValue.String(Choice.Id), 'text': JsonValue.String(Choice.Text)]))
+  end;
+
+  return Values
+end;
+
+function ValidateDialogue(Value: VisibleDialogue): result of VisibleDialogue, string;
+begin
+  if (Std.Str.Length(Value.NpcId) = 0) or (Std.Str.Length(Value.NpcId) > MaximumDialogueIdLength) then
+  begin
+    return Error('dialogue NPC id has an invalid length')
+  end;
+
+  if (Std.Str.Length(Value.Speaker) = 0) or
+     (Std.Str.Length(Value.Speaker) > MaximumVisibleInventoryTextLength) then
+  begin
+    return Error('dialogue speaker has an invalid length')
+  end;
+
+  if (Std.Str.Length(Value.Text) = 0) or (Std.Str.Length(Value.Text) > MaximumDialogueTextLength) then
+  begin
+    return Error('dialogue text has an invalid length')
+  end;
+
+  if (Std.Arrays.Length(Value.Choices) = 0) or
+     (Std.Arrays.Length(Value.Choices) > MaximumDialogueChoices) then
+  begin
+    return Error('dialogue choice count is outside protocol limits')
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(Value.Choices) - 1 do
+  begin
+    var Choice: VisibleDialogueChoice := Value.Choices[Index];
+    if (Std.Str.Length(Choice.Id) = 0) or (Std.Str.Length(Choice.Id) > MaximumDialogueIdLength) then
+    begin
+      return Error('dialogue choice id has an invalid length')
+    end;
+
+    if (Std.Str.Length(Choice.Text) = 0) or
+       (Std.Str.Length(Choice.Text) > MaximumVisibleInventoryTextLength) then
+    begin
+      return Error('dialogue choice text has an invalid length')
+    end;
+
+    for Earlier: integer := 0 to Index - 1 do
+    begin
+      if Value.Choices[Earlier].Id = Choice.Id then
+      begin
+        return Error('dialogue contains a duplicate choice id')
+      end
+    end
+  end;
+
+  return Ok(Value)
 end;
 
 function StringArrayField(Fields: dict of string to JsonValue; Name: string): result of array of string, string;
@@ -470,12 +553,14 @@ begin
   for Index: integer := 0 to Std.Arrays.Length(Items) - 1 do
   begin
     var Item: VisibleInventoryItem := Items[Index];
-    if (Std.Str.Length(Item.Id) = 0) or (Std.Str.Length(Item.Id) > MaximumVisibleInventoryTextLength) then
+    if (Std.Str.Length(Item.Id) = 0) or
+       (Std.Str.Length(Item.Id) > MaximumVisibleInventoryTextLength) then
     begin
       return Error('visible inventory item id has an invalid length')
     end;
 
-    if (Std.Str.Length(Item.Name) = 0) or (Std.Str.Length(Item.Name) > MaximumVisibleInventoryTextLength) then
+    if (Std.Str.Length(Item.Name) = 0) or
+       (Std.Str.Length(Item.Name) > MaximumVisibleInventoryTextLength) then
     begin
       return Error('visible inventory item name has an invalid length')
     end;
@@ -598,7 +683,7 @@ begin
     return Error('first-person player position is outside the area')
   end;
 
-  if ((Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#') or (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = 't')) or
+  if (((Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#') or (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = 't')) or (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = 'n')) or
      (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '?') then
   begin
     return Error('first-person player position must be traversable')
@@ -750,10 +835,7 @@ begin
   end
 end;
 
-function InventoryField(
-  Fields: dict of string to JsonValue;
-  Name: string
-): result of array of VisibleInventoryItem, string;
+function InventoryField(Fields: dict of string to JsonValue; Name: string): result of array of VisibleInventoryItem, string;
 begin
   case try RequiredField(Fields, Name) of
     JsonValue.ArrayValue(Values):
@@ -788,6 +870,58 @@ begin
       return Error('message field inventory must be an array')
     end
   end
+end;
+
+function DialogueChoicesField(Fields: dict of string to JsonValue; Name: string): result of array of VisibleDialogueChoice, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.ArrayValue(Values):
+    begin
+      mutable var Choices: array of VisibleDialogueChoice := [];
+      for Value: JsonValue in Values do
+      begin
+        case Value of
+          JsonValue.Object(ChoiceFields):
+          begin
+            if Std.Dictionaries.Length(ChoiceFields) <> 2 then
+            begin
+              return Error('dialogue choice must contain only id and text')
+            end;
+
+            Std.Arrays.Push(Choices, record
+              Id := try StringField(ChoiceFields, 'id');
+              Text := try StringField(ChoiceFields, 'text');
+            end)
+          end
+          else
+          begin
+            return Error('dialogue choices must contain only objects')
+          end
+        end
+      end;
+
+      return Ok(Choices)
+    end
+    else
+    begin
+      return Error('message field choices must be an array')
+    end
+  end
+end;
+
+function DecodeDialogue(Fields: dict of string to JsonValue): result of VisibleDialogue, string;
+begin
+  if Std.Dictionaries.Length(Fields) <> 5 then
+  begin
+    return Error('dialogue must contain only type, npc_id, speaker, text, and choices')
+  end;
+
+  return ValidateDialogue(record
+    NpcId := try StringField(Fields, 'npc_id');
+    Speaker := try StringField(Fields, 'speaker');
+    Text := try StringField(Fields, 'text');
+    Choices := try DialogueChoicesField(Fields, 'choices');
+  end)
 end;
 
 function ObjectFields(Text: string): result of dict of string to JsonValue, string;
@@ -847,6 +981,14 @@ begin
     ClientMessage.Interact:
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('interact')]))
+    end;
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('dialogue_choice'), 'choice_id': JsonValue.String(ChoiceId)]))
+    end;
+    ClientMessage.EndDialogue:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('end_dialogue')]))
     end;
     ClientMessage.Disconnect:
     begin
@@ -964,6 +1106,29 @@ begin
 
       return Ok(ClientMessage.Interact)
     end;
+    'dialogue_choice':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 2 then
+      begin
+        return Error('dialogue_choice must contain only type and choice_id')
+      end;
+      var ChoiceId: string := try StringField(Fields, 'choice_id');
+      if (Std.Str.Length(ChoiceId) = 0) or (Std.Str.Length(ChoiceId) > MaximumDialogueIdLength) then
+      begin
+        return Error('dialogue choice id has an invalid length')
+      end;
+
+      return Ok(ClientMessage.DialogueChoice(ChoiceId))
+    end;
+    'end_dialogue':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('end_dialogue must not contain additional fields')
+      end;
+
+      return Ok(ClientMessage.EndDialogue)
+    end;
     'disconnect':
     begin
       if Std.Dictionaries.Length(Fields) <> 1 then
@@ -1008,6 +1173,14 @@ begin
     ServerMessage.Interaction(Title, MessageText):
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('interaction'), 'title': JsonValue.String(Title), 'message': JsonValue.String(MessageText)]))
+    end;
+    ServerMessage.Dialogue(Value):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('dialogue'), 'npc_id': JsonValue.String(Value.NpcId), 'speaker': JsonValue.String(Value.Speaker), 'text': JsonValue.String(Value.Text), 'choices': JsonValue.ArrayValue(EncodeDialogueChoices(Value.Choices))]))
+    end;
+    ServerMessage.DialogueEnded:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('dialogue_ended')]))
     end;
     ServerMessage.SaveCompleted:
     begin
@@ -1130,6 +1303,19 @@ begin
       end;
 
       return Ok(ServerMessage.Interaction(try StringField(Fields, 'title'), MessageText))
+    end;
+    'dialogue':
+    begin
+      return Ok(ServerMessage.Dialogue(try DecodeDialogue(Fields)))
+    end;
+    'dialogue_ended':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('dialogue_ended must not contain additional fields')
+      end;
+
+      return Ok(ServerMessage.DialogueEnded)
     end;
     'rejected':
     begin

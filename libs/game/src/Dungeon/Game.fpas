@@ -1,4 +1,4 @@
-// Authoritative coordinates, terrain, generation, movement, interaction, and item rules.
+// Authoritative coordinates, terrain, movement, interaction, item, NPC, and dialogue rules.
 unit Dungeon.Game;
 
 uses Dungeon.Exploration.Model, Std.Arrays, Std.Math, Std.Results, Std.Str;
@@ -18,6 +18,14 @@ public const
   InitialDungeonItemId: string := 'initial-dungeon:ancient-coin';
   InitialDungeonItemName: string := 'Ancient coin';
   InitialDungeonItemDescription: string := 'A heavy, tarnished coin marked with a doorway beneath a crescent moon.';
+  // Stable identity and player-facing name of the first non-player character.
+  InitialDungeonNpcId: string := 'initial-dungeon:old-adventurer';
+  InitialDungeonNpcName: string := 'Mara, the old adventurer';
+  // Stable choice identities understood by the initial deterministic dialogue.
+  DialogueChoiceIdentity: string := 'identity';
+  DialogueChoiceDungeon: string := 'dungeon';
+  DialogueChoiceCoin: string := 'coin';
+  DialogueChoiceGoodbye: string := 'goodbye';
 
 public type
   // Distinguishes outdoor maps from finite first-person interiors and dungeons.
@@ -51,6 +59,28 @@ public type
     public Id: string;
     public Kind: ItemKind;
     public Location: ItemLocation;
+  end;
+  // Identifies the one NPC kind introduced by the first dialogue slice.
+  NpcKind = enum
+    OldAdventurer;
+  end;
+  // Persistent state of the fixed initial NPC; location remains part of the area definition.
+  GameNpc = record
+    public Id: string;
+    public Kind: NpcKind;
+    public HasMetPlayer: boolean;
+  end;
+  // One stable server-owned response offered by a dialogue frame.
+  NpcDialogueChoice = record
+    public Id: string;
+    public Text: string;
+  end;
+  // Client-safe dialogue content derived from authoritative game state.
+  NpcDialogue = record
+    public NpcId: string;
+    public Speaker: string;
+    public Text: string;
+    public Choices: array of NpcDialogueChoice;
   end;
   // Cardinal orientation retained for grid-based first-person movement.
   FacingDirection = enum
@@ -89,6 +119,8 @@ public type
     public Tablet: InteriorPosition;
     // Initial floor placement of the first collectible item.
     public Item: InteriorPosition;
+    // Fixed blocking floor placement of the first non-player character.
+    public Npc: InteriorPosition;
   end;
   // Position and facing retained while the player occupies a first-person area.
   FirstPersonPose = record
@@ -192,6 +224,8 @@ public type
     public Exploration: ExplorationState;
     // Persistent server-owned item locations and inventory ownership.
     public Items: array of GameItem;
+    // Persistent state of the fixed initial non-player character.
+    public Npc: GameNpc;
   end;
   // Successful server-side resolution of one interaction intention.
   InteractionOutcome = enum
@@ -201,6 +235,13 @@ public type
     StateChanged(State: GameState);
     // Read-only information; an empty title denotes short feedback rather than inspection content.
     Described(Title: string; Text: string);
+    // Starts a server-owned dialogue and returns the updated persistent NPC state.
+    DialogueStarted(State: GameState; Dialogue: NpcDialogue);
+  end;
+  // Resolution of one choice in an already active server-side dialogue session.
+  DialogueOutcome = enum
+    Continued(State: GameState; Dialogue: NpcDialogue);
+    Ended(State: GameState);
   end;
 
 type
@@ -1220,11 +1261,22 @@ begin
   begin
     return Error('interior item coordinate must name a floor field')
   end;
+  var NpcCell: InteriorCellKind := try InteriorCellAt(Map, Map.Npc);
+  if NpcCell <> InteriorCellKind.Floor then
+  begin
+    return Error('interior NPC coordinate must name a floor field')
+  end;
 
   if ((Map.Item.X = Map.Start.X) and (Map.Item.Y = Map.Start.Y)) or
      ((Map.Item.X = Map.Exit.X) and (Map.Item.Y = Map.Exit.Y)) then
   begin
     return Error('interior item coordinate must differ from start and exit')
+  end;
+
+  if (((Map.Npc.X = Map.Start.X) and (Map.Npc.Y = Map.Start.Y)) or ((Map.Npc.X = Map.Exit.X) and (Map.Npc.Y = Map.Exit.Y))) or
+     ((Map.Npc.X = Map.Item.X) and (Map.Npc.Y = Map.Item.Y)) then
+  begin
+    return Error('interior NPC coordinate must differ from start, exit, and item')
   end;
   mutable var ExitCount: integer := 0;
   mutable var TraversableCount: integer := 0;
@@ -1312,6 +1364,14 @@ begin
   end
 end;
 
+function InitialDungeonNpcPosition(): InteriorPosition;
+begin
+  return record
+    X := 1;
+    Y := 1;
+  end
+end;
+
 // Creates the fixed, hand-authored initial dungeon used by the first interior slice.
 public function InitialDungeonMap(): result of InteriorMap, string;
 begin
@@ -1353,6 +1413,7 @@ begin
       Y := 0;
     end;
     Item := InitialDungeonItemPosition();
+    Npc := InitialDungeonNpcPosition();
   end)
 end;
 
@@ -1362,6 +1423,15 @@ begin
     Id := InitialDungeonItemId;
     Kind := ItemKind.AncientCoin;
     Location := ItemLocation.InInterior(Metadata.DungeonAreaId, InitialDungeonItemPosition());
+  end
+end;
+
+function InitialDungeonNpc(): GameNpc;
+begin
+  return record
+    Id := InitialDungeonNpcId;
+    Kind := NpcKind.OldAdventurer;
+    HasMetPlayer := false;
   end
 end;
 
@@ -1407,13 +1477,93 @@ begin
   return Items
 end;
 
-// Overlays a present item on static interior geometry for client-safe projection.
-public function InteriorVisibleCodeForState(
-  Map: InteriorMap;
-  State: GameState;
-  Position: InteriorPosition
-): result of string, string;
+// Returns the player-facing name of one authoritative NPC kind.
+public function NpcDisplayName(Kind: NpcKind): string;
 begin
+  case Kind of
+    NpcKind.OldAdventurer:
+    begin
+      return InitialDungeonNpcName
+    end
+  end
+end;
+
+function PlayerCarriesAncientCoin(State: GameState): boolean;
+begin
+  for Item: GameItem in State.Items do
+  begin
+    if Item.Kind = ItemKind.AncientCoin then
+    begin
+      case Item.Location of
+        ItemLocation.CarriedByPlayer:
+        begin
+          return true
+        end
+        else
+        begin
+        end
+      end
+    end
+  end;
+
+  return false
+end;
+
+function DialogueChoices(State: GameState): array of NpcDialogueChoice;
+begin
+  mutable var Choices: array of NpcDialogueChoice := [
+                                                       record
+                                                         Id := DialogueChoiceIdentity;
+                                                         Text := 'Who are you?';
+                                                       end,
+                                                       record
+                                                         Id := DialogueChoiceDungeon;
+                                                         Text := 'What is this place?';
+                                                       end
+                                                     ];
+  if PlayerCarriesAncientCoin(State) then
+  begin
+    Std.Arrays.Push(Choices, record
+      Id := DialogueChoiceCoin;
+      Text := 'What do you know about this coin?';
+    end)
+  end;
+
+  Std.Arrays.Push(Choices, record
+    Id := DialogueChoiceGoodbye;
+    Text := 'Goodbye.';
+  end);
+  return Choices
+end;
+
+function DialogueFrame(State: GameState; Text: string): NpcDialogue;
+begin
+  return record
+    NpcId := State.Npc.Id;
+    Speaker := NpcDisplayName(State.Npc.Kind);
+    Text := Text;
+    Choices := DialogueChoices(State);
+  end
+end;
+
+function StartNpcDialogue(State: GameState): NpcDialogue;
+begin
+  if State.Npc.HasMetPlayer then
+  begin
+    return DialogueFrame(State, 'Mara recognizes you and rests both hands on her worn walking staff.')
+  end;
+
+  return DialogueFrame(State, 'A weathered adventurer lowers her lantern. She introduces herself as Mara and invites your questions.')
+end;
+
+// Overlays currently present dynamic objects on static interior geometry.
+public function InteriorVisibleCodeForState(Map: InteriorMap; State: GameState; Position: InteriorPosition): result of string, string;
+begin
+  if (State.Area = AreaKind.Dungeon) and ((Position.X = Map.Npc.X) and (Position.Y = Map.Npc.Y)) then
+  begin
+    return Ok('n')
+  end;
+
   for Item: GameItem in State.Items do
   begin
     case Item.Location of
@@ -1474,14 +1624,11 @@ begin
     ReturnLocation := ReturnLocation.NoReturnLocation;
     Exploration := EmptyExploration();
     Items := [InitialDungeonItem(Metadata)];
+    Npc := InitialDungeonNpc();
   end
 end;
 
-function ValidateItems(
-  Metadata: WorldMetadata;
-  Map: InteriorMap;
-  Items: array of GameItem
-): result of array of GameItem, string;
+function ValidateItems(Metadata: WorldMetadata; Map: InteriorMap; Items: array of GameItem): result of array of GameItem, string;
 begin
   if Std.Arrays.Length(Items) <> 1 then
   begin
@@ -1524,12 +1671,28 @@ begin
   return Ok(Items)
 end;
 
+function ValidateNpc(Npc: GameNpc): result of GameNpc, string;
+begin
+  if Npc.Id <> InitialDungeonNpcId then
+  begin
+    return Error('game state contains an unknown NPC identity')
+  end;
+
+  if Npc.Kind <> NpcKind.OldAdventurer then
+  begin
+    return Error('game state NPC identity and kind do not match')
+  end;
+
+  return Ok(Npc)
+end;
+
 // Validates current-area and return-location invariants for the selected world.
 public function ValidateGameState(Metadata: WorldMetadata; State: GameState): result of GameState, string;
 begin
   var ValidExploration: ExplorationState := try ValidateExploration(State.Exploration, WorldChunkSize);
   var DungeonMap: InteriorMap := try InitialDungeonMap();
   var ValidItems: array of GameItem := try ValidateItems(Metadata, DungeonMap, State.Items);
+  var ValidNpc: GameNpc := try ValidateNpc(State.Npc);
   for Area: InteriorDiscoveryArea in ValidExploration.InteriorAreas do
   begin
     if Area.AreaId <> Metadata.DungeonAreaId then
@@ -1585,6 +1748,11 @@ begin
         if try InteriorCellAt(Map, Pose.Position) = InteriorCellKind.Wall then
         begin
           return Error('first-person player position must be traversable')
+        end;
+
+        if (Pose.Position.X = Map.Npc.X) and (Pose.Position.Y = Map.Npc.Y) then
+        begin
+          return Error('first-person player position must not overlap the NPC')
         end;
 
         case State.ReturnLocation of
@@ -1645,6 +1813,7 @@ begin
       ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, OutdoorPosition);
       Exploration := Valid.Exploration;
       Items := Valid.Items;
+      Npc := Valid.Npc;
     end)
   end;
   var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
@@ -1664,6 +1833,7 @@ begin
         ReturnLocation := ReturnLocation.NoReturnLocation;
         Exploration := Valid.Exploration;
         Items := Valid.Items;
+        Npc := Valid.Npc;
       end)
     end
     else
@@ -1701,6 +1871,7 @@ begin
     ReturnLocation := State.ReturnLocation;
     Exploration := State.Exploration;
     Items := State.Items;
+    Npc := State.Npc;
   end)
 end;
 
@@ -1779,9 +1950,11 @@ begin
             begin
               if (Position.X = Pose.Position.X) and (Position.Y = Pose.Position.Y) then
               begin
-                return 'At your feet: ' + ItemDisplayName(Item.Kind) + ' — Enter: Pick up'
+                return ('At your feet: ' + ItemDisplayName(Item.Kind)) + ' — Enter: Pick up'
               end;
-              if (Position.X = Pose.Position.X + Offset.X) and (Position.Y = Pose.Position.Y + Offset.Y) then
+
+              if (Position.X = Pose.Position.X + Offset.X) and
+                 (Position.Y = Pose.Position.Y + Offset.Y) then
               begin
                 return ItemDisplayName(Item.Kind) + ' — Enter: Examine'
               end
@@ -1797,7 +1970,47 @@ begin
     begin
     end
   end;
+
   return ''
+end;
+
+// Describes the available NPC action when the fixed NPC is directly ahead.
+public function NpcInteractionHint(State: GameState): string;
+begin
+  if State.Area <> AreaKind.Dungeon then
+  begin
+    return ''
+  end;
+
+  case State.Player of
+    PlayerPosition.FirstPerson(Pose):
+    begin
+      var NpcPosition: InteriorPosition := InitialDungeonNpcPosition();
+      var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+      if (Pose.Position.X + Offset.X = NpcPosition.X) and
+         (Pose.Position.Y + Offset.Y = NpcPosition.Y) then
+      begin
+        return NpcDisplayName(State.Npc.Kind) + ' — Enter: Talk'
+      end
+    end
+    else
+    begin
+    end
+  end;
+
+  return ''
+end;
+
+// Returns the highest-priority interaction hint for the current field and facing.
+public function InteractionHint(State: GameState): string;
+begin
+  var NpcHint: string := NpcInteractionHint(State);
+  if NpcHint <> '' then
+  begin
+    return NpcHint
+  end;
+
+  return ItemInteractionHint(State)
 end;
 
 // Resolves current-field transitions or pickup, then inspection ahead, without implicit movement.
@@ -1820,6 +2033,7 @@ begin
   begin
     return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
   end;
+
   for Index: integer := 0 to Std.Arrays.Length(Valid.Items) - 1 do
   begin
     mutable var Item: GameItem := Valid.Items[Index];
@@ -1846,17 +2060,27 @@ begin
     Y := Pose.Position.Y + Offset.Y;
   end;
 
+  if (Target.X = Map.Npc.X) and (Target.Y = Map.Npc.Y) then
+  begin
+    var Dialogue: NpcDialogue := StartNpcDialogue(Valid);
+    mutable var Changed: GameState := Valid;
+    mutable var Npc: GameNpc := Changed.Npc;
+    Npc.HasMetPlayer := true;
+    Changed.Npc := Npc;
+    return Ok(InteractionOutcome.DialogueStarted(try ValidateGameState(Metadata, Changed), Dialogue))
+  end;
+
   if (Target.X = Map.Tablet.X) and (Target.Y = Map.Tablet.Y) then
   begin
     return Ok(InteractionOutcome.Described('Stone tablet', StoneTabletDescription))
   end;
+
   for Item: GameItem in Valid.Items do
   begin
     case Item.Location of
       ItemLocation.InInterior(AreaId, ItemPosition):
       begin
-        if (AreaId = Valid.AreaId) and
-           ((ItemPosition.X = Target.X) and (ItemPosition.Y = Target.Y)) then
+        if (AreaId = Valid.AreaId) and ((ItemPosition.X = Target.X) and (ItemPosition.Y = Target.Y)) then
         begin
           return Ok(InteractionOutcome.Described(ItemDisplayName(Item.Kind), ItemDescription(Item.Kind)))
         end
@@ -1868,6 +2092,53 @@ begin
   end;
 
   return Ok(InteractionOutcome.Described('', NoInteractionMessage))
+end;
+
+// Resolves one stable choice for the active initial-NPC dialogue.
+public function ResolveNpcDialogueChoice(
+  Metadata: WorldMetadata;
+  State: GameState;
+  NpcId: string;
+  ChoiceId: string
+): result of DialogueOutcome, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if NpcId <> Valid.Npc.Id then
+  begin
+    return Error('dialogue names an unknown NPC identity')
+  end;
+
+  if not Valid.Npc.HasMetPlayer then
+  begin
+    return Error('dialogue cannot continue before the player meets the NPC')
+  end;
+
+  if ChoiceId = DialogueChoiceIdentity then
+  begin
+    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'Mara once mapped these halls. She now waits here to warn travelers who follow the same path.')))
+  end;
+
+  if ChoiceId = DialogueChoiceDungeon then
+  begin
+    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'The corridors fold around old chambers. Mara advises marking each turn and looking for the gold exit field.')))
+  end;
+
+  if ChoiceId = DialogueChoiceCoin then
+  begin
+    if not PlayerCarriesAncientCoin(Valid) then
+    begin
+      return Error('dialogue choice is not currently available')
+    end;
+
+    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'Mara studies the crescent-marked coin. She has seen the doorway symbol before, but not who minted it.')))
+  end;
+
+  if ChoiceId = DialogueChoiceGoodbye then
+  begin
+    return Ok(DialogueOutcome.Ended(Valid))
+  end;
+
+  return Error('unknown dialogue choice')
 end;
 
 // Applies one relative first-person step against the fixed authoritative interior map.
@@ -1885,6 +2156,11 @@ begin
     Y := Pose.Position.Y + Offset.Y;
   end;
   var Map: InteriorMap := try InitialDungeonMap();
+  if (Target.X = Map.Npc.X) and (Target.Y = Map.Npc.Y) then
+  begin
+    return Error('the old adventurer blocks the way')
+  end;
+
   if try InteriorCellAt(Map, Target) = InteriorCellKind.Wall then
   begin
     return Error('a wall blocks the way')
@@ -1900,6 +2176,7 @@ begin
     ReturnLocation := Valid.ReturnLocation;
     Exploration := Valid.Exploration;
     Items := Valid.Items;
+    Npc := Valid.Npc;
   end)
 end;
 
@@ -1970,5 +2247,6 @@ begin
     ReturnLocation := Valid.ReturnLocation;
     Exploration := Valid.Exploration;
     Items := Valid.Items;
+    Npc := Valid.Npc;
   end)
 end;

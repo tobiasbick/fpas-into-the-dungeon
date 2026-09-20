@@ -81,8 +81,9 @@ compatibility fallback is provided.
   visibility changes are written atomically; command-line host and port
   overrides are not written back.
 - `worlds` contains versioned authoritative world metadata, generated chunk
-  files, and one atomic `saves/default.json` savegame per world. It is owned by
-  the server.
+  files, and one atomic `saves/default.json` savegame per world. That snapshot
+  includes discovery, item ownership, and persistent NPC state, but no active
+  dialogue. It is owned by the server.
 - `logs` contains diagnostic output and is not part of a saved world.
 - `cache` contains disposable data that the application can rebuild.
 - Tests use a temporary data root supplied through the same interface and do

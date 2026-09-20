@@ -1,0 +1,183 @@
+// Verifies fixed NPC placement, collision, interaction targeting, and deterministic dialogue choices.
+program DungeonNpcDialogueTest;
+
+uses Dungeon.Exploration.Model, Dungeon.Game, Std.Arrays, Std.Results, Std.Str, Std.Test;
+
+function DungeonState(Metadata: WorldMetadata; Position: InteriorPosition; Facing: FacingDirection): GameState;
+begin
+  var Initial: GameState := NewGame(Metadata);
+  return record
+    Area := AreaKind.Dungeon;
+    AreaId := Metadata.DungeonAreaId;
+    Player := PlayerPosition.FirstPerson(record
+    Position := Position;
+    Facing := Facing;
+  end);
+    ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance);
+    Exploration := EmptyExploration();
+    Items := Initial.Items;
+    Npc := Initial.Npc;
+  end
+end;
+
+function HasChoice(Dialogue: NpcDialogue; ChoiceId: string): boolean;
+begin
+  for Choice: NpcDialogueChoice in Dialogue.Choices do
+  begin
+    if Choice.Id = ChoiceId then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+function StartDialogue(Metadata: WorldMetadata; State: GameState): GameState;
+begin
+  case Unwrap(Interact(Metadata, State)) of
+    InteractionOutcome.DialogueStarted(Changed, Dialogue):
+    begin
+      AssertEquals(InitialDungeonNpcId, Dialogue.NpcId);
+      AssertEquals(InitialDungeonNpcName, Dialogue.Speaker);
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'introduces herself'));
+      AssertEquals(3, Std.Arrays.Length(Dialogue.Choices));
+      AssertTrue(HasChoice(Dialogue, DialogueChoiceIdentity));
+      AssertTrue(HasChoice(Dialogue, DialogueChoiceDungeon));
+      AssertTrue(HasChoice(Dialogue, DialogueChoiceGoodbye));
+      AssertFalse(HasChoice(Dialogue, DialogueChoiceCoin));
+      return Changed
+    end
+    else
+    begin
+      panic('expected dialogue to start')
+    end
+  end
+end;
+
+begin
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('npc-dialogue-test', 1324));
+  var Initial: GameState := NewGame(Metadata);
+  var Map: InteriorMap := Unwrap(InitialDungeonMap());
+  AssertEquals(InitialDungeonNpcId, Initial.Npc.Id);
+  AssertTrue(Initial.Npc.Kind = NpcKind.OldAdventurer);
+  AssertFalse(Initial.Npc.HasMetPlayer);
+  AssertEquals(1, Map.Npc.X);
+  AssertEquals(1, Map.Npc.Y);
+  AssertTrue(Unwrap(InteriorCellAt(Map, Map.Npc)) = InteriorCellKind.Floor);
+  var FacingNpc: GameState := DungeonState(Metadata, record
+    X := 2;
+    Y := 1;
+  end, FacingDirection.West);
+  AssertEquals('n', Unwrap(InteriorVisibleCodeForState(Map, FacingNpc, Map.Npc)));
+  AssertEquals(InitialDungeonNpcName + ' — Enter: Talk', NpcInteractionHint(FacingNpc));
+  AssertEquals(NpcInteractionHint(FacingNpc), InteractionHint(FacingNpc));
+  AssertTrue(IsError(StepFirstPerson(Metadata, FacingNpc, RelativeStep.Forward)));
+  AssertEquals('', NpcInteractionHint(DungeonState(Metadata, record
+    X := 3;
+    Y := 1;
+  end, FacingDirection.West)));
+  AssertEquals('', NpcInteractionHint(DungeonState(Metadata, record
+    X := 2;
+    Y := 1;
+  end, FacingDirection.East)));
+  mutable var WrongArea: GameState := FacingNpc;
+  WrongArea.Area := AreaKind.Interior;
+  AssertEquals('', NpcInteractionHint(WrongArea));
+  mutable var Met: GameState := StartDialogue(Metadata, FacingNpc);
+  AssertTrue(Met.Npc.HasMetPlayer);
+  case Unwrap(Interact(Metadata, Met)) of
+    InteractionOutcome.DialogueStarted(Repeated, Dialogue):
+    begin
+      AssertTrue(Repeated.Npc.HasMetPlayer);
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'recognizes you'))
+    end
+    else
+    begin
+      panic('expected repeat dialogue')
+    end
+  end;
+
+  case Unwrap(ResolveNpcDialogueChoice(Metadata, Met, InitialDungeonNpcId, DialogueChoiceIdentity)) of
+    DialogueOutcome.Continued(Unchanged, Dialogue):
+    begin
+      AssertTrue(Unchanged.Npc.HasMetPlayer);
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'mapped these halls'));
+      AssertFalse(HasChoice(Dialogue, DialogueChoiceCoin))
+    end
+    else
+    begin
+      panic('expected identity dialogue response')
+    end
+  end;
+
+  case Unwrap(ResolveNpcDialogueChoice(Metadata, Met, InitialDungeonNpcId, DialogueChoiceDungeon)) of
+    DialogueOutcome.Continued(Unchanged, Dialogue):
+    begin
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'corridors'))
+    end
+    else
+    begin
+      panic('expected dungeon dialogue response')
+    end
+  end;
+
+  AssertTrue(IsError(ResolveNpcDialogueChoice(Metadata, Met, InitialDungeonNpcId, DialogueChoiceCoin)));
+  AssertTrue(IsError(ResolveNpcDialogueChoice(Metadata, Met, 'unknown:npc', DialogueChoiceIdentity)));
+  AssertTrue(IsError(ResolveNpcDialogueChoice(Metadata, Met, InitialDungeonNpcId, 'unknown-choice')));
+  AssertTrue(IsError(ResolveNpcDialogueChoice(Metadata, FacingNpc, InitialDungeonNpcId, DialogueChoiceIdentity)));
+  case Unwrap(ResolveNpcDialogueChoice(Metadata, Met, InitialDungeonNpcId, DialogueChoiceGoodbye)) of
+    DialogueOutcome.Ended(Unchanged):
+    begin
+      AssertTrue(Unchanged.Npc.HasMetPlayer)
+    end
+    else
+    begin
+      panic('expected dialogue to end')
+    end
+  end;
+  mutable var WithCoin: GameState := Met;
+  mutable var Coin: GameItem := WithCoin.Items[0];
+  Coin.Location := ItemLocation.CarriedByPlayer;
+  WithCoin.Items[0] := Coin;
+  case Unwrap(ResolveNpcDialogueChoice(Metadata, WithCoin, InitialDungeonNpcId, DialogueChoiceCoin)) of
+    DialogueOutcome.Continued(Unchanged, Dialogue):
+    begin
+      AssertTrue(HasChoice(Dialogue, DialogueChoiceCoin));
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'crescent-marked coin'));
+      AssertEquals(1, Std.Arrays.Length(InventoryItems(Unchanged)))
+    end
+    else
+    begin
+      panic('expected coin dialogue response')
+    end
+  end;
+  mutable var InvalidState: GameState := Met;
+  InvalidState.Player := PlayerPosition.FirstPerson(record
+    Position := Map.Npc;
+    Facing := FacingDirection.East;
+  end);
+  AssertTrue(IsError(ValidateGameState(Metadata, InvalidState)));
+  InvalidState := Met;
+  InvalidState.Npc.Id := 'unknown:npc';
+  AssertTrue(IsError(ValidateGameState(Metadata, InvalidState)));
+  mutable var InvalidMap: InteriorMap := Map;
+  InvalidMap.Npc := Map.Start;
+  AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
+  InvalidMap := Map;
+  InvalidMap.Npc := Map.Exit;
+  AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
+  InvalidMap := Map;
+  InvalidMap.Npc := Map.Item;
+  AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
+  InvalidMap := Map;
+  InvalidMap.Npc := Map.Tablet;
+  AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
+  InvalidMap := Map;
+  InvalidMap.Npc := record
+    X := -1;
+    Y := 0;
+  end;
+
+  AssertTrue(IsError(ValidateInteriorMap(InvalidMap)))
+end.

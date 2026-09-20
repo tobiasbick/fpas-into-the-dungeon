@@ -103,7 +103,59 @@ begin
     begin
       return true
     end;
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      return true
+    end;
+    ClientMessage.EndDialogue:
+    begin
+      return true
+    end;
     ClientMessage.SaveGame:
+    begin
+      return true
+    end
+    else
+    begin
+      return false
+    end
+  end
+end;
+
+function AllowedWhileDialogueActive(Message: ClientMessage): boolean;
+begin
+  case Message of
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      return true
+    end;
+    ClientMessage.EndDialogue:
+    begin
+      return true
+    end;
+    ClientMessage.Viewport(Width, Height):
+    begin
+      return true
+    end;
+    ClientMessage.Disconnect:
+    begin
+      return true
+    end
+    else
+    begin
+      return false
+    end
+  end
+end;
+
+function RequiresActiveDialogue(Message: ClientMessage): boolean;
+begin
+  case Message of
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      return true
+    end;
+    ClientMessage.EndDialogue:
     begin
       return true
     end
@@ -198,6 +250,25 @@ begin
   end;
 
   return Values
+end;
+
+function ProjectDialogue(Value: NpcDialogue): VisibleDialogue;
+begin
+  mutable var Choices: array of VisibleDialogueChoice := [];
+  for Choice: NpcDialogueChoice in Value.Choices do
+  begin
+    Std.Arrays.Push(Choices, record
+      Id := Choice.Id;
+      Text := Choice.Text;
+    end)
+  end;
+
+  return record
+    NpcId := Value.NpcId;
+    Speaker := Value.Speaker;
+    Text := Value.Text;
+    Choices := Choices;
+  end
 end;
 
 function InteriorRows(State: GameState; Map: InteriorMap): result of array of string, string;
@@ -303,7 +374,16 @@ begin
       end
       else
       begin
-        Row := Row + Std.Str.CharAt(TerrainRows[Y], X)
+        mutable var Code: string := Std.Str.CharAt(TerrainRows[Y], X);
+        if (Knowledge = FieldKnowledge.Remembered) and ((Code = 'i') or (Code = 'n')) then
+        begin
+          Code := try InteriorVisibleCode(Map, record
+            X := X;
+            Y := Y;
+          end)
+        end;
+
+        Row := Row + Code
       end;
 
       KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
@@ -411,10 +491,19 @@ begin
       end
       else
       begin
-        Row := Row + (try InteriorVisibleCodeForState(Map, State, record
+        mutable var Code: string := try InteriorVisibleCodeForState(Map, State, record
           X := X;
           Y := Y;
-        end))
+        end);
+        if (Knowledge = FieldKnowledge.Remembered) and ((Code = 'i') or (Code = 'n')) then
+        begin
+          Code := try InteriorVisibleCode(Map, record
+            X := X;
+            Y := Y;
+          end)
+        end;
+
+        Row := Row + Code
       end;
 
       KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
@@ -447,10 +536,10 @@ begin
     var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
     // Keep the protocol's required status text neutral when no action is available.
     mutable var Status: string := 'Nothing in reach';
-    var ItemHint: string := ItemInteractionHint(State);
-    if ItemHint <> '' then
+    var Hint: string := InteractionHint(State);
+    if Hint <> '' then
     begin
-      Status := ItemHint
+      Status := Hint
     end;
 
     if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
@@ -600,6 +689,7 @@ begin
     end
   end;
   mutable var State: option of GameState := None;
+  mutable var ActiveDialogueNpcId: option of string := None;
   var WelcomeSent: boolean := try Send(ConnectionValue, ServerMessage.Welcome(ProtocolVersion, SaveAvailable, InvalidSaveRemoved), Token);
   while not IsCancellationRequested(Token) do
   begin
@@ -622,6 +712,16 @@ begin
             if not Std.Options.IsSome(State) and RequiresActiveSession(ClientMessageValue) then
             begin
               var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('session_not_started', 'Start or load a game first.'), Token)
+            end
+            else if Std.Options.IsSome(ActiveDialogueNpcId) and
+                    not AllowedWhileDialogueActive(ClientMessageValue) then
+            begin
+              var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('dialogue_active', 'End the active dialogue before taking another action.'), Token)
+            end
+            else if not Std.Options.IsSome(ActiveDialogueNpcId) and
+                    RequiresActiveDialogue(ClientMessageValue) then
+            begin
+              var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('dialogue_not_active', 'No dialogue is active.'), Token)
             end
             else
             begin
@@ -799,6 +899,12 @@ begin
                         InteractionOutcome.Described(Title, Text):
                         begin
                           var Sent: boolean := try Send(ConnectionValue, ServerMessage.Interaction(Title, Text), Token)
+                        end;
+                        InteractionOutcome.DialogueStarted(Changed, Dialogue):
+                        begin
+                          State := Some(Changed);
+                          ActiveDialogueNpcId := Some(Dialogue.NpcId);
+                          var Sent: boolean := try Send(ConnectionValue, ServerMessage.Dialogue(ProjectDialogue(Dialogue)), Token)
                         end
                       end
                     end;
@@ -807,6 +913,45 @@ begin
                       var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('interaction_rejected', Reason), Token)
                     end
                   end
+                end;
+                ClientMessage.DialogueChoice(ChoiceId):
+                begin
+                  case ActiveDialogueNpcId of
+                    Some(NpcId):
+                    begin
+                      case ResolveNpcDialogueChoice(World.Metadata, try RequireActiveState(State), NpcId, ChoiceId) of
+                        Ok(DialogueResult):
+                        begin
+                          case DialogueResult of
+                            DialogueOutcome.Continued(Changed, Dialogue):
+                            begin
+                              State := Some(Changed);
+                              var Sent: boolean := try Send(ConnectionValue, ServerMessage.Dialogue(ProjectDialogue(Dialogue)), Token)
+                            end;
+                            DialogueOutcome.Ended(Changed):
+                            begin
+                              State := Some(Changed);
+                              ActiveDialogueNpcId := None;
+                              var Sent: boolean := try Send(ConnectionValue, ServerMessage.DialogueEnded, Token)
+                            end
+                          end
+                        end;
+                        Error(Reason):
+                        begin
+                          var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('dialogue_choice_rejected', Reason), Token)
+                        end
+                      end
+                    end;
+                    None:
+                    begin
+                      var Sent: boolean := try Send(ConnectionValue, ServerMessage.Rejected('dialogue_not_active', 'No dialogue is active.'), Token)
+                    end
+                  end
+                end;
+                ClientMessage.EndDialogue:
+                begin
+                  ActiveDialogueNpcId := None;
+                  var Sent: boolean := try Send(ConnectionValue, ServerMessage.DialogueEnded, Token)
                 end
               end
             end

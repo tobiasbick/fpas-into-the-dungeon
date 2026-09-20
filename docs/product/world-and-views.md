@@ -58,6 +58,16 @@ or character progression.
 - **Ancient coin** is the first fixed collectible item in the initial dungeon.
   It proves inspection, pickup, projection, and persistence without defining a
   broader loot system.
+- **NPC** is a non-player character with stable server-owned identity, kind,
+  placement, and persistent state.
+- **Mara, the old adventurer** is the first fixed NPC. She occupies and blocks
+  one dungeon field and remembers whether she has met the player.
+- **Dialogue** is a connection-scoped conversation controlled by the server.
+  It is not part of the saved world snapshot.
+- **Dialogue frame** is one complete server-provided speaker, text, and ordered
+  set of currently available choices.
+- **Dialogue choice** is a stable server-owned response identity plus
+  client-facing text. The client selects it but does not resolve its effect.
 - **Visible state** is the server-produced, client-safe projection of the
   current area and player state. It is not the complete world.
 - **Game session** is one connected, server-authoritative period of play. A
@@ -109,6 +119,8 @@ area.
 - **Exploration map** is an overlay showing the current area's discovered
   world knowledge. It may be panned independently of the player and does not
   replace the primary view or issue movement intentions.
+- **Dialogue overlay** is the framed modal presentation of the current dialogue
+  frame. It owns gameplay input until the server advances or ends the dialogue.
 
 ## View families
 
@@ -155,6 +167,12 @@ standing on its field. The server removes it from the area, exposes it in the
 visible inventory, and persists its carried state. The server accepts the exit
 interaction only on the exit field and then returns the player to the exact
 outdoor entrance coordinate.
+
+Mara occupies the dead end at dungeon field `(1, 1)`. She blocks movement and
+can be addressed with `Enter` from the adjacent field. Her deterministic
+conversation distinguishes the first and later meeting and conditionally
+offers a question about the Ancient coin while the player carries it. Only the
+meeting flag is persistent; an active conversation ends with the connection.
 
 Settlements, further entrances, navigable interiors, mutable terrain, broader
 world simulation, isometric rendering, LLM integration, and broader mutable RPG

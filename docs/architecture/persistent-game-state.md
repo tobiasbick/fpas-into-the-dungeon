@@ -23,10 +23,10 @@ reconnect repeats this choice.
 
 ## Savegame contract
 
-Savegame format `3` is an exact JSON object containing the selected world ID,
+Savegame format `4` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, persistent discovered-area state, and the complete
-server-owned item state. Outdoor positions use signed world coordinates.
+server-owned item and NPC state. Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
 their return location contains the exact outdoor area and coordinate.
 
@@ -44,8 +44,15 @@ inventory. The fixed Ancient coin must occur exactly once, so malformed,
 missing, duplicate, unknown, or misplaced item state rejects the complete
 savegame. There is no separate client inventory file.
 
+The NPC record contains Mara's stable ID, kind, and whether she has met the
+player. Her fixed area position remains part of the validated dungeon rather
+than mutable save data. Missing, duplicate, unknown, mistyped, or extra NPC
+data invalidates the complete save. An active dialogue and its current choice
+are connection state and are deliberately absent; loading restores the meeting
+but never resumes a conversation.
+
 Rendered rows, visible windows, status and message text, pending requests,
-overlays, chunk caches, and generated chunk contents are deliberately absent.
+overlays, active dialogue, chunk caches, and generated chunk contents are deliberately absent.
 The generated world remains in `world.json` and the chunk files.
 
 The single save path is:

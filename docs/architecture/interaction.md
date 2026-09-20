@@ -5,13 +5,13 @@ defining a general scripting system.
 
 ## Semantics
 
-`Enter` sends the protocol version 9 `interact` intention while the game screen
+`Enter` sends the protocol version 10 `interact` intention while the game screen
 is active, no overlay owns input, and no earlier request is pending. The server
 resolves the occupied field first for state-changing actions, then the field
 directly ahead for an inspectable object. Interaction never moves or turns the
 player implicitly.
 
-There are three successful outcomes:
+There are four successful outcomes:
 
 - a transition replaces authoritative game state and returns a complete visible
   state;
@@ -20,7 +20,9 @@ There are three successful outcomes:
 - a description leaves authoritative game state unchanged and returns an
   `interaction` message containing a title and text. A nonempty title opens a
   centered, framed description overlay. An empty title denotes a short status
-  response, such as having no target. Both outcomes are retained in message history.
+  response, such as having no target. Both outcomes are retained in message history;
+- a dialogue start updates persistent NPC state and returns a complete,
+  server-owned dialogue frame without moving the player.
 
 The description overlay wraps text to the available width. Longer descriptions
 scroll with Up/Down. Enter or Escape closes it, and gameplay keys send no
@@ -56,10 +58,19 @@ projected quick inventory. Further interaction cannot create another copy.
 The complete ownership, projection, and persistence contract is described in
 [items and inventory](items-and-inventory.md).
 
+## First NPC conversation
+
+The fixed old adventurer extends the same one-field-ahead target rule. She
+blocks movement, starts a deterministic dialogue on `Enter`, and remembers the
+first meeting. During the conversation the server owns available choices and
+rejects unrelated actions; the client owns only selection and presentation.
+See [NPCs and simple dialogue](npcs-and-dialogue.md) for the graph, protocol,
+visibility, persistence, and overlay lifecycle.
+
 ## Deferred systems
 
 Multiple item kinds, interaction menus, reach beyond one field, dropping,
-equipping, using, stacking, capacity limits, dialogue, general mutable object
-state, scripted actions, and configurable bindings remain outside this slice.
+equipping, using, stacking, capacity limits, general mutable object state,
+general dialogue scripting, and configurable bindings remain outside this slice.
 They should extend or replace this narrow model only when a concrete gameplay
 requirement needs them.

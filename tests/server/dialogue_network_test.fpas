@@ -1,0 +1,423 @@
+// Verifies server-authoritative dialogue, action gating, visibility memory, and persisted NPC state over TCP.
+program DungeonDialogueNetworkTest;
+
+uses
+  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Std.Arrays, Std.Conv,
+  Std.Fs, Std.Net, Std.Results, Std.Str, Std.Task, Std.Test, Std.Time;
+
+type
+  ExchangeResult = record
+    Reader: LineReader;
+    Message: ServerMessage;
+  end;
+
+function TestConfig(WorldsRoot: string): ServerConfig;
+begin
+  return record
+    WorldsRoot := WorldsRoot;
+    WorldId := 'dialogue-network';
+    WorldSeed := 9462;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 240;
+    MaximumViewHeight := 120;
+  end
+end;
+
+function EnsureDirectory(Path: string): boolean;
+begin
+  if Std.Fs.IsDir(Path) then
+  begin
+    return true
+  end;
+
+  case Std.Fs.CreateDir(Path) of
+    Ok(Created):
+    begin
+      return true
+    end
+    else
+    begin
+      return Std.Fs.IsDir(Path)
+    end
+  end
+end;
+
+function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Configured: boolean := try SetTimeout(Client, 30000);
+  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
+  var Closed: boolean := try Close(Client);
+  return Outcome
+end;
+
+function Exchange(
+  Client: Connection;
+  Reader: LineReader;
+  Message: ClientMessage;
+  Token: CancellationToken
+): ExchangeResult;
+begin
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(Message), Token)));
+  var LineValue: LineRead := Unwrap(ReadLine(Reader, Token));
+  return record
+    Reader := LineValue.Reader;
+    Message := Unwrap(DecodeServer(LineValue.Line));
+  end
+end;
+
+function RequireFirstPerson(Message: ServerMessage): FirstPersonVisibleState;
+begin
+  case Message of
+    ServerMessage.State(Value):
+    begin
+      case Value of
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          return FirstPersonValue
+        end
+        else
+        begin
+          panic('expected first-person visible state')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected first-person state')
+    end
+  end
+end;
+
+function RequireMap(Message: ServerMessage): MapVisibleState;
+begin
+  case Message of
+    ServerMessage.State(Value):
+    begin
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          return MapValue
+        end
+        else
+        begin
+          panic('expected map visible state')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected map state')
+    end
+  end
+end;
+
+function HasChoice(Dialogue: VisibleDialogue; ChoiceId: string): boolean;
+begin
+  for Choice: VisibleDialogueChoice in Dialogue.Choices do
+  begin
+    if Choice.Id = ChoiceId then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+procedure AssertRejected(Message: ServerMessage; ExpectedCode: string);
+begin
+  case Message of
+    ServerMessage.Rejected(Code, Text):
+    begin
+      AssertEquals(ExpectedCode, Code);
+      AssertFalse(Text = '')
+    end
+    else
+    begin
+      panic('expected rejected server message')
+    end
+  end
+end;
+
+begin
+  var WorldsRoot: string := '.temp-data/dialogue-network-' + IntToStr(TimestampMillis());
+  AssertTrue(EnsureDirectory('.temp-data'));
+  AssertTrue(EnsureDirectory(WorldsRoot));
+  var Config: ServerConfig := TestConfig(WorldsRoot);
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var ServerTask: task := go ServeOne(ListenerValue, Config, Token);
+  var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(Client, 120000)));
+  mutable var Reader: LineReader := NewLineReader(Client);
+  mutable var Response: ExchangeResult := Exchange(Client, Reader, ClientMessage.Hello(ProtocolVersion, 13, 9), Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertEquals(ProtocolVersion, Version);
+      AssertFalse(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected welcome')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.StartNewGame, Token);
+  Reader := Response.Reader;
+  mutable var CurrentX: integer := RequireMap(Response.Message).WorldX;
+  mutable var CurrentY: integer := RequireMap(Response.Message).WorldY;
+  for Step: integer := 1 to 3 do
+  begin
+    mutable var DeltaX: integer := 0;
+    mutable var DeltaY: integer := 0;
+    // The entrance contract guarantees a cardinal path within three steps; consume one axis at a time.
+    if CurrentX < Metadata.Entrance.X then
+    begin
+      DeltaX := 1
+    end
+    else if CurrentX > Metadata.Entrance.X then
+    begin
+      DeltaX := -1
+    end
+    else if CurrentY < Metadata.Entrance.Y then
+    begin
+      DeltaY := 1
+    end
+    else if CurrentY > Metadata.Entrance.Y then
+    begin
+      DeltaY := -1
+    end;
+
+    if (DeltaX <> 0) or (DeltaY <> 0) then
+    begin
+      Response := Exchange(Client, Reader, ClientMessage.Move(DeltaX, DeltaY), Token);
+      Reader := Response.Reader;
+      CurrentX := RequireMap(Response.Message).WorldX;
+      CurrentY := RequireMap(Response.Message).WorldY
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Response.Reader;
+  var Entered: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(9, Entered.PlayerX);
+  AssertEquals(1, Entered.PlayerY);
+  Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Response.Reader;
+  AssertEquals(1, Std.Arrays.Length(RequireFirstPerson(Response.Message).Inventory));
+  for Step: integer := 1 to 6 do
+  begin
+    Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+    Reader := Response.Reader
+  end;
+  var BeforeNpc: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(2, BeforeNpc.PlayerX);
+  AssertEquals(1, BeforeNpc.PlayerY);
+  AssertEquals('n', Std.Str.CharAt(BeforeNpc.Rows[1], 1));
+  AssertTrue(Std.Str.Contains(BeforeNpc.Status, 'Mara'));
+  Response := Exchange(Client, Reader, ClientMessage.ExplorationMap(0, 0, 11, 9), Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.ExplorationMap(Value):
+    begin
+      AssertEquals('n', Std.Str.CharAt(Value.Rows[1], 1));
+      AssertEquals('v', Std.Str.CharAt(Value.KnowledgeRows[1], 1))
+    end
+    else
+    begin
+      panic('expected visible NPC on current exploration map')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.Dialogue(Dialogue):
+    begin
+      AssertEquals(InitialDungeonNpcId, Dialogue.NpcId);
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'introduces herself'));
+      AssertTrue(HasChoice(Dialogue, DialogueChoiceCoin));
+      AssertTrue(HasChoice(Dialogue, DialogueChoiceGoodbye))
+    end
+    else
+    begin
+      panic('expected initial NPC dialogue')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward), Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'dialogue_active');
+  Response := Exchange(Client, Reader, ClientMessage.SaveGame, Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'dialogue_active');
+  Response := Exchange(Client, Reader, ClientMessage.DialogueChoice('unknown-choice'), Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'dialogue_choice_rejected');
+  Response := Exchange(Client, Reader, ClientMessage.DialogueChoice(DialogueChoiceIdentity), Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.Dialogue(Dialogue):
+    begin
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'mapped these halls'))
+    end
+    else
+    begin
+      panic('expected continued identity dialogue')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.DialogueChoice(DialogueChoiceCoin), Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.Dialogue(Dialogue):
+    begin
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'crescent-marked coin'))
+    end
+    else
+    begin
+      panic('expected continued coin dialogue')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.EndDialogue, Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.DialogueEnded:
+    begin
+    end
+    else
+    begin
+      panic('expected explicit dialogue end')
+    end
+  end;
+
+  // Move the NPC behind the player: remembered geometry remains, but the dynamic NPC must disappear.
+  Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.ExplorationMap(0, 0, 11, 9), Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.ExplorationMap(Value):
+    begin
+      AssertEquals('.', Std.Str.CharAt(Value.Rows[1], 1));
+      AssertEquals('r', Std.Str.CharAt(Value.KnowledgeRows[1], 1))
+    end
+    else
+    begin
+      panic('expected remembered NPC field on exploration map')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.Dialogue(Dialogue):
+    begin
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'recognizes you'))
+    end
+    else
+    begin
+      panic('expected repeat NPC dialogue')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.DialogueChoice(DialogueChoiceGoodbye), Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.DialogueEnded:
+    begin
+    end
+    else
+    begin
+      panic('expected goodbye to end dialogue')
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.SaveGame, Token);
+  Reader := Response.Reader;
+  case Response.Message of
+    ServerMessage.SaveCompleted:
+    begin
+    end
+    else
+    begin
+      panic('expected save after dialogue ended')
+    end
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(Client)));
+  AssertTrue(Unwrap(Wait(ServerTask)));
+  AssertTrue(Unwrap(CloseListener(ListenerValue)));
+  // A new connection has no active dialogue, but the explicit save retains the meeting and coin.
+  var RestartListener: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var RestartAddress: NetworkAddress := Unwrap(ListenerLocalAddress(RestartListener));
+  var RestartTask: task := go ServeOne(RestartListener, Config, Token);
+  var RestartClient: Connection := Unwrap(Connect('127.0.0.1', RestartAddress.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(RestartClient, 120000)));
+  mutable var RestartReader: LineReader := NewLineReader(RestartClient);
+  Response := Exchange(RestartClient, RestartReader, ClientMessage.Hello(ProtocolVersion, 13, 9), Token);
+  RestartReader := Response.Reader;
+  case Response.Message of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertTrue(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected restart welcome')
+    end
+  end;
+
+  Response := Exchange(RestartClient, RestartReader, ClientMessage.LoadGame, Token);
+  RestartReader := Response.Reader;
+  var Loaded: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(2, Loaded.PlayerX);
+  AssertEquals(1, Loaded.PlayerY);
+  AssertEquals(1, Std.Arrays.Length(Loaded.Inventory));
+  Response := Exchange(RestartClient, RestartReader, ClientMessage.DialogueChoice(DialogueChoiceIdentity), Token);
+  RestartReader := Response.Reader;
+  AssertRejected(Response.Message, 'dialogue_not_active');
+  Response := Exchange(RestartClient, RestartReader, ClientMessage.Interact, Token);
+  RestartReader := Response.Reader;
+  case Response.Message of
+    ServerMessage.Dialogue(Dialogue):
+    begin
+      AssertTrue(Std.Str.Contains(Dialogue.Text, 'recognizes you'));
+      AssertTrue(HasChoice(Dialogue, DialogueChoiceCoin))
+    end
+    else
+    begin
+      panic('expected persisted repeat dialogue')
+    end
+  end;
+
+  Response := Exchange(RestartClient, RestartReader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward), Token);
+  RestartReader := Response.Reader;
+  AssertRejected(Response.Message, 'dialogue_active');
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Close(RestartClient)));
+  AssertTrue(Unwrap(Wait(RestartTask)));
+  AssertTrue(Unwrap(CloseListener(RestartListener)))
+end.

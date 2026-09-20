@@ -7,7 +7,7 @@ uses
 
 public const
   // Current-only savegame schema written below each selected world.
-  SaveGameFormatVersion: integer := 3;
+  SaveGameFormatVersion: integer := 4;
 
 public type
   // Inspection result: absent, invalid and deleted with its reason, or fully validated state.
@@ -61,6 +61,20 @@ begin
     else
     begin
       return Error(('savegame field ' + Name) + ' must be a number')
+    end
+  end
+end;
+
+function BooleanField(Fields: dict of string to JsonValue; Name: string): result of boolean, string;
+begin
+  case try RequiredField(Fields, Name) of
+    JsonValue.Bool(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error(('savegame field ' + Name) + ' must be a boolean')
     end
   end
 end;
@@ -348,12 +362,7 @@ begin
   case Value of
     ItemLocation.InInterior(AreaId, Position):
     begin
-      return JsonValue.Object([
-                                'kind': JsonValue.String('interior'),
-                                'area_id': JsonValue.String(AreaId),
-                                'x': JsonValue.Number(IntToReal(Position.X)),
-                                'y': JsonValue.Number(IntToReal(Position.Y))
-                              ])
+      return JsonValue.Object(['kind': JsonValue.String('interior'), 'area_id': JsonValue.String(AreaId), 'x': JsonValue.Number(IntToReal(Position.X)), 'y': JsonValue.Number(IntToReal(Position.Y))])
     end;
     ItemLocation.CarriedByPlayer:
     begin
@@ -398,11 +407,7 @@ begin
   mutable var Values: array of JsonValue := [];
   for Item: GameItem in Items do
   begin
-    Std.Arrays.Push(Values, JsonValue.Object([
-                                              'id': JsonValue.String(Item.Id),
-                                              'kind': JsonValue.String(ItemKindName(Item.Kind)),
-                                              'location': EncodeItemLocation(Item.Location)
-                                            ]))
+    Std.Arrays.Push(Values, JsonValue.Object(['id': JsonValue.String(Item.Id), 'kind': JsonValue.String(ItemKindName(Item.Kind)), 'location': EncodeItemLocation(Item.Location)]))
   end;
 
   return Values
@@ -435,6 +440,49 @@ begin
   end;
 
   return Ok(Values)
+end;
+
+function NpcKindName(Value: NpcKind): string;
+begin
+  case Value of
+    NpcKind.OldAdventurer:
+    begin
+      return 'old_adventurer'
+    end
+  end
+end;
+
+function DecodeNpcKind(Value: string): result of NpcKind, string;
+begin
+  case Value of
+    'old_adventurer':
+    begin
+      return Ok(NpcKind.OldAdventurer)
+    end
+    else
+    begin
+      return Error('savegame contains an unknown NPC kind')
+    end
+  end
+end;
+
+function EncodeNpc(Value: GameNpc): JsonValue;
+begin
+  return JsonValue.Object(['id': JsonValue.String(Value.Id), 'kind': JsonValue.String(NpcKindName(Value.Kind)), 'has_met_player': JsonValue.Bool(Value.HasMetPlayer)])
+end;
+
+function DecodeNpc(Fields: dict of string to JsonValue): result of GameNpc, string;
+begin
+  if Std.Dictionaries.Length(Fields) <> 3 then
+  begin
+    return Error('savegame NPC has an unexpected field set')
+  end;
+
+  return Ok(record
+    Id := try StringField(Fields, 'id');
+    Kind := try DecodeNpcKind(try StringField(Fields, 'kind'));
+    HasMetPlayer := try BooleanField(Fields, 'has_met_player');
+  end)
 end;
 
 function EncodeMaskRows(Fields: array of boolean; Width: integer; Height: integer): array of JsonValue;
@@ -649,14 +697,14 @@ end;
 // Encodes only authoritative resumable state using the current savegame schema.
 public function EncodeSaveGame(WorldId: string; State: GameState): string;
 begin
-  return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation), 'exploration': EncodeExploration(State.Exploration), 'items': JsonValue.ArrayValue(EncodeItems(State.Items))]))
+  return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation), 'exploration': EncodeExploration(State.Exploration), 'items': JsonValue.ArrayValue(EncodeItems(State.Items)), 'npc': EncodeNpc(State.Npc)]))
 end;
 
 // Decodes an exact current-version save and validates it against selected-world invariants.
 public function DecodeSaveGame(Text: string; Metadata: WorldMetadata): result of GameState, string;
 begin
   var Fields: dict of string to JsonValue := try ObjectFields(Text);
-  if Std.Dictionaries.Length(Fields) <> 8 then
+  if Std.Dictionaries.Length(Fields) <> 9 then
   begin
     return Error('savegame has an unexpected field set')
   end;
@@ -677,6 +725,7 @@ begin
     ReturnLocation := try DecodeReturnLocation(try ObjectField(Fields, 'return_location'));
     Exploration := try DecodeExploration(try ObjectField(Fields, 'exploration'));
     Items := try DecodeItems(try ArrayField(Fields, 'items'));
+    Npc := try DecodeNpc(try ObjectField(Fields, 'npc'));
   end;
 
   return ValidateGameState(Metadata, State)

@@ -1,0 +1,99 @@
+// Verifies that the real client network adapter transports dialogue frames and lifecycle events.
+program DialogueNetworkAdapterTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.Protocol.Transport, Std.Net, Std.Results, Std.Task,
+  Std.Test;
+
+function Frame(Text: string): VisibleDialogue;
+begin
+  return record
+    NpcId := 'initial-dungeon:old-adventurer';
+    Speaker := 'Mara, the old adventurer';
+    Text := Text;
+    Choices := [record
+  Id := 'identity';
+  Text := 'Who are you?';
+end];
+  end
+end;
+
+function ServeDialogue(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
+begin
+  var ConnectionValue: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Reader: LineReader := NewLineReader(ConnectionValue);
+  var Hello: LineRead := try ReadLine(Reader, Token);
+  var Welcomed: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Welcome(ProtocolVersion, false, false)), Token);
+  var Interact: LineRead := try ReadLine(Hello.Reader, Token);
+  var Started: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Dialogue(Frame('First frame'))), Token);
+  var Choice: LineRead := try ReadLine(Interact.Reader, Token);
+  var Continued: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Dialogue(Frame('Second frame'))), Token);
+  var EndDialogue: LineRead := try ReadLine(Choice.Reader, Token);
+  var Ended: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.DialogueEnded), Token);
+  var Disconnect: LineRead := try ReadLine(EndDialogue.Reader, Token);
+  return Close(ConnectionValue)
+end;
+
+begin
+  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var Requests: channel of ClientMessage := CreateChannel(4);
+  var Events: channel of ClientEvent := CreateChannel(4);
+  var ServerTask: task := go ServeDialogue(ListenerValue, Token);
+  var ClientTask: task := go RunNetwork('127.0.0.1', Address.Port, 1, 1, Requests, Events, Token);
+  case Unwrap(ReceiveWithTimeout(Events, 5000)) of
+    ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved):
+    begin
+      AssertFalse(SaveAvailable);
+      AssertFalse(InvalidSaveRemoved)
+    end
+    else
+    begin
+      panic('expected connected event')
+    end
+  end;
+
+  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
+  case Unwrap(ReceiveWithTimeout(Events, 5000)) of
+    ClientEvent.Dialogue(Value):
+    begin
+      AssertEquals('First frame', Value.Text)
+    end
+    else
+    begin
+      panic('expected initial dialogue event')
+    end
+  end;
+
+  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.DialogueChoice('identity'), 1000)));
+  case Unwrap(ReceiveWithTimeout(Events, 5000)) of
+    ClientEvent.Dialogue(Value):
+    begin
+      AssertEquals('Second frame', Value.Text)
+    end
+    else
+    begin
+      panic('expected continued dialogue event')
+    end
+  end;
+
+  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.EndDialogue, 1000)));
+  case Unwrap(ReceiveWithTimeout(Events, 5000)) of
+    ClientEvent.DialogueEnded:
+    begin
+    end
+    else
+    begin
+      panic('expected dialogue-ended event')
+    end
+  end;
+
+  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.Disconnect, 1000)));
+  AssertTrue(Unwrap(Wait(ClientTask)));
+  AssertTrue(Unwrap(Wait(ServerTask)));
+  AssertTrue(Unwrap(CloseListener(ListenerValue)));
+  CloseChannel(Requests);
+  CloseChannel(Events)
+end.
