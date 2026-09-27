@@ -23,7 +23,8 @@ projection is built:
 - `remembered` means it was discovered earlier but is not currently visible;
 - `undiscovered` means it is in neither set.
 
-`Dungeon.Exploration` owns sight calculation, discovery updates, and field
+`Dungeon.Exploration.Sight` owns interior line of sight and the facing-aware
+sight field. `Dungeon.Exploration` owns outdoor sight, discovery updates, and field
 classification. Low-level mask validation lives beside the representation so
 the game and persistence layers can enforce the same invariants without
 depending on server integration. The rule units, such as `Dungeon.Movement`,

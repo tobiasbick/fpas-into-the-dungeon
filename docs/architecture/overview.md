@@ -78,7 +78,8 @@ these projects.
     read-only queries.
   - `Dungeon.Movement`, `Dungeon.Interaction`, `Dungeon.Dialogue`,
     `Dungeon.Equipment`, `Dungeon.Combat`: the rules that change the state.
-  - `Dungeon.Exploration` with `.Model`: discovery and line of sight.
+  - `Dungeon.Exploration` with `.Model` and `.Sight`: discovery masks,
+    outdoor sight and discovery updates, and interior line of sight.
 - `libs/world` owns validated world, chunk, and savegame persistence,
   creation of missing chunks through the `libs/game` generator, visible-window
   composition, prefetching, and bounded caching. `Dungeon.World.Savegame` owns the
