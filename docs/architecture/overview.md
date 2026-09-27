@@ -81,7 +81,9 @@ these projects.
   - `Dungeon.Exploration` with `.Model`: discovery and line of sight.
 - `libs/world` owns validated world, chunk, and savegame persistence,
   creation of missing chunks through the `libs/game` generator, visible-window
-  composition, prefetching, and bounded caching.
+  composition, prefetching, and bounded caching. `Dungeon.World.Savegame` owns the
+  savegame file and its format version; its subunits `Player`, `Entities`, and
+  `Discovery` encode and strictly decode the parts of the saved state.
 - `libs/protocol` owns commands and visible-state messages shared by client and
   server, including the one-character cell and knowledge code alphabet of
   visible rows. It contains no game rules; a server contract test verifies that

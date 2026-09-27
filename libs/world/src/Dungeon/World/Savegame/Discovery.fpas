@@ -1,0 +1,174 @@
+// Savegame JSON of outdoor and interior discovery masks.
+unit Dungeon.World.Savegame.Discovery;
+
+uses
+  Dungeon.Coordinates, Dungeon.Exploration.Model, Std.Arrays, Std.Conv, Std.Json, Std.Json.Fields,
+  Std.Str;
+
+function EncodeMaskRows(Fields: array of boolean; Width: integer; Height: integer): array of JsonValue;
+begin
+  mutable var Rows: array of JsonValue := [];
+  for Y: integer := 0 to Height - 1 do
+  begin
+    mutable var Row: string := '';
+    for X: integer := 0 to Width - 1 do
+    begin
+      if Fields[(Y * Width) + X] then
+      begin
+        Row := Row + '1'
+      end
+      else
+      begin
+        Row := Row + '0'
+      end
+    end;
+
+    Std.Arrays.Push(Rows, JsonValue.String(Row))
+  end;
+
+  return Rows
+end;
+
+function DecodeMaskRows(Rows: array of string; Width: integer; Height: integer): result of array of boolean, string;
+begin
+  if Std.Arrays.Length(Rows) <> Height then
+  begin
+    return Error('savegame discovery mask has an unexpected row count')
+  end;
+  mutable var Fields: array of boolean := [];
+  for Row: string in Rows do
+  begin
+    if Std.Str.Length(Row) <> Width then
+    begin
+      return Error('savegame discovery mask has an unexpected row width')
+    end;
+
+    for X: integer := 0 to Width - 1 do
+    begin
+      case Std.Str.CharAt(Row, X) of
+        '0':
+        begin
+          Std.Arrays.Push(Fields, false)
+        end;
+        '1':
+        begin
+          Std.Arrays.Push(Fields, true)
+        end
+        else
+        begin
+          return Error('savegame discovery mask contains an invalid field code')
+        end
+      end
+    end
+  end;
+
+  return Ok(Fields)
+end;
+
+function EncodeOutdoorDiscovery(Chunks: array of OutdoorDiscoveryChunk): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Chunk: OutdoorDiscoveryChunk in Chunks do
+  begin
+    Std.Arrays.Push(Values, JsonValue.Object(['chunk_x': JsonValue.Number(IntToReal(Chunk.ChunkX)), 'chunk_y': JsonValue.Number(IntToReal(Chunk.ChunkY)), 'rows': JsonValue.ArrayValue(EncodeMaskRows(Chunk.Fields, WorldChunkSize, WorldChunkSize))]))
+  end;
+
+  return Values
+end;
+
+function DecodeOutdoorDiscovery(Items: array of JsonValue): result of array of OutdoorDiscoveryChunk, string;
+begin
+  mutable var Chunks: array of OutdoorDiscoveryChunk := [];
+  for Item: JsonValue in Items do
+  begin
+    case Item of
+      JsonValue.Object(Fields):
+      begin
+        if Std.Dictionaries.Length(Fields) <> 3 then
+        begin
+          return Error('outdoor discovery chunk has an unexpected field set')
+        end;
+
+        Std.Arrays.Push(Chunks, record
+          ChunkX := try IntegerField(Fields, 'chunk_x');
+          ChunkY := try IntegerField(Fields, 'chunk_y');
+          Fields := try DecodeMaskRows(try StringArrayField(Fields, 'rows'), WorldChunkSize, WorldChunkSize);
+        end)
+      end
+      else
+      begin
+        return Error('outdoor discovery must contain only objects')
+      end
+    end
+  end;
+
+  return Ok(Chunks)
+end;
+
+function EncodeInteriorDiscovery(Areas: array of InteriorDiscoveryArea): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Area: InteriorDiscoveryArea in Areas do
+  begin
+    Std.Arrays.Push(Values, JsonValue.Object(['area_id': JsonValue.String(Area.AreaId), 'width': JsonValue.Number(IntToReal(Area.Width)), 'height': JsonValue.Number(IntToReal(Area.Height)), 'rows': JsonValue.ArrayValue(EncodeMaskRows(Area.Fields, Area.Width, Area.Height))]))
+  end;
+
+  return Values
+end;
+
+function DecodeInteriorDiscovery(Items: array of JsonValue): result of array of InteriorDiscoveryArea, string;
+begin
+  mutable var Areas: array of InteriorDiscoveryArea := [];
+  for Item: JsonValue in Items do
+  begin
+    case Item of
+      JsonValue.Object(Fields):
+      begin
+        if Std.Dictionaries.Length(Fields) <> 4 then
+        begin
+          return Error('interior discovery area has an unexpected field set')
+        end;
+        var Width: integer := try IntegerField(Fields, 'width');
+        var Height: integer := try IntegerField(Fields, 'height');
+        if (Width < 1) or (Height < 1) then
+        begin
+          return Error('interior discovery dimensions must be positive')
+        end;
+
+        Std.Arrays.Push(Areas, record
+          AreaId := try StringField(Fields, 'area_id');
+          Width := Width;
+          Height := Height;
+          Fields := try DecodeMaskRows(try StringArrayField(Fields, 'rows'), Width, Height);
+        end)
+      end
+      else
+      begin
+        return Error('interior discovery must contain only objects')
+      end
+    end
+  end;
+
+  return Ok(Areas)
+end;
+
+// Encodes outdoor and interior discovery as mask rows.
+public function EncodeExploration(State: ExplorationState): JsonValue;
+begin
+  return JsonValue.Object(['outdoor_chunks': JsonValue.ArrayValue(EncodeOutdoorDiscovery(State.OutdoorChunks)), 'interior_areas': JsonValue.ArrayValue(EncodeInteriorDiscovery(State.InteriorAreas))])
+end;
+
+// Decodes and validates the exact discovery object.
+public function DecodeExploration(Fields: dict of string to JsonValue): result of ExplorationState, string;
+begin
+  if Std.Dictionaries.Length(Fields) <> 2 then
+  begin
+    return Error('savegame exploration has an unexpected field set')
+  end;
+  var State: ExplorationState := record
+    OutdoorChunks := try DecodeOutdoorDiscovery(try ArrayField(Fields, 'outdoor_chunks'));
+    InteriorAreas := try DecodeInteriorDiscovery(try ArrayField(Fields, 'interior_areas'));
+  end;
+
+  return ValidateExploration(State, WorldChunkSize)
+end;
