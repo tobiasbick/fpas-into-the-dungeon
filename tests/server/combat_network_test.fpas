@@ -1,0 +1,289 @@
+// Verifies combat over TCP: health projection, turn log, rejections, and a fight to its end.
+program DungeonCombatNetworkTest;
+
+uses
+  Dungeon.Game, Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.Server, Std.Arrays, Std.Conv,
+  Std.Fs, Std.Net, Std.Results, Std.Str, Std.Task, Std.Test, Std.Time;
+
+type
+  ExchangeResult = record
+    Reader: LineReader;
+    Message: ServerMessage;
+  end;
+
+function TestConfig(WorldsRoot: string): ServerConfig;
+begin
+  return record
+    WorldsRoot := WorldsRoot;
+    WorldId := 'combat-network';
+    WorldSeed := 9462;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 240;
+    MaximumViewHeight := 120;
+  end
+end;
+
+function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Configured: boolean := try SetTimeout(Client, 30000);
+  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
+  var Closed: boolean := try Close(Client);
+  return Outcome
+end;
+
+function Exchange(
+  Client: Connection;
+  Reader: LineReader;
+  Message: ClientMessage;
+  Token: CancellationToken
+): ExchangeResult;
+begin
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(Message), Token)));
+  var LineValue: LineRead := Unwrap(ReadLine(Reader, Token));
+  return record
+    Reader := LineValue.Reader;
+    Message := Unwrap(DecodeServer(LineValue.Line));
+  end
+end;
+
+function RequireFirstPerson(Message: ServerMessage): FirstPersonVisibleState;
+begin
+  case Message of
+    ServerMessage.State(Value):
+    begin
+      case Value of
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          return FirstPersonValue
+        end
+        else
+        begin
+          panic('expected first-person visible state')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected first-person state')
+    end
+  end
+end;
+
+function RequireMap(Message: ServerMessage): MapVisibleState;
+begin
+  case Message of
+    ServerMessage.State(Value):
+    begin
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          return MapValue
+        end
+        else
+        begin
+          panic('expected map visible state')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected map state')
+    end
+  end
+end;
+
+procedure AssertRejected(Message: ServerMessage; ExpectedCode: string);
+begin
+  case Message of
+    ServerMessage.Rejected(Code, Text):
+    begin
+      AssertEquals(ExpectedCode, Code);
+      AssertFalse(Text = '')
+    end
+    else
+    begin
+      panic('expected rejected server message')
+    end
+  end
+end;
+
+function LogContains(Log: array of string; Text: string): boolean;
+begin
+  for Entry: string in Log do
+  begin
+    if Std.Str.Contains(Entry, Text) then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+begin
+  var WorldsRoot: string := '.temp-data/combat-network-' + IntToStr(TimestampMillis());
+  AssertTrue(Unwrap(Std.Fs.CreateDirAll(WorldsRoot)));
+  var Config: ServerConfig := TestConfig(WorldsRoot);
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var ServerTask: task := go ServeOne(ListenerValue, Config, Token);
+  var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Unwrap(SetTimeout(Client, 120000)));
+  mutable var Reader: LineReader := NewLineReader(Client);
+  mutable var Response: ExchangeResult := Exchange(Client, Reader, ClientMessage.Hello(ProtocolVersion, 13, 9), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.StartNewGame, Token);
+  Reader := Response.Reader;
+  var Outdoor: MapVisibleState := RequireMap(Response.Message);
+  AssertEquals(PlayerMaximumHealth, Outdoor.Health);
+  AssertEquals(PlayerMaximumHealth, Outdoor.MaxHealth);
+  // Attacking outdoors is rejected without consuming anything.
+  Response := Exchange(Client, Reader, ClientMessage.Attack, Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'attack_rejected');
+  mutable var CurrentX: integer := Outdoor.WorldX;
+  mutable var CurrentY: integer := Outdoor.WorldY;
+  for Step: integer := 1 to 3 do
+  begin
+    mutable var DeltaX: integer := 0;
+    mutable var DeltaY: integer := 0;
+    if CurrentX < Metadata.Entrance.X then
+    begin
+      DeltaX := 1
+    end
+    else if CurrentX > Metadata.Entrance.X then
+    begin
+      DeltaX := -1
+    end
+    else if CurrentY < Metadata.Entrance.Y then
+    begin
+      DeltaY := 1
+    end
+    else if CurrentY > Metadata.Entrance.Y then
+    begin
+      DeltaY := -1
+    end;
+
+    if (DeltaX <> 0) or (DeltaY <> 0) then
+    begin
+      Response := Exchange(Client, Reader, ClientMessage.Move(DeltaX, DeltaY), Token);
+      Reader := Response.Reader;
+      CurrentX := RequireMap(Response.Message).WorldX;
+      CurrentY := RequireMap(Response.Message).WorldY
+    end
+  end;
+
+  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Response.Reader;
+  var Entered: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(PlayerMaximumHealth, Entered.Health);
+  AssertEquals(0, Std.Arrays.Length(Entered.CombatLog));
+  // The coin lies ahead, not an opponent.
+  Response := Exchange(Client, Reader, ClientMessage.Attack, Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'attack_rejected');
+  Response := Exchange(Client, Reader, ClientMessage.Wait, Token);
+  Reader := Response.Reader;
+  AssertTrue(LogContains(RequireFirstPerson(Response.Message).CombatLog, 'You wait.'));
+  // Into the inner passages: west, south, west, north up to (5, 3).
+  var Route: array of integer := [0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 2, 0, 0];
+  for Move: integer in Route do
+  begin
+    if Move = 0 then
+    begin
+      Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token)
+    end
+    else if Move = 1 then
+    begin
+      Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token)
+    end
+    else
+    begin
+      Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token)
+    end;
+
+    Reader := Response.Reader
+  end;
+  var InPassage: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(5, InPassage.PlayerX);
+  AssertEquals(3, InPassage.PlayerY);
+  // Face west; turning is free, so the skeleton does not move while the player turns.
+  Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token);
+  Reader := Response.Reader;
+  mutable var View: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  mutable var Waited: integer := 0;
+  while (Std.Str.CharAt(View.Rows[3], 4) <> InteriorHostileCode) and (Waited < 6) do
+  begin
+    Response := Exchange(Client, Reader, ClientMessage.Wait, Token);
+    Reader := Response.Reader;
+    View := RequireFirstPerson(Response.Message);
+    Waited := Waited + 1
+  end;
+
+  AssertEquals(InteriorHostileCode, Std.Str.CharAt(View.Rows[3], 4));
+  AssertTrue(Std.Str.Contains(View.Status, 'Space: Attack'));
+  Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'movement_rejected');
+  // Fight until one side falls; the dice are deterministic, but the test accepts either end.
+  mutable var Finished: boolean := false;
+  mutable var Victory: boolean := false;
+  mutable var Blows: integer := 0;
+  while (not Finished) and (Blows < 80) do
+  begin
+    Response := Exchange(Client, Reader, ClientMessage.Attack, Token);
+    Reader := Response.Reader;
+    Blows := Blows + 1;
+    case Response.Message of
+      ServerMessage.Defeated(Summary):
+      begin
+        AssertTrue(Std.Str.Contains(Summary, 'You have fallen.'));
+        Finished := true
+      end;
+      ServerMessage.State(Value):
+      begin
+        var Fighting: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+        AssertTrue(Std.Arrays.Length(Fighting.CombatLog) > 0);
+        AssertTrue((Fighting.Health >= 1) and (Fighting.Health <= Fighting.MaxHealth));
+        if LogContains(Fighting.CombatLog, 'collapses') then
+        begin
+          AssertTrue(Std.Str.CharAt(Fighting.Rows[3], 4) <> InteriorHostileCode);
+          Victory := true;
+          Finished := true
+        end
+      end
+      else
+      begin
+        panic('expected a state or defeat after an attack')
+      end
+    end
+  end;
+
+  AssertTrue(Finished);
+  if Victory then
+  begin
+    // With the skeleton gone the passage is open again.
+    Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+    Reader := Response.Reader;
+    AssertEquals(4, RequireFirstPerson(Response.Message).PlayerX)
+  end
+  else
+  begin
+    // Defeat ended the session but kept the connection: a new game can start at once.
+    Response := Exchange(Client, Reader, ClientMessage.Wait, Token);
+    Reader := Response.Reader;
+    AssertRejected(Response.Message, 'session_not_started');
+    Response := Exchange(Client, Reader, ClientMessage.StartNewGame, Token);
+    Reader := Response.Reader;
+    AssertEquals(PlayerMaximumHealth, RequireMap(Response.Message).Health)
+  end;
+
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Unwrap(Wait(ServerTask)));
+  AssertTrue(Unwrap(Close(Client)));
+  AssertTrue(Unwrap(CloseListener(ListenerValue)))
+end.

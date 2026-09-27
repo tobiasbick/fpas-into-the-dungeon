@@ -23,10 +23,11 @@ reconnect repeats this choice.
 
 ## Savegame contract
 
-Savegame format `4` is an exact JSON object containing the selected world ID,
+Savegame format `5` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
-the return location, persistent discovered-area state, and the complete
-server-owned item and NPC state. Outdoor positions use signed world coordinates.
+the return location, persistent discovered-area state, the complete
+server-owned item and NPC state, the player's health, every opponent, and the
+dice generator state. Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
 their return location contains the exact outdoor area and coordinate.
 
@@ -50,6 +51,12 @@ than mutable save data. Missing, duplicate, unknown, mistyped, or extra NPC
 data invalidates the complete save. An active dialogue and its current choice
 are connection state and are deliberately absent; loading restores the meeting
 but never resumes a conversation.
+
+Each opponent record contains its stable ID, kind, area, field, health, and
+alert status. A destroyed opponent stays recorded with zero health. Health
+outside its range, an unknown or missing opponent, an opponent on a wall or on
+Mara, and a dice state outside `0 <= state < 2^31` invalidate the save. Saving
+during a fight is allowed; the combat log and a defeat are never saved.
 
 Rendered rows, visible windows, status and message text, pending requests,
 overlays, active dialogue, chunk caches, and generated chunk contents are deliberately absent.

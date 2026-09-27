@@ -54,7 +54,7 @@ changing the wall geometry. Floor and ceiling keep their base colors within
 1.5 fields of the eye and darken with depth like torchlight; the floor shows
 one flagstone per field whose joints fade out beyond 3.5 fields. The
 projected exit floor uses a distinct gold material; rays crossing it never
-recolor walls. Currently visible NPC and item fields are drawn as upright
+recolor walls. Currently visible NPC, opponent, and item fields are drawn as upright
 pixel-art billboards at their field centers, scaled by depth, darkened like
 walls, and hidden behind nearer walls through the per-column wall depth. The visual eye is shifted 0.35 fields
 back from the occupied field's center, opposite the facing direction. It stays

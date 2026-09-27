@@ -59,7 +59,7 @@ line-of-sight test, so revealing a wall face does not reveal the room behind it.
 
 ## Projection and information boundary
 
-Protocol version 10 represents knowledge with one code per projected field:
+Protocol version 11 represents knowledge with one code per projected field:
 `u` for undiscovered, `r` for remembered, and `v` for visible. Terrain and
 interior row data use `?` wherever knowledge is `u`. The primary outdoor view
 and the first-person geometry therefore cannot disclose a hidden field to the
@@ -109,7 +109,7 @@ never becomes a movement or transition intention.
 
 ## Persistence
 
-Savegame format 4 stores accumulated discovery in the authoritative game
+Savegame format 5 stores accumulated discovery in the authoritative game
 snapshot together with item and NPC state. Outdoor masks are records containing signed
 `chunk_x`, `chunk_y`, and exactly 128 strings of 128 `0` or `1` characters. Interior records contain
 `area_id`, `width`, `height`, and exactly one equally sized `0`/`1` row per

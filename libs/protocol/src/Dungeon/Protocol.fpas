@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Json, Std.Json.Fields, Std.Str;
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 10;
+  ProtocolVersion: integer := 11;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
   // Largest exploration-map window that remains below the line-size limit with two row planes.
@@ -17,11 +17,15 @@ public const
   MaximumVisibleInventoryItems: integer := 64;
   MaximumVisibleInventoryTextLength: integer := 128;
   // Defensive bounds for one deterministic dialogue frame.
-  MaximumDialogueChoices: integer := 4;
+  MaximumDialogueChoices: integer := 6;
   MaximumDialogueIdLength: integer := 128;
   MaximumDialogueTextLength: integer := 2048;
   // Bound for short dialogue labels: the speaker name and each choice text.
   MaximumDialogueLabelLength: integer := 128;
+  // Defensive bounds for the character's health and one turn's combat messages.
+  MaximumVisibleHealth: integer := 999;
+  MaximumCombatLogEntries: integer := 8;
+  MaximumCombatLogTextLength: integer := 160;
   // One-character wire alphabet for visible-state and exploration-map rows. Dungeon.Game
   // produces the terrain and interior codes; the server contract test keeps both aligned.
   // Field whose content is undiscovered in both map and interior rows.
@@ -44,6 +48,8 @@ public const
   InteriorTabletCode: string := 't';
   InteriorItemCode: string := 'i';
   InteriorNpcCode: string := 'n';
+  // A standing opponent; like items and NPCs it appears only in currently visible fields.
+  InteriorHostileCode: string := 'h';
   // Knowledge rows: undiscovered, remembered, or currently visible.
   KnowledgeUndiscoveredCode: string := 'u';
   KnowledgeRememberedCode: string := 'r';
@@ -106,6 +112,9 @@ public type
     public WorldY: integer;
     // Bounded carried-item summaries; IDs are unique and names are display-only.
     public Inventory: array of VisibleInventoryItem;
+    // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
+    public Health: integer;
+    public MaxHealth: integer;
   end;
   // Client-safe bounded interior geometry and pose used by the first-person renderer.
   FirstPersonVisibleState = record
@@ -121,6 +130,11 @@ public type
     public Facing: FirstPersonFacing;
     // Bounded carried-item summaries; IDs are unique and names are display-only.
     public Inventory: array of VisibleInventoryItem;
+    // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
+    public Health: integer;
+    public MaxHealth: integer;
+    // Messages of the turn that produced this state, oldest first; empty without combat.
+    public CombatLog: array of string;
   end;
   // View-specific server projection; map-only fields cannot occur in a first-person state.
   VisibleState = enum
@@ -159,6 +173,10 @@ public type
     DialogueChoice(ChoiceId: string);
     // Ends the active dialogue without changing persistent game state.
     EndDialogue;
+    // Attacks the field directly ahead; consumes one combat turn.
+    Attack;
+    // Passes one combat turn without acting.
+    Wait;
     Disconnect;
   end;
   // Handshake, including save availability/removal, visible state, and structured outcomes.
@@ -173,6 +191,8 @@ public type
     // Acknowledges that no dialogue remains active for this connection.
     DialogueEnded;
     SaveCompleted;
+    // Replaces the state response of the turn in which the character fell; the session has ended.
+    Defeated(Message: string);
     Rejected(Code: string; Message: string);
     ErrorMessage(Code: string; Message: string);
   end;
@@ -365,7 +385,8 @@ begin
                                InteriorExitCode,
                                InteriorTabletCode,
                                InteriorItemCode,
-                               InteriorNpcCode
+                               InteriorNpcCode,
+                               InteriorHostileCode
                              ], Value)
 end;
 
@@ -534,9 +555,39 @@ begin
   return Ok(Items)
 end;
 
+function ValidateHealth(Health: integer; MaxHealth: integer): result of boolean, string;
+begin
+  if ((MaxHealth < 1) or (MaxHealth > MaximumVisibleHealth)) or
+     ((Health < 1) or (Health > MaxHealth)) then
+  begin
+    return Error('visible health is outside protocol limits')
+  end;
+
+  return Ok(true)
+end;
+
+function ValidateCombatLog(Log: array of string): result of boolean, string;
+begin
+  if Std.Arrays.Length(Log) > MaximumCombatLogEntries then
+  begin
+    return Error('combat log exceeds the protocol entry limit')
+  end;
+
+  for Entry: string in Log do
+  begin
+    if (Std.Str.Length(Entry) = 0) or (Std.Str.Length(Entry) > MaximumCombatLogTextLength) then
+    begin
+      return Error('combat log entry has an invalid length')
+    end
+  end;
+
+  return Ok(true)
+end;
+
 function ValidateMapVisibleState(Value: MapVisibleState): result of MapVisibleState, string;
 begin
   var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
+  var ValidHealth: boolean := try ValidateHealth(Value.Health, Value.MaxHealth);
   if (Value.Width <= 0) or (Value.Height <= 0) then
   begin
     return Error('visible-state dimensions must be positive')
@@ -587,6 +638,8 @@ end;
 function ValidateFirstPersonVisibleState(Value: FirstPersonVisibleState): result of FirstPersonVisibleState, string;
 begin
   var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
+  var ValidHealth: boolean := try ValidateHealth(Value.Health, Value.MaxHealth);
+  var ValidLog: boolean := try ValidateCombatLog(Value.CombatLog);
   if Std.Str.Length(Value.Title) = 0 then
   begin
     return Error('first-person state title must not be empty')
@@ -640,7 +693,13 @@ begin
     return Error('first-person player position is outside the area')
   end;
   var PlayerCode: string := Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX);
-  if Std.Arrays.Contains([InteriorWallCode, InteriorTabletCode, InteriorNpcCode, UnknownFieldCode], PlayerCode) then
+  if Std.Arrays.Contains([
+                           InteriorWallCode,
+                           InteriorTabletCode,
+                           InteriorNpcCode,
+                           InteriorHostileCode,
+                           UnknownFieldCode
+                         ], PlayerCode) then
   begin
     return Error('first-person player position must be traversable')
   end;
@@ -884,6 +943,14 @@ begin
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('end_dialogue')]))
     end;
+    ClientMessage.Attack:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('attack')]))
+    end;
+    ClientMessage.Wait:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('wait')]))
+    end;
     ClientMessage.Disconnect:
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('disconnect')]))
@@ -1023,6 +1090,24 @@ begin
 
       return Ok(ClientMessage.EndDialogue)
     end;
+    'attack':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('attack must not contain additional fields')
+      end;
+
+      return Ok(ClientMessage.Attack)
+    end;
+    'wait':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('wait must not contain additional fields')
+      end;
+
+      return Ok(ClientMessage.Wait)
+    end;
     'disconnect':
     begin
       if Std.Dictionaries.Length(Fields) <> 1 then
@@ -1052,11 +1137,11 @@ begin
       case Value of
         VisibleState.MapState(MapValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY)), 'inventory': JsonValue.ArrayValue(EncodeInventory(MapValue.Inventory))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY)), 'inventory': JsonValue.ArrayValue(EncodeInventory(MapValue.Inventory)), 'health': JsonValue.Number(IntToReal(MapValue.Health)), 'max_health': JsonValue.Number(IntToReal(MapValue.MaxHealth))]))
         end;
         VisibleState.FirstPersonState(FirstPersonValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing)), 'inventory': JsonValue.ArrayValue(EncodeInventory(FirstPersonValue.Inventory))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing)), 'inventory': JsonValue.ArrayValue(EncodeInventory(FirstPersonValue.Inventory)), 'health': JsonValue.Number(IntToReal(FirstPersonValue.Health)), 'max_health': JsonValue.Number(IntToReal(FirstPersonValue.MaxHealth)), 'combat_log': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.CombatLog))]))
         end
       end
     end;
@@ -1079,6 +1164,10 @@ begin
     ServerMessage.SaveCompleted:
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('save_completed')]))
+    end;
+    ServerMessage.Defeated(MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('defeated'), 'message': JsonValue.String(MessageText)]))
     end;
     ServerMessage.Rejected(Code, MessageText):
     begin
@@ -1119,7 +1208,7 @@ begin
       case try DecodeView(try StringField(Fields, 'view')) of
         ViewKind.Map:
         begin
-          if Std.Dictionaries.Length(Fields) <> 13 then
+          if Std.Dictionaries.Length(Fields) <> 15 then
           begin
             return Error('map state has an unexpected field set')
           end;
@@ -1135,13 +1224,15 @@ begin
             WorldX := try IntegerField(Fields, 'world_x');
             WorldY := try IntegerField(Fields, 'world_y');
             Inventory := try InventoryField(Fields, 'inventory');
+            Health := try IntegerField(Fields, 'health');
+            MaxHealth := try IntegerField(Fields, 'max_health');
           end;
 
           return Ok(ServerMessage.State(VisibleState.MapState(try ValidateMapVisibleState(MapValue))))
         end;
         ViewKind.FirstPerson:
         begin
-          if Std.Dictionaries.Length(Fields) <> 12 then
+          if Std.Dictionaries.Length(Fields) <> 15 then
           begin
             return Error('first-person state has an unexpected field set')
           end;
@@ -1156,6 +1247,9 @@ begin
             PlayerY := try IntegerField(Fields, 'y');
             Facing := try DecodeFirstPersonFacing(try StringField(Fields, 'facing'));
             Inventory := try InventoryField(Fields, 'inventory');
+            Health := try IntegerField(Fields, 'health');
+            MaxHealth := try IntegerField(Fields, 'max_health');
+            CombatLog := try StringArrayField(Fields, 'combat_log');
           end;
 
           return Ok(ServerMessage.State(VisibleState.FirstPersonState(try ValidateFirstPersonVisibleState(FirstPersonValue))))
@@ -1201,6 +1295,21 @@ begin
     'dialogue':
     begin
       return Ok(ServerMessage.Dialogue(try DecodeDialogue(Fields)))
+    end;
+    'defeated':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 2 then
+      begin
+        return Error('defeated must contain only type and message')
+      end;
+      var DefeatText: string := try StringField(Fields, 'message');
+      if (Std.Str.Length(DefeatText) = 0) or
+         (Std.Str.Length(DefeatText) > MaximumCombatLogTextLength) then
+      begin
+        return Error('defeat message has an invalid length')
+      end;
+
+      return Ok(ServerMessage.Defeated(DefeatText))
     end;
     'dialogue_ended':
     begin

@@ -1,7 +1,7 @@
-// Authoritative coordinates, terrain, movement, interaction, item, NPC, and dialogue rules.
+// Authoritative coordinates, terrain, movement, interaction, item, NPC, opponent, and dialogue rules.
 unit Dungeon.Game;
 
-uses Dungeon.Exploration.Model, Std.Arrays, Std.Math, Std.Results, Std.Str;
+uses Dungeon.Exploration.Model, Std.Arrays, Std.Conv, Std.Math, Std.Results, Std.Str;
 
 public const
   // Schema version written to world metadata and chunk files.
@@ -26,6 +26,16 @@ public const
   DialogueChoiceDungeon: string := 'dungeon';
   DialogueChoiceCoin: string := 'coin';
   DialogueChoiceGoodbye: string := 'goodbye';
+  // Offered only while the player is hurt; Mara restores full health.
+  DialogueChoiceWounds: string := 'wounds';
+  // Full health of a new player character; health never exceeds it.
+  PlayerMaximumHealth: integer := 20;
+  // Stable identity, player-facing name, and full health of the first opponent.
+  RestlessSkeletonId: string := 'initial-dungeon:restless-skeleton';
+  RestlessSkeletonName: string := 'Restless skeleton';
+  RestlessSkeletonMaximumHealth: integer := 12;
+  // Exclusive upper bound of the persisted dice generator state.
+  RandomStateModulus: integer := 2147483648;
 
 public type
   // Distinguishes outdoor maps from finite first-person interiors and dungeons.
@@ -75,6 +85,20 @@ public type
     public Id: string;
     public Text: string;
   end;
+  // Identifies the one opponent kind introduced by the first combat slice.
+  HostileKind = enum
+    RestlessSkeleton;
+  end;
+  // Persistent opponent state; zero health marks a destroyed opponent that stays recorded.
+  GameHostile = record
+    public Id: string;
+    public Kind: HostileKind;
+    public AreaId: string;
+    public Position: InteriorPosition;
+    public Health: integer;
+    // Set once the opponent has seen the player; alerted opponents chase and attack.
+    public Alerted: boolean;
+  end;
   // Client-safe dialogue content derived from authoritative game state.
   NpcDialogue = record
     public NpcId: string;
@@ -121,6 +145,8 @@ public type
     public Item: InteriorPosition;
     // Fixed blocking floor placement of the first non-player character.
     public Npc: InteriorPosition;
+    // Initial floor placement of the first opponent.
+    public Hostile: InteriorPosition;
   end;
   // Position and facing retained while the player occupies a first-person area.
   FirstPersonPose = record
@@ -226,6 +252,12 @@ public type
     public Items: array of GameItem;
     // Persistent state of the fixed initial non-player character.
     public Npc: GameNpc;
+    // Current player health, from 1 through PlayerMaximumHealth while a game is active.
+    public Health: integer;
+    // Every opponent of the world, including destroyed ones.
+    public Hostiles: array of GameHostile;
+    // Dice generator state in 0 until RandomStateModulus; advancing it makes fights reproducible.
+    public RandomState: integer;
   end;
   // Successful server-side resolution of one interaction intention.
   InteractionOutcome = enum
@@ -1358,6 +1390,12 @@ begin
   return Ok(InteriorCellCode(Cell))
 end;
 
+// Returns whether two interior positions name the same field.
+public function SamePosition(Left: InteriorPosition; Right: InteriorPosition): boolean;
+begin
+  return (Left.X = Right.X) and (Left.Y = Right.Y)
+end;
+
 // Validates bounded shape, unique exit, traversable endpoints, and connected floor space.
 public function ValidateInteriorMap(Map: InteriorMap): result of InteriorMap, string;
 begin
@@ -1406,6 +1444,17 @@ begin
      ((Map.Npc.X = Map.Item.X) and (Map.Npc.Y = Map.Item.Y)) then
   begin
     return Error('interior NPC coordinate must differ from start, exit, and item')
+  end;
+  var HostileCell: InteriorCellKind := try InteriorCellAt(Map, Map.Hostile);
+  if HostileCell <> InteriorCellKind.Floor then
+  begin
+    return Error('interior opponent coordinate must name a floor field')
+  end;
+
+  if ((SamePosition(Map.Hostile, Map.Start) or SamePosition(Map.Hostile, Map.Exit)) or SamePosition(Map.Hostile, Map.Item)) or
+     SamePosition(Map.Hostile, Map.Npc) then
+  begin
+    return Error('interior opponent coordinate must differ from start, exit, item, and NPC')
   end;
   mutable var ExitCount: integer := 0;
   mutable var TraversableCount: integer := 0;
@@ -1496,6 +1545,15 @@ begin
   end
 end;
 
+// The skeleton rests in the inner passages, hidden from the main corridors by walls.
+function InitialDungeonHostilePosition(): InteriorPosition;
+begin
+  return record
+    X := 3;
+    Y := 3;
+  end
+end;
+
 // Creates the fixed, hand-authored initial dungeon used by the first interior slice.
 public function InitialDungeonMap(): result of InteriorMap, string;
 begin
@@ -1538,6 +1596,7 @@ begin
     end;
     Item := InitialDungeonItemPosition();
     Npc := InitialDungeonNpcPosition();
+    Hostile := InitialDungeonHostilePosition();
   end)
 end;
 
@@ -1548,6 +1607,62 @@ begin
     Kind := ItemKind.AncientCoin;
     Location := ItemLocation.InInterior(Metadata.DungeonAreaId, InitialDungeonItemPosition());
   end
+end;
+
+function InitialDungeonHostile(Metadata: WorldMetadata): GameHostile;
+begin
+  return record
+    Id := RestlessSkeletonId;
+    Kind := HostileKind.RestlessSkeleton;
+    AreaId := Metadata.DungeonAreaId;
+    Position := InitialDungeonHostilePosition();
+    Health := RestlessSkeletonMaximumHealth;
+    Alerted := false;
+  end
+end;
+
+// Derives the first dice generator state of a new game from the world seed.
+public function InitialRandomState(Seed: integer): integer;
+begin
+  return PositiveModulo((PositiveModulo(Seed, RandomStateModulus) * 7919) + 17, RandomStateModulus)
+end;
+
+// Returns the player-facing name of one authoritative opponent kind.
+public function HostileDisplayName(Kind: HostileKind): string;
+begin
+  case Kind of
+    HostileKind.RestlessSkeleton:
+    begin
+      return RestlessSkeletonName
+    end
+  end
+end;
+
+// Returns the full health of one opponent kind.
+public function HostileMaximumHealth(Kind: HostileKind): integer;
+begin
+  case Kind of
+    HostileKind.RestlessSkeleton:
+    begin
+      return RestlessSkeletonMaximumHealth
+    end
+  end
+end;
+
+// Returns the index of the standing opponent occupying one field of an area, or -1.
+public function StandingHostileAt(State: GameState; AreaId: string; Position: InteriorPosition): integer;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(State.Hostiles) - 1 do
+  begin
+    var Hostile: GameHostile := State.Hostiles[Index];
+    if ((Hostile.Health > 0) and (Hostile.AreaId = AreaId)) and
+       SamePosition(Hostile.Position, Position) then
+    begin
+      return Index
+    end
+  end;
+
+  return -1
 end;
 
 function InitialDungeonNpc(): GameNpc;
@@ -1650,6 +1765,14 @@ begin
     end)
   end;
 
+  if State.Health < PlayerMaximumHealth then
+  begin
+    Std.Arrays.Push(Choices, record
+      Id := DialogueChoiceWounds;
+      Text := 'Could you tend my wounds?';
+    end)
+  end;
+
   Std.Arrays.Push(Choices, record
     Id := DialogueChoiceGoodbye;
     Text := 'Goodbye.';
@@ -1683,6 +1806,11 @@ begin
   if (State.Area = AreaKind.Dungeon) and ((Position.X = Map.Npc.X) and (Position.Y = Map.Npc.Y)) then
   begin
     return Ok('n')
+  end;
+
+  if StandingHostileAt(State, State.AreaId, Position) >= 0 then
+  begin
+    return Ok('h')
   end;
 
   for Item: GameItem in State.Items do
@@ -1746,6 +1874,9 @@ begin
     Exploration := EmptyExploration();
     Items := [InitialDungeonItem(Metadata)];
     Npc := InitialDungeonNpc();
+    Health := PlayerMaximumHealth;
+    Hostiles := [InitialDungeonHostile(Metadata)];
+    RandomState := InitialRandomState(Metadata.Seed);
   end
 end;
 
@@ -1792,6 +1923,46 @@ begin
   return Ok(Items)
 end;
 
+function ValidateHostiles(Metadata: WorldMetadata; Map: InteriorMap; Hostiles: array of GameHostile): result of array of GameHostile, string;
+begin
+  if Std.Arrays.Length(Hostiles) <> 1 then
+  begin
+    return Error('game state must contain exactly the initial dungeon opponent')
+  end;
+  var Hostile: GameHostile := Hostiles[0];
+  if Hostile.Id <> RestlessSkeletonId then
+  begin
+    return Error('game state contains an unknown opponent identity')
+  end;
+
+  if Hostile.Kind <> HostileKind.RestlessSkeleton then
+  begin
+    return Error('game state opponent identity and kind do not match')
+  end;
+
+  if Hostile.AreaId <> Metadata.DungeonAreaId then
+  begin
+    return Error('initial dungeon opponent names an unknown area')
+  end;
+
+  if (Hostile.Health < 0) or (Hostile.Health > HostileMaximumHealth(Hostile.Kind)) then
+  begin
+    return Error('opponent health is outside its range')
+  end;
+
+  if try InteriorCellAt(Map, Hostile.Position) = InteriorCellKind.Wall then
+  begin
+    return Error('opponent must occupy a traversable field')
+  end;
+
+  if (Hostile.Health > 0) and SamePosition(Hostile.Position, Map.Npc) then
+  begin
+    return Error('standing opponent must not overlap the NPC')
+  end;
+
+  return Ok(Hostiles)
+end;
+
 function ValidateNpc(Npc: GameNpc): result of GameNpc, string;
 begin
   if Npc.Id <> InitialDungeonNpcId then
@@ -1814,6 +1985,17 @@ begin
   var DungeonMap: InteriorMap := try InitialDungeonMap();
   var ValidItems: array of GameItem := try ValidateItems(Metadata, DungeonMap, State.Items);
   var ValidNpc: GameNpc := try ValidateNpc(State.Npc);
+  var ValidHostiles: array of GameHostile := try ValidateHostiles(Metadata, DungeonMap, State.Hostiles);
+  if (State.Health < 1) or (State.Health > PlayerMaximumHealth) then
+  begin
+    return Error('player health is outside its range')
+  end;
+
+  if (State.RandomState < 0) or (State.RandomState >= RandomStateModulus) then
+  begin
+    return Error('dice generator state is outside its range')
+  end;
+
   for Area: InteriorDiscoveryArea in ValidExploration.InteriorAreas do
   begin
     if Area.AreaId <> Metadata.DungeonAreaId then
@@ -1874,6 +2056,11 @@ begin
         if (Pose.Position.X = Map.Npc.X) and (Pose.Position.Y = Map.Npc.Y) then
         begin
           return Error('first-person player position must not overlap the NPC')
+        end;
+
+        if StandingHostileAt(State, State.AreaId, Pose.Position) >= 0 then
+        begin
+          return Error('first-person player position must not overlap a standing opponent')
         end;
 
         case State.ReturnLocation of
@@ -1972,7 +2159,8 @@ begin
   end); end)
 end;
 
-function StepOffset(Facing: FacingDirection; Step: RelativeStep): InteriorPosition;
+// Returns the field offset of one relative step for a cardinal facing.
+public function StepOffset(Facing: FacingDirection; Step: RelativeStep): InteriorPosition;
 begin
   mutable var ForwardX: integer := 0;
   mutable var ForwardY: integer := -1;
@@ -2098,9 +2286,46 @@ begin
   return ''
 end;
 
+// Returns the standing opponent directly ahead of a first-person player, or -1.
+public function HostileAhead(State: GameState): integer;
+begin
+  case State.Player of
+    PlayerPosition.FirstPerson(Pose):
+    begin
+      var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+      return StandingHostileAt(State, State.AreaId, record
+        X := Pose.Position.X + Offset.X;
+        Y := Pose.Position.Y + Offset.Y;
+      end)
+    end
+    else
+    begin
+      return -1
+    end
+  end
+end;
+
+// Describes the opponent directly ahead with its health; empty means no opponent ahead.
+public function HostileInteractionHint(State: GameState): string;
+begin
+  var Index: integer := HostileAhead(State);
+  if Index < 0 then
+  begin
+    return ''
+  end;
+  var Hostile: GameHostile := State.Hostiles[Index];
+  return ((((HostileDisplayName(Hostile.Kind) + ' ') + IntToStr(Hostile.Health)) + '/') + IntToStr(HostileMaximumHealth(Hostile.Kind))) +
+         ' — Space: Attack'
+end;
+
 // Returns the highest-priority interaction hint for the current field and facing.
 public function InteractionHint(State: GameState): string;
 begin
+  var HostileHint: string := HostileInteractionHint(State);
+  if HostileHint <> '' then
+  begin
+    return HostileHint
+  end;
   var NpcHint: string := NpcInteractionHint(State);
   if NpcHint <> '' then
   begin
@@ -2155,6 +2380,11 @@ begin
   var Target: InteriorPosition := record
     X := Pose.Position.X + Offset.X;
     Y := Pose.Position.Y + Offset.Y;
+  end;
+
+  if StandingHostileAt(Valid, Valid.AreaId, Target) >= 0 then
+  begin
+    return Ok(InteractionOutcome.Described('', 'The restless skeleton rattles its bones at you. Press Space to attack.'))
   end;
 
   if (Target.X = Map.Npc.X) and (Target.Y = Map.Npc.Y) then
@@ -2215,7 +2445,7 @@ begin
 
   if ChoiceId = DialogueChoiceDungeon then
   begin
-    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'The corridors fold around old chambers. Mara advises marking each turn and looking for the gold exit field.')))
+    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'The corridors fold around old chambers. Mara advises marking each turn and looking for the gold exit field. Something restless still walks the inner passages.')))
   end;
 
   if ChoiceId = DialogueChoiceCoin then
@@ -2226,6 +2456,17 @@ begin
     end;
 
     return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'Mara studies the crescent-marked coin. She has seen the doorway symbol before, but not who minted it.')))
+  end;
+
+  if ChoiceId = DialogueChoiceWounds then
+  begin
+    if Valid.Health >= PlayerMaximumHealth then
+    begin
+      return Error('dialogue choice is not currently available')
+    end;
+    var Healed: GameState := Valid with Health := PlayerMaximumHealth; end;
+
+    return Ok(DialogueOutcome.Continued(Healed, DialogueFrame(Healed, 'Mara cleans and binds your wounds with practiced hands. You feel whole again.')))
   end;
 
   if ChoiceId = DialogueChoiceGoodbye then
@@ -2254,6 +2495,11 @@ begin
   if (Target.X = Map.Npc.X) and (Target.Y = Map.Npc.Y) then
   begin
     return Error('the old adventurer blocks the way')
+  end;
+
+  if StandingHostileAt(Valid, Valid.AreaId, Target) >= 0 then
+  begin
+    return Error('the restless skeleton blocks the way')
   end;
 
   if try InteriorCellAt(Map, Target) = InteriorCellKind.Wall then

@@ -27,7 +27,10 @@ values but does not derive available choices or resolve their effects.
 The initial typed dialogue graph offers questions about Mara and the dungeon,
 plus goodbye. A question about the Ancient coin appears only while the
 authoritative inventory contains it. Mara comments on the coin but neither
-takes nor changes it. The first and later greetings differ according to
+takes nor changes it. Her description of the dungeon warns that something
+restless walks the inner passages. While the player is hurt, the `wounds`
+choice restores full health without consuming a combat turn. A frame offers at
+most six choices. The first and later greetings differ according to
 `has_met_player`.
 
 While a dialogue is active, the server accepts only a dialogue choice, explicit

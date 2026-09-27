@@ -1,7 +1,7 @@
 # World structure and views
 
 This document defines the canonical terms for the spatial world model and its
-presentation. It does not yet define gameplay systems such as combat, quests,
+presentation, including the first combat terms. It does not yet define quests
 or character progression.
 
 ## Terminology
@@ -68,6 +68,20 @@ or character progression.
   set of currently available choices.
 - **Dialogue choice** is a stable server-owned response identity plus
   client-facing text. The client selects it but does not resolve its effect.
+- **Opponent** is a hostile actor with stable server-owned identity, kind,
+  area, position, health, and alert status. A standing opponent blocks its
+  field; a destroyed one stays recorded but is never projected.
+- **Restless skeleton** is the first opponent. It rests in the inner passages
+  of the initial dungeon.
+- **Health** is the player's current and full hit points. Reaching zero means
+  defeat.
+- **Turn** is one time-consuming player action (step, attack, or wait) followed
+  by the opponents' actions. Turning, interaction, dialogue, and saving are not
+  turns.
+- **Attack** is the player intention that strikes the field directly ahead.
+- **Combat log** is the ordered list of messages describing one resolved turn.
+- **Defeat** ends the current game session when the player's health reaches
+  zero. The connection remains, and the player may load or start a game.
 - **Visible state** is the server-produced, client-safe projection of the
   current area and player state. It is not the complete world.
 - **Game session** is one connected, server-authoritative period of play. A
@@ -173,6 +187,11 @@ can be addressed with `Enter` from the adjacent field. Her deterministic
 conversation distinguishes the first and later meeting and conditionally
 offers a question about the Ancient coin while the player carries it. Only the
 meeting flag is persistent; an active conversation ends with the connection.
+While the player is hurt, Mara also offers to tend their wounds.
+
+The restless skeleton rests at field `(3, 3)` in the inner passages that form
+the second route to the exit. It notices the player through line of sight,
+chases, and fights turn by turn; see [combat](../architecture/combat.md).
 
 Settlements, further entrances, navigable interiors, mutable terrain, broader
 world simulation, isometric rendering, LLM integration, and broader mutable RPG

@@ -93,6 +93,8 @@ persistence boundary are described in
 [items and inventory](items-and-inventory.md).
 The fixed NPC, deterministic dialogue graph, session lifecycle, and persistence
 boundary are described in [NPCs and simple dialogue](npcs-and-dialogue.md).
+Turn-based combat, its dice, opponent behavior, defeat, and persistence are
+described in [combat](combat.md).
 
 ## Runtime data
 

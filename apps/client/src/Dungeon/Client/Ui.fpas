@@ -545,6 +545,33 @@ begin
   end
 end;
 
+// Queues one turn-consuming combat intention such as attack or wait.
+function QueueCombatAction(State: ClientModel; Message: ClientMessage; Status: string): ClientModel;
+begin
+  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  begin
+    return State
+  end;
+
+  case TrySend(State.Requests, Message) of
+    Ok(Queued):
+    begin
+      if not Queued then
+      begin
+        return State
+      end;
+      mutable var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.Status := Status;
+      return Next
+    end
+    else
+    begin
+      return State
+    end
+  end
+end;
+
 function QueueFirstPersonTurn(State: ClientModel; Direction: FirstPersonTurnDirection): ClientModel;
 begin
   if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
@@ -1088,6 +1115,16 @@ begin
     if HasCharacter(Key, 'e', 'E') then
     begin
       return QueueFirstPersonTurn(State, FirstPersonTurnDirection.Right)
+    end;
+
+    if HasCharacter(Key, ' ', ' ') then
+    begin
+      return QueueCombatAction(State, ClientMessage.Attack, 'Attacking...')
+    end;
+
+    if HasCharacter(Key, 'z', 'Z') then
+    begin
+      return QueueCombatAction(State, ClientMessage.Wait, 'Waiting...')
     end
   end;
 
@@ -1254,6 +1291,32 @@ begin
       end;
 
       Next.Pending := false;
+      mutable var Health: integer := 0;
+      mutable var MaxHealth: integer := 0;
+      mutable var CombatLog: array of string := [];
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          Health := MapValue.Health;
+          MaxHealth := MapValue.MaxHealth
+        end;
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          Health := FirstPersonValue.Health;
+          MaxHealth := FirstPersonValue.MaxHealth;
+          CombatLog := FirstPersonValue.CombatLog
+        end
+      end;
+
+      // Only a drop within one running game flashes; loading or starting never does.
+      Next.DamageTaken := (State.HasVisibleState and (State.Health > 0)) and (Health < State.Health);
+      Next.Health := Health;
+      Next.MaxHealth := MaxHealth;
+      for Entry: string in CombatLog do
+      begin
+        Next := AppendMessage(Next, Entry)
+      end;
+
       if Next.View = ViewKind.FirstPerson then
       begin
         // A newly carried identity confirms pickup until the next authoritative update.
@@ -1283,6 +1346,11 @@ begin
       else
       begin
         Next.Status := 'Connected'
+      end;
+
+      if Std.Arrays.Length(CombatLog) > 0 then
+      begin
+        Next.Status := CombatLog[Std.Arrays.Length(CombatLog) - 1]
       end;
 
       return QueueViewport(Next)
@@ -1362,6 +1430,22 @@ begin
       Next.SaveAvailable := true;
       Next.Status := 'Game saved.';
       return AppendMessage(Next, Next.Status)
+    end;
+    ClientEvent.Defeated(Message):
+    begin
+      // The server ended the game session; the connection stays ready for a new session choice.
+      Next.Screen := ClientScreen.StartScreen;
+      Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
+      Next.Overlay := ClientOverlay.DefeatOverlay;
+      Next.FocusedControl := OverlayBackControlId;
+      Next.Pending := false;
+      Next.MapRequestPending := false;
+      Next.HasVisibleState := false;
+      Next.DamageTaken := false;
+      Next.DialogueChoices := [];
+      Next.DefeatMessage := Message;
+      Next.Status := 'You have fallen.';
+      return AppendMessage(Next, Message)
     end;
     ClientEvent.MapRejected(Code, Message):
     begin
@@ -1591,6 +1675,10 @@ begin
     InteriorNpcCode:
     begin
       return ColoredCell('♟', 225, 210, 255, 62, 43, 82)
+    end;
+    InteriorHostileCode:
+    begin
+      return ColoredCell('☠', 255, 214, 204, 110, 24, 24)
     end
     else
     begin
@@ -1640,6 +1728,24 @@ begin
   return TuiElementBuilders.MakePanel('World', [TuiElementBuilders.MakeColumn(Elements)])
 end;
 
+// Tints the outermost ring of the first-person image red after the character was hit.
+function WithDamageFrame(Grid: TuiCellGrid): TuiCellGrid;
+begin
+  mutable var Framed: TuiCellGrid := Grid;
+  for Y: integer := 0 to Grid.Height - 1 do
+  begin
+    for X: integer := 0 to Grid.Width - 1 do
+    begin
+      if (((X = 0) or (Y = 0)) or (X = Grid.Width - 1)) or (Y = Grid.Height - 1) then
+      begin
+        Framed.Cells[(Y * Grid.Width) + X] := ColoredCell(' ', 255, 255, 255, 150, 18, 18)
+      end
+    end
+  end;
+
+  return Framed
+end;
+
 function ViewFirstPerson(State: ClientModel): TuiElement;
 begin
   var Viewport: WorldViewport := DesiredWorldViewport(State);
@@ -1654,8 +1760,16 @@ begin
     PlayerY := State.PlayerY;
     Facing := State.FirstPersonFacing;
     Inventory := State.Inventory;
+    Health := State.Health;
+    MaxHealth := State.MaxHealth;
+    CombatLog := [];
   end;
   mutable var Grid: TuiCellGrid := RenderFirstPersonGrid(Value, Viewport.Width, Viewport.Height);
+  if State.DamageTaken then
+  begin
+    Grid := WithDamageFrame(Grid)
+  end;
+
   // Fallback only: the docked sidebar owns hints while visible.
   if (((((Grid.Width > 0) and (Grid.Height > 0)) and (State.PrimaryStatus <> '')) and not (State.ContextPanelVisible and ContextCanDock(State))) and (State.Overlay <> ClientOverlay.ContextOverlay)) and
      (State.PrimaryStatus <> 'Nothing in reach') then
@@ -1707,6 +1821,19 @@ begin
   end
 end;
 
+// Health as numbers plus an eight-segment bar that fits the narrowest docked sidebar.
+// Any remaining health shows at least one segment; before the first projection it is unknown.
+function HealthLabel(State: ClientModel): string;
+begin
+  if State.MaxHealth <= 0 then
+  begin
+    return 'Health unknown'
+  end;
+  var Filled: integer := (((State.Health * 8) + State.MaxHealth) - 1) div State.MaxHealth;
+  return ((((('Health ' + IntToStr(State.Health)) + '/') + IntToStr(State.MaxHealth)) + ' ') + Std.Str.RepeatStr('█', Filled)) +
+         Std.Str.RepeatStr('░', 8 - Filled)
+end;
+
 function ViewContext(State: ClientModel): TuiElement;
 begin
   mutable var Position: string := 'Not available';
@@ -1726,7 +1853,7 @@ begin
   end;
   mutable var Elements: array of TuiElement := [
                                                  TuiElementBuilders.MakeLabel('Character'),
-                                                 TuiElementBuilders.MakeLabel('Adventurer'),
+                                                 TuiElementBuilders.MakeLabel(HealthLabel(State)),
                                                  TuiElementBuilders.MakeLabel(''),
                                                  TuiElementBuilders.MakeLabel('Location'),
                                                  TuiElementBuilders.MakeLabel(Location),
@@ -1957,7 +2084,9 @@ begin
   begin
     Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('W/S    Forward/back one field'));
     Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('A/D    Left/right one field'));
-    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Q/E    Turn left/right 90 degrees'))
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Q/E    Turn left/right 90 degrees'));
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Space  Attack ahead'));
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Z      Wait one turn'))
   end;
 
   Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Enter  Interact'));
@@ -2132,6 +2261,19 @@ begin
                                                                ])
 end;
 
+function ViewDefeat(State: ClientModel): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay('You have fallen', [
+                                                             TuiElementBuilders.MakeColumn([
+                                                                                             TuiElementBuilders.MakeLabel(State.DefeatMessage),
+                                                                                             TuiElementBuilders.MakeLabel(''),
+                                                                                             TuiElementBuilders.MakeLabel('Load your last save or start a new game.'),
+                                                                                             TuiElementBuilders.MakeLabel(''),
+                                                                                             TuiElementBuilders.MakeButton(TuiControlId.Create(OverlayBackControlId), 'Continue', TuiAction.Create(BackAction))
+                                                                                           ])
+                                                           ])
+end;
+
 function ViewOverlay(State: ClientModel): TuiElement;
 begin
   case State.Overlay of
@@ -2171,6 +2313,10 @@ begin
     begin
       return ViewDialogue(State)
     end;
+    ClientOverlay.DefeatOverlay:
+    begin
+      return ViewDefeat(State)
+    end;
     ClientOverlay.NoOverlay:
     begin
       return TuiElementBuilders.MakeEmpty()
@@ -2198,7 +2344,9 @@ begin
       return TuiElementBuilders.MakeDesktop(Focus(State), [ViewInformation()])
     end;
 
-    if State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
+    // Confirmations and the defeat report stay above the session choices they lead back to.
+    if (State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay) or
+       (State.Overlay = ClientOverlay.DefeatOverlay) then
     begin
       return TuiElementBuilders.MakeDesktop(Focus(State), [
                                                             ViewStartScreen(State),

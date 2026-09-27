@@ -266,6 +266,20 @@ global clean disconnect. A viewport response may resize the underlying game
 screen without dismissing the conversation. Dialogue text, selection, and the
 active conversation are transient and are not restored after reconnecting.
 
+## Combat
+
+The Character section of the context panel shows health as numbers and an
+eight-segment bar, for example `Health 14/20 ██████░░`. While an opponent stands
+directly ahead, the Environment panel names it with its health and the attack
+key. Every message of a resolved turn is appended to the message history, and
+the last one also becomes the status text. When a turn lowers health, a red
+frame surrounds the first-person image until the next projection; starting or
+loading a game never shows it.
+
+Defeat returns to the session start screen with a `You have fallen` overlay
+containing the server's summary. `Continue` closes it with `New game` focused,
+so the player can load the last explicit save or start again.
+
 ## System menu
 
 `Ctrl+P` opens a framed overlay above the game screen. It contains at least
@@ -295,6 +309,9 @@ server or other players that may exist later.
 - In the first-person view, `W` and `S` move one field forward or backward,
   `A` and `D` step one field left or right, and `Q` and `E` turn 90 degrees
   left or right without changing fields.
+- In the first-person view, `Space` attacks the field directly ahead and `Z`
+  waits one turn. Both are turns and, like steps, are accepted only with no
+  request pending. `Enter` never attacks.
 - `Ctrl+P` opens or closes the system menu.
 - `M` opens or closes the exploration map. While it is open, WASD and the arrow
   keys pan, and `Home` recenters on the player.

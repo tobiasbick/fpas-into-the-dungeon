@@ -225,7 +225,7 @@ visual work may be discussed separately without reopening Phase 10.
 - [x] Accept the current first-person presentation and Ancient coin appearance
   as sufficient for the first playable checkpoint.
 
-## 11. NPCs and simple dialogue — IN REVIEW
+## 11. NPCs and simple dialogue — DONE
 
 Introduce one server-owned NPC and one deterministic conversation without LLM
 involvement. The first implementation places **Mara, the old adventurer** at a
@@ -248,7 +248,7 @@ fixed blocking field in the initial dungeon.
   TCP session behavior.
 - [x] Synchronize architecture, product terminology, UI, persistence, and
   roadmap documentation.
-- [ ] Review the complete NPC and dialogue slice with the user and obtain
+- [x] Review the complete NPC and dialogue slice with the user and obtain
   explicit acceptance.
 
 The implemented slice uses protocol version 10 and savegame format 4. It uses
@@ -257,13 +257,41 @@ See [NPCs and simple dialogue](architecture/npcs-and-dialogue.md).
 
 Moving NPCs, schedules, quests, general dialogue scripting, free-text input,
 branching world effects, and LLM-generated behavior remain outside this phase.
-Phase 11 is not complete or approved until the open acceptance item is checked.
+The user accepted the complete slice, including the upright first-person figure
+that replaced the initial floor marker.
 
-## 12. Combat — LATER
+## 12. Combat — IN REVIEW
 
-Introduce one small server-authoritative combat loop with one opponent. Combat
-rules, defeat behavior, and their relationship to grid movement will be
-designed separately before implementation.
+Introduce one small server-authoritative combat loop with one opponent. The
+design keeps the grid-based first-person presentation of classic dungeon
+crawlers but advances time only through player actions, so the request-response
+protocol stays sufficient and every fight is reproducible.
+
+- [x] Design turns, dice, the opponent, defeat, and persistence before
+  implementation in [combat](architecture/combat.md).
+- [x] Place the **restless skeleton** in the inner passages of the initial
+  dungeon, hidden from the main route, with blocking collision and
+  current-visibility-only projection.
+- [x] Consume a turn only for a successful step, `Space` attack, or `Z` wait;
+  keep turning, interaction, dialogue, and saving free.
+- [x] Let the skeleton notice the player through line of sight, chase along a
+  shortest path, and attack from orthogonally adjacent fields.
+- [x] Roll hits and damage with a seeded generator stored in the game state.
+- [x] End the game session on defeat with a dedicated message and a client
+  overlay that leads back to loading or starting a game.
+- [x] Let Mara tend the player's wounds while the player is hurt.
+- [x] Project health in both views, the turn's combat log, and a red damage
+  frame; draw the skeleton as a first-person figure and map marker.
+- [x] Persist health, the opponent, and the dice state in savegame format 5.
+- [x] Cover perception, pursuit, deterministic fights, victory, defeat,
+  healing, validation, protocol bounds, persistence, TUI behavior, and a
+  complete TCP fight.
+- [ ] Review the complete combat slice with the user and obtain explicit
+  acceptance.
+
+The implemented slice uses protocol version 11 and savegame format 5.
+Multiple opponents, loot, experience, ranged attacks, spells, real-time combat,
+and equipment remain outside this phase.
 
 ## 13. Character progression — LATER
 

@@ -2,7 +2,7 @@
 unit Dungeon.Server;
 
 uses
-  Dungeon.Exploration, Dungeon.Exploration.Model, Dungeon.Game, Dungeon.Protocol,
+  Dungeon.Combat, Dungeon.Exploration, Dungeon.Exploration.Model, Dungeon.Game, Dungeon.Protocol,
   Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Console,
   Std.Conv, Std.Net, Std.Options, Std.Results, Std.Server, Std.Str, Std.Task, Std.Time;
 
@@ -121,6 +121,14 @@ begin
       return true
     end;
     ClientMessage.SaveGame:
+    begin
+      return true
+    end;
+    ClientMessage.Attack:
+    begin
+      return true
+    end;
+    ClientMessage.Wait:
     begin
       return true
     end
@@ -385,7 +393,7 @@ begin
       begin
         mutable var Code: string := Std.Str.CharAt(TerrainRows[Y], X);
         if (Knowledge = FieldKnowledge.Remembered) and
-           ((Code = InteriorItemCode) or (Code = InteriorNpcCode)) then
+           (((Code = InteriorItemCode) or (Code = InteriorNpcCode)) or (Code = InteriorHostileCode)) then
         begin
           Code := try InteriorVisibleCode(Map, record
             X := X;
@@ -506,7 +514,7 @@ begin
           Y := Y;
         end);
         if (Knowledge = FieldKnowledge.Remembered) and
-           ((Code = InteriorItemCode) or (Code = InteriorNpcCode)) then
+           (((Code = InteriorItemCode) or (Code = InteriorNpcCode)) or (Code = InteriorHostileCode)) then
         begin
           Code := try InteriorVisibleCode(Map, record
             X := X;
@@ -539,7 +547,13 @@ begin
   end)
 end;
 
-function ProjectSession(World: WorldSession; State: GameState; Viewport: ViewportSize): result of SessionProjection, string;
+// Projects the current area; CombatLog carries the messages of the turn that produced State.
+function ProjectSession(
+  World: WorldSession;
+  State: GameState;
+  Viewport: ViewportSize;
+  CombatLog: array of string
+): result of SessionProjection, string;
 begin
   if State.Area = AreaKind.Dungeon then
   begin
@@ -569,6 +583,9 @@ begin
       PlayerY := Pose.Position.Y;
       Facing := ProtocolFacing(Pose.Facing);
       Inventory := ProjectInventory(State);
+      Health := State.Health;
+      MaxHealth := PlayerMaximumHealth;
+      CombatLog := CombatLog;
     end;
 
     return Ok(record
@@ -591,6 +608,8 @@ begin
     WorldX := OutdoorPosition.X;
     WorldY := OutdoorPosition.Y;
     Inventory := ProjectInventory(State);
+    Health := State.Health;
+    MaxHealth := PlayerMaximumHealth;
   end;
 
   return Ok(record
@@ -614,10 +633,11 @@ function SendProjection(
   World: WorldSession;
   State: GameState;
   Viewport: ViewportSize;
+  CombatLog: array of string;
   Token: CancellationToken
 ): result of WorldSession, string;
 begin
-  var Projection: SessionProjection := try ProjectSession(World, State, Viewport);
+  var Projection: SessionProjection := try ProjectSession(World, State, Viewport, CombatLog);
   var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(Projection.State), Token);
   return Ok(Projection.World)
 end;
@@ -632,10 +652,11 @@ begin
   return Send(ConnectionValue, ServerMessage.Rejected(Code, Message), Token)
 end;
 
-// Reveals the accepted state, makes it current, and sends its projection.
-function CommitState(
+// Reveals the accepted state, makes it current, and sends its projection with the turn's messages.
+function CommitTurn(
   Session: ServerSession;
   Changed: GameState;
+  CombatLog: array of string;
   ConnectionValue: Connection;
   Token: CancellationToken
 ): result of ServerSession, string;
@@ -643,8 +664,83 @@ begin
   var Revealed: GameState := try RevealCurrentArea(Session.World.Metadata, Changed);
   mutable var Next: ServerSession := Session;
   Next.State := Some(Revealed);
-  Next.World := try SendProjection(ConnectionValue, Session.World, Revealed, Session.Viewport, Token);
+  Next.World := try SendProjection(ConnectionValue, Session.World, Revealed, Session.Viewport, CombatLog, Token);
   return Ok(Next)
+end;
+
+// Reveals the accepted state, makes it current, and sends its projection without combat messages.
+function CommitState(
+  Session: ServerSession;
+  Changed: GameState;
+  ConnectionValue: Connection;
+  Token: CancellationToken
+): result of ServerSession, string;
+begin
+  return CommitTurn(Session, Changed, [], ConnectionValue, Token)
+end;
+
+// Joins one turn's messages into the bounded defeat summary.
+function DefeatSummary(Log: array of string): string;
+begin
+  mutable var Summary: string := '';
+  for Entry: string in Log do
+  begin
+    if Summary = '' then
+    begin
+      Summary := Entry
+    end
+    else
+    begin
+      Summary := (Summary + ' ') + Entry
+    end
+  end;
+
+  if Summary = '' then
+  begin
+    Summary := 'You have fallen.'
+  end;
+
+  if Std.Str.Length(Summary) > MaximumCombatLogTextLength then
+  begin
+    Summary := Std.Str.Substring(Summary, Std.Str.Length(Summary) - MaximumCombatLogTextLength, MaximumCombatLogTextLength)
+  end;
+
+  return Summary
+end;
+
+// Resolves one time-consuming intention; defeat ends the game session but keeps the connection.
+function PlayTurn(
+  Session: ServerSession;
+  Action: TurnAction;
+  RejectionCode: string;
+  ConnectionValue: Connection;
+  Token: CancellationToken
+): result of ServerSession, string;
+begin
+  case ResolveTurn(Session.World.Metadata, try RequireActiveState(Session.State), Action) of
+    Ok(Outcome):
+    begin
+      case Outcome of
+        TurnOutcome.Continued(Changed, Log):
+        begin
+          return CommitTurn(Session, Changed, Log, ConnectionValue, Token)
+        end;
+        TurnOutcome.Defeated(Log):
+        begin
+          var Sent: boolean := try Send(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
+          mutable var Ended: ServerSession := Session;
+          Ended.State := None;
+          Ended.ActiveDialogueNpcId := None;
+          return Ok(Ended)
+        end
+      end
+    end;
+    Error(Reason):
+    begin
+      var Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
+      return Ok(Session)
+    end
+  end
 end;
 
 // Applies one decoded client message after the handshake; Finished requests connection close.
@@ -749,7 +845,7 @@ begin
         Ok(Value):
         begin
           Next.Viewport := Value;
-          Next.World := try SendProjection(ConnectionValue, Session.World, try RequireActiveState(Session.State), Value, Token)
+          Next.World := try SendProjection(ConnectionValue, Session.World, try RequireActiveState(Session.State), Value, [], Token)
         end;
         Error(Reason):
         begin
@@ -785,16 +881,15 @@ begin
     end;
     ClientMessage.StepFirstPerson(Direction):
     begin
-      case Dungeon.Game.StepFirstPerson(Session.World.Metadata, try RequireActiveState(Session.State), GameStep(Direction)) of
-        Ok(Stepped):
-        begin
-          return CommitState(Session, Stepped, ConnectionValue, Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'movement_rejected', Reason, Token)
-        end
-      end
+      return PlayTurn(Session, TurnAction.Step(GameStep(Direction)), 'movement_rejected', ConnectionValue, Token)
+    end;
+    ClientMessage.Attack:
+    begin
+      return PlayTurn(Session, TurnAction.Attack, 'attack_rejected', ConnectionValue, Token)
+    end;
+    ClientMessage.Wait:
+    begin
+      return PlayTurn(Session, TurnAction.Wait, 'wait_rejected', ConnectionValue, Token)
     end;
     ClientMessage.TurnFirstPerson(Direction):
     begin
