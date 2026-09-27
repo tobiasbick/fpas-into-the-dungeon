@@ -80,6 +80,10 @@ these projects.
   server, including the one-character cell and knowledge code alphabet of
   visible rows. It contains no game rules; a server contract test verifies that
   every code produced by `libs/game` belongs to that alphabet.
+  `Dungeon.Protocol` holds the contract itself: limits, codes, and message
+  types. `Names`, `Validation`, and `Fields` encode and check nested values;
+  `ClientMessages` and `ServerMessages` encode and strictly decode whole
+  messages; `Transport` frames them as bounded lines.
 - `libs/persistence` currently owns the shared runtime path and configuration
   interface. Authoritative world files are owned by `libs/world`.
 - `tools/world-preview` samples final terrain or one normalized generator field

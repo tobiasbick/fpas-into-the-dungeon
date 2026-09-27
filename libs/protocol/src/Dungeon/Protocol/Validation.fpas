@@ -1,0 +1,432 @@
+// Bounds and consistency checks applied to every decoded or encoded visible state.
+unit Dungeon.Protocol.Validation;
+
+uses Dungeon.Protocol, Std.Arrays, Std.Str;
+
+function IsKnowledgeCode(Value: string): boolean;
+begin
+  return Std.Arrays.Contains([
+                               KnowledgeUndiscoveredCode,
+                               KnowledgeRememberedCode,
+                               KnowledgeVisibleCode
+                             ], Value)
+end;
+
+function ValidateKnowledgeRows(
+  Rows: array of string;
+  KnowledgeRows: array of string;
+  Width: integer;
+  Height: integer
+): result of boolean, string;
+begin
+  if Std.Arrays.Length(KnowledgeRows) <> Height then
+  begin
+    return Error('knowledge row count must match height')
+  end;
+
+  for Y: integer := 0 to Height - 1 do
+  begin
+    if Std.Str.Length(KnowledgeRows[Y]) <> Width then
+    begin
+      return Error('knowledge row width must match width')
+    end;
+
+    for X: integer := 0 to Width - 1 do
+    begin
+      var KnowledgeCode: string := Std.Str.CharAt(KnowledgeRows[Y], X);
+      var TerrainCode: string := Std.Str.CharAt(Rows[Y], X);
+      if not IsKnowledgeCode(KnowledgeCode) then
+      begin
+        return Error('knowledge row contains an unknown field code')
+      end;
+
+      if (KnowledgeCode = KnowledgeUndiscoveredCode) and (TerrainCode <> UnknownFieldCode) then
+      begin
+        return Error('undiscovered field must not expose terrain')
+      end;
+
+      if (KnowledgeCode <> KnowledgeUndiscoveredCode) and (TerrainCode = UnknownFieldCode) then
+      begin
+        return Error('known field must include terrain')
+      end
+    end
+  end;
+
+  return Ok(true)
+end;
+
+// Checks a dialogue frame against identity, text, and choice bounds.
+public function ValidateDialogue(Value: VisibleDialogue): result of VisibleDialogue, string;
+begin
+  if (Std.Str.Length(Value.NpcId) = 0) or (Std.Str.Length(Value.NpcId) > MaximumDialogueIdLength) then
+  begin
+    return Error('dialogue NPC id has an invalid length')
+  end;
+
+  if (Std.Str.Length(Value.Speaker) = 0) or
+     (Std.Str.Length(Value.Speaker) > MaximumDialogueLabelLength) then
+  begin
+    return Error('dialogue speaker has an invalid length')
+  end;
+
+  if (Std.Str.Length(Value.Text) = 0) or (Std.Str.Length(Value.Text) > MaximumDialogueTextLength) then
+  begin
+    return Error('dialogue text has an invalid length')
+  end;
+
+  if (Std.Arrays.Length(Value.Choices) = 0) or
+     (Std.Arrays.Length(Value.Choices) > MaximumDialogueChoices) then
+  begin
+    return Error('dialogue choice count is outside protocol limits')
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(Value.Choices) - 1 do
+  begin
+    var Choice: VisibleDialogueChoice := Value.Choices[Index];
+    if (Std.Str.Length(Choice.Id) = 0) or (Std.Str.Length(Choice.Id) > MaximumDialogueIdLength) then
+    begin
+      return Error('dialogue choice id has an invalid length')
+    end;
+
+    if (Std.Str.Length(Choice.Text) = 0) or
+       (Std.Str.Length(Choice.Text) > MaximumDialogueLabelLength) then
+    begin
+      return Error('dialogue choice text has an invalid length')
+    end;
+
+    for Earlier: integer := 0 to Index - 1 do
+    begin
+      if Value.Choices[Earlier].Id = Choice.Id then
+      begin
+        return Error('dialogue contains a duplicate choice id')
+      end
+    end
+  end;
+
+  return Ok(Value)
+end;
+
+// Checks inventory bounds, unique identities, and that only slotted items are worn, one per slot.
+public function ValidateInventory(Items: array of VisibleInventoryItem): result of array of VisibleInventoryItem, string;
+begin
+  if Std.Arrays.Length(Items) > MaximumVisibleInventoryItems then
+  begin
+    return Error('visible inventory exceeds the protocol item limit')
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(Items) - 1 do
+  begin
+    var Item: VisibleInventoryItem := Items[Index];
+    if (Std.Str.Length(Item.Id) = 0) or
+       (Std.Str.Length(Item.Id) > MaximumVisibleInventoryTextLength) then
+    begin
+      return Error('visible inventory item id has an invalid length')
+    end;
+
+    if (Std.Str.Length(Item.Name) = 0) or
+       (Std.Str.Length(Item.Name) > MaximumVisibleInventoryTextLength) then
+    begin
+      return Error('visible inventory item name has an invalid length')
+    end;
+
+    if Item.Equipped and (Item.Slot = VisibleItemSlot.NoSlot) then
+    begin
+      return Error('visible inventory item without a slot cannot be worn')
+    end;
+
+    for Earlier: integer := 0 to Index - 1 do
+    begin
+      if ((Item.Equipped and Items[Earlier].Equipped) and (Item.Slot = Items[Earlier].Slot)) then
+      begin
+        return Error('visible inventory wears two items in one slot')
+      end
+    end;
+
+    for Earlier: integer := 0 to Index - 1 do
+    begin
+      if Items[Earlier].Id = Item.Id then
+      begin
+        return Error('visible inventory contains a duplicate item id')
+      end
+    end
+  end;
+
+  return Ok(Items)
+end;
+
+function ValidateHealth(Health: integer; MaxHealth: integer): result of boolean, string;
+begin
+  if ((MaxHealth < 1) or (MaxHealth > MaximumVisibleHealth)) or
+     ((Health < 1) or (Health > MaxHealth)) then
+  begin
+    return Error('visible health is outside protocol limits')
+  end;
+
+  return Ok(true)
+end;
+
+function ValidateCombatLog(Log: array of string): result of boolean, string;
+begin
+  if Std.Arrays.Length(Log) > MaximumCombatLogEntries then
+  begin
+    return Error('combat log exceeds the protocol entry limit')
+  end;
+
+  for Entry: string in Log do
+  begin
+    if (Std.Str.Length(Entry) = 0) or (Std.Str.Length(Entry) > MaximumCombatLogTextLength) then
+    begin
+      return Error('combat log entry has an invalid length')
+    end
+  end;
+
+  return Ok(true)
+end;
+
+// Checks the character sheet line count and text bounds.
+public function ValidateCharacter(Lines: array of VisibleCharacterValue): result of boolean, string;
+begin
+  if Std.Arrays.Length(Lines) > MaximumCharacterValues then
+  begin
+    return Error('character sheet exceeds the protocol line limit')
+  end;
+
+  for Line: VisibleCharacterValue in Lines do
+  begin
+    if (((Std.Str.Length(Line.Label) = 0) or (Std.Str.Length(Line.Label) > MaximumCharacterTextLength)) or ((Std.Str.Length(Line.Value) = 0) or (Std.Str.Length(Line.Value) > MaximumCharacterTextLength))) or
+       ((Std.Str.Length(Line.Source) = 0) or (Std.Str.Length(Line.Source) > MaximumCharacterTextLength)) then
+    begin
+      return Error('character sheet line has an invalid length')
+    end
+  end;
+
+  return Ok(true)
+end;
+
+// Checks the combat event count and amount bounds.
+public function ValidateCombatEvents(Events: array of VisibleCombatEvent): result of boolean, string;
+begin
+  if Std.Arrays.Length(Events) > MaximumCombatEvents then
+  begin
+    return Error('combat events exceed the protocol entry limit')
+  end;
+
+  for Entry: VisibleCombatEvent in Events do
+  begin
+    if (Entry.Amount < 0) or (Entry.Amount > MaximumCombatEventAmount) then
+    begin
+      return Error('combat event amount is outside protocol limits')
+    end
+  end;
+
+  return Ok(true)
+end;
+
+// Checks a map state: dimensions, alphabet, knowledge rows, player position, inventory, health.
+public function ValidateMapVisibleState(Value: MapVisibleState): result of MapVisibleState, string;
+begin
+  var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
+  var ValidHealth: boolean := try ValidateHealth(Value.Health, Value.MaxHealth);
+  var ValidCharacter: boolean := try ValidateCharacter(Value.Character);
+  if (Value.Width <= 0) or (Value.Height <= 0) then
+  begin
+    return Error('visible-state dimensions must be positive')
+  end;
+
+  if Std.Arrays.Length(Value.Rows) <> Value.Height then
+  begin
+    return Error('visible-state row count must match height')
+  end;
+
+  for Row: string in Value.Rows do
+  begin
+    if Std.Str.Length(Row) <> Value.Width then
+    begin
+      return Error('visible-state row width must match width')
+    end;
+
+    for Index: integer := 0 to Std.Str.Length(Row) - 1 do
+    begin
+      var Code: string := Std.Str.CharAt(Row, Index);
+      if not IsMapCellCode(Code) then
+      begin
+        return Error('visible-state row contains an unknown cell code')
+      end
+    end
+  end;
+  var KnowledgeValid: boolean := try ValidateKnowledgeRows(Value.Rows, Value.KnowledgeRows, Value.Width, Value.Height);
+  if (((Value.PlayerX < 0) or (Value.PlayerX >= Value.Width)) or (Value.PlayerY < 0)) or
+     (Value.PlayerY >= Value.Height) then
+  begin
+    return Error('visible-state player position is outside the area')
+  end;
+
+  if (Value.OriginX + Value.PlayerX <> Value.WorldX) or
+     (Value.OriginY + Value.PlayerY <> Value.WorldY) then
+  begin
+    return Error('visible-state local and world player positions disagree')
+  end;
+
+  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> KnowledgeVisibleCode then
+  begin
+    return Error('visible-state player field must be currently visible')
+  end;
+
+  return Ok(Value)
+end;
+
+// Checks a first-person state: geometry, alphabet, single exit, traversable player field, and bounded extras.
+public function ValidateFirstPersonVisibleState(Value: FirstPersonVisibleState): result of FirstPersonVisibleState, string;
+begin
+  var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
+  var ValidHealth: boolean := try ValidateHealth(Value.Health, Value.MaxHealth);
+  var ValidLog: boolean := try ValidateCombatLog(Value.CombatLog);
+  var ValidCharacter: boolean := try ValidateCharacter(Value.Character);
+  var ValidEvents: boolean := try ValidateCombatEvents(Value.CombatEvents);
+  if Std.Str.Length(Value.Title) = 0 then
+  begin
+    return Error('first-person state title must not be empty')
+  end;
+
+  if Std.Str.Length(Value.Status) = 0 then
+  begin
+    return Error('first-person state status must not be empty')
+  end;
+
+  if (Value.Width <= 0) or (Value.Height <= 0) then
+  begin
+    return Error('first-person dimensions must be positive')
+  end;
+
+  if Std.Arrays.Length(Value.Rows) <> Value.Height then
+  begin
+    return Error('first-person row count must match height')
+  end;
+  mutable var ExitCount: integer := 0;
+  for Row: string in Value.Rows do
+  begin
+    if Std.Str.Length(Row) <> Value.Width then
+    begin
+      return Error('first-person row width must match width')
+    end;
+
+    for Index: integer := 0 to Std.Str.Length(Row) - 1 do
+    begin
+      var Code: string := Std.Str.CharAt(Row, Index);
+      if not IsInteriorCellCode(Code) then
+      begin
+        return Error('first-person row contains an unknown field code')
+      end;
+
+      if Code = InteriorExitCode then
+      begin
+        ExitCount := ExitCount + 1
+      end
+    end
+  end;
+  var KnowledgeValid: boolean := try ValidateKnowledgeRows(Value.Rows, Value.KnowledgeRows, Value.Width, Value.Height);
+  if ExitCount > 1 then
+  begin
+    return Error('first-person state must not contain duplicate exit fields')
+  end;
+
+  if (((Value.PlayerX < 0) or (Value.PlayerX >= Value.Width)) or (Value.PlayerY < 0)) or
+     (Value.PlayerY >= Value.Height) then
+  begin
+    return Error('first-person player position is outside the area')
+  end;
+  var PlayerCode: string := Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX);
+  if Std.Arrays.Contains([
+                           InteriorWallCode,
+                           InteriorTabletCode,
+                           InteriorNpcCode,
+                           InteriorHostileCode,
+                           UnknownFieldCode
+                         ], PlayerCode) then
+  begin
+    return Error('first-person player position must be traversable')
+  end;
+
+  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> KnowledgeVisibleCode then
+  begin
+    return Error('first-person player field must be currently visible')
+  end;
+
+  return Ok(Value)
+end;
+
+// Checks an exploration-map window: dimensions, alphabet, knowledge, origin bounds, and player marker.
+public function ValidateExplorationMapState(Value: ExplorationMapState): result of ExplorationMapState, string;
+begin
+  if Std.Str.Length(Value.LabelText) = 0 then
+  begin
+    return Error('exploration map label must not be empty')
+  end;
+
+  if (Value.Width <= 0) or (Value.Height <= 0) then
+  begin
+    return Error('exploration map dimensions must be positive')
+  end;
+
+  if (Value.Width > MaximumExplorationMapWidth) or (Value.Height > MaximumExplorationMapHeight) then
+  begin
+    return Error('exploration map dimensions exceed protocol limits')
+  end;
+
+  if (((Value.OriginX < - MaximumExplorationMapOriginMagnitude) or (Value.OriginX > MaximumExplorationMapOriginMagnitude)) or (Value.OriginY < - MaximumExplorationMapOriginMagnitude)) or
+     (Value.OriginY > MaximumExplorationMapOriginMagnitude) then
+  begin
+    return Error('exploration map origin exceeds protocol limits')
+  end;
+
+  if Std.Arrays.Length(Value.Rows) <> Value.Height then
+  begin
+    return Error('exploration map row count must match height')
+  end;
+
+  for Row: string in Value.Rows do
+  begin
+    if Std.Str.Length(Row) <> Value.Width then
+    begin
+      return Error('exploration map row width must match width')
+    end;
+
+    for X: integer := 0 to Value.Width - 1 do
+    begin
+      var Code: string := Std.Str.CharAt(Row, X);
+      if Value.View = ViewKind.Map then
+      begin
+        if not IsMapCellCode(Code) then
+        begin
+          return Error('exploration map contains an unknown outdoor field code')
+        end
+      end
+      else
+      begin
+        if not IsInteriorCellCode(Code) then
+        begin
+          return Error('exploration map contains an unknown interior field code')
+        end
+      end
+    end
+  end;
+  var KnowledgeValid: boolean := try ValidateKnowledgeRows(Value.Rows, Value.KnowledgeRows, Value.Width, Value.Height);
+  var ContainsPlayer: boolean := (((Value.PlayerWorldX >= Value.OriginX) and (Value.PlayerWorldX < Value.OriginX + Value.Width)) and (Value.PlayerWorldY >= Value.OriginY)) and
+                                 (Value.PlayerWorldY < Value.OriginY + Value.Height);
+  if ContainsPlayer <> Value.PlayerInWindow then
+  begin
+    return Error('exploration map player-in-window flag is inconsistent')
+  end;
+
+  if Value.PlayerInWindow then
+  begin
+    var PlayerLocalX: integer := Value.PlayerWorldX - Value.OriginX;
+    var PlayerLocalY: integer := Value.PlayerWorldY - Value.OriginY;
+    if Std.Str.CharAt(Value.KnowledgeRows[PlayerLocalY], PlayerLocalX) <> KnowledgeVisibleCode then
+    begin
+      return Error('exploration map player field must be currently visible')
+    end
+  end;
+
+  return Ok(Value)
+end;

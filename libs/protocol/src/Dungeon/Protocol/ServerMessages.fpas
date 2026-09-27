@@ -1,0 +1,230 @@
+// Encoding and strict decoding of server-to-client messages.
+unit Dungeon.Protocol.ServerMessages;
+
+uses
+  Dungeon.Protocol, Dungeon.Protocol.Fields, Dungeon.Protocol.Names, Dungeon.Protocol.Validation,
+  Std.Conv, Std.Json, Std.Json.Fields, Std.Str;
+
+// Encodes one server message as a compact JSON object for line transport.
+public function EncodeServer(Message: ServerMessage): string;
+begin
+  case Message of
+    ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('welcome'), 'version': JsonValue.Number(IntToReal(Version)), 'save_available': JsonValue.Bool(SaveAvailable), 'invalid_save_removed': JsonValue.Bool(InvalidSaveRemoved)]))
+    end;
+    ServerMessage.State(Value):
+    begin
+      case Value of
+        VisibleState.MapState(MapValue):
+        begin
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY)), 'inventory': JsonValue.ArrayValue(EncodeInventory(MapValue.Inventory)), 'health': JsonValue.Number(IntToReal(MapValue.Health)), 'max_health': JsonValue.Number(IntToReal(MapValue.MaxHealth)), 'character': JsonValue.ArrayValue(EncodeCharacter(MapValue.Character))]))
+        end;
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing)), 'inventory': JsonValue.ArrayValue(EncodeInventory(FirstPersonValue.Inventory)), 'health': JsonValue.Number(IntToReal(FirstPersonValue.Health)), 'max_health': JsonValue.Number(IntToReal(FirstPersonValue.MaxHealth)), 'character': JsonValue.ArrayValue(EncodeCharacter(FirstPersonValue.Character)), 'combat_log': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.CombatLog)), 'combat_events': JsonValue.ArrayValue(EncodeCombatEvents(FirstPersonValue.CombatEvents))]))
+        end
+      end
+    end;
+    ServerMessage.ExplorationMap(Value):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('exploration_map'), 'view': JsonValue.String(ViewName(Value.View)), 'label': JsonValue.String(Value.LabelText), 'origin_x': JsonValue.Number(IntToReal(Value.OriginX)), 'origin_y': JsonValue.Number(IntToReal(Value.OriginY)), 'width': JsonValue.Number(IntToReal(Value.Width)), 'height': JsonValue.Number(IntToReal(Value.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(Value.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(Value.KnowledgeRows)), 'player_world_x': JsonValue.Number(IntToReal(Value.PlayerWorldX)), 'player_world_y': JsonValue.Number(IntToReal(Value.PlayerWorldY)), 'player_in_window': JsonValue.Bool(Value.PlayerInWindow)]))
+    end;
+    ServerMessage.Interaction(Title, MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('interaction'), 'title': JsonValue.String(Title), 'message': JsonValue.String(MessageText)]))
+    end;
+    ServerMessage.Dialogue(Value):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('dialogue'), 'npc_id': JsonValue.String(Value.NpcId), 'speaker': JsonValue.String(Value.Speaker), 'text': JsonValue.String(Value.Text), 'choices': JsonValue.ArrayValue(EncodeDialogueChoices(Value.Choices))]))
+    end;
+    ServerMessage.DialogueEnded:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('dialogue_ended')]))
+    end;
+    ServerMessage.SaveCompleted:
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('save_completed')]))
+    end;
+    ServerMessage.Defeated(MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('defeated'), 'message': JsonValue.String(MessageText)]))
+    end;
+    ServerMessage.Rejected(Code, MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('rejected'), 'code': JsonValue.String(Code), 'message': JsonValue.String(MessageText)]))
+    end;
+    ServerMessage.ErrorMessage(Code, MessageText):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('error'), 'code': JsonValue.String(Code), 'message': JsonValue.String(MessageText)]))
+    end
+  end
+end;
+
+// Decodes one server message and validates visible-state dimensions and coordinates.
+public function DecodeServer(Text: string): result of ServerMessage, string;
+begin
+  var Fields: dict of string to JsonValue := try ParseObject(Text);
+  case try StringField(Fields, 'type') of
+    'welcome':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 4 then
+      begin
+        return Error('welcome must contain only type, version, save_available, and invalid_save_removed')
+      end;
+
+      return Ok(ServerMessage.Welcome(try IntegerField(Fields, 'version'), try BooleanField(Fields, 'save_available'), try BooleanField(Fields, 'invalid_save_removed')))
+    end;
+    'save_completed':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('save_completed must not contain additional fields')
+      end;
+
+      return Ok(ServerMessage.SaveCompleted)
+    end;
+    'state':
+    begin
+      case try DecodeView(try StringField(Fields, 'view')) of
+        ViewKind.Map:
+        begin
+          if Std.Dictionaries.Length(Fields) <> 16 then
+          begin
+            return Error('map state has an unexpected field set')
+          end;
+          var MapValue: MapVisibleState := record
+            OriginX := try IntegerField(Fields, 'origin_x');
+            OriginY := try IntegerField(Fields, 'origin_y');
+            Width := try IntegerField(Fields, 'width');
+            Height := try IntegerField(Fields, 'height');
+            Rows := try StringArrayField(Fields, 'rows');
+            KnowledgeRows := try StringArrayField(Fields, 'knowledge_rows');
+            PlayerX := try IntegerField(Fields, 'x');
+            PlayerY := try IntegerField(Fields, 'y');
+            WorldX := try IntegerField(Fields, 'world_x');
+            WorldY := try IntegerField(Fields, 'world_y');
+            Inventory := try InventoryField(Fields, 'inventory');
+            Health := try IntegerField(Fields, 'health');
+            MaxHealth := try IntegerField(Fields, 'max_health');
+            Character := try CharacterField(Fields);
+          end;
+
+          return Ok(ServerMessage.State(VisibleState.MapState(try ValidateMapVisibleState(MapValue))))
+        end;
+        ViewKind.FirstPerson:
+        begin
+          if Std.Dictionaries.Length(Fields) <> 17 then
+          begin
+            return Error('first-person state has an unexpected field set')
+          end;
+          var FirstPersonValue: FirstPersonVisibleState := record
+            Title := try StringField(Fields, 'title');
+            Status := try StringField(Fields, 'status');
+            Width := try IntegerField(Fields, 'width');
+            Height := try IntegerField(Fields, 'height');
+            Rows := try StringArrayField(Fields, 'rows');
+            KnowledgeRows := try StringArrayField(Fields, 'knowledge_rows');
+            PlayerX := try IntegerField(Fields, 'x');
+            PlayerY := try IntegerField(Fields, 'y');
+            Facing := try DecodeFirstPersonFacing(try StringField(Fields, 'facing'));
+            Inventory := try InventoryField(Fields, 'inventory');
+            Health := try IntegerField(Fields, 'health');
+            MaxHealth := try IntegerField(Fields, 'max_health');
+            Character := try CharacterField(Fields);
+            CombatLog := try StringArrayField(Fields, 'combat_log');
+            CombatEvents := try CombatEventsField(Fields);
+          end;
+
+          return Ok(ServerMessage.State(VisibleState.FirstPersonState(try ValidateFirstPersonVisibleState(FirstPersonValue))))
+        end
+      end
+    end;
+    'exploration_map':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 12 then
+      begin
+        return Error('exploration map has an unexpected field set')
+      end;
+      var Value: ExplorationMapState := record
+        View := try DecodeView(try StringField(Fields, 'view'));
+        LabelText := try StringField(Fields, 'label');
+        OriginX := try IntegerField(Fields, 'origin_x');
+        OriginY := try IntegerField(Fields, 'origin_y');
+        Width := try IntegerField(Fields, 'width');
+        Height := try IntegerField(Fields, 'height');
+        Rows := try StringArrayField(Fields, 'rows');
+        KnowledgeRows := try StringArrayField(Fields, 'knowledge_rows');
+        PlayerWorldX := try IntegerField(Fields, 'player_world_x');
+        PlayerWorldY := try IntegerField(Fields, 'player_world_y');
+        PlayerInWindow := try BooleanField(Fields, 'player_in_window');
+      end;
+
+      return Ok(ServerMessage.ExplorationMap(try ValidateExplorationMapState(Value)))
+    end;
+    'interaction':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('interaction must contain only type, title, and message')
+      end;
+      var MessageText: string := try StringField(Fields, 'message');
+      if Std.Str.Length(MessageText) = 0 then
+      begin
+        return Error('interaction message must not be empty')
+      end;
+
+      return Ok(ServerMessage.Interaction(try StringField(Fields, 'title'), MessageText))
+    end;
+    'dialogue':
+    begin
+      return Ok(ServerMessage.Dialogue(try DecodeDialogue(Fields)))
+    end;
+    'defeated':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 2 then
+      begin
+        return Error('defeated must contain only type and message')
+      end;
+      var DefeatText: string := try StringField(Fields, 'message');
+      if (Std.Str.Length(DefeatText) = 0) or
+         (Std.Str.Length(DefeatText) > MaximumCombatLogTextLength) then
+      begin
+        return Error('defeat message has an invalid length')
+      end;
+
+      return Ok(ServerMessage.Defeated(DefeatText))
+    end;
+    'dialogue_ended':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 1 then
+      begin
+        return Error('dialogue_ended must not contain additional fields')
+      end;
+
+      return Ok(ServerMessage.DialogueEnded)
+    end;
+    'rejected':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('rejected must contain only type, code, and message')
+      end;
+
+      return Ok(ServerMessage.Rejected(try StringField(Fields, 'code'), try StringField(Fields, 'message')))
+    end;
+    'error':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 3 then
+      begin
+        return Error('error must contain only type, code, and message')
+      end;
+
+      return Ok(ServerMessage.ErrorMessage(try StringField(Fields, 'code'), try StringField(Fields, 'message')))
+    end
+    else
+    begin
+      return Error('unknown server message type')
+    end
+  end
+end;
