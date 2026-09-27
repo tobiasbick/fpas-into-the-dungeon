@@ -1,0 +1,241 @@
+// Derived character values from base values plus worn items, and the rules for wearing items.
+unit Dungeon.Equipment;
+
+uses Dungeon.Game, Std.Arrays, Std.Conv, Std.Options, Std.Results, Std.Str;
+
+public const
+  // Lowest d20 roll with which the player hits before any modifier.
+  BaseHitThreshold: integer := 6;
+  // Damage die of an unarmed blow; low on purpose so that a weapon matters.
+  UnarmedDamageSides: integer := 3;
+  // Armor of the unprotected character.
+  BaseArmor: integer := 0;
+
+public type
+  // The character's values as the rules read them; always derived, never persisted.
+  CharacterValues = record
+    public MaximumHealth: integer;
+    // Lowest d20 roll that hits an opponent.
+    public HitThreshold: integer;
+    // Damage of a hit is one roll of 1 through DamageSides plus DamageBonus.
+    public DamageSides: integer;
+    public DamageBonus: integer;
+    // Added to an opponent's hit threshold.
+    public Armor: integer;
+  end;
+  // One player-facing line of the character sheet, formatted by the server.
+  CharacterValueLine = record
+    public Label: string;
+    public Value: string;
+    // What the value comes from, such as `Base` or the name of a worn item.
+    public Source: string;
+  end;
+  // Accepted equipment change and its turn log message.
+  EquipmentChange = record
+    public State: GameState;
+    public Message: string;
+  end;
+
+// Formats damage dice such as `d3` or `d6+1`.
+public function DamageText(Sides: integer; Bonus: integer): string;
+begin
+  if Bonus = 0 then
+  begin
+    return 'd' + IntToStr(Sides)
+  end;
+
+  return (('d' + IntToStr(Sides)) + '+') + IntToStr(Bonus)
+end;
+
+// Derives the character's values from base values and the items worn in the given state.
+public function DeriveCharacterValues(State: GameState): CharacterValues;
+begin
+  mutable var Values: CharacterValues := record
+    MaximumHealth := PlayerMaximumHealth;
+    HitThreshold := BaseHitThreshold;
+    DamageSides := UnarmedDamageSides;
+    DamageBonus := 0;
+    Armor := BaseArmor;
+  end;
+
+  case EquippedItem(State, EquipmentSlot.Weapon) of
+    Some(Weapon):
+    begin
+      if Weapon.Kind = ItemKind.RustyShortSword then
+      begin
+        Values.DamageSides := 6;
+        Values.DamageBonus := 1
+      end
+    end;
+    None:
+    begin
+    end
+  end;
+
+  case EquippedItem(State, EquipmentSlot.Body) of
+    Some(Armor):
+    begin
+      if Armor.Kind = ItemKind.LeatherJerkin then
+      begin
+        Values.Armor := Values.Armor + 2
+      end
+    end;
+    None:
+    begin
+    end
+  end;
+
+  return Values
+end;
+
+function WornSource(State: GameState; Slot: EquipmentSlot; Fallback: string): string;
+begin
+  case EquippedItem(State, Slot) of
+    Some(Item):
+    begin
+      return ItemDisplayName(Item.Kind)
+    end;
+    None:
+    begin
+      return Fallback
+    end
+  end
+end;
+
+// Returns the character sheet lines in a fixed order: health, hit chance, damage, armor.
+public function CharacterValueLines(State: GameState): array of CharacterValueLine;
+begin
+  var Values: CharacterValues := DeriveCharacterValues(State);
+  var HitPercent: integer := ((21 - Values.HitThreshold) * 100) div 20;
+  return [record
+    Label := 'Maximum health';
+    Value := IntToStr(Values.MaximumHealth);
+    Source := 'Base';
+  end, record
+    Label := 'Hit chance';
+    Value := ((IntToStr(HitPercent) + '% (d20 ≥ ') + IntToStr(Values.HitThreshold)) + ')';
+    Source := 'Base';
+  end, record
+    Label := 'Damage';
+    Value := DamageText(Values.DamageSides, Values.DamageBonus);
+    Source := WornSource(State, EquipmentSlot.Weapon, 'Unarmed');
+  end, record
+    Label := 'Armor';
+    Value := IntToStr(Values.Armor);
+    Source := WornSource(State, EquipmentSlot.Body, 'None');
+  end]
+end;
+
+function ItemIndex(State: GameState; ItemId: string): result of integer, string;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(State.Items) - 1 do
+  begin
+    if State.Items[Index].Id = ItemId then
+    begin
+      return Ok(Index)
+    end
+  end;
+
+  return Error('unknown item')
+end;
+
+function WornMessage(Kind: ItemKind; Slot: EquipmentSlot): string;
+begin
+  var Name: string := Std.Str.ToLower(ItemDisplayName(Kind));
+  if Slot = EquipmentSlot.Weapon then
+  begin
+    return ('You wield the ' + Name) + '.'
+  end;
+
+  return ('You put on the ' + Name) + '.'
+end;
+
+function RemovedMessage(Kind: ItemKind; Slot: EquipmentSlot): string;
+begin
+  var Name: string := Std.Str.ToLower(ItemDisplayName(Kind));
+  if Slot = EquipmentSlot.Weapon then
+  begin
+    return ('You put away the ' + Name) + '.'
+  end;
+
+  return ('You take off the ' + Name) + '.'
+end;
+
+// Wears a carried item in its slot; an item already worn there returns to the inventory.
+// Errors name items that are unknown, not carried, already worn, or cannot be worn.
+public function EquipItem(State: GameState; ItemId: string): result of EquipmentChange, string;
+begin
+  var Index: integer := try ItemIndex(State, ItemId);
+  var Item: GameItem := State.Items[Index];
+  mutable var Slot: EquipmentSlot := EquipmentSlot.Weapon;
+  case ItemSlot(Item.Kind) of
+    Some(Fitting):
+    begin
+      Slot := Fitting
+    end;
+    None:
+    begin
+      return Error('this item cannot be worn')
+    end
+  end;
+
+  case Item.Location of
+    ItemLocation.CarriedByPlayer:
+    begin
+    end;
+    ItemLocation.EquippedByPlayer(Worn):
+    begin
+      return Error('this item is already worn')
+    end;
+    ItemLocation.InInterior(AreaId, Position):
+    begin
+      return Error('you do not carry this item')
+    end
+  end;
+  mutable var Items: array of GameItem := State.Items;
+  for Other: integer := 0 to Std.Arrays.Length(Items) - 1 do
+  begin
+    case Items[Other].Location of
+      ItemLocation.EquippedByPlayer(Worn):
+      begin
+        if Worn = Slot then
+        begin
+          Items[Other] := Items[Other] with Location := ItemLocation.CarriedByPlayer; end
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  Items[Index] := Item with Location := ItemLocation.EquippedByPlayer(Slot); end;
+
+  return Ok(record
+    State := State with Items := Items; end;
+    Message := WornMessage(Item.Kind, Slot);
+  end)
+end;
+
+// Returns a worn item to the inventory; errors name items that are unknown or not worn.
+public function UnequipItem(State: GameState; ItemId: string): result of EquipmentChange, string;
+begin
+  var Index: integer := try ItemIndex(State, ItemId);
+  var Item: GameItem := State.Items[Index];
+  case Item.Location of
+    ItemLocation.EquippedByPlayer(Worn):
+    begin
+      mutable var Items: array of GameItem := State.Items;
+      Items[Index] := Item with Location := ItemLocation.CarriedByPlayer; end;
+
+      return Ok(record
+        State := State with Items := Items; end;
+        Message := RemovedMessage(Item.Kind, Worn);
+      end)
+    end
+    else
+    begin
+      return Error('this item is not worn')
+    end
+  end
+end;

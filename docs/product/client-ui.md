@@ -81,9 +81,11 @@ also includes both sections.
 Docking also requires enough height for both frames and the existing character
 summary; short terminals use the same overlay and hint fallback as narrow ones.
 
-Context contains summaries rather than another full game screen. Its quick inventory
-lists the carried item names projected by the server and displays `Empty` when
-the player carries nothing. Item identity, ownership, and rules never move into
+Context contains summaries rather than another full game screen. Its equipment
+section lists one line per worn item, such as `Weapon: Rusty short sword`, or
+`Nothing worn`. Its quick inventory lists the carried items that are not worn
+and displays `Empty` when there are none. Worn and carried lines together never
+exceed the item count plus one, which the docking height already reserves. Item identity, ownership, and rules never move into
 the client.
 
 The context and message panels can be shown or hidden. The framed status view
@@ -276,9 +278,32 @@ the last one also becomes the status text. When a turn lowers health, a red
 frame surrounds the first-person image until the next projection; starting or
 loading a game never shows it.
 
+After a first-person turn with combat events the client plays a short combat
+animation of at most three 160 ms phases: the player's swing with a blade or a
+fist, then a white hit flash with a rising damage number or a sideways dodge
+with `miss`, then the opponent's lunge. The red frame and the player's rising
+damage number wait for that lunge; a destroyed opponent sinks into the floor.
+The animation only presents the already resolved state. Any key completes it at
+once and is then handled normally. A client background subscription sends one
+frame event every 40 ms while an animation runs; walls and floor are rendered
+once at its start, so each frame only composes sprites and texts.
+
 Defeat returns to the session start screen with a `You have fallen` overlay
 containing the server's summary. `Continue` closes it with `New game` focused,
 so the player can load the last explicit save or start again.
+
+## Equipment
+
+`I` opens the inventory overlay. It lists every carried and worn item with its
+slot or `cannot be worn`; W/S or Up/Down select, `Enter` asks the server to wear
+or remove the selection, and `Escape` or `I` closes it. The overlay stays open
+while the change is resolved, so the new state is visible at once. Changing gear
+takes a turn, so an adjacent opponent may strike in between.
+
+`C` opens the character sheet: health, then each server-formatted derived value
+with its source, such as `Damage d6+1 · Rusty short sword`, then the worn
+equipment. `I` switches to the inventory, `Escape` or `C` closes it. The client
+never computes these values.
 
 ## System menu
 
@@ -312,6 +337,8 @@ server or other players that may exist later.
 - In the first-person view, `Space` attacks the field directly ahead and `Z`
   waits one turn. Both are turns and, like steps, are accepted only with no
   request pending. `Enter` never attacks.
+- `I` opens or closes the inventory overlay and `C` the character sheet; both
+  need an active game and no other overlay.
 - `Ctrl+P` opens or closes the system menu.
 - `M` opens or closes the exploration map. While it is open, WASD and the arrow
   keys pan, and `Home` recenters on the player.

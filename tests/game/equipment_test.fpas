@@ -1,0 +1,314 @@
+// Verifies equipment: placements, derived values, equip rules and turn costs, combat effects, and validation.
+program EquipmentTest;
+
+uses
+  Dungeon.Combat, Dungeon.Equipment, Dungeon.Exploration, Dungeon.Game, Std.Arrays, Std.Options,
+  Std.Results, Std.Str, Std.Test;
+
+function InDungeon(
+  Metadata: WorldMetadata;
+  State: GameState;
+  X: integer;
+  Y: integer;
+  Facing: FacingDirection
+): GameState;
+begin
+  return State with Area := AreaKind.Dungeon; AreaId := Metadata.DungeonAreaId; Player := PlayerPosition.FirstPerson(record
+    Position := record
+      X := X;
+      Y := Y;
+    end;
+    Facing := Facing;
+  end); ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance); end
+end;
+
+// Places one item at a new location without any rule check.
+function WithLocation(State: GameState; ItemId: string; Location: ItemLocation): GameState;
+begin
+  mutable var Items: array of GameItem := State.Items;
+  for Index: integer := 0 to Std.Arrays.Length(Items) - 1 do
+  begin
+    if Items[Index].Id = ItemId then
+    begin
+      Items[Index] := Items[Index] with Location := Location; end
+    end
+  end;
+
+  return State with Items := Items; end
+end;
+
+function Continued(Outcome: TurnOutcome): GameState;
+begin
+  case Outcome of
+    TurnOutcome.Continued(State, Log, Events):
+    begin
+      return State
+    end;
+    TurnOutcome.Defeated(Log):
+    begin
+      panic('expected the game to continue')
+    end
+  end
+end;
+
+function LogOf(Outcome: TurnOutcome): array of string;
+begin
+  case Outcome of
+    TurnOutcome.Continued(State, Log, Events):
+    begin
+      return Log
+    end;
+    TurnOutcome.Defeated(Log):
+    begin
+      return Log
+    end
+  end
+end;
+
+function EventsOf(Outcome: TurnOutcome): array of CombatEvent;
+begin
+  case Outcome of
+    TurnOutcome.Continued(State, Log, Events):
+    begin
+      return Events
+    end;
+    TurnOutcome.Defeated(Log):
+    begin
+      return []
+    end
+  end
+end;
+
+function IsWorn(State: GameState; ItemId: string; Slot: EquipmentSlot): boolean;
+begin
+  case EquippedItem(State, Slot) of
+    Some(Item):
+    begin
+      return Item.Id = ItemId
+    end;
+    None:
+    begin
+      return false
+    end
+  end
+end;
+
+function Line(State: GameState; Label: string): CharacterValueLine;
+begin
+  for Entry: CharacterValueLine in CharacterValueLines(State) do
+  begin
+    if Entry.Label = Label then
+    begin
+      return Entry
+    end
+  end;
+
+  panic('missing character line ' + Label)
+end;
+
+// Counts the skeleton's hits over many turns while the player keeps waiting beside it.
+function SkeletonHits(Metadata: WorldMetadata; Start: GameState): integer;
+begin
+  mutable var State: GameState := Start;
+  mutable var Hits: integer := 0;
+  for Turn: integer := 1 to 200 do
+  begin
+    State := State with Health := PlayerMaximumHealth; end;
+    var Outcome: TurnOutcome := Std.Results.Unwrap(ResolveTurn(Metadata, State, TurnAction.Wait));
+    for Entry: CombatEvent in EventsOf(Outcome) do
+    begin
+      if Entry.Kind = CombatEventKind.HostileHit then
+      begin
+        Hits := Hits + 1;
+        AssertTrue((Entry.Amount >= 1) and (Entry.Amount <= 4))
+      end
+    end;
+
+    State := Continued(Outcome)
+  end;
+
+  return Hits
+end;
+
+begin
+  var Metadata: WorldMetadata := Std.Results.Unwrap(NewWorldMetadata('equipment', 24680));
+  var Fresh: GameState := NewGame(Metadata);
+  var Map: InteriorMap := Std.Results.Unwrap(InitialDungeonMap());
+  // Three items: the coin on the upper corridor, sword and jerkin off the main route.
+  AssertEquals(3, Std.Arrays.Length(Fresh.Items));
+  var SwordField: InteriorPosition := Std.Results.Unwrap(InitialItemPosition(Map, RustyShortSwordId));
+  var JerkinField: InteriorPosition := Std.Results.Unwrap(InitialItemPosition(Map, LeatherJerkinId));
+  AssertEquals(7, SwordField.X);
+  AssertEquals(4, SwordField.Y);
+  AssertEquals(1, JerkinField.X);
+  AssertEquals(6, JerkinField.Y);
+  AssertTrue(IsError(InitialItemPosition(Map, 'unknown:item')));
+  // Neither item can be seen from the skeleton's resting field.
+  var Rest: InteriorPosition := Fresh.Hostiles[0].Position;
+  AssertFalse(HasLineOfSight(Map, Rest, SwordField) or HasLineOfSight(Map, SwordField, Rest));
+  AssertFalse(HasLineOfSight(Map, Rest, JerkinField) or HasLineOfSight(Map, JerkinField, Rest));
+  AssertEquals('w', Std.Results.Unwrap(InteriorVisibleCodeForState(Map, InDungeon(Metadata, Fresh, 9, 1, FacingDirection.West), SwordField)));
+  AssertEquals('a', Std.Results.Unwrap(InteriorVisibleCodeForState(Map, InDungeon(Metadata, Fresh, 9, 1, FacingDirection.West), JerkinField)));
+  AssertTrue(ItemSlot(ItemKind.AncientCoin) = None);
+  AssertTrue(Std.Options.Unwrap(ItemSlot(ItemKind.RustyShortSword)) = EquipmentSlot.Weapon);
+  AssertTrue(Std.Options.Unwrap(ItemSlot(ItemKind.LeatherJerkin)) = EquipmentSlot.Body);
+  // Picking up the sword carries it without wearing it.
+  var OnSword: GameState := InDungeon(Metadata, Fresh, SwordField.X, SwordField.Y, FacingDirection.South);
+  AssertEquals('At your feet: Rusty short sword — Enter: Pick up', ItemInteractionHint(OnSword));
+  mutable var Carrying: GameState := OnSword;
+  case Std.Results.Unwrap(Interact(Metadata, OnSword)) of
+    InteractionOutcome.StateChanged(Changed):
+    begin
+      Carrying := Changed
+    end
+    else
+    begin
+      panic('expected the sword to be picked up')
+    end
+  end;
+
+  AssertEquals(1, Std.Arrays.Length(InventoryItems(Carrying)));
+  AssertTrue(EquippedItem(Carrying, EquipmentSlot.Weapon) = None);
+  // Unarmed values: d3 damage, base hit threshold, no armor.
+  var Unarmed: CharacterValues := DeriveCharacterValues(Carrying);
+  AssertEquals(PlayerMaximumHealth, Unarmed.MaximumHealth);
+  AssertEquals(BaseHitThreshold, Unarmed.HitThreshold);
+  AssertEquals(3, Unarmed.DamageSides);
+  AssertEquals(0, Unarmed.DamageBonus);
+  AssertEquals(0, Unarmed.Armor);
+  AssertEquals('d3', Line(Carrying, 'Damage').Value);
+  AssertEquals('Unarmed', Line(Carrying, 'Damage').Source);
+  AssertEquals('75% (d20 ≥ 6)', Line(Carrying, 'Hit chance').Value);
+  AssertEquals('None', Line(Carrying, 'Armor').Source);
+  AssertEquals(4, Std.Arrays.Length(CharacterValueLines(Carrying)));
+  // Equipping consumes a turn and reports it; the dice stay untouched outside combat.
+  var Wield: TurnOutcome := Std.Results.Unwrap(ResolveTurn(Metadata, Carrying, TurnAction.Equip(RustyShortSwordId)));
+  var Armed: GameState := Continued(Wield);
+  AssertEquals('You wield the rusty short sword.', LogOf(Wield)[0]);
+  AssertTrue(IsWorn(Armed, RustyShortSwordId, EquipmentSlot.Weapon));
+  AssertEquals(1, Std.Arrays.Length(InventoryItems(Armed)));
+  AssertEquals(6, DeriveCharacterValues(Armed).DamageSides);
+  AssertEquals(1, DeriveCharacterValues(Armed).DamageBonus);
+  AssertEquals('d6+1', Line(Armed, 'Damage').Value);
+  AssertEquals(RustyShortSwordName, Line(Armed, 'Damage').Source);
+  AssertEquals(Carrying.RandomState, Armed.RandomState);
+  // Rejections consume nothing: already worn, not worn, cannot be worn, not carried, unknown.
+  AssertTrue(IsError(ResolveTurn(Metadata, Armed, TurnAction.Equip(RustyShortSwordId))));
+  AssertTrue(IsError(ResolveTurn(Metadata, Carrying, TurnAction.Unequip(RustyShortSwordId))));
+  AssertTrue(IsError(ResolveTurn(Metadata, Armed, TurnAction.Equip(LeatherJerkinId))));
+  AssertTrue(IsError(ResolveTurn(Metadata, Armed, TurnAction.Equip('unknown:item'))));
+  var CoinCarried: GameState := WithLocation(Armed, InitialDungeonItemId, ItemLocation.CarriedByPlayer);
+  AssertTrue(IsError(ResolveTurn(Metadata, CoinCarried, TurnAction.Equip(InitialDungeonItemId))));
+  // Unequipping returns the sword to the inventory.
+  var PutAway: TurnOutcome := Std.Results.Unwrap(ResolveTurn(Metadata, Armed, TurnAction.Unequip(RustyShortSwordId)));
+  AssertEquals('You put away the rusty short sword.', LogOf(PutAway)[0]);
+  AssertTrue(EquippedItem(Continued(PutAway), EquipmentSlot.Weapon) = None);
+  AssertEquals(1, Std.Arrays.Length(InventoryItems(Continued(PutAway))));
+  // The jerkin adds armor; its slot is independent of the weapon slot.
+  var BothCarried: GameState := WithLocation(Armed, LeatherJerkinId, ItemLocation.CarriedByPlayer);
+  var Dressed: GameState := Continued(Std.Results.Unwrap(ResolveTurn(Metadata, BothCarried, TurnAction.Equip(LeatherJerkinId))));
+  AssertTrue(IsWorn(Dressed, LeatherJerkinId, EquipmentSlot.Body));
+  AssertTrue(IsWorn(Dressed, RustyShortSwordId, EquipmentSlot.Weapon));
+  AssertEquals(2, DeriveCharacterValues(Dressed).Armor);
+  AssertEquals('2', Line(Dressed, 'Armor').Value);
+  AssertEquals(LeatherJerkinName, Line(Dressed, 'Armor').Source);
+  var TakenOff: TurnOutcome := Std.Results.Unwrap(ResolveTurn(Metadata, Dressed, TurnAction.Unequip(LeatherJerkinId)));
+  AssertEquals('You take off the leather jerkin.', LogOf(TakenOff)[0]);
+  // Equipping outdoors works too; no opponent acts there.
+  var Outdoors: GameState := WithLocation(Fresh, RustyShortSwordId, ItemLocation.CarriedByPlayer);
+  AssertTrue(IsWorn(Continued(Std.Results.Unwrap(ResolveTurn(Metadata, Outdoors, TurnAction.Equip(RustyShortSwordId)))), RustyShortSwordId, EquipmentSlot.Weapon));
+  // Changing gear beside an alerted skeleton gives it a turn to strike.
+  var Beside: GameState := InDungeon(Metadata, BothCarried, 4, 3, FacingDirection.West) with Hostiles := [
+                                                                                                           Fresh.Hostiles[0] with Alerted := true; end
+                                                                                                         ]; end;
+  var Exposed: TurnOutcome := Std.Results.Unwrap(ResolveTurn(Metadata, Beside, TurnAction.Equip(LeatherJerkinId)));
+  AssertEquals('You put on the leather jerkin.', LogOf(Exposed)[0]);
+  AssertEquals(2, Std.Arrays.Length(LogOf(Exposed)));
+  AssertTrue(Std.Str.Contains(LogOf(Exposed)[1], 'skeleton'));
+  AssertEquals(1, Std.Arrays.Length(EventsOf(Exposed)));
+  AssertTrue(Continued(Exposed).RandomState <> Beside.RandomState);
+  // Armor lowers the skeleton's hits over the same number of turns.
+  var Unprotected: GameState := Beside;
+  var Protected: GameState := Continued(Exposed) with RandomState := Beside.RandomState; end;
+  var HitsWithout: integer := SkeletonHits(Metadata, Unprotected);
+  var HitsWith: integer := SkeletonHits(Metadata, Protected);
+  AssertTrue(HitsWithout > 0);
+  AssertTrue(HitsWith < HitsWithout);
+  // Blows report structured events whose damage follows the wielded weapon.
+  mutable var SawArmedHit: boolean := false;
+  mutable var SawUnarmedHit: boolean := false;
+  for Weapon: integer := 0 to 1 do
+  begin
+    // Beside wears the sword; the unarmed round puts it away first.
+    mutable var Attacker: GameState := Beside;
+    if Weapon = 0 then
+    begin
+      Attacker := WithLocation(Beside, RustyShortSwordId, ItemLocation.CarriedByPlayer)
+    end;
+
+    for Turn: integer := 1 to 30 do
+    begin
+      var Target: GameHostile := Attacker.Hostiles[0] with Health := RestlessSkeletonMaximumHealth; end;
+
+      Attacker := Attacker with Health := PlayerMaximumHealth; Hostiles := [Target]; end;
+      var Blow: TurnOutcome := Std.Results.Unwrap(ResolveTurn(Metadata, Attacker, TurnAction.Attack));
+      AssertTrue(Std.Arrays.Length(EventsOf(Blow)) >= 1);
+      var First: CombatEvent := EventsOf(Blow)[0];
+      AssertTrue((First.Kind = CombatEventKind.PlayerHit) or
+                 (First.Kind = CombatEventKind.PlayerMiss));
+      if First.Kind = CombatEventKind.PlayerHit then
+      begin
+        if Weapon = 1 then
+        begin
+          AssertTrue((First.Amount >= 2) and (First.Amount <= 7));
+          SawArmedHit := true
+        end
+        else
+        begin
+          AssertTrue((First.Amount >= 1) and (First.Amount <= 3));
+          SawUnarmedHit := true
+        end
+      end
+      else
+      begin
+        AssertEquals(0, First.Amount)
+      end;
+
+      Attacker := Continued(Blow)
+    end
+  end;
+
+  AssertTrue(SawArmedHit);
+  AssertTrue(SawUnarmedHit);
+  // Validation: every known item exactly once, worn only in a fitting and free slot.
+  AssertTrue(IsOk(ValidateGameState(Metadata, Dressed)));
+  AssertTrue(IsError(ValidateGameState(Metadata, WithLocation(Fresh, InitialDungeonItemId, ItemLocation.EquippedByPlayer(EquipmentSlot.Weapon)))));
+  AssertTrue(IsError(ValidateGameState(Metadata, WithLocation(Fresh, RustyShortSwordId, ItemLocation.EquippedByPlayer(EquipmentSlot.Body)))));
+  var TwoBodies: GameState := WithLocation(WithLocation(Fresh, LeatherJerkinId, ItemLocation.EquippedByPlayer(EquipmentSlot.Body)), RustyShortSwordId, ItemLocation.EquippedByPlayer(EquipmentSlot.Body));
+  AssertTrue(IsError(ValidateGameState(Metadata, TwoBodies)));
+  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Items := [
+                                                                       Fresh.Items[0],
+                                                                       Fresh.Items[1]
+                                                                     ]; end)));
+  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Items := [
+                                                                       Fresh.Items[0],
+                                                                       Fresh.Items[1],
+                                                                       Fresh.Items[1]
+                                                                     ]; end)));
+  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Items := [
+                                                                       Fresh.Items[0],
+                                                                       Fresh.Items[1],
+                                                                       Fresh.Items[2] with Kind := ItemKind.AncientCoin; end
+                                                                     ]; end)));
+  AssertTrue(IsError(ValidateGameState(Metadata, WithLocation(Fresh, RustyShortSwordId, ItemLocation.InInterior(Metadata.DungeonAreaId, JerkinField)))));
+  // Map validation: placements need distinct floor fields and distinct identities.
+  mutable var Crowded: InteriorMap := Map;
+  Crowded.Items := [Map.Items[0], Map.Items[1] with Position := Map.Items[0].Position; end];
+  AssertTrue(IsError(ValidateInteriorMap(Crowded)));
+  Crowded.Items := [Map.Items[0], Map.Items[0] with Position := SwordField; end];
+  AssertTrue(IsError(ValidateInteriorMap(Crowded)));
+  Crowded.Items := [Map.Items[0] with Position := Map.Hostile; end];
+  AssertTrue(IsError(ValidateInteriorMap(Crowded)));
+  Crowded.Items := [Map.Items[0] with Position := Map.Npc; end];
+  AssertTrue(IsError(ValidateInteriorMap(Crowded)))
+end.

@@ -1,0 +1,204 @@
+// Verifies protocol version 12: equip intentions, worn inventory entries, character lines, and combat events.
+program EquipmentProtocolTest;
+
+uses Dungeon.Protocol, Std.Arrays, Std.Results, Std.Str, Std.Test;
+
+function Item(Id: string; Name: string; Slot: VisibleItemSlot; Equipped: boolean): VisibleInventoryItem;
+begin
+  return record
+    Id := Id;
+    Name := Name;
+    Slot := Slot;
+    Equipped := Equipped;
+  end
+end;
+
+function Hall(
+  Inventory: array of VisibleInventoryItem;
+  Character: array of VisibleCharacterValue;
+  Events: array of VisibleCombatEvent
+): FirstPersonVisibleState;
+begin
+  return record
+    Title := 'Initial dungeon';
+    Status := 'Nothing in reach';
+    Width := 5;
+    Height := 3;
+    Rows := ['#####', '#wa.#', '#####'];
+    KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'];
+    PlayerX := 3;
+    PlayerY := 1;
+    Facing := FirstPersonFacing.West;
+    Inventory := Inventory;
+    Health := 20;
+    MaxHealth := 20;
+    Character := Character;
+    CombatLog := [];
+    CombatEvents := Events;
+  end
+end;
+
+function Encoded(Value: FirstPersonVisibleState): string;
+begin
+  return EncodeServer(ServerMessage.State(VisibleState.FirstPersonState(Value)))
+end;
+
+function Line(Label: string; Value: string; Source: string): VisibleCharacterValue;
+begin
+  return record
+    Label := Label;
+    Value := Value;
+    Source := Source;
+  end
+end;
+
+function Happened(Kind: VisibleCombatEventKind; Amount: integer): VisibleCombatEvent;
+begin
+  return record
+    Kind := Kind;
+    Amount := Amount;
+  end
+end;
+
+begin
+  AssertEquals(12, ProtocolVersion);
+  // Equip intentions carry one bounded item id.
+  AssertEquals('{"item_id":"sword","type":"equip"}', EncodeClient(ClientMessage.Equip('sword')));
+  AssertEquals('{"item_id":"sword","type":"unequip"}', EncodeClient(ClientMessage.Unequip('sword')));
+  case Unwrap(DecodeClient('{"type":"equip","item_id":"sword"}')) of
+    ClientMessage.Equip(ItemId):
+    begin
+      AssertEquals('sword', ItemId)
+    end
+    else
+    begin
+      panic('expected equip')
+    end
+  end;
+
+  case Unwrap(DecodeClient('{"type":"unequip","item_id":"jerkin"}')) of
+    ClientMessage.Unequip(ItemId):
+    begin
+      AssertEquals('jerkin', ItemId)
+    end
+    else
+    begin
+      panic('expected unequip')
+    end
+  end;
+
+  AssertTrue(IsError(DecodeClient('{"type":"equip"}')));
+  AssertTrue(IsError(DecodeClient('{"type":"equip","item_id":""}')));
+  AssertTrue(IsError(DecodeClient('{"type":"equip","item_id":42}')));
+  AssertTrue(IsError(DecodeClient('{"type":"unequip","item_id":"a","slot":"weapon"}')));
+  AssertTrue(IsError(DecodeClient(('{"type":"equip","item_id":"' + Std.Str.RepeatStr('x', MaximumVisibleInventoryTextLength +
+                                                                                          1)) +
+                                  '"}')));
+  // A complete state round-trips worn items, character lines, and events in order.
+  var Full: FirstPersonVisibleState := Hall([
+                                              Item('coin', 'Ancient coin', VisibleItemSlot.NoSlot, false),
+                                              Item('sword', 'Rusty short sword', VisibleItemSlot.Weapon, true),
+                                              Item('jerkin', 'Leather jerkin', VisibleItemSlot.Body, false)
+                                            ], [
+                                                 Line('Damage', 'd6+1', 'Rusty short sword'),
+                                                 Line('Armor', '0', 'None')
+                                               ], [
+                                                    Happened(VisibleCombatEventKind.PlayerHit, 5),
+                                                    Happened(VisibleCombatEventKind.HostileMiss, 0),
+                                                    Happened(VisibleCombatEventKind.PlayerMiss, 0),
+                                                    Happened(VisibleCombatEventKind.HostileHit, 3),
+                                                    Happened(VisibleCombatEventKind.HostileDefeated, 0)
+                                                  ]);
+  case Unwrap(DecodeServer(Encoded(Full))) of
+    ServerMessage.State(Value):
+    begin
+      case Value of
+        VisibleState.FirstPersonState(Decoded):
+        begin
+          AssertEquals(3, Std.Arrays.Length(Decoded.Inventory));
+          AssertTrue(Decoded.Inventory[0].Slot = VisibleItemSlot.NoSlot);
+          AssertTrue(Decoded.Inventory[1].Slot = VisibleItemSlot.Weapon);
+          AssertTrue(Decoded.Inventory[1].Equipped);
+          AssertTrue(Decoded.Inventory[2].Slot = VisibleItemSlot.Body);
+          AssertFalse(Decoded.Inventory[2].Equipped);
+          AssertEquals(2, Std.Arrays.Length(Decoded.Character));
+          AssertEquals('d6+1', Decoded.Character[0].Value);
+          AssertEquals('Rusty short sword', Decoded.Character[0].Source);
+          AssertEquals(5, Std.Arrays.Length(Decoded.CombatEvents));
+          AssertTrue(Decoded.CombatEvents[0].Kind = VisibleCombatEventKind.PlayerHit);
+          AssertEquals(5, Decoded.CombatEvents[0].Amount);
+          AssertTrue(Decoded.CombatEvents[3].Kind = VisibleCombatEventKind.HostileHit);
+          AssertTrue(Decoded.CombatEvents[4].Kind = VisibleCombatEventKind.HostileDefeated);
+          AssertEquals(InteriorWeaponCode, Std.Str.CharAt(Decoded.Rows[1], 1));
+          AssertEquals(InteriorArmorCode, Std.Str.CharAt(Decoded.Rows[1], 2))
+        end
+        else
+        begin
+          panic('expected first-person state')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected state')
+    end
+  end;
+
+  // Only items with a slot can be worn, and never two in one slot.
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([
+                                                 Item('coin', 'Ancient coin', VisibleItemSlot.NoSlot, true)
+                                               ], [], [])))));
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([
+                                                 Item('a', 'Sword', VisibleItemSlot.Weapon, true),
+                                                 Item('b', 'Axe', VisibleItemSlot.Weapon, true)
+                                               ], [], [])))));
+  AssertTrue(IsOk(DecodeServer(Encoded(Hall([
+                                              Item('a', 'Sword', VisibleItemSlot.Weapon, true),
+                                              Item('b', 'Jerkin', VisibleItemSlot.Body, true)
+                                            ], [], [])))));
+  var OneCoin: string := Encoded(Hall([Item('coin', 'Ancient coin', VisibleItemSlot.NoSlot, false)], [], []));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneCoin, '"slot":""', '"slot":"head"'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneCoin, '"equipped":false', '"equipped":"no"'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneCoin, '"equipped":false,', ''))));
+  // Character lines: bounded count and text, no empty parts.
+  mutable var ManyLines: array of VisibleCharacterValue := [];
+  for Index: integer := 0 to MaximumCharacterValues do
+  begin
+    Std.Arrays.Push(ManyLines, Line('Armor', '0', 'None'))
+  end;
+
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], ManyLines, [])))));
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], [Line('', '0', 'None')], [])))));
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], [Line('Armor', '', 'None')], [])))));
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], [Line('Armor', '0', '')], [])))));
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], [
+                                                     Line('Armor', Std.Str.RepeatStr('9', MaximumCharacterTextLength + 1), 'None')
+                                                   ], [])))));
+  var OneLine: string := Encoded(Hall([], [Line('Armor', '0', 'None')], []));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneLine, '"source":"None"', '"source":"None","extra":1'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneLine, '"character":[', '"character":[42,'))));
+  // Combat events: known kinds, bounded count and amount.
+  mutable var ManyEvents: array of VisibleCombatEvent := [];
+  for Index: integer := 0 to MaximumCombatEvents do
+  begin
+    Std.Arrays.Push(ManyEvents, Happened(VisibleCombatEventKind.PlayerMiss, 0))
+  end;
+
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], [], ManyEvents)))));
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], [], [
+                                                         Happened(VisibleCombatEventKind.PlayerHit, -1)
+                                                       ])))));
+  AssertTrue(IsError(DecodeServer(Encoded(Hall([], [], [
+                                                         Happened(VisibleCombatEventKind.PlayerHit, MaximumCombatEventAmount + 1)
+                                                       ])))));
+  var OneEvent: string := Encoded(Hall([], [], [Happened(VisibleCombatEventKind.PlayerHit, 2)]));
+  AssertTrue(IsOk(DecodeServer(OneEvent)));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneEvent, '"player_hit"', '"dragon_breath"'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneEvent, '"amount":2.0', '"amount":2.5'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneEvent, '"combat_events":[', '"combat_events":["x",'))));
+  AssertTrue(IsError(DecodeServer(Std.Str.Replace(OneEvent, ',"combat_events":[{"amount":2.0,"kind":"player_hit"}]', ''))));
+  // Both item codes belong to the interior alphabet; the map alphabet stays unchanged.
+  AssertTrue(IsInteriorCellCode(InteriorWeaponCode));
+  AssertTrue(IsInteriorCellCode(InteriorArmorCode));
+  AssertFalse(IsMapCellCode(InteriorArmorCode))
+end.

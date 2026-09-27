@@ -1,0 +1,132 @@
+// Verifies floor sprites for weapon and armor and the first-person effects of combat animation frames.
+program DungeonCombatAnimationRenderTest;
+
+uses
+  Dungeon.Client.Animation, Dungeon.Client.Raycast, Dungeon.Protocol, Std.Arrays, Std.Options,
+  Std.Str, Std.Test, Std.Tui;
+
+function Corridor(Middle: string): FirstPersonVisibleState;
+begin
+  return record
+    Title := 'Corridor';
+    Status := '';
+    Width := 7;
+    Height := 3;
+    Rows := ['#######', Middle, '#######'];
+    KnowledgeRows := ['vvvvvvv', 'vvvvvvv', 'vvvvvvv'];
+    PlayerX := 1;
+    PlayerY := 1;
+    Facing := FirstPersonFacing.East;
+    Inventory := [];
+    Health := 20;
+    MaxHealth := 20;
+    Character := [];
+    CombatLog := [];
+    CombatEvents := [];
+  end
+end;
+
+function SameCell(Left: TuiCell; Right: TuiCell): boolean;
+begin
+  var A: TuiStyle := Std.Options.Unwrap(Left.ConcreteStyle);
+  var B: TuiStyle := Std.Options.Unwrap(Right.ConcreteStyle);
+  return ((Left.Glyph = Right.Glyph) and ((A.Background.Red = B.Background.Red) and (A.Background.Green = B.Background.Green))) and
+         (((A.Background.Blue = B.Background.Blue) and (A.Foreground.Red = B.Foreground.Red)) and ((A.Foreground.Green = B.Foreground.Green) and (A.Foreground.Blue = B.Foreground.Blue)))
+end;
+
+function DifferentCells(Left: TuiCellGrid; Right: TuiCellGrid): integer;
+begin
+  mutable var Count: integer := 0;
+  for I: integer := 0 to Std.Arrays.Length(Left.Cells) - 1 do
+  begin
+    if not SameCell(Left.Cells[I], Right.Cells[I]) then
+    begin
+      Count := Count + 1
+    end
+  end;
+
+  return Count
+end;
+
+// Counts cells whose upper or lower half shows the white-hot flash color.
+function FlashCells(Grid: TuiCellGrid): integer;
+begin
+  mutable var Count: integer := 0;
+  for Cell: TuiCell in Grid.Cells do
+  begin
+    var Style: TuiStyle := Std.Options.Unwrap(Cell.ConcreteStyle);
+    if ((Style.Foreground.Red = 255) and (Style.Foreground.Green = 250)) and
+       (Style.Foreground.Blue = 236) then
+    begin
+      Count := Count + 1
+    end
+  end;
+
+  return Count
+end;
+
+begin
+  var Width: integer := 61;
+  var Height: integer := 25;
+  var Empty: FirstPersonVisibleState := Corridor('#.....#');
+  var EmptyGrid: TuiCellGrid := RenderFirstPersonGrid(Empty, Width, Height);
+  // Weapon and armor lie on the floor: they change cells only below the horizon.
+  for Code: string in ['w', 'a'] do
+  begin
+    var WithItem: TuiCellGrid := RenderFirstPersonGrid(Corridor(('#.' + Code) + '...#'), Width, Height);
+    AssertTrue(DifferentCells(WithItem, EmptyGrid) > 0);
+    for I: integer := 0 to ((Height div 2) * Width) - 1 do
+    begin
+      AssertTrue(SameCell(WithItem.Cells[I], EmptyGrid.Cells[I]))
+    end
+  end;
+
+  AssertTrue(DifferentCells(RenderFirstPersonGrid(Corridor('#.w...#'), Width, Height), RenderFirstPersonGrid(Corridor('#.a...#'), Width, Height)) >
+             0);
+  // A still frame composed from a scene equals the plain rendering.
+  var Fight: FirstPersonVisibleState := Corridor('#.h...#');
+  var Scene: FirstPersonScene := RenderFirstPersonScene(Fight, Width, Height);
+  var Still: TuiCellGrid := ComposeFirstPersonGrid(Fight, Scene, NoFirstPersonEffect());
+  AssertEquals(0, DifferentCells(Still, RenderFirstPersonGrid(Fight, Width, Height)));
+  AssertEquals(0, FlashCells(Still));
+  // A flash whitens the skeleton; a dodge and a lunge move and enlarge it.
+  mutable var Effect: FirstPersonEffect := NoFirstPersonEffect();
+  Effect.Flash := true;
+  AssertTrue(FlashCells(ComposeFirstPersonGrid(Fight, Scene, Effect)) > 10);
+  Effect := NoFirstPersonEffect();
+  Effect.Shift := 0.35;
+  AssertTrue(DifferentCells(ComposeFirstPersonGrid(Fight, Scene, Effect), Still) > 0);
+  Effect := NoFirstPersonEffect();
+  Effect.Scale := 1.25;
+  AssertTrue(DifferentCells(ComposeFirstPersonGrid(Fight, Scene, Effect), Still) > 0);
+  // A fully sunk skeleton is gone; a fallen one is drawn on the field ahead without an h code.
+  Effect := NoFirstPersonEffect();
+  Effect.Sink := 1.0;
+  var Sunk: TuiCellGrid := ComposeFirstPersonGrid(Fight, Scene, Effect);
+  AssertTrue(DifferentCells(Sunk, Still) > 0);
+  var EmptyScene: FirstPersonScene := RenderFirstPersonScene(Empty, Width, Height);
+  Effect := NoFirstPersonEffect();
+  Effect.FallenAhead := true;
+  AssertEquals(0, DifferentCells(ComposeFirstPersonGrid(Empty, EmptyScene, Effect), Still));
+  // Swings change the lower right of the view; blade and fist differ.
+  Effect := NoFirstPersonEffect();
+  Effect.Swing := 0.5;
+  var Fist: TuiCellGrid := ComposeFirstPersonGrid(Empty, EmptyScene, Effect);
+  Effect.Armed := true;
+  var Blade: TuiCellGrid := ComposeFirstPersonGrid(Empty, EmptyScene, Effect);
+  AssertTrue(DifferentCells(Fist, EmptyGrid) > 0);
+  AssertTrue(DifferentCells(Blade, EmptyGrid) > 0);
+  AssertTrue(DifferentCells(Blade, Fist) > 0);
+  // Rising texts land centered in the view; empty texts draw nothing.
+  mutable var Frame: AnimationFrame := AnimationFrameAt(NoAnimation());
+  AssertEquals(0, DifferentCells(PaintAnimationText(Still, Frame), Still));
+  Frame.HostileText := '-5';
+  Frame.PlayerText := '-3';
+  var Texts: TuiCellGrid := PaintAnimationText(Still, Frame);
+  AssertEquals(4, DifferentCells(Texts, Still));
+  AssertEquals('-', Texts.Cells[((Height div 4) * Width) + (Width - 2) div 2].Glyph);
+  AssertEquals('3', Texts.Cells[(((Height - 4) * Width) + ((Width - 2) div 2)) + 1].Glyph);
+  // Texts outside the grid are clipped instead of failing.
+  Frame.Rise := Height;
+  AssertEquals(0, DifferentCells(PaintAnimationText(Still, Frame), Still))
+end.

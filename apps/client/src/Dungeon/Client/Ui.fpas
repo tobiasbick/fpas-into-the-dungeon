@@ -2,11 +2,14 @@
 unit Dungeon.Client.Ui;
 
 uses
-  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Client.Raycast, Dungeon.Protocol,
-  Dungeon.RuntimeData, Std.Arrays, Std.Console, Std.Conv, Std.Options, Std.Str, Std.Task, Std.Tui;
+  Dungeon.Client.Animation, Dungeon.Client.Character, Dungeon.Client.Model, Dungeon.Client.Network,
+  Dungeon.Client.Raycast, Dungeon.Protocol, Dungeon.RuntimeData, Std.Arrays, Std.Console, Std.Conv,
+  Std.Options, Std.Str, Std.Task, Std.Tui;
 
 const
   NetworkSubscriptionId: integer := 1;
+  // Clock that drives a running combat animation; absent while nothing animates.
+  AnimationSubscriptionId: integer := 2;
   ConnectControlId: integer := 1;
   StartInformationControlId: integer := 2;
   StartQuitControlId: integer := 3;
@@ -572,6 +575,105 @@ begin
   end
 end;
 
+// Sends one frame event per animation interval until cancelled; it never fails.
+function RunAnimationClock(Events: channel of ClientEvent; Token: CancellationToken): result of boolean, string;
+begin
+  while true do
+  begin
+    var Winner: integer := Select([
+                                    CancellationCase(Token, procedure() begin end),
+                                    TimerCase(AnimationFrameMilliseconds, procedure() begin end)
+                                  ]);
+    if Winner = 0 then
+    begin
+      return Ok(true)
+    end;
+
+    case SendWithCancellation(Events, ClientEvent.AnimationTick(AnimationFrameMilliseconds), Token) of
+      Ok(Sent):
+      begin
+      end;
+      Error(Reason):
+      begin
+        return Ok(true)
+      end
+    end
+  end;
+
+  return Ok(true)
+end;
+
+// Ends a running animation at once and stops its clock; the still frame shows the final state.
+function StopAnimation(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+begin
+  if not State.Animation.Active then
+  begin
+    return State
+  end;
+
+  Cmd.CancelSubscription(AnimationSubscriptionId);
+  mutable var Next: ClientModel := State;
+  Next.Animation := NoAnimation();
+  return Next
+end;
+
+function WieldsWeapon(Inventory: array of VisibleInventoryItem): boolean;
+begin
+  for Item: VisibleInventoryItem in Inventory do
+  begin
+    if Item.Equipped and (Item.Slot = VisibleItemSlot.Weapon) then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+function FirstPersonFromModel(State: ClientModel): FirstPersonVisibleState;
+begin
+  return record
+    Title := State.PrimaryTitle;
+    Status := State.PrimaryStatus;
+    Width := State.Width;
+    Height := State.Height;
+    Rows := State.Rows;
+    KnowledgeRows := State.KnowledgeRows;
+    PlayerX := State.PlayerX;
+    PlayerY := State.PlayerY;
+    Facing := State.FirstPersonFacing;
+    Inventory := State.Inventory;
+    Health := State.Health;
+    MaxHealth := State.MaxHealth;
+    Character := State.Character;
+    CombatLog := [];
+    CombatEvents := [];
+  end
+end;
+
+// Starts playback of a first-person turn's events, rendering walls and floor once for all frames.
+function StartCombatAnimation(
+  State: ClientModel;
+  Events: array of VisibleCombatEvent;
+  Cmd: TuiCmdOutput
+): ClientModel;
+begin
+  mutable var Next: ClientModel := StopAnimation(State, Cmd);
+  var Animation: CombatAnimation := StartAnimation(Events, WieldsWeapon(State.Inventory));
+  if not Animation.Active then
+  begin
+    return Next
+  end;
+  var Viewport: WorldViewport := DesiredWorldViewport(Next);
+  var ClockEvents: channel of ClientEvent := Next.Events;
+  Next.Animation := Animation;
+  Next.AnimationScene := RenderFirstPersonScene(FirstPersonFromModel(Next), Viewport.Width, Viewport.Height);
+  Cmd.ReplaceSubscription(AnimationSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
+    return RunAnimationClock(ClockEvents, Token)
+  end);
+  return Next
+end;
+
 function QueueFirstPersonTurn(State: ClientModel; Direction: FirstPersonTurnDirection): ClientModel;
 begin
   if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
@@ -983,6 +1085,59 @@ begin
     return State
   end;
 
+  if State.Overlay = ClientOverlay.InventoryOverlay then
+  begin
+    if (Key.kind = TuiKeyKind.Escape) or HasCharacter(Key, 'i', 'I') then
+    begin
+      return CloseOverlay(State)
+    end;
+
+    if (Key.kind = TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W') then
+    begin
+      return MoveInventorySelection(State, -1)
+    end;
+
+    if (Key.kind = TuiKeyKind.Down) or HasCharacter(Key, 's', 'S') then
+    begin
+      return MoveInventorySelection(State, 1)
+    end;
+
+    if Key.kind = TuiKeyKind.Enter then
+    begin
+      case SelectedEquipmentRequest(State) of
+        Some(Request):
+        begin
+          return QueueCombatAction(State, Request, 'Changing gear...')
+        end;
+        None:
+        begin
+          mutable var Next: ClientModel := State;
+          Next.Status := 'That cannot be worn.';
+          return Next
+        end
+      end
+    end;
+
+    return State
+  end;
+
+  if State.Overlay = ClientOverlay.CharacterSheetOverlay then
+  begin
+    if (Key.kind = TuiKeyKind.Escape) or HasCharacter(Key, 'c', 'C') then
+    begin
+      return CloseOverlay(State)
+    end;
+
+    if HasCharacter(Key, 'i', 'I') then
+    begin
+      mutable var Next: ClientModel := State;
+      Next.Overlay := ClientOverlay.InventoryOverlay;
+      return MoveInventorySelection(Next, 0)
+    end;
+
+    return State
+  end;
+
   if IsCtrlCharacter(Key, 'p', 'P') then
   begin
     if State.Overlay = ClientOverlay.SystemMenuOverlay then
@@ -1008,6 +1163,25 @@ begin
     end;
 
     return State
+  end;
+
+  if (State.Overlay = ClientOverlay.NoOverlay) and State.HasVisibleState then
+  begin
+    if HasCharacter(Key, 'i', 'I') then
+    begin
+      mutable var Next: ClientModel := State;
+      Next.Overlay := ClientOverlay.InventoryOverlay;
+      Next.FocusedControl := 0;
+      return MoveInventorySelection(Next, 0)
+    end;
+
+    if HasCharacter(Key, 'c', 'C') then
+    begin
+      mutable var Next: ClientModel := State;
+      Next.Overlay := ClientOverlay.CharacterSheetOverlay;
+      Next.FocusedControl := 0;
+      return Next
+    end
   end;
 
   if State.Overlay = ClientOverlay.ExplorationMapOverlay then
@@ -1187,7 +1361,8 @@ begin
     end;
     TuiMsg.Key(Key):
     begin
-      return HandleKey(State, Key, Cmd)
+      // A key press completes a running animation first, so fast play never waits for it.
+      return HandleKey(StopAnimation(State, Cmd), Key, Cmd)
     end;
     TuiMsg.BackgroundFailed(Id, Kind, Message, Code, Line, Column):
     begin
@@ -1251,6 +1426,13 @@ begin
         Next.Overlay := ClientOverlay.DialogueOverlay
       end;
 
+      // Gear changes answer with a state; the overlays stay open to show the result.
+      if (State.Overlay = ClientOverlay.InventoryOverlay) or
+         (State.Overlay = ClientOverlay.CharacterSheetOverlay) then
+      begin
+        Next.Overlay := State.Overlay
+      end;
+
       Next.ConnectionPhase := ClientConnectionPhase.Active;
       Next.FocusedControl := 0;
       Next.HasVisibleState := true;
@@ -1269,6 +1451,7 @@ begin
           Next.WorldX := MapValue.WorldX;
           Next.WorldY := MapValue.WorldY;
           Next.Inventory := MapValue.Inventory;
+          Next.Character := MapValue.Character;
           Next.PrimaryTitle := '';
           Next.PrimaryStatus := ''
         end;
@@ -1286,6 +1469,7 @@ begin
           Next.WorldY := 0;
           Next.FirstPersonFacing := FirstPersonValue.Facing;
           Next.Inventory := FirstPersonValue.Inventory;
+          Next.Character := FirstPersonValue.Character;
           Next.PrimaryTitle := FirstPersonValue.Title;
           Next.PrimaryStatus := FirstPersonValue.Status
         end
@@ -1295,6 +1479,7 @@ begin
       mutable var Health: integer := 0;
       mutable var MaxHealth: integer := 0;
       mutable var CombatLog: array of string := [];
+      mutable var CombatEvents: array of VisibleCombatEvent := [];
       case Value of
         VisibleState.MapState(MapValue):
         begin
@@ -1305,10 +1490,12 @@ begin
         begin
           Health := FirstPersonValue.Health;
           MaxHealth := FirstPersonValue.MaxHealth;
-          CombatLog := FirstPersonValue.CombatLog
+          CombatLog := FirstPersonValue.CombatLog;
+          CombatEvents := FirstPersonValue.CombatEvents
         end
       end;
 
+      Next := MoveInventorySelection(Next, 0);
       // Only a drop within one running game flashes; loading or starting never does.
       Next.DamageTaken := (State.HasVisibleState and (State.Health > 0)) and (Health < State.Health);
       Next.Health := Health;
@@ -1352,6 +1539,15 @@ begin
       if Std.Arrays.Length(CombatLog) > 0 then
       begin
         Next.Status := CombatLog[Std.Arrays.Length(CombatLog) - 1]
+      end;
+
+      if Next.View = ViewKind.FirstPerson then
+      begin
+        Next := StartCombatAnimation(Next, CombatEvents, Cmd)
+      end
+      else
+      begin
+        Next := StopAnimation(Next, Cmd)
       end;
 
       return QueueViewport(Next)
@@ -1435,6 +1631,7 @@ begin
     ClientEvent.Defeated(Message):
     begin
       // The server ended the game session; the connection stays ready for a new session choice.
+      Next := StopAnimation(Next, Cmd);
       Next.Screen := ClientScreen.StartScreen;
       Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
       Next.Overlay := ClientOverlay.DefeatOverlay;
@@ -1474,6 +1671,7 @@ begin
     end;
     ClientEvent.Failed(Message):
     begin
+      Next := StopAnimation(Next, Cmd);
       Next.ConnectionPhase := ClientConnectionPhase.Failed;
       Next.Overlay := ClientOverlay.NoOverlay;
       Next.FocusedControl := ConnectControlId;
@@ -1483,12 +1681,30 @@ begin
     end;
     ClientEvent.Disconnected:
     begin
+      Next := StopAnimation(Next, Cmd);
       Next.ConnectionPhase := ClientConnectionPhase.Disconnected;
       Next.Overlay := ClientOverlay.NoOverlay;
       Next.FocusedControl := ConnectControlId;
       Next.Pending := false;
       Next.Status := 'Disconnected';
       return AppendMessage(Next, 'Disconnected')
+    end;
+    ClientEvent.AnimationTick(Milliseconds):
+    begin
+      // Late ticks after a stop change nothing.
+      if not State.Animation.Active then
+      begin
+        return State
+      end;
+
+      Next.Animation := AdvanceAnimation(State.Animation, Milliseconds);
+      if not Next.Animation.Active then
+      begin
+        Cmd.CancelSubscription(AnimationSubscriptionId);
+        Next.Animation := NoAnimation()
+      end;
+
+      return Next
     end
   end
 end;
@@ -1673,6 +1889,14 @@ begin
     begin
       return ColoredCell('●', 255, 220, 96, 78, 57, 24)
     end;
+    InteriorWeaponCode:
+    begin
+      return ColoredCell('†', 214, 222, 232, 58, 58, 64)
+    end;
+    InteriorArmorCode:
+    begin
+      return ColoredCell('▼', 214, 160, 104, 70, 46, 28)
+    end;
     InteriorNpcCode:
     begin
       return ColoredCell('♟', 225, 210, 255, 62, 43, 82)
@@ -1750,27 +1974,26 @@ end;
 function ViewFirstPerson(State: ClientModel): TuiElement;
 begin
   var Viewport: WorldViewport := DesiredWorldViewport(State);
-  var Value: FirstPersonVisibleState := record
-    Title := State.PrimaryTitle;
-    Status := State.PrimaryStatus;
-    Width := State.Width;
-    Height := State.Height;
-    Rows := State.Rows;
-    KnowledgeRows := State.KnowledgeRows;
-    PlayerX := State.PlayerX;
-    PlayerY := State.PlayerY;
-    Facing := State.FirstPersonFacing;
-    Inventory := State.Inventory;
-    Health := State.Health;
-    MaxHealth := State.MaxHealth;
-    CombatLog := [];
+  var Value: FirstPersonVisibleState := FirstPersonFromModel(State);
+  var Frame: AnimationFrame := AnimationFrameAt(State.Animation);
+  mutable var Grid: TuiCellGrid := TuiCellGrid.Create(0, 0, []);
+  // Animation frames reuse the walls rendered at their start while the size is unchanged.
+  if (State.Animation.Active and (State.AnimationScene.Width = Viewport.Width)) and
+     (State.AnimationScene.Height = Viewport.Height) then
+  begin
+    Grid := ComposeFirstPersonGrid(Value, State.AnimationScene, Frame.Effect)
+  end
+  else
+  begin
+    Grid := ComposeFirstPersonGrid(Value, RenderFirstPersonScene(Value, Viewport.Width, Viewport.Height), Frame.Effect)
   end;
-  mutable var Grid: TuiCellGrid := RenderFirstPersonGrid(Value, Viewport.Width, Viewport.Height);
-  if State.DamageTaken then
+
+  if State.DamageTaken and Frame.ShowDamageFrame then
   begin
     Grid := WithDamageFrame(Grid)
   end;
 
+  Grid := PaintAnimationText(Grid, Frame);
   // Fallback only: the docked sidebar owns hints while visible.
   if (((((Grid.Width > 0) and (Grid.Height > 0)) and (State.PrimaryStatus <> '')) and not (State.ContextPanelVisible and ContextCanDock(State))) and (State.Overlay <> ClientOverlay.ContextOverlay)) and
      (State.PrimaryStatus <> 'Nothing in reach') then
@@ -1860,20 +2083,26 @@ begin
                                                  TuiElementBuilders.MakeLabel(Location),
                                                  TuiElementBuilders.MakeLabel('Position: ' + Position),
                                                  TuiElementBuilders.MakeLabel(''),
-                                                 TuiElementBuilders.MakeLabel('Equipment'),
-                                                 TuiElementBuilders.MakeLabel('Not available'),
-                                                 TuiElementBuilders.MakeLabel(''),
-                                                 TuiElementBuilders.MakeLabel('Quick inventory')
+                                                 TuiElementBuilders.MakeLabel('Equipment')
                                                ];
-  if Std.Arrays.Length(State.Inventory) = 0 then
+  // Worn and carried lines together never exceed the item count plus one, which the dock budget covers.
+  for Line: string in EquipmentLines(State.Inventory) do
+  begin
+    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Line))
+  end;
+
+  Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(''));
+  Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('Quick inventory'));
+  var Carried: array of string := CarriedItemNames(State.Inventory);
+  if Std.Arrays.Length(Carried) = 0 then
   begin
     Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('Empty'))
   end
   else
   begin
-    for Item: VisibleInventoryItem in State.Inventory do
+    for Name: string in Carried do
     begin
-      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Item.Name))
+      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Name))
     end
   end;
 
@@ -2091,6 +2320,8 @@ begin
   end;
 
   Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('Enter  Interact'));
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('I      Inventory'));
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel('C      Character'));
   Items := Std.Arrays.Concat(Items, [
                                       TuiElementBuilders.MakeLabel('M      Map'),
                                       TuiElementBuilders.MakeLabel('F2     Context'),
@@ -2317,6 +2548,14 @@ begin
     ClientOverlay.DefeatOverlay:
     begin
       return ViewDefeat(State)
+    end;
+    ClientOverlay.InventoryOverlay:
+    begin
+      return ViewInventory(State)
+    end;
+    ClientOverlay.CharacterSheetOverlay:
+    begin
+      return ViewCharacterSheet(State)
     end;
     ClientOverlay.NoOverlay:
     begin

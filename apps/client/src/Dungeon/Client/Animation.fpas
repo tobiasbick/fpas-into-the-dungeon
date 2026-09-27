@@ -1,0 +1,265 @@
+// Client-only playback of one resolved combat turn; the authoritative state is already final.
+unit Dungeon.Client.Animation;
+
+uses Dungeon.Client.Raycast, Dungeon.Protocol, Std.Arrays, Std.Conv, Std.Math, Std.Str, Std.Tui;
+
+public const
+  // Interval of the animation clock and the time one frame event advances.
+  AnimationFrameMilliseconds: integer := 40;
+  // Length of each phase: the player's swing, its impact, and the opponent's lunge.
+  AnimationPhaseMilliseconds: integer := 160;
+
+public type
+  // Running playback of one turn's combat events; inactive playback draws still frames.
+  CombatAnimation = record
+    public Active: boolean;
+    public Elapsed: integer;
+    public Duration: integer;
+    public Events: array of VisibleCombatEvent;
+    // Whether the player wields a weapon, so the swing shows a blade instead of a fist.
+    public Armed: boolean;
+  end;
+  // Everything one frame draws on top of the still first-person image.
+  AnimationFrame = record
+    public Effect: FirstPersonEffect;
+    // Text rising above the opponent, such as `-3` or `miss`; empty draws nothing.
+    public HostileText: string;
+    // Text rising near the bottom when the opponent hurts the player; empty draws nothing.
+    public PlayerText: string;
+    // Rows the texts have risen so far.
+    public Rise: integer;
+    // Whether the red damage frame may show; it waits for the opponent's blow.
+    public ShowDamageFrame: boolean;
+  end;
+
+// Returns an inactive animation.
+public function NoAnimation(): CombatAnimation;
+begin
+  return record
+    Active := false;
+    Elapsed := 0;
+    Duration := 0;
+    Events := [];
+    Armed := false;
+  end
+end;
+
+function HasEvent(Events: array of VisibleCombatEvent; Kind: VisibleCombatEventKind): boolean;
+begin
+  for Entry: VisibleCombatEvent in Events do
+  begin
+    if Entry.Kind = Kind then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+function EventAmount(Events: array of VisibleCombatEvent; Kind: VisibleCombatEventKind): integer;
+begin
+  for Entry: VisibleCombatEvent in Events do
+  begin
+    if Entry.Kind = Kind then
+    begin
+      return Entry.Amount
+    end
+  end;
+
+  return 0
+end;
+
+function PlayerActed(Events: array of VisibleCombatEvent): boolean;
+begin
+  return HasEvent(Events, VisibleCombatEventKind.PlayerHit) or
+         HasEvent(Events, VisibleCombatEventKind.PlayerMiss)
+end;
+
+function HostileActed(Events: array of VisibleCombatEvent): boolean;
+begin
+  return HasEvent(Events, VisibleCombatEventKind.HostileHit) or
+         HasEvent(Events, VisibleCombatEventKind.HostileMiss)
+end;
+
+// Start of the opponent's lunge: after the player's swing and impact when the player attacked.
+function HostileStart(Events: array of VisibleCombatEvent): integer;
+begin
+  if PlayerActed(Events) then
+  begin
+    return 2 * AnimationPhaseMilliseconds
+  end;
+
+  return 0
+end;
+
+// Starts playback of one turn's events; a turn without attacks yields an inactive animation.
+public function StartAnimation(Events: array of VisibleCombatEvent; Armed: boolean): CombatAnimation;
+begin
+  mutable var Duration: integer := 0;
+  if PlayerActed(Events) then
+  begin
+    Duration := 2 * AnimationPhaseMilliseconds
+  end;
+
+  if HasEvent(Events, VisibleCombatEventKind.HostileDefeated) then
+  begin
+    Duration := 3 * AnimationPhaseMilliseconds
+  end;
+
+  if HostileActed(Events) then
+  begin
+    Duration := HostileStart(Events) + AnimationPhaseMilliseconds
+  end;
+
+  return record
+    Active := Duration > 0;
+    Elapsed := 0;
+    Duration := Duration;
+    Events := Events;
+    Armed := Armed;
+  end
+end;
+
+// Advances playback; it becomes inactive once its duration has passed.
+public function AdvanceAnimation(Value: CombatAnimation; Milliseconds: integer): CombatAnimation;
+begin
+  if not Value.Active then
+  begin
+    return Value
+  end;
+  var Elapsed: integer := Value.Elapsed + Std.Math.Max(0, Milliseconds);
+  return Value with Elapsed := Elapsed; Active := Elapsed < Value.Duration; end
+end;
+
+// Progress from 0 to 1 within one phase starting at Start; outside the phase it is clamped.
+function PhaseProgress(Elapsed: integer; Start: integer): real;
+begin
+  return Std.Math.Clamp(IntToReal(Elapsed - Start) / IntToReal(AnimationPhaseMilliseconds), 0.0, 1.0)
+end;
+
+function Within(Elapsed: integer; Start: integer; Length: integer): boolean;
+begin
+  return (Elapsed >= Start) and (Elapsed < Start + Length)
+end;
+
+// Describes the frame at the animation's current time; an inactive animation is a still frame.
+public function AnimationFrameAt(Value: CombatAnimation): AnimationFrame;
+begin
+  mutable var Frame: AnimationFrame := record
+    Effect := NoFirstPersonEffect();
+    HostileText := '';
+    PlayerText := '';
+    Rise := 0;
+    ShowDamageFrame := true;
+  end;
+
+  if not Value.Active then
+  begin
+    return Frame
+  end;
+  var Events: array of VisibleCombatEvent := Value.Events;
+  var Elapsed: integer := Value.Elapsed;
+  var Phase: integer := AnimationPhaseMilliseconds;
+  Frame.Effect.Armed := Value.Armed;
+  if PlayerActed(Events) then
+  begin
+    if Elapsed < Phase then
+    begin
+      Frame.Effect.Swing := PhaseProgress(Elapsed, 0)
+    end;
+
+    if Within(Elapsed, Phase, Phase) then
+    begin
+      var Impact: real := PhaseProgress(Elapsed, Phase);
+      Frame.Rise := Trunc(Impact * 3.0);
+      if HasEvent(Events, VisibleCombatEventKind.PlayerHit) then
+      begin
+        Frame.Effect.Flash := Impact < 0.5;
+        Frame.HostileText := '-' + IntToStr(EventAmount(Events, VisibleCombatEventKind.PlayerHit))
+      end
+      else
+      begin
+        // The opponent steps aside and returns.
+        Frame.Effect.Shift := Std.Math.Sin(Std.Math.Pi * Impact) * 0.35;
+        Frame.HostileText := 'miss'
+      end
+    end
+  end;
+
+  if HasEvent(Events, VisibleCombatEventKind.HostileDefeated) and (Elapsed >= Phase) then
+  begin
+    // The destroyed opponent is gone from the state; it sinks where it stood.
+    Frame.Effect.FallenAhead := true;
+    Frame.Effect.Sink := Std.Math.Clamp(IntToReal(Elapsed - Phase) / IntToReal(2 * Phase), 0.0, 1.0)
+  end;
+
+  if HostileActed(Events) then
+  begin
+    var Start: integer := HostileStart(Events);
+    Frame.ShowDamageFrame := Elapsed >= Start + (Phase div 2);
+    if Elapsed >= Start then
+    begin
+      var Lunge: real := PhaseProgress(Elapsed, Start);
+      Frame.Effect.Scale := 1.0 + (Std.Math.Sin(Std.Math.Pi * Lunge) * 0.25);
+      if HasEvent(Events, VisibleCombatEventKind.HostileHit) and Frame.ShowDamageFrame then
+      begin
+        Frame.PlayerText := '-' + IntToStr(EventAmount(Events, VisibleCombatEventKind.HostileHit));
+        Frame.Rise := Trunc(Lunge * 3.0)
+      end
+    end
+  end;
+
+  return Frame
+end;
+
+function TextCell(Glyph: string; Red: integer; Green: integer; Blue: integer): TuiCell;
+begin
+  return TuiCell.Styled(Glyph, TuiStyle.FromColors(TuiColor.FromRgb(Red, Green, Blue), TuiColor.FromRgb(18, 14, 12)))
+end;
+
+function PutText(
+  Grid: TuiCellGrid;
+  Text: string;
+  Row: integer;
+  Red: integer;
+  Green: integer;
+  Blue: integer
+): TuiCellGrid;
+begin
+  mutable var Drawn: TuiCellGrid := Grid;
+  var Length: integer := Std.Str.Length(Text);
+  var Left: integer := (Grid.Width - Length) div 2;
+  if (Row < 0) or (Row >= Grid.Height) then
+  begin
+    return Drawn
+  end;
+
+  for Index: integer := 0 to Length - 1 do
+  begin
+    var Column: integer := Left + Index;
+    if (Column >= 0) and (Column < Grid.Width) then
+    begin
+      Drawn.Cells[(Row * Grid.Width) + Column] := TextCell(Std.Str.CharAt(Text, Index), Red, Green, Blue)
+    end
+  end;
+
+  return Drawn
+end;
+
+// Paints the frame's rising texts: opponent damage above the view center, player damage near the bottom.
+public function PaintAnimationText(Grid: TuiCellGrid; Frame: AnimationFrame): TuiCellGrid;
+begin
+  mutable var Painted: TuiCellGrid := Grid;
+  if Frame.HostileText <> '' then
+  begin
+    Painted := PutText(Painted, Frame.HostileText, (Grid.Height div 4) - Frame.Rise, 255, 236, 150)
+  end;
+
+  if Frame.PlayerText <> '' then
+  begin
+    Painted := PutText(Painted, Frame.PlayerText, (Grid.Height - 4) - Frame.Rise, 255, 96, 84)
+  end;
+
+  return Painted
+end;

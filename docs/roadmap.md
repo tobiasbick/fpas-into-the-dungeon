@@ -295,56 +295,55 @@ and equipment remain outside this phase.
 The user accepted the slice after `Space` was mapped to the terminal's
 dedicated space key kind.
 
-## 13. Character progression — NEXT
+## 13. Character progression — IN REVIEW
 
 Progression starts with equipment because it changes the existing fight at
 once, while experience and levels need more opponents than the initial dungeon
 provides. Named attributes such as strength or dexterity are introduced only
 when a rule needs them; until then the character has derived values.
 
-### 13a. Equipment, character sheet, and combat animation — NEXT
+### 13a. Equipment, character sheet, and combat animation — IN REVIEW
 
-- [ ] Design derived values (attack, damage, armor, maximum health), equipment
-  slots, and turn costs before implementation in the architecture
-  documentation.
-- [ ] Derive the character's values from base values plus equipment; let the
+- [x] Design derived values (attack, damage, armor, maximum health), equipment
+  slots, and turn costs before implementation in
+  [equipment](architecture/equipment.md).
+- [x] Derive the character's values from base values plus equipment; let the
   combat rules read the derived values instead of fixed numbers. Unarmed
   damage drops to d3 so a weapon matters; the deterministic combat
   expectations change accordingly.
-- [ ] Offer a weapon slot and a body slot.
-- [ ] Let an interior hold several floor items instead of one fixed item field.
-- [ ] Place a **rusty short sword** (damage d6+1 instead of unarmed d3) and a
+- [x] Offer a weapon slot and a body slot.
+- [x] Let an interior hold several floor items instead of one fixed item field.
+- [x] Place a **rusty short sword** (damage d6+1 instead of unarmed d3) and a
   **leather jerkin** (armor +2, raising the skeleton's hit threshold from 9 to
   11) as floor items in the initial dungeon. Both lie off the main route and
   outside the skeleton's sight, so exploring before the fight pays off.
-- [ ] Open an inventory overlay with `I`: select with W/S or the arrow keys,
+- [x] Open an inventory overlay with `I`: select with W/S or the arrow keys,
   equip or unequip with `Enter`, close with `Escape`. Each change consumes one
   turn so gear cannot be swapped for free during a fight.
-- [ ] Validate on the server that an item is equippable, owned, and fits its
+- [x] Validate on the server that an item is equippable, owned, and fits its
   slot.
-- [ ] Show a character sheet overlay on `C` with the derived values, their
+- [x] Show a character sheet overlay on `C` with the derived values, their
   sources, and the equipment; list equipped items in the context panel.
-- [ ] Persist equipment in the next savegame format and project it in the next
+- [x] Persist equipment in the next savegame format and project it in the next
   protocol version.
-- [ ] Add a timer command to Functional Pascal's `Std.Tui` that delivers a
-  `Tick` message to the interactive loop after a requested delay; the live loop
-  currently delivers ticks only in headless test runs.
-- [ ] Animate a resolved combat turn on the client only, driven by TUI ticks:
-  a weapon swing, a hit flash or dodge on the skeleton, its lunge before the
-  damage frame, rising damage numbers, and its collapse. The server protocol
-  stays unchanged.
-- [ ] Measure first-person frame cost first; cache the wall image if a full
+- [x] Animate a resolved combat turn on the client only: a weapon swing, a hit
+  flash or dodge on the skeleton, its lunge before the damage frame, rising
+  damage numbers, and its collapse. The server adds only structured turn
+  events; a client subscription with a timer supplies the animation frames, so
+  Functional Pascal needs no change.
+- [x] Measure first-person frame cost first; cache the wall image if a full
   raycast per animation frame is too slow.
-- [ ] Keep animations short; a further key press completes the running
+- [x] Keep animations short; a further key press completes the running
   animation at once and is not lost.
-- [ ] Cover derivation, validation, turn costs, combat effects, persistence,
-  TUI behavior, tick-driven animation frames, and a complete TCP fight with
+- [x] Cover derivation, validation, turn costs, combat effects, persistence,
+  TUI behavior, individual animation frames, and a complete TCP fight with
   equipment.
-- [ ] Synchronize architecture, product terminology, UI, persistence, and
+- [x] Synchronize architecture, product terminology, UI, persistence, and
   roadmap documentation.
 - [ ] Review the complete equipment slice with the user and obtain explicit
   acceptance.
 
+The implemented slice uses protocol version 12 and savegame format 6.
 Item rarity, durability, shops, loot tables, two-handed weapons, and further
 slots remain outside this slice.
 

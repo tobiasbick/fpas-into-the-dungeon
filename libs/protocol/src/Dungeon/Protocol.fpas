@@ -5,7 +5,7 @@ uses Std.Arrays, Std.Conv, Std.Json, Std.Json.Fields, Std.Str;
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 11;
+  ProtocolVersion: integer := 12;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
   // Largest exploration-map window that remains below the line-size limit with two row planes.
@@ -26,6 +26,12 @@ public const
   MaximumVisibleHealth: integer := 999;
   MaximumCombatLogEntries: integer := 8;
   MaximumCombatLogTextLength: integer := 160;
+  // Defensive bounds for one turn's structured combat events and their damage amounts.
+  MaximumCombatEvents: integer := 8;
+  MaximumCombatEventAmount: integer := 999;
+  // Defensive bounds for the server-formatted character sheet lines.
+  MaximumCharacterValues: integer := 8;
+  MaximumCharacterTextLength: integer := 64;
   // One-character wire alphabet for visible-state and exploration-map rows. Dungeon.Game
   // produces the terrain and interior codes; the server contract test keeps both aligned.
   // Field whose content is undiscovered in both map and interior rows.
@@ -47,6 +53,9 @@ public const
   InteriorExitCode: string := 'x';
   InteriorTabletCode: string := 't';
   InteriorItemCode: string := 'i';
+  // Weapon and armor lying on a visible interior field.
+  InteriorWeaponCode: string := 'w';
+  InteriorArmorCode: string := 'a';
   InteriorNpcCode: string := 'n';
   // A standing opponent; like items and NPCs it appears only in currently visible fields.
   InteriorHostileCode: string := 'h';
@@ -80,10 +89,38 @@ public type
     Left;
     Right;
   end;
-  // Client-safe identity and display name of one carried item.
+  // Slot in which an inventory item can be worn; NoSlot marks items that cannot be worn.
+  VisibleItemSlot = enum
+    NoSlot;
+    Weapon;
+    Body;
+  end;
+  // Client-safe identity, display name, and wear state of one carried or worn item.
   VisibleInventoryItem = record
     public Id: string;
     public Name: string;
+    public Slot: VisibleItemSlot;
+    // True while the item is worn; only items with a slot can be worn.
+    public Equipped: boolean;
+  end;
+  // One server-formatted character sheet line such as `Damage`, `d6+1`, `Rusty short sword`.
+  VisibleCharacterValue = record
+    public Label: string;
+    public Value: string;
+    public Source: string;
+  end;
+  // Kind of one structured fact of the resolved turn.
+  VisibleCombatEventKind = enum
+    PlayerHit;
+    PlayerMiss;
+    HostileHit;
+    HostileMiss;
+    HostileDefeated;
+  end;
+  // One structured fact of the resolved turn; Amount is the damage of a hit, otherwise zero.
+  VisibleCombatEvent = record
+    public Kind: VisibleCombatEventKind;
+    public Amount: integer;
   end;
   // One stable server-provided response displayed by the dialogue overlay.
   VisibleDialogueChoice = record
@@ -115,6 +152,8 @@ public type
     // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
     public Health: integer;
     public MaxHealth: integer;
+    // Character sheet lines in display order.
+    public Character: array of VisibleCharacterValue;
   end;
   // Client-safe bounded interior geometry and pose used by the first-person renderer.
   FirstPersonVisibleState = record
@@ -133,8 +172,12 @@ public type
     // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
     public Health: integer;
     public MaxHealth: integer;
+    // Character sheet lines in display order.
+    public Character: array of VisibleCharacterValue;
     // Messages of the turn that produced this state, oldest first; empty without combat.
     public CombatLog: array of string;
+    // Structured facts of the same turn in order; presentation only.
+    public CombatEvents: array of VisibleCombatEvent;
   end;
   // View-specific server projection; map-only fields cannot occur in a first-person state.
   VisibleState = enum
@@ -177,6 +220,10 @@ public type
     Attack;
     // Passes one combat turn without acting.
     Wait;
+    // Wears one carried item; consumes one turn.
+    Equip(ItemId: string);
+    // Returns one worn item to the inventory; consumes one turn.
+    Unequip(ItemId: string);
     Disconnect;
   end;
   // Handshake, including save availability/removal, visible state, and structured outcomes.
@@ -385,6 +432,8 @@ begin
                                InteriorExitCode,
                                InteriorTabletCode,
                                InteriorItemCode,
+                               InteriorWeaponCode,
+                               InteriorArmorCode,
                                InteriorNpcCode,
                                InteriorHostileCode
                              ], Value)
@@ -449,12 +498,130 @@ begin
   end)
 end;
 
+function ItemSlotName(Value: VisibleItemSlot): string;
+begin
+  case Value of
+    VisibleItemSlot.NoSlot:
+    begin
+      return ''
+    end;
+    VisibleItemSlot.Weapon:
+    begin
+      return 'weapon'
+    end;
+    VisibleItemSlot.Body:
+    begin
+      return 'body'
+    end
+  end
+end;
+
+function DecodeItemSlot(Value: string): result of VisibleItemSlot, string;
+begin
+  case Value of
+    '':
+    begin
+      return Ok(VisibleItemSlot.NoSlot)
+    end;
+    'weapon':
+    begin
+      return Ok(VisibleItemSlot.Weapon)
+    end;
+    'body':
+    begin
+      return Ok(VisibleItemSlot.Body)
+    end
+    else
+    begin
+      return Error('visible inventory item has an unknown slot')
+    end
+  end
+end;
+
+function CombatEventName(Value: VisibleCombatEventKind): string;
+begin
+  case Value of
+    VisibleCombatEventKind.PlayerHit:
+    begin
+      return 'player_hit'
+    end;
+    VisibleCombatEventKind.PlayerMiss:
+    begin
+      return 'player_miss'
+    end;
+    VisibleCombatEventKind.HostileHit:
+    begin
+      return 'hostile_hit'
+    end;
+    VisibleCombatEventKind.HostileMiss:
+    begin
+      return 'hostile_miss'
+    end;
+    VisibleCombatEventKind.HostileDefeated:
+    begin
+      return 'hostile_defeated'
+    end
+  end
+end;
+
+function DecodeCombatEventKind(Value: string): result of VisibleCombatEventKind, string;
+begin
+  case Value of
+    'player_hit':
+    begin
+      return Ok(VisibleCombatEventKind.PlayerHit)
+    end;
+    'player_miss':
+    begin
+      return Ok(VisibleCombatEventKind.PlayerMiss)
+    end;
+    'hostile_hit':
+    begin
+      return Ok(VisibleCombatEventKind.HostileHit)
+    end;
+    'hostile_miss':
+    begin
+      return Ok(VisibleCombatEventKind.HostileMiss)
+    end;
+    'hostile_defeated':
+    begin
+      return Ok(VisibleCombatEventKind.HostileDefeated)
+    end
+    else
+    begin
+      return Error('combat event has an unknown kind')
+    end
+  end
+end;
+
 function EncodeInventory(Items: array of VisibleInventoryItem): array of JsonValue;
 begin
   mutable var Values: array of JsonValue := [];
   for Item: VisibleInventoryItem in Items do
   begin
-    Std.Arrays.Push(Values, JsonValue.Object(['id': JsonValue.String(Item.Id), 'name': JsonValue.String(Item.Name)]))
+    Std.Arrays.Push(Values, JsonValue.Object(['id': JsonValue.String(Item.Id), 'name': JsonValue.String(Item.Name), 'slot': JsonValue.String(ItemSlotName(Item.Slot)), 'equipped': JsonValue.Bool(Item.Equipped)]))
+  end;
+
+  return Values
+end;
+
+function EncodeCharacter(Lines: array of VisibleCharacterValue): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Line: VisibleCharacterValue in Lines do
+  begin
+    Std.Arrays.Push(Values, JsonValue.Object(['label': JsonValue.String(Line.Label), 'value': JsonValue.String(Line.Value), 'source': JsonValue.String(Line.Source)]))
+  end;
+
+  return Values
+end;
+
+function EncodeCombatEvents(Events: array of VisibleCombatEvent): array of JsonValue;
+begin
+  mutable var Values: array of JsonValue := [];
+  for Entry: VisibleCombatEvent in Events do
+  begin
+    Std.Arrays.Push(Values, JsonValue.Object(['kind': JsonValue.String(CombatEventName(Entry.Kind)), 'amount': JsonValue.Number(IntToReal(Entry.Amount))]))
   end;
 
   return Values
@@ -543,6 +710,19 @@ begin
       return Error('visible inventory item name has an invalid length')
     end;
 
+    if Item.Equipped and (Item.Slot = VisibleItemSlot.NoSlot) then
+    begin
+      return Error('visible inventory item without a slot cannot be worn')
+    end;
+
+    for Earlier: integer := 0 to Index - 1 do
+    begin
+      if ((Item.Equipped and Items[Earlier].Equipped) and (Item.Slot = Items[Earlier].Slot)) then
+      begin
+        return Error('visible inventory wears two items in one slot')
+      end
+    end;
+
     for Earlier: integer := 0 to Index - 1 do
     begin
       if Items[Earlier].Id = Item.Id then
@@ -584,10 +764,48 @@ begin
   return Ok(true)
 end;
 
+function ValidateCharacter(Lines: array of VisibleCharacterValue): result of boolean, string;
+begin
+  if Std.Arrays.Length(Lines) > MaximumCharacterValues then
+  begin
+    return Error('character sheet exceeds the protocol line limit')
+  end;
+
+  for Line: VisibleCharacterValue in Lines do
+  begin
+    if (((Std.Str.Length(Line.Label) = 0) or (Std.Str.Length(Line.Label) > MaximumCharacterTextLength)) or ((Std.Str.Length(Line.Value) = 0) or (Std.Str.Length(Line.Value) > MaximumCharacterTextLength))) or
+       ((Std.Str.Length(Line.Source) = 0) or (Std.Str.Length(Line.Source) > MaximumCharacterTextLength)) then
+    begin
+      return Error('character sheet line has an invalid length')
+    end
+  end;
+
+  return Ok(true)
+end;
+
+function ValidateCombatEvents(Events: array of VisibleCombatEvent): result of boolean, string;
+begin
+  if Std.Arrays.Length(Events) > MaximumCombatEvents then
+  begin
+    return Error('combat events exceed the protocol entry limit')
+  end;
+
+  for Entry: VisibleCombatEvent in Events do
+  begin
+    if (Entry.Amount < 0) or (Entry.Amount > MaximumCombatEventAmount) then
+    begin
+      return Error('combat event amount is outside protocol limits')
+    end
+  end;
+
+  return Ok(true)
+end;
+
 function ValidateMapVisibleState(Value: MapVisibleState): result of MapVisibleState, string;
 begin
   var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
   var ValidHealth: boolean := try ValidateHealth(Value.Health, Value.MaxHealth);
+  var ValidCharacter: boolean := try ValidateCharacter(Value.Character);
   if (Value.Width <= 0) or (Value.Height <= 0) then
   begin
     return Error('visible-state dimensions must be positive')
@@ -640,6 +858,8 @@ begin
   var ValidInventory: array of VisibleInventoryItem := try ValidateInventory(Value.Inventory);
   var ValidHealth: boolean := try ValidateHealth(Value.Health, Value.MaxHealth);
   var ValidLog: boolean := try ValidateCombatLog(Value.CombatLog);
+  var ValidCharacter: boolean := try ValidateCharacter(Value.Character);
+  var ValidEvents: boolean := try ValidateCombatEvents(Value.CombatEvents);
   if Std.Str.Length(Value.Title) = 0 then
   begin
     return Error('first-person state title must not be empty')
@@ -813,14 +1033,16 @@ begin
         case Value of
           JsonValue.Object(ItemFields):
           begin
-            if Std.Dictionaries.Length(ItemFields) <> 2 then
+            if Std.Dictionaries.Length(ItemFields) <> 4 then
             begin
-              return Error('visible inventory item must contain only id and name')
+              return Error('visible inventory item must contain only id, name, slot, and equipped')
             end;
 
             Std.Arrays.Push(Items, record
               Id := try StringField(ItemFields, 'id');
               Name := try StringField(ItemFields, 'name');
+              Slot := try DecodeItemSlot(try StringField(ItemFields, 'slot'));
+              Equipped := try BooleanField(ItemFields, 'equipped');
             end)
           end
           else
@@ -835,6 +1057,92 @@ begin
     else
     begin
       return Error('message field inventory must be an array')
+    end
+  end
+end;
+
+function ItemIdField(Fields: dict of string to JsonValue): result of string, string;
+begin
+  var ItemId: string := try StringField(Fields, 'item_id');
+  if (Std.Str.Length(ItemId) = 0) or (Std.Str.Length(ItemId) > MaximumVisibleInventoryTextLength) then
+  begin
+    return Error('item id has an invalid length')
+  end;
+
+  return Ok(ItemId)
+end;
+
+function CharacterField(Fields: dict of string to JsonValue): result of array of VisibleCharacterValue, string;
+begin
+  case try Field(Fields, 'character') of
+    JsonValue.ArrayValue(Values):
+    begin
+      mutable var Lines: array of VisibleCharacterValue := [];
+      for Value: JsonValue in Values do
+      begin
+        case Value of
+          JsonValue.Object(LineFields):
+          begin
+            if Std.Dictionaries.Length(LineFields) <> 3 then
+            begin
+              return Error('character line must contain only label, value, and source')
+            end;
+
+            Std.Arrays.Push(Lines, record
+              Label := try StringField(LineFields, 'label');
+              Value := try StringField(LineFields, 'value');
+              Source := try StringField(LineFields, 'source');
+            end)
+          end
+          else
+          begin
+            return Error('character must contain only objects')
+          end
+        end
+      end;
+      var Valid: boolean := try ValidateCharacter(Lines);
+      return Ok(Lines)
+    end
+    else
+    begin
+      return Error('message field character must be an array')
+    end
+  end
+end;
+
+function CombatEventsField(Fields: dict of string to JsonValue): result of array of VisibleCombatEvent, string;
+begin
+  case try Field(Fields, 'combat_events') of
+    JsonValue.ArrayValue(Values):
+    begin
+      mutable var Events: array of VisibleCombatEvent := [];
+      for Value: JsonValue in Values do
+      begin
+        case Value of
+          JsonValue.Object(EventFields):
+          begin
+            if Std.Dictionaries.Length(EventFields) <> 2 then
+            begin
+              return Error('combat event must contain only kind and amount')
+            end;
+
+            Std.Arrays.Push(Events, record
+              Kind := try DecodeCombatEventKind(try StringField(EventFields, 'kind'));
+              Amount := try IntegerField(EventFields, 'amount');
+            end)
+          end
+          else
+          begin
+            return Error('combat events must contain only objects')
+          end
+        end
+      end;
+      var Valid: boolean := try ValidateCombatEvents(Events);
+      return Ok(Events)
+    end
+    else
+    begin
+      return Error('message field combat_events must be an array')
     end
   end
 end;
@@ -950,6 +1258,14 @@ begin
     ClientMessage.Wait:
     begin
       return Stringify(JsonValue.Object(['type': JsonValue.String('wait')]))
+    end;
+    ClientMessage.Equip(ItemId):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('equip'), 'item_id': JsonValue.String(ItemId)]))
+    end;
+    ClientMessage.Unequip(ItemId):
+    begin
+      return Stringify(JsonValue.Object(['type': JsonValue.String('unequip'), 'item_id': JsonValue.String(ItemId)]))
     end;
     ClientMessage.Disconnect:
     begin
@@ -1108,6 +1424,24 @@ begin
 
       return Ok(ClientMessage.Wait)
     end;
+    'equip':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 2 then
+      begin
+        return Error('equip must contain only type and item_id')
+      end;
+
+      return Ok(ClientMessage.Equip(try ItemIdField(Fields)))
+    end;
+    'unequip':
+    begin
+      if Std.Dictionaries.Length(Fields) <> 2 then
+      begin
+        return Error('unequip must contain only type and item_id')
+      end;
+
+      return Ok(ClientMessage.Unequip(try ItemIdField(Fields)))
+    end;
     'disconnect':
     begin
       if Std.Dictionaries.Length(Fields) <> 1 then
@@ -1137,11 +1471,11 @@ begin
       case Value of
         VisibleState.MapState(MapValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY)), 'inventory': JsonValue.ArrayValue(EncodeInventory(MapValue.Inventory)), 'health': JsonValue.Number(IntToReal(MapValue.Health)), 'max_health': JsonValue.Number(IntToReal(MapValue.MaxHealth))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.Map)), 'origin_x': JsonValue.Number(IntToReal(MapValue.OriginX)), 'origin_y': JsonValue.Number(IntToReal(MapValue.OriginY)), 'width': JsonValue.Number(IntToReal(MapValue.Width)), 'height': JsonValue.Number(IntToReal(MapValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(MapValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(MapValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(MapValue.PlayerX)), 'y': JsonValue.Number(IntToReal(MapValue.PlayerY)), 'world_x': JsonValue.Number(IntToReal(MapValue.WorldX)), 'world_y': JsonValue.Number(IntToReal(MapValue.WorldY)), 'inventory': JsonValue.ArrayValue(EncodeInventory(MapValue.Inventory)), 'health': JsonValue.Number(IntToReal(MapValue.Health)), 'max_health': JsonValue.Number(IntToReal(MapValue.MaxHealth)), 'character': JsonValue.ArrayValue(EncodeCharacter(MapValue.Character))]))
         end;
         VisibleState.FirstPersonState(FirstPersonValue):
         begin
-          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing)), 'inventory': JsonValue.ArrayValue(EncodeInventory(FirstPersonValue.Inventory)), 'health': JsonValue.Number(IntToReal(FirstPersonValue.Health)), 'max_health': JsonValue.Number(IntToReal(FirstPersonValue.MaxHealth)), 'combat_log': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.CombatLog))]))
+          return Stringify(JsonValue.Object(['type': JsonValue.String('state'), 'view': JsonValue.String(ViewName(ViewKind.FirstPerson)), 'title': JsonValue.String(FirstPersonValue.Title), 'status': JsonValue.String(FirstPersonValue.Status), 'width': JsonValue.Number(IntToReal(FirstPersonValue.Width)), 'height': JsonValue.Number(IntToReal(FirstPersonValue.Height)), 'rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.Rows)), 'knowledge_rows': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.KnowledgeRows)), 'x': JsonValue.Number(IntToReal(FirstPersonValue.PlayerX)), 'y': JsonValue.Number(IntToReal(FirstPersonValue.PlayerY)), 'facing': JsonValue.String(FirstPersonFacingName(FirstPersonValue.Facing)), 'inventory': JsonValue.ArrayValue(EncodeInventory(FirstPersonValue.Inventory)), 'health': JsonValue.Number(IntToReal(FirstPersonValue.Health)), 'max_health': JsonValue.Number(IntToReal(FirstPersonValue.MaxHealth)), 'character': JsonValue.ArrayValue(EncodeCharacter(FirstPersonValue.Character)), 'combat_log': JsonValue.ArrayValue(EncodeRows(FirstPersonValue.CombatLog)), 'combat_events': JsonValue.ArrayValue(EncodeCombatEvents(FirstPersonValue.CombatEvents))]))
         end
       end
     end;
@@ -1208,7 +1542,7 @@ begin
       case try DecodeView(try StringField(Fields, 'view')) of
         ViewKind.Map:
         begin
-          if Std.Dictionaries.Length(Fields) <> 15 then
+          if Std.Dictionaries.Length(Fields) <> 16 then
           begin
             return Error('map state has an unexpected field set')
           end;
@@ -1226,13 +1560,14 @@ begin
             Inventory := try InventoryField(Fields, 'inventory');
             Health := try IntegerField(Fields, 'health');
             MaxHealth := try IntegerField(Fields, 'max_health');
+            Character := try CharacterField(Fields);
           end;
 
           return Ok(ServerMessage.State(VisibleState.MapState(try ValidateMapVisibleState(MapValue))))
         end;
         ViewKind.FirstPerson:
         begin
-          if Std.Dictionaries.Length(Fields) <> 15 then
+          if Std.Dictionaries.Length(Fields) <> 17 then
           begin
             return Error('first-person state has an unexpected field set')
           end;
@@ -1249,7 +1584,9 @@ begin
             Inventory := try InventoryField(Fields, 'inventory');
             Health := try IntegerField(Fields, 'health');
             MaxHealth := try IntegerField(Fields, 'max_health');
+            Character := try CharacterField(Fields);
             CombatLog := try StringArrayField(Fields, 'combat_log');
+            CombatEvents := try CombatEventsField(Fields);
           end;
 
           return Ok(ServerMessage.State(VisibleState.FirstPersonState(try ValidateFirstPersonVisibleState(FirstPersonValue))))

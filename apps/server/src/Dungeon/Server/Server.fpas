@@ -2,9 +2,9 @@
 unit Dungeon.Server;
 
 uses
-  Dungeon.Combat, Dungeon.Exploration, Dungeon.Exploration.Model, Dungeon.Game, Dungeon.Protocol,
-  Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Console,
-  Std.Conv, Std.Net, Std.Options, Std.Results, Std.Server, Std.Str, Std.Task, Std.Time;
+  Dungeon.Combat, Dungeon.Equipment, Dungeon.Exploration, Dungeon.Exploration.Model, Dungeon.Game,
+  Dungeon.Protocol, Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame, Std.Arrays,
+  Std.Console, Std.Conv, Std.Net, Std.Options, Std.Results, Std.Server, Std.Str, Std.Task, Std.Time;
 
 public type
   // Immutable server policy and selected persistent world used by each session.
@@ -131,6 +131,14 @@ begin
     ClientMessage.Wait:
     begin
       return true
+    end;
+    ClientMessage.Equip(ItemId):
+    begin
+      return true
+    end;
+    ClientMessage.Unequip(ItemId):
+    begin
+      return true
     end
     else
     begin
@@ -255,18 +263,117 @@ begin
   end
 end;
 
+function ProtocolSlot(Value: EquipmentSlot): VisibleItemSlot;
+begin
+  case Value of
+    EquipmentSlot.Weapon:
+    begin
+      return VisibleItemSlot.Weapon
+    end;
+    EquipmentSlot.Body:
+    begin
+      return VisibleItemSlot.Body
+    end
+  end
+end;
+
 function ProjectInventory(State: GameState): array of VisibleInventoryItem;
 begin
   mutable var Values: array of VisibleInventoryItem := [];
   for Item: GameItem in InventoryItems(State) do
   begin
+    mutable var Slot: VisibleItemSlot := VisibleItemSlot.NoSlot;
+    case ItemSlot(Item.Kind) of
+      Some(Fitting):
+      begin
+        Slot := ProtocolSlot(Fitting)
+      end;
+      None:
+      begin
+      end
+    end;
+    mutable var Equipped: boolean := false;
+    case Item.Location of
+      ItemLocation.EquippedByPlayer(Worn):
+      begin
+        Equipped := true
+      end
+      else
+      begin
+      end
+    end;
+
     Std.Arrays.Push(Values, record
       Id := Item.Id;
       Name := ItemDisplayName(Item.Kind);
+      Slot := Slot;
+      Equipped := Equipped;
     end)
   end;
 
   return Values
+end;
+
+function ProjectCharacter(State: GameState): array of VisibleCharacterValue;
+begin
+  mutable var Values: array of VisibleCharacterValue := [];
+  for Line: CharacterValueLine in CharacterValueLines(State) do
+  begin
+    Std.Arrays.Push(Values, record
+      Label := Line.Label;
+      Value := Line.Value;
+      Source := Line.Source;
+    end)
+  end;
+
+  return Values
+end;
+
+type
+  // Messages and structured events of the turn that produced a projected state.
+  TurnReport = record
+    Log: array of string;
+    Events: array of CombatEvent;
+  end;
+
+function NoTurnReport(): TurnReport;
+begin
+  return record
+    Log := [];
+    Events := [];
+  end
+end;
+
+function ProtocolCombatEvent(Value: CombatEvent): VisibleCombatEvent;
+begin
+  mutable var Kind: VisibleCombatEventKind := VisibleCombatEventKind.PlayerMiss;
+  case Value.Kind of
+    CombatEventKind.PlayerHit:
+    begin
+      Kind := VisibleCombatEventKind.PlayerHit
+    end;
+    CombatEventKind.PlayerMiss:
+    begin
+      Kind := VisibleCombatEventKind.PlayerMiss
+    end;
+    CombatEventKind.HostileHit:
+    begin
+      Kind := VisibleCombatEventKind.HostileHit
+    end;
+    CombatEventKind.HostileMiss:
+    begin
+      Kind := VisibleCombatEventKind.HostileMiss
+    end;
+    CombatEventKind.HostileDefeated:
+    begin
+      Kind := VisibleCombatEventKind.HostileDefeated
+    end
+  end;
+
+  return record
+    Kind := Kind;
+    Amount := Value.Amount;
+  end
 end;
 
 function ProjectDialogue(Value: NpcDialogue): VisibleDialogue;
@@ -547,12 +654,12 @@ begin
   end)
 end;
 
-// Projects the current area; CombatLog carries the messages of the turn that produced State.
+// Projects the current area; Report carries the messages and events of the turn that produced State.
 function ProjectSession(
   World: WorldSession;
   State: GameState;
   Viewport: ViewportSize;
-  CombatLog: array of string
+  Report: TurnReport
 ): result of SessionProjection, string;
 begin
   if State.Area = AreaKind.Dungeon then
@@ -584,8 +691,10 @@ begin
       Facing := ProtocolFacing(Pose.Facing);
       Inventory := ProjectInventory(State);
       Health := State.Health;
-      MaxHealth := PlayerMaximumHealth;
-      CombatLog := CombatLog;
+      MaxHealth := DeriveCharacterValues(State).MaximumHealth;
+      Character := ProjectCharacter(State);
+      CombatLog := Report.Log;
+      CombatEvents := Std.Arrays.Map(Report.Events, ProtocolCombatEvent);
     end;
 
     return Ok(record
@@ -609,7 +718,8 @@ begin
     WorldY := OutdoorPosition.Y;
     Inventory := ProjectInventory(State);
     Health := State.Health;
-    MaxHealth := PlayerMaximumHealth;
+    MaxHealth := DeriveCharacterValues(State).MaximumHealth;
+    Character := ProjectCharacter(State);
   end;
 
   return Ok(record
@@ -633,11 +743,11 @@ function SendProjection(
   World: WorldSession;
   State: GameState;
   Viewport: ViewportSize;
-  CombatLog: array of string;
+  Report: TurnReport;
   Token: CancellationToken
 ): result of WorldSession, string;
 begin
-  var Projection: SessionProjection := try ProjectSession(World, State, Viewport, CombatLog);
+  var Projection: SessionProjection := try ProjectSession(World, State, Viewport, Report);
   var Sent: boolean := try Send(ConnectionValue, ServerMessage.State(Projection.State), Token);
   return Ok(Projection.World)
 end;
@@ -652,11 +762,11 @@ begin
   return Send(ConnectionValue, ServerMessage.Rejected(Code, Message), Token)
 end;
 
-// Reveals the accepted state, makes it current, and sends its projection with the turn's messages.
+// Reveals the accepted state, makes it current, and sends its projection with the turn's report.
 function CommitTurn(
   Session: ServerSession;
   Changed: GameState;
-  CombatLog: array of string;
+  Report: TurnReport;
   ConnectionValue: Connection;
   Token: CancellationToken
 ): result of ServerSession, string;
@@ -664,7 +774,7 @@ begin
   var Revealed: GameState := try RevealCurrentArea(Session.World.Metadata, Changed);
   mutable var Next: ServerSession := Session;
   Next.State := Some(Revealed);
-  Next.World := try SendProjection(ConnectionValue, Session.World, Revealed, Session.Viewport, CombatLog, Token);
+  Next.World := try SendProjection(ConnectionValue, Session.World, Revealed, Session.Viewport, Report, Token);
   return Ok(Next)
 end;
 
@@ -676,7 +786,7 @@ function CommitState(
   Token: CancellationToken
 ): result of ServerSession, string;
 begin
-  return CommitTurn(Session, Changed, [], ConnectionValue, Token)
+  return CommitTurn(Session, Changed, NoTurnReport(), ConnectionValue, Token)
 end;
 
 // Joins one turn's messages into the bounded defeat summary.
@@ -721,9 +831,12 @@ begin
     Ok(Outcome):
     begin
       case Outcome of
-        TurnOutcome.Continued(Changed, Log):
+        TurnOutcome.Continued(Changed, Log, Events):
         begin
-          return CommitTurn(Session, Changed, Log, ConnectionValue, Token)
+          return CommitTurn(Session, Changed, record
+            Log := Log;
+            Events := Events;
+          end, ConnectionValue, Token)
         end;
         TurnOutcome.Defeated(Log):
         begin
@@ -845,7 +958,7 @@ begin
         Ok(Value):
         begin
           Next.Viewport := Value;
-          Next.World := try SendProjection(ConnectionValue, Session.World, try RequireActiveState(Session.State), Value, [], Token)
+          Next.World := try SendProjection(ConnectionValue, Session.World, try RequireActiveState(Session.State), Value, NoTurnReport(), Token)
         end;
         Error(Reason):
         begin
@@ -890,6 +1003,14 @@ begin
     ClientMessage.Wait:
     begin
       return PlayTurn(Session, TurnAction.Wait, 'wait_rejected', ConnectionValue, Token)
+    end;
+    ClientMessage.Equip(ItemId):
+    begin
+      return PlayTurn(Session, TurnAction.Equip(ItemId), 'equip_rejected', ConnectionValue, Token)
+    end;
+    ClientMessage.Unequip(ItemId):
+    begin
+      return PlayTurn(Session, TurnAction.Unequip(ItemId), 'equip_rejected', ConnectionValue, Token)
     end;
     ClientMessage.TurnFirstPerson(Direction):
     begin

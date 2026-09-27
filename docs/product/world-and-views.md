@@ -1,8 +1,8 @@
 # World structure and views
 
 This document defines the canonical terms for the spatial world model and its
-presentation, including the first combat terms. It does not yet define quests
-or character progression.
+presentation, including the first combat and equipment terms. It does not yet
+define quests, experience, or levels.
 
 ## Terminology
 
@@ -58,6 +58,17 @@ or character progression.
 - **Ancient coin** is the first fixed collectible item in the initial dungeon.
   It proves inspection, pickup, projection, and persistence without defining a
   broader loot system.
+- **Equipment** is the set of items the player wears. A worn item is still part
+  of the inventory; its location records the slot it occupies.
+- **Slot** is the body location for one worn item: **weapon** or **body**. An
+  item kind fits at most one slot, and each slot holds at most one item.
+- **Rusty short sword** is the first weapon; it lies in the initial dungeon's
+  middle passage. **Leather jerkin** is the first armor; it lies in the nook
+  north of the exit.
+- **Derived values** are the character's values as the rules read them: hit
+  threshold, damage, armor, and maximum health. They follow from base values
+  plus equipment and are never stored.
+- **Armor** raises the roll an opponent needs to hit the player.
 - **NPC** is a non-player character with stable server-owned identity, kind,
   placement, and persistent state.
 - **Mara, the old adventurer** is the first fixed NPC. She occupies and blocks
@@ -75,11 +86,14 @@ or character progression.
   of the initial dungeon.
 - **Health** is the player's current and full hit points. Reaching zero means
   defeat.
-- **Turn** is one time-consuming player action (step, attack, or wait) followed
+- **Turn** is one time-consuming player action (step, attack, wait, or a change
+  of equipment) followed
   by the opponents' actions. Turning, interaction, dialogue, and saving are not
   turns.
 - **Attack** is the player intention that strikes the field directly ahead.
 - **Combat log** is the ordered list of messages describing one resolved turn.
+- **Combat event** is one structured fact of a resolved turn, such as a hit and
+  its damage. Combat events drive the client's animation and never change state.
 - **Defeat** ends the current game session when the player's health reaches
   zero. The connection remains, and the player may load or start a game.
 - **Visible state** is the server-produced, client-safe projection of the
@@ -135,6 +149,12 @@ area.
   replace the primary view or issue movement intentions.
 - **Dialogue overlay** is the framed modal presentation of the current dialogue
   frame. It owns gameplay input until the server advances or ends the dialogue.
+- **Inventory overlay** lists carried and worn items with a client-owned
+  selection; `Enter` asks the server to wear or remove the selected item.
+- **Character sheet** is the overlay that shows health, the server-formatted
+  derived values with their sources, and the equipment.
+- **Combat animation** is the client-only playback of one turn's combat events
+  after the resolved state has arrived.
 
 ## View families
 

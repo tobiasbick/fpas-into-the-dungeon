@@ -1,0 +1,173 @@
+// Inventory overlay, character sheet, and equipment summaries built from server projections.
+unit Dungeon.Client.Character;
+
+uses Dungeon.Client.Model, Dungeon.Protocol, Std.Arrays, Std.Conv, Std.Options, Std.Str, Std.Tui;
+
+function SlotLabel(Slot: VisibleItemSlot): string;
+begin
+  case Slot of
+    VisibleItemSlot.Weapon:
+    begin
+      return 'Weapon'
+    end;
+    VisibleItemSlot.Body:
+    begin
+      return 'Body'
+    end;
+    VisibleItemSlot.NoSlot:
+    begin
+      return ''
+    end
+  end
+end;
+
+// Returns one line per worn item, such as `Weapon: Rusty short sword`, or `Nothing worn`.
+public function EquipmentLines(Inventory: array of VisibleInventoryItem): array of string;
+begin
+  mutable var Lines: array of string := [];
+  for Item: VisibleInventoryItem in Inventory do
+  begin
+    if Item.Equipped then
+    begin
+      Std.Arrays.Push(Lines, (SlotLabel(Item.Slot) + ': ') + Item.Name)
+    end
+  end;
+
+  if Std.Arrays.Length(Lines) = 0 then
+  begin
+    return ['Nothing worn']
+  end;
+
+  return Lines
+end;
+
+// Returns the names of carried items that are not worn, in projection order.
+public function CarriedItemNames(Inventory: array of VisibleInventoryItem): array of string;
+begin
+  mutable var Names: array of string := [];
+  for Item: VisibleInventoryItem in Inventory do
+  begin
+    if not Item.Equipped then
+    begin
+      Std.Arrays.Push(Names, Item.Name)
+    end
+  end;
+
+  return Names
+end;
+
+// Moves the inventory selection by Delta, wrapping at both ends; an empty inventory selects 0.
+public function MoveInventorySelection(State: ClientModel; Delta: integer): ClientModel;
+begin
+  var Count: integer := Std.Arrays.Length(State.Inventory);
+  mutable var Next: ClientModel := State;
+  if Count = 0 then
+  begin
+    Next.InventorySelection := 0;
+    return Next
+  end;
+  mutable var Selection: integer := (State.InventorySelection + Delta) mod Count;
+  if Selection < 0 then
+  begin
+    Selection := Selection + Count
+  end;
+
+  Next.InventorySelection := Selection;
+  return Next
+end;
+
+// Returns the intention for Enter on the selected item: unequip when worn, equip when it has a slot.
+public function SelectedEquipmentRequest(State: ClientModel): option of ClientMessage;
+begin
+  if (State.InventorySelection < 0) or
+     (State.InventorySelection >= Std.Arrays.Length(State.Inventory)) then
+  begin
+    return None
+  end;
+  var Item: VisibleInventoryItem := State.Inventory[State.InventorySelection];
+  if Item.Equipped then
+  begin
+    return Some(ClientMessage.Unequip(Item.Id))
+  end;
+
+  if Item.Slot <> VisibleItemSlot.NoSlot then
+  begin
+    return Some(ClientMessage.Equip(Item.Id))
+  end;
+
+  return None
+end;
+
+function InventoryEntry(Item: VisibleInventoryItem; Selected: boolean): string;
+begin
+  mutable var Prefix: string := '  ';
+  if Selected then
+  begin
+    Prefix := '> '
+  end;
+
+  if Item.Equipped then
+  begin
+    return ((Prefix + Item.Name) + ' — worn as ') + SlotLabel(Item.Slot)
+  end;
+
+  if Item.Slot = VisibleItemSlot.NoSlot then
+  begin
+    return (Prefix + Item.Name) + ' — cannot be worn'
+  end;
+
+  return ((Prefix + Item.Name) + ' — ') + SlotLabel(Item.Slot)
+end;
+
+// Renders the inventory overlay with the current selection and its controls.
+public function ViewInventory(State: ClientModel): TuiElement;
+begin
+  mutable var Content: array of TuiElement := [];
+  if Std.Arrays.Length(State.Inventory) = 0 then
+  begin
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('You carry nothing.'))
+  end
+  else
+  begin
+    for Index: integer := 0 to Std.Arrays.Length(State.Inventory) - 1 do
+    begin
+      Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(InventoryEntry(State.Inventory[Index], Index =
+                                                                                                   State.InventorySelection)))
+    end
+  end;
+
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(''));
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('W/S or arrows select  Enter wear/remove  Esc close'));
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('Changing gear takes one turn.'));
+  return TuiElementBuilders.MakeOverlay('Inventory', [TuiElementBuilders.MakeColumn(Content)])
+end;
+
+// Renders the character sheet: health, derived values with their sources, and the equipment.
+public function ViewCharacterSheet(State: ClientModel): TuiElement;
+begin
+  mutable var Content: array of TuiElement := [
+                                                TuiElementBuilders.MakeLabel((('Health         ' + IntToStr(State.Health)) + '/') +
+                                                                             IntToStr(State.MaxHealth))
+                                              ];
+  for Line: VisibleCharacterValue in State.Character do
+  begin
+    mutable var Label: string := Line.Label;
+    while Std.Str.Length(Label) < 15 do
+    begin
+      Label := Label + ' '
+    end;
+
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(((Label + Line.Value) + '  · ') +
+                                                          Line.Source))
+  end;
+
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeRule('Equipment'));
+  for Line: string in EquipmentLines(State.Inventory) do
+  begin
+    Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(Line))
+  end;
+
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel(''));
+  Std.Arrays.Push(Content, TuiElementBuilders.MakeLabel('I inventory  Esc close'));
+  return TuiElementBuilders.MakeOverlay('Character', [TuiElementBuilders.MakeColumn(Content)])
+end;

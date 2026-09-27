@@ -23,7 +23,7 @@ reconnect repeats this choice.
 
 ## Savegame contract
 
-Savegame format `5` is an exact JSON object containing the selected world ID,
+Savegame format `6` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, persistent discovered-area state, the complete
 server-owned item and NPC state, the player's health, every opponent, and the

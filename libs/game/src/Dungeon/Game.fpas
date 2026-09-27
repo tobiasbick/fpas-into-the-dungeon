@@ -1,7 +1,7 @@
 // Authoritative coordinates, terrain, movement, interaction, item, NPC, opponent, and dialogue rules.
 unit Dungeon.Game;
 
-uses Dungeon.Exploration.Model, Std.Arrays, Std.Conv, Std.Math, Std.Results, Std.Str;
+uses Dungeon.Exploration.Model, Std.Arrays, Std.Conv, Std.Math, Std.Options, Std.Results, Std.Str;
 
 public const
   // Schema version written to world metadata and chunk files.
@@ -18,6 +18,14 @@ public const
   InitialDungeonItemId: string := 'initial-dungeon:ancient-coin';
   InitialDungeonItemName: string := 'Ancient coin';
   InitialDungeonItemDescription: string := 'A heavy, tarnished coin marked with a doorway beneath a crescent moon.';
+  // Stable identity of the weapon lying in the initial dungeon's middle passage.
+  RustyShortSwordId: string := 'initial-dungeon:rusty-short-sword';
+  RustyShortSwordName: string := 'Rusty short sword';
+  RustyShortSwordDescription: string := 'A short blade pitted with rust. Its edge still bites.';
+  // Stable identity of the armor lying in the nook north of the initial dungeon's exit.
+  LeatherJerkinId: string := 'initial-dungeon:leather-jerkin';
+  LeatherJerkinName: string := 'Leather jerkin';
+  LeatherJerkinDescription: string := 'A stiff jerkin of boiled leather, scuffed but whole.';
   // Stable identity and player-facing name of the first non-player character.
   InitialDungeonNpcId: string := 'initial-dungeon:old-adventurer';
   InitialDungeonNpcName: string := 'Mara, the old adventurer';
@@ -55,14 +63,28 @@ public type
     public X: integer;
     public Y: integer;
   end;
-  // Identifies the one item kind introduced by the first inventory slice.
+  // Identifies every known item kind; the kind decides name, description, and slot.
   ItemKind = enum
     AncientCoin;
+    RustyShortSword;
+    LeatherJerkin;
+  end;
+  // Body location in which the player can wear one item at a time.
+  EquipmentSlot = enum
+    Weapon;
+    Body;
   end;
   // Authoritative ownership or exact area-local placement of an item.
   ItemLocation = enum
     InInterior(AreaId: string; Position: InteriorPosition);
     CarriedByPlayer;
+    // Worn by the player; the slot always fits the item kind.
+    EquippedByPlayer(Slot: EquipmentSlot);
+  end;
+  // Initial floor placement of one item identity in an interior.
+  ItemPlacement = record
+    public ItemId: string;
+    public Position: InteriorPosition;
   end;
   // Stable mutable item state; identity is unique within one game state.
   GameItem = record
@@ -141,8 +163,8 @@ public type
     public Exit: InteriorPosition;
     // Fixed wall field occupied by the initial dungeon's inspectable stone tablet.
     public Tablet: InteriorPosition;
-    // Initial floor placement of the first collectible item.
-    public Item: InteriorPosition;
+    // Initial floor placements of the area's items, each on a distinct floor field.
+    public Items: array of ItemPlacement;
     // Fixed blocking floor placement of the first non-player character.
     public Npc: InteriorPosition;
     // Initial floor placement of the first opponent.
@@ -1423,27 +1445,15 @@ begin
   begin
     return Error('interior tablet coordinate must name a wall field')
   end;
-  var ItemCell: InteriorCellKind := try InteriorCellAt(Map, Map.Item);
-  if ItemCell <> InteriorCellKind.Floor then
-  begin
-    return Error('interior item coordinate must name a floor field')
-  end;
   var NpcCell: InteriorCellKind := try InteriorCellAt(Map, Map.Npc);
   if NpcCell <> InteriorCellKind.Floor then
   begin
     return Error('interior NPC coordinate must name a floor field')
   end;
 
-  if ((Map.Item.X = Map.Start.X) and (Map.Item.Y = Map.Start.Y)) or
-     ((Map.Item.X = Map.Exit.X) and (Map.Item.Y = Map.Exit.Y)) then
+  if SamePosition(Map.Npc, Map.Start) or SamePosition(Map.Npc, Map.Exit) then
   begin
-    return Error('interior item coordinate must differ from start and exit')
-  end;
-
-  if (((Map.Npc.X = Map.Start.X) and (Map.Npc.Y = Map.Start.Y)) or ((Map.Npc.X = Map.Exit.X) and (Map.Npc.Y = Map.Exit.Y))) or
-     ((Map.Npc.X = Map.Item.X) and (Map.Npc.Y = Map.Item.Y)) then
-  begin
-    return Error('interior NPC coordinate must differ from start, exit, and item')
+    return Error('interior NPC coordinate must differ from start and exit')
   end;
   var HostileCell: InteriorCellKind := try InteriorCellAt(Map, Map.Hostile);
   if HostileCell <> InteriorCellKind.Floor then
@@ -1451,10 +1461,38 @@ begin
     return Error('interior opponent coordinate must name a floor field')
   end;
 
-  if ((SamePosition(Map.Hostile, Map.Start) or SamePosition(Map.Hostile, Map.Exit)) or SamePosition(Map.Hostile, Map.Item)) or
+  if (SamePosition(Map.Hostile, Map.Start) or SamePosition(Map.Hostile, Map.Exit)) or
      SamePosition(Map.Hostile, Map.Npc) then
   begin
-    return Error('interior opponent coordinate must differ from start, exit, item, and NPC')
+    return Error('interior opponent coordinate must differ from start, exit, and NPC')
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(Map.Items) - 1 do
+  begin
+    var Placement: ItemPlacement := Map.Items[Index];
+    if try InteriorCellAt(Map, Placement.Position) <> InteriorCellKind.Floor then
+    begin
+      return Error('interior item coordinate must name a floor field')
+    end;
+
+    if ((SamePosition(Placement.Position, Map.Start) or SamePosition(Placement.Position, Map.Exit)) or SamePosition(Placement.Position, Map.Npc)) or
+       SamePosition(Placement.Position, Map.Hostile) then
+    begin
+      return Error('interior item coordinate must differ from start, exit, NPC, and opponent')
+    end;
+
+    for Other: integer := 0 to Index - 1 do
+    begin
+      if Map.Items[Other].ItemId = Placement.ItemId then
+      begin
+        return Error('interior item placements must name distinct items')
+      end;
+
+      if SamePosition(Map.Items[Other].Position, Placement.Position) then
+      begin
+        return Error('interior item placements must occupy distinct fields')
+      end
+    end
   end;
   mutable var ExitCount: integer := 0;
   mutable var TraversableCount: integer := 0;
@@ -1529,12 +1567,29 @@ begin
   return Ok(Map)
 end;
 
-function InitialDungeonItemPosition(): InteriorPosition;
+// The coin lies on the upper corridor; sword and jerkin lie off the main route
+// and outside the skeleton's line of sight, rewarding exploration before a fight.
+function InitialDungeonItemPlacements(): array of ItemPlacement;
 begin
-  return record
-    X := 8;
-    Y := 1;
-  end
+  return [record
+    ItemId := InitialDungeonItemId;
+    Position := record
+      X := 8;
+      Y := 1;
+    end;
+  end, record
+    ItemId := RustyShortSwordId;
+    Position := record
+      X := 7;
+      Y := 4;
+    end;
+  end, record
+    ItemId := LeatherJerkinId;
+    Position := record
+      X := 1;
+      Y := 6;
+    end;
+  end]
 end;
 
 function InitialDungeonNpcPosition(): InteriorPosition;
@@ -1594,19 +1649,60 @@ begin
       X := 9;
       Y := 0;
     end;
-    Item := InitialDungeonItemPosition();
+    Items := InitialDungeonItemPlacements();
     Npc := InitialDungeonNpcPosition();
     Hostile := InitialDungeonHostilePosition();
   end)
 end;
 
-function InitialDungeonItem(Metadata: WorldMetadata): GameItem;
+// Returns the kind of one known item identity; unknown identities are an error.
+public function KnownItemKind(Id: string): result of ItemKind, string;
 begin
-  return record
-    Id := InitialDungeonItemId;
-    Kind := ItemKind.AncientCoin;
-    Location := ItemLocation.InInterior(Metadata.DungeonAreaId, InitialDungeonItemPosition());
-  end
+  if Id = InitialDungeonItemId then
+  begin
+    return Ok(ItemKind.AncientCoin)
+  end;
+
+  if Id = RustyShortSwordId then
+  begin
+    return Ok(ItemKind.RustyShortSword)
+  end;
+
+  if Id = LeatherJerkinId then
+  begin
+    return Ok(ItemKind.LeatherJerkin)
+  end;
+
+  return Error('game state contains an unknown item identity')
+end;
+
+// Returns the initial field of one item in an interior map.
+public function InitialItemPosition(Map: InteriorMap; ItemId: string): result of InteriorPosition, string;
+begin
+  for Placement: ItemPlacement in Map.Items do
+  begin
+    if Placement.ItemId = ItemId then
+    begin
+      return Ok(Placement.Position)
+    end
+  end;
+
+  return Error('item has no placement in this area')
+end;
+
+function InitialDungeonItems(Metadata: WorldMetadata): array of GameItem;
+begin
+  mutable var Items: array of GameItem := [];
+  for Placement: ItemPlacement in InitialDungeonItemPlacements() do
+  begin
+    Std.Arrays.Push(Items, record
+      Id := Placement.ItemId;
+      Kind := Std.Results.Unwrap(KnownItemKind(Placement.ItemId));
+      Location := ItemLocation.InInterior(Metadata.DungeonAreaId, Placement.Position);
+    end)
+  end;
+
+  return Items
 end;
 
 function InitialDungeonHostile(Metadata: WorldMetadata): GameHostile;
@@ -1681,6 +1777,14 @@ begin
     ItemKind.AncientCoin:
     begin
       return InitialDungeonItemName
+    end;
+    ItemKind.RustyShortSword:
+    begin
+      return RustyShortSwordName
+    end;
+    ItemKind.LeatherJerkin:
+    begin
+      return LeatherJerkinName
     end
   end
 end;
@@ -1692,20 +1796,88 @@ begin
     ItemKind.AncientCoin:
     begin
       return InitialDungeonItemDescription
+    end;
+    ItemKind.RustyShortSword:
+    begin
+      return RustyShortSwordDescription
+    end;
+    ItemKind.LeatherJerkin:
+    begin
+      return LeatherJerkinDescription
     end
   end
 end;
 
-// Returns carried items in stable game-state order without exposing placement rules.
+// Returns the slot an item kind can be worn in; None means the item cannot be worn.
+public function ItemSlot(Kind: ItemKind): option of EquipmentSlot;
+begin
+  case Kind of
+    ItemKind.AncientCoin:
+    begin
+      return None
+    end;
+    ItemKind.RustyShortSword:
+    begin
+      return Some(EquipmentSlot.Weapon)
+    end;
+    ItemKind.LeatherJerkin:
+    begin
+      return Some(EquipmentSlot.Body)
+    end
+  end
+end;
+
+// Returns the client-safe interior code of an item lying on a visible field.
+public function ItemVisibleCode(Kind: ItemKind): string;
+begin
+  case Kind of
+    ItemKind.RustyShortSword:
+    begin
+      return 'w'
+    end;
+    ItemKind.LeatherJerkin:
+    begin
+      return 'a'
+    end
+    else
+    begin
+      return 'i'
+    end
+  end
+end;
+
+// Returns carried and worn items in stable game-state order without exposing placement rules.
 public function InventoryItems(State: GameState): array of GameItem;
 begin
   mutable var Items: array of GameItem := [];
   for Item: GameItem in State.Items do
   begin
     case Item.Location of
-      ItemLocation.CarriedByPlayer:
+      ItemLocation.InInterior(AreaId, Position):
+      begin
+      end
+      else
       begin
         Std.Arrays.Push(Items, Item)
+      end
+    end
+  end;
+
+  return Items
+end;
+
+// Returns the item worn in one slot, if any.
+public function EquippedItem(State: GameState; Slot: EquipmentSlot): option of GameItem;
+begin
+  for Item: GameItem in State.Items do
+  begin
+    case Item.Location of
+      ItemLocation.EquippedByPlayer(Worn):
+      begin
+        if Worn = Slot then
+        begin
+          return Some(Item)
+        end
       end
       else
       begin
@@ -1713,7 +1885,7 @@ begin
     end
   end;
 
-  return Items
+  return None
 end;
 
 // Returns the player-facing name of one authoritative NPC kind.
@@ -1821,7 +1993,7 @@ begin
         if (AreaId = State.AreaId) and
            ((ItemPosition.X = Position.X) and (ItemPosition.Y = Position.Y)) then
         begin
-          return Ok('i')
+          return Ok(ItemVisibleCode(Item.Kind))
         end
       end
       else
@@ -1872,7 +2044,7 @@ begin
     Player := PlayerPosition.Outdoor(Metadata.Spawn);
     ReturnLocation := ReturnLocation.NoReturnLocation;
     Exploration := EmptyExploration();
-    Items := [InitialDungeonItem(Metadata)];
+    Items := InitialDungeonItems(Metadata);
     Npc := InitialDungeonNpc();
     Health := PlayerMaximumHealth;
     Hostiles := [InitialDungeonHostile(Metadata)];
@@ -1880,43 +2052,82 @@ begin
   end
 end;
 
+// Requires exactly the known items, each on its own placement, carried, or worn in a fitting free slot.
 function ValidateItems(Metadata: WorldMetadata; Map: InteriorMap; Items: array of GameItem): result of array of GameItem, string;
 begin
-  if Std.Arrays.Length(Items) <> 1 then
+  if Std.Arrays.Length(Items) <> Std.Arrays.Length(Map.Items) then
   begin
-    return Error('game state must contain exactly the initial dungeon item')
+    return Error('game state must contain exactly the initial dungeon items')
   end;
-  var Item: GameItem := Items[0];
-  if Item.Id <> InitialDungeonItemId then
+  mutable var WeaponWorn: boolean := false;
+  mutable var BodyWorn: boolean := false;
+  for Index: integer := 0 to Std.Arrays.Length(Items) - 1 do
   begin
-    return Error('game state contains an unknown item identity')
-  end;
-
-  if Item.Kind <> ItemKind.AncientCoin then
-  begin
-    return Error('game state item identity and kind do not match')
-  end;
-
-  case Item.Location of
-    ItemLocation.InInterior(AreaId, Position):
+    var Item: GameItem := Items[Index];
+    if try KnownItemKind(Item.Id) <> Item.Kind then
     begin
-      if AreaId <> Metadata.DungeonAreaId then
-      begin
-        return Error('initial dungeon item names an unknown area')
-      end;
+      return Error('game state item identity and kind do not match')
+    end;
 
-      if (Position.X <> Map.Item.X) or (Position.Y <> Map.Item.Y) then
+    for Other: integer := 0 to Index - 1 do
+    begin
+      if Items[Other].Id = Item.Id then
       begin
-        return Error('initial dungeon item is outside its authoritative placement')
-      end;
-
-      if try InteriorCellAt(Map, Position) <> InteriorCellKind.Floor then
-      begin
-        return Error('initial dungeon item must occupy a floor field')
+        return Error('game state contains a duplicate item identity')
       end
     end;
-    ItemLocation.CarriedByPlayer:
-    begin
+
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, Position):
+      begin
+        if AreaId <> Metadata.DungeonAreaId then
+        begin
+          return Error('initial dungeon item names an unknown area')
+        end;
+
+        if not SamePosition(Position, try InitialItemPosition(Map, Item.Id)) then
+        begin
+          return Error('initial dungeon item is outside its authoritative placement')
+        end
+      end;
+      ItemLocation.CarriedByPlayer:
+      begin
+      end;
+      ItemLocation.EquippedByPlayer(Slot):
+      begin
+        case ItemSlot(Item.Kind) of
+          Some(Fitting):
+          begin
+            if Fitting <> Slot then
+            begin
+              return Error('worn item does not fit its slot')
+            end
+          end;
+          None:
+          begin
+            return Error('game state wears an item that cannot be worn')
+          end
+        end;
+
+        if Slot = EquipmentSlot.Weapon then
+        begin
+          if WeaponWorn then
+          begin
+            return Error('only one item can be worn in each slot')
+          end;
+
+          WeaponWorn := true
+        end
+        else
+        begin
+          if BodyWorn then
+          begin
+            return Error('only one item can be worn in each slot')
+          end;
+
+          BodyWorn := true
+        end
+      end
     end
   end;
 

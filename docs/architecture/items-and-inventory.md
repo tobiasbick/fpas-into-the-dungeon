@@ -33,8 +33,8 @@ requirements justify it.
 
 ## Protocol and presentation
 
-Protocol version 11 projects visible inventory entries as stable ID and display
-name pairs. Both map and first-person visible states carry the same bounded,
+Protocol version 12 projects visible inventory entries as stable ID, display
+name, slot, and worn flag. Both map and first-person visible states carry the same bounded,
 validated inventory projection. The dungeon uses cell code `i` only while the
 coin remains on its field and Fog of War permits that field to be shown.
 
@@ -61,7 +61,7 @@ narrow-screen overlay; no new preference or configuration schema is introduced.
 
 ## Persistence
 
-Savegame format 5 stores the complete item array alongside player, return, and
+Savegame format 6 stores the complete item array alongside player, return, and
 exploration state. Each location is an explicit variant: an interior area and
 field, or carried by the player. Loading validates the full state before it can
 replace the active game. Format 3 and all other obsolete schemas are rejected
@@ -75,5 +75,7 @@ next explicit save.
 
 ## Deferred scope
 
-Dropping, equipping, using, stacking, capacity limits, random loot, containers,
-shops, an economy, and multiple item kinds remain outside Phase 10.
+Dropping, using, stacking, capacity limits, random loot, containers, shops, and
+an economy remain outside Phase 10. Stage 13a adds further item kinds, several
+item placements per interior, and wearing items; see
+[equipment and character values](equipment.md).

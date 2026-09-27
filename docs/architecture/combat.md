@@ -32,8 +32,8 @@ dangerous. Mara warns that something restless still walks the inner passages.
 
 ## Turns
 
-Only three intentions consume a turn: a successful first-person **step**, an
-**attack**, and **wait**. After each of them the skeleton acts once while it
+Only these intentions consume a turn: a successful first-person **step**, an
+**attack**, **wait**, and wearing or removing an item. After each of them the skeleton acts once while it
 stands in the player's current area. Turning, interaction, dialogue, the
 exploration map, saving, and rejected intentions do not advance time.
 
@@ -45,8 +45,8 @@ keeps its non-violent meaning, so talking to Mara can never become an attack.
 | Value | Player | Restless skeleton |
 |---|---|---|
 | Health | 20 | 12 |
-| Hit | d20 ≥ 6 (75 %) | d20 ≥ 9 (60 %) |
-| Damage | d4 + 1 | d4 |
+| Hit | d20 ≥ 6 (75 %) | d20 ≥ 9 + armor (60 % unarmored) |
+| Damage | d3 unarmed, d6 + 1 with the rusty short sword | d4 |
 
 Dice come from a small linear congruential generator whose state is part of
 the authoritative game state. A new game seeds it from the world seed, and a
@@ -56,7 +56,8 @@ fight predictable for a player.
 
 Mara tends the player's wounds: while the player is hurt, her dialogue offers
 `Could you tend my wounds?`, which restores full health without consuming a
-turn. Character progression, equipment, and other healing remain Phase 13.
+turn. The player's values come from base values plus equipment; see
+[equipment and character values](equipment.md).
 
 ## Defeat and victory
 
@@ -69,12 +70,17 @@ automatically.
 When the skeleton's health reaches zero it is marked destroyed. The state keeps
 the record so that savegames can prove that the fight already happened.
 
-## Protocol version 11
+## Protocol
+
+Introduced with protocol version 11 and extended in version 12:
+
 
 - Client intentions `attack` and `wait`, both without fields.
 - Both visible states carry `health` and `max_health` for the character panel.
   The first-person state also carries `combat_log`: the bounded messages of the
-  resolved turn, such as `You hit the restless skeleton for 3.`
+  resolved turn, such as `You hit the restless skeleton for 3.`, and, since
+  protocol version 12, `combat_events`: the same turn as structured facts that
+  drive the client's combat animation.
 - The interior alphabet gains `InteriorHostileCode` (`h`) for a currently
   visible standing opponent. Remembered fields never retain it.
 - `defeated` replaces the state response of the turn that ended the game; it
@@ -83,7 +89,7 @@ the record so that savegames can prove that the fight already happened.
 
 ## Persistence
 
-Savegame format 5 adds the player's health, the random generator state, and
+Since savegame format 5 the save holds the player's health, the random generator state, and
 the complete opponent record with identity, kind, area, position, health, and
 alert status. Validation requires exactly the known opponent, a floor field
 that overlaps neither Mara nor a standing player, and consistent health. Saving
@@ -98,4 +104,4 @@ intentions and outcomes into protocol messages. The client only renders the
 projected opponent, health, combat log, and defeat.
 
 Multiple opponents, loot, experience, ranged attacks, spells, fleeing
-behavior, real-time combat, and equipment remain outside this slice.
+behavior, and real-time combat remain outside this slice.

@@ -1,13 +1,18 @@
 // Turn-based combat: player actions, dice, opponent perception, pathfinding, attacks, and defeat.
 unit Dungeon.Combat;
 
-uses Dungeon.Exploration, Dungeon.Game, Std.Arrays, Std.Conv, Std.Math, Std.Results;
+uses
+  Dungeon.Equipment, Dungeon.Exploration, Dungeon.Game, Std.Arrays, Std.Conv, Std.Math, Std.Results;
 
 public const
   // Largest distance in fields at which a dormant opponent notices the player.
   HostileSightRange: integer := 6;
-  // Upper bound of messages reported for one resolved turn.
+  // Upper bound of messages and of structured events reported for one resolved turn.
   MaximumTurnLogEntries: integer := 8;
+  // Lowest d20 roll with which the restless skeleton hits an unarmored player.
+  RestlessSkeletonHitThreshold: integer := 9;
+  // Damage die of the restless skeleton's blow.
+  RestlessSkeletonDamageSides: integer := 4;
 
 public type
   // One time-consuming player intention; turning and interaction never consume a turn.
@@ -15,10 +20,27 @@ public type
     Step(Direction: RelativeStep);
     Attack;
     Wait;
+    // Wears a carried item; an item already worn in its slot returns to the inventory.
+    Equip(ItemId: string);
+    // Returns a worn item to the inventory.
+    Unequip(ItemId: string);
+  end;
+  // Kind of one structured fact of a resolved turn; presentation animates these.
+  CombatEventKind = enum
+    PlayerHit;
+    PlayerMiss;
+    HostileHit;
+    HostileMiss;
+    HostileDefeated;
+  end;
+  // One structured fact of a resolved turn; Amount is the damage dealt, otherwise zero.
+  CombatEvent = record
+    public Kind: CombatEventKind;
+    public Amount: integer;
   end;
   // Result of one accepted turn. Defeated ends the game session and carries no state.
   TurnOutcome = enum
-    Continued(State: GameState; Log: array of string);
+    Continued(State: GameState; Log: array of string; Events: array of CombatEvent);
     Defeated(Log: array of string);
   end;
 
@@ -30,6 +52,7 @@ type
   TurnProgress = record
     State: GameState;
     Log: array of string;
+    Events: array of CombatEvent;
     PlayerDefeated: boolean;
   end;
 
@@ -52,6 +75,20 @@ begin
   end;
 
   return Progress with Log := Log; end
+end;
+
+function Happened(Progress: TurnProgress; Kind: CombatEventKind; Amount: integer): TurnProgress;
+begin
+  mutable var Events: array of CombatEvent := Progress.Events;
+  if Std.Arrays.Length(Events) < MaximumTurnLogEntries then
+  begin
+    Std.Arrays.Push(Events, record
+      Kind := Kind;
+      Amount := Amount;
+    end)
+  end;
+
+  return Progress with Events := Events; end
 end;
 
 function WithHostile(State: GameState; Index: integer; Hostile: GameHostile): GameState;
@@ -209,14 +246,16 @@ begin
   if IsOrthogonallyAdjacent(Hostile.Position, Player) then
   begin
     var HitRoll: DiceRoll := Roll(Progress.State, 20);
-    if HitRoll.Value < 9 then
+    // Armor raises the roll the opponent needs.
+    if HitRoll.Value < RestlessSkeletonHitThreshold + DeriveCharacterValues(Progress.State).Armor then
     begin
-      return Logged(Progress with State := HitRoll.State; end, ('The ' + Name) + ' misses you.')
+      return Happened(Logged(Progress with State := HitRoll.State; end, ('The ' + Name) +
+                                                                        ' misses you.'), CombatEventKind.HostileMiss, 0)
     end;
-    var DamageRoll: DiceRoll := Roll(HitRoll.State, 4);
+    var DamageRoll: DiceRoll := Roll(HitRoll.State, RestlessSkeletonDamageSides);
     var Health: integer := Std.Math.Max(0, DamageRoll.State.Health - DamageRoll.Value);
-    var Hurt: TurnProgress := Logged(Progress with State := (DamageRoll.State with Health := Std.Math.Max(1, Health); end); end, ((('The ' + Name) + ' strikes you for ') + IntToStr(DamageRoll.Value)) +
-                                                                                                                                 '.');
+    var Hurt: TurnProgress := Happened(Logged(Progress with State := (DamageRoll.State with Health := Std.Math.Max(1, Health); end); end, ((('The ' + Name) + ' strikes you for ') + IntToStr(DamageRoll.Value)) +
+                                                                                                                                          '.'), CombatEventKind.HostileHit, DamageRoll.Value);
     if Health = 0 then
     begin
       return Logged(Hurt with PlayerDefeated := true; end, 'You have fallen.')
@@ -264,25 +303,27 @@ begin
   var Start: TurnProgress := record
     State := Valid;
     Log := [];
+    Events := [];
     PlayerDefeated := false;
   end;
+  var Values: CharacterValues := DeriveCharacterValues(Valid);
   var HitRoll: DiceRoll := Roll(Valid, 20);
   // Being attacked always alerts the opponent, even when the blow misses.
   var Alerted: GameHostile := Hostile with Alerted := true; end;
 
-  if HitRoll.Value < 6 then
+  if HitRoll.Value < Values.HitThreshold then
   begin
-    return Ok(Logged(Start with State := WithHostile(HitRoll.State, Index, Alerted); end, ('You miss the ' + Name) +
-                                                                                          '.'))
+    return Ok(Happened(Logged(Start with State := WithHostile(HitRoll.State, Index, Alerted); end, ('You miss the ' + Name) +
+                                                                                                   '.'), CombatEventKind.PlayerMiss, 0))
   end;
-  var DamageRoll: DiceRoll := Roll(HitRoll.State, 4);
-  var Damage: integer := DamageRoll.Value + 1;
+  var DamageRoll: DiceRoll := Roll(HitRoll.State, Values.DamageSides);
+  var Damage: integer := DamageRoll.Value + Values.DamageBonus;
   var Remaining: integer := Std.Math.Max(0, Hostile.Health - Damage);
-  var Struck: TurnProgress := Logged(Start with State := WithHostile(DamageRoll.State, Index, Alerted with Health := Remaining; end); end, ((('You hit the ' + Name) + ' for ') + IntToStr(Damage)) +
-                                                                                                                                           '.');
+  var Struck: TurnProgress := Happened(Logged(Start with State := WithHostile(DamageRoll.State, Index, Alerted with Health := Remaining; end); end, ((('You hit the ' + Name) + ' for ') + IntToStr(Damage)) +
+                                                                                                                                                    '.'), CombatEventKind.PlayerHit, Damage);
   if Remaining = 0 then
   begin
-    return Ok(Logged(Struck, ('The ' + Name) + ' collapses into a heap of bones.'))
+    return Ok(Happened(Logged(Struck, ('The ' + Name) + ' collapses into a heap of bones.'), CombatEventKind.HostileDefeated, 0))
   end;
 
   return Ok(Struck)
@@ -296,6 +337,7 @@ begin
   mutable var Progress: TurnProgress := record
     State := Valid;
     Log := [];
+    Events := [];
     PlayerDefeated := false;
   end;
 
@@ -316,6 +358,16 @@ begin
     TurnAction.Wait:
     begin
       Progress := Logged(Progress, 'You wait.')
+    end;
+    TurnAction.Equip(ItemId):
+    begin
+      var Change: EquipmentChange := try EquipItem(Valid, ItemId);
+      Progress := Logged(Progress with State := Change.State; end, Change.Message)
+    end;
+    TurnAction.Unequip(ItemId):
+    begin
+      var Change: EquipmentChange := try UnequipItem(Valid, ItemId);
+      Progress := Logged(Progress with State := Change.State; end, Change.Message)
     end
   end;
 
@@ -329,5 +381,5 @@ begin
     return Ok(TurnOutcome.Defeated(Progress.Log))
   end;
 
-  return Ok(TurnOutcome.Continued(try ValidateGameState(Metadata, Progress.State), Progress.Log))
+  return Ok(TurnOutcome.Continued(try ValidateGameState(Metadata, Progress.State), Progress.Log, Progress.Events))
 end;

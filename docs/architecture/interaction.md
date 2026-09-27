@@ -5,7 +5,7 @@ defining a general scripting system.
 
 ## Semantics
 
-`Enter` sends the protocol version 11 `interact` intention while the game screen
+`Enter` sends the protocol version 12 `interact` intention while the game screen
 is active, no overlay owns input, and no earlier request is pending. The server
 resolves the occupied field first for state-changing actions, then the field
 directly ahead for an inspectable object. Interaction never moves or turns the
