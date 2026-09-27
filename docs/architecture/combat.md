@@ -97,8 +97,9 @@ is allowed during a fight.
 
 ## Ownership
 
-`Dungeon.Game` owns the opponent and health state, collision, visible codes,
-and validation. `Dungeon.Combat` owns turns: attacks, dice, the opponent's
+`Dungeon.Hostiles` owns opponent kinds and their values; `Dungeon.GameState`
+owns the opponent and health state, collision queries, visible codes, and
+validation. `Dungeon.Combat` owns turns: attacks, dice, the opponent's
 perception, pathfinding, and attacks, and defeat. The server translates
 intentions and outcomes into protocol messages. The client only renders the
 projected opponent, health, combat log, and defeat.

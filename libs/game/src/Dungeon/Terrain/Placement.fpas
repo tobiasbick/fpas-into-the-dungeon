@@ -1,0 +1,381 @@
+// World metadata creation and validation: natural spawn search and the dungeon entrance near it.
+unit Dungeon.Terrain.Placement;
+
+uses
+  Dungeon.Coordinates, Dungeon.Terrain, Dungeon.Terrain.Generation, Dungeon.Terrain.Noise, Std.Math,
+  Std.Results;
+
+const
+  NaturalSpawnRadius: integer := 8;
+  MaximumSpawnCandidates: integer := 1024;
+  VisibleSpawnRadiusX: integer := 64;
+  VisibleSpawnRadiusY: integer := 24;
+  NearbySpawnRadiusX: integer := 512;
+  NearbySpawnRadiusY: integer := 256;
+
+function HasVisibleWoodland(Seed: integer; X: integer; Y: integer): boolean;
+begin
+  mutable var CandidateY: integer := Y - VisibleSpawnRadiusY;
+  while CandidateY <= Y + VisibleSpawnRadiusY do
+  begin
+    mutable var CandidateX: integer := X - VisibleSpawnRadiusX;
+    while CandidateX <= X + VisibleSpawnRadiusX do
+    begin
+      var Cell: WorldCell := GenerateCellWithShifts(Seed, CandidateX, CandidateY, RiverShift(Seed, CandidateY), PathShift(Seed, CandidateX));
+      if (Cell.Feature = TerrainFeatureKind.Tree) or (Cell.Feature = TerrainFeatureKind.Forest) then
+      begin
+        return true
+      end;
+
+      CandidateX := CandidateX + 4
+    end;
+
+    CandidateY := CandidateY + 4
+  end;
+
+  return false
+end;
+
+function HasNearbyLandscapeContrast(Seed: integer; X: integer; Y: integer): boolean;
+begin
+  mutable var CandidateY: integer := Y - NearbySpawnRadiusY;
+  while CandidateY <= Y + NearbySpawnRadiusY do
+  begin
+    mutable var CandidateX: integer := X - NearbySpawnRadiusX;
+    while CandidateX <= X + NearbySpawnRadiusX do
+    begin
+      var Cell: WorldCell := GenerateCellWithShifts(Seed, CandidateX, CandidateY, RiverShift(Seed, CandidateY), PathShift(Seed, CandidateX));
+      if (((Cell.Base = BaseTerrainKind.Sand) or (Cell.Base = BaseTerrainKind.Rock)) or (Cell.Water <> WaterKind.NoWater)) or
+         (Cell.Feature = TerrainFeatureKind.Forest) then
+      begin
+        return true
+      end;
+
+      CandidateX := CandidateX + 32
+    end;
+
+    CandidateY := CandidateY + 32
+  end;
+
+  return false
+end;
+
+function EntranceOffset(Index: integer): WorldPosition;
+begin
+  case Index of
+    0:
+    begin
+      return record
+        X := 3;
+        Y := 0;
+      end
+    end;
+    1:
+    begin
+      return record
+        X := 2;
+        Y := 1;
+      end
+    end;
+    2:
+    begin
+      return record
+        X := 1;
+        Y := 2;
+      end
+    end;
+    3:
+    begin
+      return record
+        X := 0;
+        Y := 3;
+      end
+    end;
+    4:
+    begin
+      return record
+        X := -1;
+        Y := 2;
+      end
+    end;
+    5:
+    begin
+      return record
+        X := -2;
+        Y := 1;
+      end
+    end;
+    6:
+    begin
+      return record
+        X := -3;
+        Y := 0;
+      end
+    end;
+    7:
+    begin
+      return record
+        X := -2;
+        Y := -1;
+      end
+    end;
+    8:
+    begin
+      return record
+        X := -1;
+        Y := -2;
+      end
+    end;
+    9:
+    begin
+      return record
+        X := 0;
+        Y := -3;
+      end
+    end;
+    10:
+    begin
+      return record
+        X := 1;
+        Y := -2;
+      end
+    end
+    else
+    begin
+      return record
+        X := 2;
+        Y := -1;
+      end
+    end
+  end
+end;
+
+function IsClearEntranceCell(Seed: integer; Position: WorldPosition): boolean;
+begin
+  var Cell: WorldCell := NaturalCell(Seed, Position.X, Position.Y);
+  return (CellIsWalkable(Cell) and (Cell.Feature = TerrainFeatureKind.NoFeature)) and
+         (Cell.Water = WaterKind.NoWater)
+end;
+
+function HasTraversableCardinalRoute(Seed: integer; Spawn: WorldPosition; Target: WorldPosition): boolean;
+begin
+  mutable var X: integer := Spawn.X;
+  mutable var Y: integer := Spawn.Y;
+  while X <> Target.X do
+  begin
+    if X < Target.X then
+    begin
+      X := X + 1
+    end
+    else
+    begin
+      X := X - 1
+    end;
+
+    if not CellIsWalkable(NaturalCell(Seed, X, Y)) then
+    begin
+      return false
+    end
+  end;
+
+  while Y <> Target.Y do
+  begin
+    if Y < Target.Y then
+    begin
+      Y := Y + 1
+    end
+    else
+    begin
+      Y := Y - 1
+    end;
+
+    if not CellIsWalkable(NaturalCell(Seed, X, Y)) then
+    begin
+      return false
+    end
+  end;
+
+  return true
+end;
+
+function FindEntrance(Seed: integer; Spawn: WorldPosition): result of WorldPosition, string;
+begin
+  var Start: integer := CoordinateHash(Seed, Spawn.X, Spawn.Y, 211) mod 12;
+  for Candidate: integer := 0 to 11 do
+  begin
+    var Offset: WorldPosition := EntranceOffset((Start + Candidate) mod 12);
+    var Position: WorldPosition := record
+      X := Spawn.X + Offset.X;
+      Y := Spawn.Y + Offset.Y;
+    end;
+
+    if IsClearEntranceCell(Seed, Position) and HasTraversableCardinalRoute(Seed, Spawn, Position) then
+    begin
+      return Ok(Position)
+    end
+  end;
+
+  return Error('unable to place an entrance exactly three traversable steps from spawn')
+end;
+
+function IsNaturalSpawnSite(Seed: integer; X: integer; Y: integer): boolean;
+begin
+  var CenterSample: TerrainGenerationSample := SampleTerrainAtSeed(Seed, X, Y);
+  if ((CenterSample.LandScore < 590) or (CenterSample.Ruggedness > 700)) or
+     (((CenterSample.Moisture < 300) or (CenterSample.Moisture > 800)) or ((CenterSample.Vegetation < 430) or (CenterSample.Vegetation > 680))) then
+  begin
+    return false
+  end;
+  var Center: WorldCell := GenerateCellWithShifts(Seed, X, Y, RiverShift(Seed, Y), PathShift(Seed, X));
+  if not CellIsWalkable(Center) or (Center.Feature <> TerrainFeatureKind.NoFeature) then
+  begin
+    return false
+  end;
+
+  for CandidateY: integer := Y - NaturalSpawnRadius to Y + NaturalSpawnRadius do
+  begin
+    for CandidateX: integer := X - NaturalSpawnRadius to X + NaturalSpawnRadius do
+    begin
+      if not CellIsWalkable(GenerateCellWithShifts(Seed, CandidateX, CandidateY, RiverShift(Seed, CandidateY), PathShift(Seed, CandidateX))) then
+      begin
+        return false
+      end
+    end
+  end;
+  var Spawn: WorldPosition := record
+    X := X;
+    Y := Y;
+  end;
+
+  return (HasVisibleWoodland(Seed, X, Y) and HasNearbyLandscapeContrast(Seed, X, Y)) and
+         IsOk(FindEntrance(Seed, Spawn))
+end;
+
+function FindNaturalSpawn(Seed: integer): result of WorldPosition, string;
+begin
+  for Candidate: integer := 0 to MaximumSpawnCandidates - 1 do
+  begin
+    var X: integer := (CoordinateHash(Seed, Candidate, 0, 101) - 500) * 32;
+    var Y: integer := (CoordinateHash(Seed, Candidate, 0, 103) - 500) * 32;
+    if IsNaturalSpawnSite(Seed, X, Y) then
+    begin
+      return Ok(record
+        X := X;
+        Y := Y;
+      end)
+    end
+  end;
+
+  return Error('unable to find a natural spawn site with a valid entrance for world seed')
+end;
+
+// Creates current metadata with deterministic area identities, spawn, and initial entrance.
+public function NewWorldMetadata(Id: string; Seed: integer): result of WorldMetadata, string;
+begin
+  var Spawn: WorldPosition := try FindNaturalSpawn(Seed);
+  var Entrance: WorldPosition := try FindEntrance(Seed, Spawn);
+  var OutdoorAreaId: string := Id + ':outdoor';
+  var DungeonAreaId: string := Id + ':dungeon:initial';
+  return Ok(record
+    Id := Id;
+    Seed := Seed;
+    FormatVersion := WorldFormatVersion;
+    GeneratorVersion := WorldGeneratorVersion;
+    ChunkSize := WorldChunkSize;
+    Spawn := Spawn;
+    OutdoorAreaId := OutdoorAreaId;
+    OutdoorAreaLabel := 'Outdoor region';
+    DungeonAreaId := DungeonAreaId;
+    DungeonAreaLabel := 'Initial dungeon';
+    EntranceId := Id + ':entrance:initial-dungeon';
+    Entrance := Entrance;
+    EntranceTargetAreaId := DungeonAreaId;
+  end)
+end;
+
+// Rejects metadata that does not exactly match the deterministic current-schema world contract.
+public function ValidateWorldMetadata(Metadata: WorldMetadata): result of WorldMetadata, string;
+begin
+  if Metadata.FormatVersion <> WorldFormatVersion then
+  begin
+    return Error('unsupported world format version')
+  end;
+
+  if Metadata.GeneratorVersion <> WorldGeneratorVersion then
+  begin
+    return Error('unsupported world generator version')
+  end;
+
+  if Metadata.ChunkSize <> WorldChunkSize then
+  begin
+    return Error('world chunk size must be 128')
+  end;
+  var Expected: WorldMetadata := try NewWorldMetadata(Metadata.Id, Metadata.Seed);
+  if (Metadata.Spawn.X <> Expected.Spawn.X) or (Metadata.Spawn.Y <> Expected.Spawn.Y) then
+  begin
+    return Error('world spawn position is invalid for this generator version')
+  end;
+
+  if Metadata.OutdoorAreaId <> Expected.OutdoorAreaId then
+  begin
+    return Error('outdoor area identity is invalid')
+  end;
+
+  if Metadata.DungeonAreaId <> Expected.DungeonAreaId then
+  begin
+    return Error('dungeon area identity is invalid')
+  end;
+
+  if Metadata.OutdoorAreaId = Metadata.DungeonAreaId then
+  begin
+    return Error('area identities must be unique')
+  end;
+
+  if Metadata.OutdoorAreaLabel = '' then
+  begin
+    return Error('outdoor area label must not be empty')
+  end;
+
+  if Metadata.DungeonAreaLabel = '' then
+  begin
+    return Error('dungeon area label must not be empty')
+  end;
+
+  if Metadata.EntranceId <> Expected.EntranceId then
+  begin
+    return Error('entrance identity is invalid')
+  end;
+
+  if (Metadata.EntranceId = Metadata.OutdoorAreaId) or
+     (Metadata.EntranceId = Metadata.DungeonAreaId) then
+  begin
+    return Error('entrance identity must be unique')
+  end;
+
+  if Metadata.EntranceTargetAreaId <> Metadata.DungeonAreaId then
+  begin
+    return Error('entrance target must name the initial dungeon')
+  end;
+
+  if (Metadata.Entrance.X <> Expected.Entrance.X) or (Metadata.Entrance.Y <> Expected.Entrance.Y) then
+  begin
+    return Error('entrance coordinate is invalid for this generator version')
+  end;
+
+  if Abs(Metadata.Entrance.X - Metadata.Spawn.X) + Abs(Metadata.Entrance.Y - Metadata.Spawn.Y) <> 3 then
+  begin
+    return Error('entrance must be exactly three cardinal steps from spawn')
+  end;
+
+  if not IsClearEntranceCell(Metadata.Seed, Metadata.Entrance) then
+  begin
+    return Error('entrance conflicts with generated terrain')
+  end;
+
+  if not HasTraversableCardinalRoute(Metadata.Seed, Metadata.Spawn, Metadata.Entrance) then
+  begin
+    return Error('entrance has no traversable three-step route from spawn')
+  end;
+
+  return Ok(Metadata)
+end;

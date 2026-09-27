@@ -1,0 +1,226 @@
+// The generic Enter interaction: environment hints, pickup, inspection, dialogue start, and exits.
+unit Dungeon.Interaction;
+
+uses
+  Dungeon.Coordinates, Dungeon.Dialogue, Dungeon.GameState, Dungeon.Hostiles, Dungeon.Interior,
+  Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Movement, Dungeon.Npcs, Dungeon.Terrain,
+  Std.Arrays, Std.Conv;
+
+public const
+  // Successful interaction text when neither the current nor forward field offers an action.
+  NoInteractionMessage: string := 'There is nothing to interact with.';
+  // Read-only description returned for the first wall-mounted inspectable object.
+  StoneTabletDescription: string := 'The weathered inscription reads: The dungeon remembers every step.';
+
+public type
+  // Successful server-side resolution of one interaction intention.
+  InteractionOutcome = enum
+    // The interaction changed the authoritative area and returns its replacement state.
+    Transitioned(State: GameState);
+    // The interaction changed mutable state without changing areas.
+    StateChanged(State: GameState);
+    // Read-only information; an empty title denotes short feedback rather than inspection content.
+    Described(Title: string; Text: string);
+    // Starts a server-owned dialogue and returns the updated persistent NPC state.
+    DialogueStarted(State: GameState; Dialogue: NpcDialogue);
+  end;
+
+// Describes the available item action for a validated interior state; empty means no item target.
+public function ItemInteractionHint(State: GameState): string;
+begin
+  case State.Player of
+    PlayerPosition.FirstPerson(Pose):
+    begin
+      var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+      for Item: GameItem in State.Items do
+      begin
+        case Item.Location of
+          ItemLocation.InInterior(AreaId, Position):
+          begin
+            if AreaId = State.AreaId then
+            begin
+              if (Position.X = Pose.Position.X) and (Position.Y = Pose.Position.Y) then
+              begin
+                return ('At your feet: ' + ItemDisplayName(Item.Kind)) + ' — Enter: Pick up'
+              end;
+
+              if (Position.X = Pose.Position.X + Offset.X) and
+                 (Position.Y = Pose.Position.Y + Offset.Y) then
+              begin
+                return ItemDisplayName(Item.Kind) + ' — Enter: Examine'
+              end
+            end
+          end
+          else
+          begin
+          end
+        end
+      end
+    end
+    else
+    begin
+    end
+  end;
+
+  return ''
+end;
+
+// Describes the available NPC action when the fixed NPC is directly ahead.
+public function NpcInteractionHint(State: GameState): string;
+begin
+  if State.Area <> AreaKind.Dungeon then
+  begin
+    return ''
+  end;
+
+  case State.Player of
+    PlayerPosition.FirstPerson(Pose):
+    begin
+      var NpcPosition: InteriorPosition := InitialDungeonNpcPosition();
+      var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+      if (Pose.Position.X + Offset.X = NpcPosition.X) and
+         (Pose.Position.Y + Offset.Y = NpcPosition.Y) then
+      begin
+        return NpcDisplayName(State.Npc.Kind) + ' — Enter: Talk'
+      end
+    end
+    else
+    begin
+    end
+  end;
+
+  return ''
+end;
+
+// Returns the standing opponent directly ahead of a first-person player, or -1.
+public function HostileAhead(State: GameState): integer;
+begin
+  case State.Player of
+    PlayerPosition.FirstPerson(Pose):
+    begin
+      var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+      return StandingHostileAt(State, State.AreaId, record
+        X := Pose.Position.X + Offset.X;
+        Y := Pose.Position.Y + Offset.Y;
+      end)
+    end
+    else
+    begin
+      return -1
+    end
+  end
+end;
+
+// Describes the opponent directly ahead with its health; empty means no opponent ahead.
+public function HostileInteractionHint(State: GameState): string;
+begin
+  var Index: integer := HostileAhead(State);
+  if Index < 0 then
+  begin
+    return ''
+  end;
+  var Hostile: GameHostile := State.Hostiles[Index];
+  return ((((HostileDisplayName(Hostile.Kind) + ' ') + IntToStr(Hostile.Health)) + '/') + IntToStr(HostileMaximumHealth(Hostile.Kind))) +
+         ' — Space: Attack'
+end;
+
+// Returns the highest-priority interaction hint for the current field and facing.
+public function InteractionHint(State: GameState): string;
+begin
+  var HostileHint: string := HostileInteractionHint(State);
+  if HostileHint <> '' then
+  begin
+    return HostileHint
+  end;
+  var NpcHint: string := NpcInteractionHint(State);
+  if NpcHint <> '' then
+  begin
+    return NpcHint
+  end;
+
+  return ItemInteractionHint(State)
+end;
+
+// Resolves current-field transitions or pickup, then inspection ahead, without implicit movement.
+public function Interact(Metadata: WorldMetadata; State: GameState): result of InteractionOutcome, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.Area = AreaKind.OutdoorRegion then
+  begin
+    var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(Valid);
+    if (OutdoorPosition.X = Metadata.Entrance.X) and (OutdoorPosition.Y = Metadata.Entrance.Y) then
+    begin
+      return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
+    end;
+
+    return Ok(InteractionOutcome.Described('', NoInteractionMessage))
+  end;
+  var Map: InteriorMap := try InitialDungeonMap();
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
+  begin
+    return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(Valid.Items) - 1 do
+  begin
+    mutable var Item: GameItem := Valid.Items[Index];
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, ItemPosition):
+      begin
+        if (AreaId = Valid.AreaId) and
+           ((ItemPosition.X = Pose.Position.X) and (ItemPosition.Y = Pose.Position.Y)) then
+        begin
+          mutable var Changed: GameState := Valid;
+          Item.Location := ItemLocation.CarriedByPlayer;
+          Changed.Items[Index] := Item;
+          return Ok(InteractionOutcome.StateChanged(try ValidateGameState(Metadata, Changed)))
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+  var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+  var Target: InteriorPosition := record
+    X := Pose.Position.X + Offset.X;
+    Y := Pose.Position.Y + Offset.Y;
+  end;
+
+  if StandingHostileAt(Valid, Valid.AreaId, Target) >= 0 then
+  begin
+    return Ok(InteractionOutcome.Described('', 'The restless skeleton rattles its bones at you. Press Space to attack.'))
+  end;
+
+  if (Target.X = Map.Npc.X) and (Target.Y = Map.Npc.Y) then
+  begin
+    var Dialogue: NpcDialogue := StartNpcDialogue(Valid);
+    var Changed: GameState := Valid with Npc := (Valid.Npc with HasMetPlayer := true; end); end;
+
+    return Ok(InteractionOutcome.DialogueStarted(try ValidateGameState(Metadata, Changed), Dialogue))
+  end;
+
+  if (Target.X = Map.Tablet.X) and (Target.Y = Map.Tablet.Y) then
+  begin
+    return Ok(InteractionOutcome.Described('Stone tablet', StoneTabletDescription))
+  end;
+
+  for Item: GameItem in Valid.Items do
+  begin
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, ItemPosition):
+      begin
+        if (AreaId = Valid.AreaId) and ((ItemPosition.X = Target.X) and (ItemPosition.Y = Target.Y)) then
+        begin
+          return Ok(InteractionOutcome.Described(ItemDisplayName(Item.Kind), ItemDescription(Item.Kind)))
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  return Ok(InteractionOutcome.Described('', NoInteractionMessage))
+end;

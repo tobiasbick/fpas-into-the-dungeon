@@ -51,7 +51,20 @@ these projects.
   connection to the game simulation.
 - `apps/server` owns the server program entry point and server lifetime.
 - `libs/game` owns the authoritative world model, rules, and simulation,
-  including the deterministic outdoor terrain generator.
+  including the deterministic outdoor terrain generator. It has one unit per
+  concern, layered without cycles:
+  - `Dungeon.Coordinates`: positions, facing, relative steps, chunk arithmetic.
+  - `Dungeon.Terrain` with `.Noise`, `.Generation`, and `.Placement`: cells,
+    chunks, and world metadata; noise; chunk generation; spawn and entrance.
+  - `Dungeon.Items`, `Dungeon.Npcs`, `Dungeon.Hostiles`: kinds, identities,
+    and per-kind texts and values.
+  - `Dungeon.Interior` and `Dungeon.Interior.InitialDungeon`: interior
+    geometry and its validation; the hand-authored initial dungeon.
+  - `Dungeon.GameState`: the authoritative state, new games, validation, and
+    read-only queries.
+  - `Dungeon.Movement`, `Dungeon.Interaction`, `Dungeon.Dialogue`,
+    `Dungeon.Equipment`, `Dungeon.Combat`: the rules that change the state.
+  - `Dungeon.Exploration` with `.Model`: discovery and line of sight.
 - `libs/world` owns validated world, chunk, and savegame persistence,
   creation of missing chunks through the `libs/game` generator, visible-window
   composition, prefetching, and bounded caching.

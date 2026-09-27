@@ -1,0 +1,143 @@
+// The initial NPC's deterministic dialogue: available choices, frames, and their effects.
+unit Dungeon.Dialogue;
+
+uses Dungeon.GameState, Dungeon.Items, Dungeon.Npcs, Dungeon.Terrain, Std.Arrays;
+
+public type
+  // Resolution of one choice in an already active server-side dialogue session.
+  DialogueOutcome = enum
+    Continued(State: GameState; Dialogue: NpcDialogue);
+    Ended(State: GameState);
+  end;
+
+function PlayerCarriesAncientCoin(State: GameState): boolean;
+begin
+  for Item: GameItem in State.Items do
+  begin
+    if Item.Kind = ItemKind.AncientCoin then
+    begin
+      case Item.Location of
+        ItemLocation.CarriedByPlayer:
+        begin
+          return true
+        end
+        else
+        begin
+        end
+      end
+    end
+  end;
+
+  return false
+end;
+
+function DialogueChoices(State: GameState): array of NpcDialogueChoice;
+begin
+  mutable var Choices: array of NpcDialogueChoice := [record
+    Id := DialogueChoiceIdentity;
+    Text := 'Who are you?';
+  end, record
+    Id := DialogueChoiceDungeon;
+    Text := 'What is this place?';
+  end];
+  if PlayerCarriesAncientCoin(State) then
+  begin
+    Std.Arrays.Push(Choices, record
+      Id := DialogueChoiceCoin;
+      Text := 'What do you know about this coin?';
+    end)
+  end;
+
+  if State.Health < PlayerMaximumHealth then
+  begin
+    Std.Arrays.Push(Choices, record
+      Id := DialogueChoiceWounds;
+      Text := 'Could you tend my wounds?';
+    end)
+  end;
+
+  Std.Arrays.Push(Choices, record
+    Id := DialogueChoiceGoodbye;
+    Text := 'Goodbye.';
+  end);
+  return Choices
+end;
+
+function DialogueFrame(State: GameState; Text: string): NpcDialogue;
+begin
+  return record
+    NpcId := State.Npc.Id;
+    Speaker := NpcDisplayName(State.Npc.Kind);
+    Text := Text;
+    Choices := DialogueChoices(State);
+  end
+end;
+
+// Returns Mara's opening dialogue frame for the current state.
+public function StartNpcDialogue(State: GameState): NpcDialogue;
+begin
+  if State.Npc.HasMetPlayer then
+  begin
+    return DialogueFrame(State, 'Mara recognizes you and rests both hands on her worn walking staff.')
+  end;
+
+  return DialogueFrame(State, 'A weathered adventurer lowers her lantern. She introduces herself as Mara and invites your questions.')
+end;
+
+// Resolves one stable choice for the active initial-NPC dialogue.
+public function ResolveNpcDialogueChoice(
+  Metadata: WorldMetadata;
+  State: GameState;
+  NpcId: string;
+  ChoiceId: string
+): result of DialogueOutcome, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if NpcId <> Valid.Npc.Id then
+  begin
+    return Error('dialogue names an unknown NPC identity')
+  end;
+
+  if not Valid.Npc.HasMetPlayer then
+  begin
+    return Error('dialogue cannot continue before the player meets the NPC')
+  end;
+
+  if ChoiceId = DialogueChoiceIdentity then
+  begin
+    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'Mara once mapped these halls. She now waits here to warn travelers who follow the same path.')))
+  end;
+
+  if ChoiceId = DialogueChoiceDungeon then
+  begin
+    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'The corridors fold around old chambers. Mara advises marking each turn and looking for the gold exit field. Something restless still walks the inner passages.')))
+  end;
+
+  if ChoiceId = DialogueChoiceCoin then
+  begin
+    if not PlayerCarriesAncientCoin(Valid) then
+    begin
+      return Error('dialogue choice is not currently available')
+    end;
+
+    return Ok(DialogueOutcome.Continued(Valid, DialogueFrame(Valid, 'Mara studies the crescent-marked coin. She has seen the doorway symbol before, but not who minted it.')))
+  end;
+
+  if ChoiceId = DialogueChoiceWounds then
+  begin
+    if Valid.Health >= PlayerMaximumHealth then
+    begin
+      return Error('dialogue choice is not currently available')
+    end;
+    var Healed: GameState := Valid with Health := PlayerMaximumHealth; end;
+
+    return Ok(DialogueOutcome.Continued(Healed, DialogueFrame(Healed, 'Mara cleans and binds your wounds with practiced hands. You feel whole again.')))
+  end;
+
+  if ChoiceId = DialogueChoiceGoodbye then
+  begin
+    return Ok(DialogueOutcome.Ended(Valid))
+  end;
+
+  return Error('unknown dialogue choice')
+end;

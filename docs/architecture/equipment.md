@@ -130,7 +130,8 @@ already final.
 
 ## Ownership
 
-`Dungeon.Game` owns item kinds, slots, locations, placements, and validation.
+`Dungeon.Items` owns item kinds, slots, and locations; `Dungeon.Interior`
+owns placements; `Dungeon.GameState` validates the complete item set.
 `Dungeon.Equipment` owns base values, derivation, equip rules, and the
 character sheet lines. `Dungeon.Combat` resolves equip actions as turns, reads
 the derived values, and reports combat events. The server projects inventory,

@@ -1,0 +1,116 @@
+// Player movement: outdoor steps, first-person steps and turns, and area transitions.
+unit Dungeon.Movement;
+
+uses
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Interior.InitialDungeon,
+  Dungeon.Terrain;
+
+// Activates the single entrance or exit transition owned by the selected world.
+public function ActivateAreaTransition(Metadata: WorldMetadata; State: GameState): result of GameState, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.AreaId = Metadata.OutdoorAreaId then
+  begin
+    var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(Valid);
+    if (OutdoorPosition.X <> Metadata.Entrance.X) or (OutdoorPosition.Y <> Metadata.Entrance.Y) then
+    begin
+      return Error('player is not standing on an entrance')
+    end;
+
+    if Metadata.EntranceTargetAreaId <> Metadata.DungeonAreaId then
+    begin
+      return Error('entrance target does not name the initial dungeon')
+    end;
+    var Map: InteriorMap := try InitialDungeonMap();
+    return Ok(Valid with Area := AreaKind.Dungeon; AreaId := Metadata.DungeonAreaId; Player := PlayerPosition.FirstPerson(record
+      Position := Map.Start;
+      Facing := Map.StartFacing;
+    end); ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, OutdoorPosition); end)
+  end;
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  var Interior: InteriorMap := try InitialDungeonMap();
+  if (Pose.Position.X <> Interior.Exit.X) or (Pose.Position.Y <> Interior.Exit.Y) then
+  begin
+    return Error('player is not standing on the interior exit')
+  end;
+
+  case Valid.ReturnLocation of
+    ReturnLocation.ReturnTo(AreaId, Position):
+    begin
+      return Ok(Valid with Area := AreaKind.OutdoorRegion; AreaId := AreaId; Player := PlayerPosition.Outdoor(Position); ReturnLocation := ReturnLocation.NoReturnLocation; end)
+    end
+    else
+    begin
+      return Error('cannot leave an entered area without a return location')
+    end
+  end
+end;
+
+// Applies one cardinal movement intention after validating the authoritative target cell.
+public function MovePlayer(State: GameState; DeltaX: integer; DeltaY: integer; Target: WorldCell): result of GameState, string;
+begin
+  if State.Area <> AreaKind.OutdoorRegion then
+  begin
+    return Error('movement is unavailable in the current area')
+  end;
+
+  if not (((DeltaX = 0) and ((DeltaY = -1) or (DeltaY = 1))) or ((DeltaY = 0) and ((DeltaX = -1) or (DeltaX = 1)))) then
+  begin
+    return Error('movement must be one cardinal step')
+  end;
+
+  if not IsWalkable(Target) then
+  begin
+    return Error('terrain is not traversable')
+  end;
+  var Position: WorldPosition := try OutdoorPlayerPosition(State);
+  return Ok(State with Player := PlayerPosition.Outdoor(record
+    X := Position.X + DeltaX;
+    Y := Position.Y + DeltaY;
+  end); end)
+end;
+
+// Applies one relative first-person step against the fixed authoritative interior map.
+public function StepFirstPerson(Metadata: WorldMetadata; State: GameState; Step: RelativeStep): result of GameState, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.Area <> AreaKind.Dungeon then
+  begin
+    return Error('first-person movement is unavailable in the current area')
+  end;
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  var Offset: InteriorPosition := StepOffset(Pose.Facing, Step);
+  var Target: InteriorPosition := record
+    X := Pose.Position.X + Offset.X;
+    Y := Pose.Position.Y + Offset.Y;
+  end;
+  var Map: InteriorMap := try InitialDungeonMap();
+  if (Target.X = Map.Npc.X) and (Target.Y = Map.Npc.Y) then
+  begin
+    return Error('the old adventurer blocks the way')
+  end;
+
+  if StandingHostileAt(Valid, Valid.AreaId, Target) >= 0 then
+  begin
+    return Error('the restless skeleton blocks the way')
+  end;
+
+  if try InteriorCellAt(Map, Target) = InteriorCellKind.Wall then
+  begin
+    return Error('a wall blocks the way')
+  end;
+
+  return Ok(Valid with Player := PlayerPosition.FirstPerson(Pose with Position := Target; end); end)
+end;
+
+// Applies one relative 90-degree turn without changing the occupied interior field.
+public function TurnFirstPerson(Metadata: WorldMetadata; State: GameState; Turn: RelativeTurn): result of GameState, string;
+begin
+  var Valid: GameState := try ValidateGameState(Metadata, State);
+  if Valid.Area <> AreaKind.Dungeon then
+  begin
+    return Error('first-person turning is unavailable in the current area')
+  end;
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  return Ok(Valid with Player := PlayerPosition.FirstPerson(Pose with Facing := TurnedFacing(Pose.Facing, Turn); end); end)
+end;

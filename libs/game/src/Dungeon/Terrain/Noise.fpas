@@ -1,0 +1,180 @@
+// Deterministic coordinate hashing and value noise, sampled pointwise or from precomputed grids.
+unit Dungeon.Terrain.Noise;
+
+uses Dungeon.Coordinates, Std.Arrays, Std.Math;
+
+public type
+  // Precomputed noise lattice of one scale and salt covering one chunk.
+  NoiseGrid = record
+    Scale: integer;
+    MinimumX: integer;
+    MinimumY: integer;
+    Width: integer;
+    Values: array of integer;
+  end;
+  // Grid offsets and smooth weights of one noise grid for every column and row of one chunk.
+  // Grid position and weights change only per column or row, so cells skip recomputing them.
+  NoiseGridAxes = record
+    ColumnOffsets: array of integer;
+    ColumnWeights: array of integer;
+    RowIndexes: array of integer;
+    RowWeights: array of integer;
+  end;
+
+// Hashes a seeded coordinate and salt into a stable non-negative value.
+public function CoordinateHash(Seed: integer; X: integer; Y: integer; Salt: integer): integer;
+begin
+  var Prime: integer := 2147483647;
+  var XPart: integer := PositiveModulo(X, 1000003);
+  var YPart: integer := PositiveModulo(Y, 1000033);
+  var SeedPart: integer := PositiveModulo(Seed, 1000037);
+  var SaltPart: integer := PositiveModulo(Salt, 1000039);
+  mutable var Mixed: integer := PositiveModulo((XPart * 73856093) + (YPart * 19349663), Prime);
+  Mixed := PositiveModulo(Mixed + (SeedPart * 83492791), Prime);
+  Mixed := PositiveModulo(Mixed + (SaltPart * 265443), Prime);
+  Mixed := PositiveModulo((Mixed * 48271) + 1, Prime);
+  return Mixed mod 1000
+end;
+
+// Returns small-scale per-cell detail for a seeded coordinate.
+public function CoordinateDetail(Seed: integer; X: integer; Y: integer): integer;
+begin
+  var Primary: integer := CoordinateHash(Seed, X, Y, 37);
+  var Secondary: integer := CoordinateHash(Seed, Y, X, 53);
+  return PositiveModulo(((Primary * 613) + (Secondary * 337)) + (Primary * Secondary), 1000)
+end;
+
+function SmoothWeight(Local: integer; Scale: integer): integer;
+begin
+  return ((Local * Local) * ((3 * Scale) - (2 * Local))) div (Scale * Scale)
+end;
+
+function Interpolate(A: integer; B: integer; Weight: integer; Scale: integer): integer;
+begin
+  return ((A * (Scale - Weight)) + (B * Weight)) div Scale
+end;
+
+// Samples smoothed value noise at one coordinate for one scale and salt.
+public function ValueNoise(Seed: integer; X: integer; Y: integer; Scale: integer; Salt: integer): integer;
+begin
+  var GridX: integer := FloorDivide(X, Scale);
+  var GridY: integer := FloorDivide(Y, Scale);
+  var LocalX: integer := PositiveModulo(X, Scale);
+  var LocalY: integer := PositiveModulo(Y, Scale);
+  var WeightX: integer := SmoothWeight(LocalX, Scale);
+  var WeightY: integer := SmoothWeight(LocalY, Scale);
+  var Top: integer := Interpolate(CoordinateHash(Seed, GridX, GridY, Salt), CoordinateHash(Seed, GridX +
+                                                                                                 1, GridY, Salt), WeightX, Scale);
+  var Bottom: integer := Interpolate(CoordinateHash(Seed, GridX, GridY + 1, Salt), CoordinateHash(Seed, GridX +
+                                                                                                        1, GridY +
+                                                                                                           1, Salt), WeightX, Scale);
+  return Interpolate(Top, Bottom, WeightY, Scale)
+end;
+
+// Folds a noise value into a ridge shape that peaks at the middle of the range.
+public function RidgeValue(Value: integer): integer;
+begin
+  return 1000 - (Std.Math.Abs(Value - 500) * 2)
+end;
+
+// Precomputes the noise lattice covering one chunk so its cells can be sampled cheaply.
+public function BuildNoiseGrid(
+  Seed: integer;
+  OriginX: integer;
+  OriginY: integer;
+  Scale: integer;
+  Salt: integer
+): NoiseGrid;
+begin
+  var MinimumX: integer := FloorDivide(OriginX, Scale);
+  var MinimumY: integer := FloorDivide(OriginY, Scale);
+  var MaximumX: integer := FloorDivide((OriginX + WorldChunkSize) - 1, Scale) + 1;
+  var MaximumY: integer := FloorDivide((OriginY + WorldChunkSize) - 1, Scale) + 1;
+  mutable var Values: array of integer := [];
+  for GridY: integer := MinimumY to MaximumY do
+  begin
+    for GridX: integer := MinimumX to MaximumX do
+    begin
+      Std.Arrays.Push(Values, CoordinateHash(Seed, GridX, GridY, Salt))
+    end
+  end;
+
+  return record
+    Scale := Scale;
+    MinimumX := MinimumX;
+    MinimumY := MinimumY;
+    Width := (MaximumX - MinimumX) + 1;
+    Values := Values;
+  end
+end;
+
+function SampleNoise(Grid: NoiseGrid; X: integer; Y: integer): integer;
+begin
+  var GridX: integer := FloorDivide(X, Grid.Scale);
+  var GridY: integer := FloorDivide(Y, Grid.Scale);
+  var LocalX: integer := PositiveModulo(X, Grid.Scale);
+  var LocalY: integer := PositiveModulo(Y, Grid.Scale);
+  var WeightX: integer := SmoothWeight(LocalX, Grid.Scale);
+  var WeightY: integer := SmoothWeight(LocalY, Grid.Scale);
+  var OffsetX: integer := GridX - Grid.MinimumX;
+  var OffsetY: integer := GridY - Grid.MinimumY;
+  var TopIndex: integer := (OffsetY * Grid.Width) + OffsetX;
+  var BottomIndex: integer := TopIndex + Grid.Width;
+  var Top: integer := Interpolate(Grid.Values[TopIndex], Grid.Values[TopIndex + 1], WeightX, Grid.Scale);
+  var Bottom: integer := Interpolate(Grid.Values[BottomIndex], Grid.Values[BottomIndex + 1], WeightX, Grid.Scale);
+  return Interpolate(Top, Bottom, WeightY, Grid.Scale)
+end;
+
+// Precomputes the per-column and per-row lattice offsets and weights of one chunk.
+public function BuildNoiseGridAxes(Grid: NoiseGrid; OriginX: integer; OriginY: integer): NoiseGridAxes;
+begin
+  mutable var ColumnOffsets: array of integer := [];
+  mutable var ColumnWeights: array of integer := [];
+  mutable var RowIndexes: array of integer := [];
+  mutable var RowWeights: array of integer := [];
+  for Local: integer := 0 to WorldChunkSize - 1 do
+  begin
+    var X: integer := OriginX + Local;
+    var Y: integer := OriginY + Local;
+    Std.Arrays.Push(ColumnOffsets, FloorDivide(X, Grid.Scale) - Grid.MinimumX);
+    Std.Arrays.Push(ColumnWeights, SmoothWeight(PositiveModulo(X, Grid.Scale), Grid.Scale));
+    Std.Arrays.Push(RowIndexes, (FloorDivide(Y, Grid.Scale) - Grid.MinimumY) * Grid.Width);
+    Std.Arrays.Push(RowWeights, SmoothWeight(PositiveModulo(Y, Grid.Scale), Grid.Scale))
+  end;
+
+  return record
+    ColumnOffsets := ColumnOffsets;
+    ColumnWeights := ColumnWeights;
+    RowIndexes := RowIndexes;
+    RowWeights := RowWeights;
+  end
+end;
+
+// Returns exactly SampleNoise(Grid, OriginX + LocalX, OriginY + LocalY) for the axes' chunk origin.
+public function SampleNoiseAt(Grid: NoiseGrid; Axes: NoiseGridAxes; LocalX: integer; LocalY: integer): integer;
+begin
+  var TopIndex: integer := Axes.RowIndexes[LocalY] + Axes.ColumnOffsets[LocalX];
+  var BottomIndex: integer := TopIndex + Grid.Width;
+  var WeightX: integer := Axes.ColumnWeights[LocalX];
+  var Top: integer := Interpolate(Grid.Values[TopIndex], Grid.Values[TopIndex + 1], WeightX, Grid.Scale);
+  var Bottom: integer := Interpolate(Grid.Values[BottomIndex], Grid.Values[BottomIndex + 1], WeightX, Grid.Scale);
+  return Interpolate(Top, Bottom, Axes.RowWeights[LocalY], Grid.Scale)
+end;
+
+// Returns the distance of Value to the nearest multiple of Period.
+public function PeriodicDistance(Value: integer; Period: integer): integer;
+begin
+  var Wrapped: integer := PositiveModulo(Value, Period);
+  if Wrapped > Period div 2 then
+  begin
+    return Period - Wrapped
+  end;
+
+  return Wrapped
+end;
+
+// Returns the index of the periodic site nearest to Value.
+public function NearestPeriodicIndex(Value: integer; Offset: integer; Period: integer): integer;
+begin
+  return FloorDivide((Value + Offset) + (Period div 2), Period)
+end;

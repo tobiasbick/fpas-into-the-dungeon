@@ -26,8 +26,8 @@ projection is built:
 `Dungeon.Exploration` owns sight calculation, discovery updates, and field
 classification. Low-level mask validation lives beside the representation so
 the game and persistence layers can enforce the same invariants without
-depending on server integration. `Dungeon.Game` retains exploration in every
-authoritative state transformation. `Dungeon.World.Savegame` owns only the
+depending on server integration. The rule units, such as `Dungeon.Movement`,
+retain exploration in every authoritative state transformation. `Dungeon.World.Savegame` owns only the
 exact persistence representation. The server connects these modules to the
 session lifecycle and creates the client-safe projections.
 

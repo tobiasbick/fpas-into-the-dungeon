@@ -1,0 +1,430 @@
+// The authoritative game state: creation, validation, and read-only queries of its parts.
+unit Dungeon.GameState;
+
+uses
+  Dungeon.Exploration.Model, Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Interior,
+  Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Npcs, Dungeon.Terrain, Std.Arrays;
+
+public const
+  // Full health of a new player character; health never exceeds it.
+  PlayerMaximumHealth: integer := 20;
+  // Exclusive upper bound of the persisted dice generator state.
+  RandomStateModulus: integer := 2147483648;
+
+public type
+  // Authoritative player state retained by the server for one session.
+  GameState = record
+    public Area: AreaKind;
+    public AreaId: string;
+    public Player: PlayerPosition;
+    public ReturnLocation: ReturnLocation;
+    // Persistent server-owned discovery; current visibility is derived by exploration rules.
+    public Exploration: ExplorationState;
+    // Persistent server-owned item locations and inventory ownership.
+    public Items: array of GameItem;
+    // Persistent state of the fixed initial non-player character.
+    public Npc: GameNpc;
+    // Current player health, from 1 through PlayerMaximumHealth while a game is active.
+    public Health: integer;
+    // Every opponent of the world, including destroyed ones.
+    public Hostiles: array of GameHostile;
+    // Dice generator state in 0 until RandomStateModulus; advancing it makes fights reproducible.
+    public RandomState: integer;
+  end;
+
+// Derives the first dice generator state of a new game from the world seed.
+public function InitialRandomState(Seed: integer): integer;
+begin
+  return PositiveModulo((PositiveModulo(Seed, RandomStateModulus) * 7919) + 17, RandomStateModulus)
+end;
+
+// Returns the index of the standing opponent occupying one field of an area, or -1.
+public function StandingHostileAt(State: GameState; AreaId: string; Position: InteriorPosition): integer;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(State.Hostiles) - 1 do
+  begin
+    var Hostile: GameHostile := State.Hostiles[Index];
+    if ((Hostile.Health > 0) and (Hostile.AreaId = AreaId)) and
+       SamePosition(Hostile.Position, Position) then
+    begin
+      return Index
+    end
+  end;
+
+  return -1
+end;
+
+// Returns carried and worn items in stable game-state order without exposing placement rules.
+public function InventoryItems(State: GameState): array of GameItem;
+begin
+  mutable var Items: array of GameItem := [];
+  for Item: GameItem in State.Items do
+  begin
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, Position):
+      begin
+      end
+      else
+      begin
+        Std.Arrays.Push(Items, Item)
+      end
+    end
+  end;
+
+  return Items
+end;
+
+// Returns the item worn in one slot, if any.
+public function EquippedItem(State: GameState; Slot: EquipmentSlot): option of GameItem;
+begin
+  for Item: GameItem in State.Items do
+  begin
+    case Item.Location of
+      ItemLocation.EquippedByPlayer(Worn):
+      begin
+        if Worn = Slot then
+        begin
+          return Some(Item)
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  return None
+end;
+
+// Overlays currently present dynamic objects on static interior geometry.
+public function InteriorVisibleCodeForState(Map: InteriorMap; State: GameState; Position: InteriorPosition): result of string, string;
+begin
+  if (State.Area = AreaKind.Dungeon) and ((Position.X = Map.Npc.X) and (Position.Y = Map.Npc.Y)) then
+  begin
+    return Ok('n')
+  end;
+
+  if StandingHostileAt(State, State.AreaId, Position) >= 0 then
+  begin
+    return Ok('h')
+  end;
+
+  for Item: GameItem in State.Items do
+  begin
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, ItemPosition):
+      begin
+        if (AreaId = State.AreaId) and
+           ((ItemPosition.X = Position.X) and (ItemPosition.Y = Position.Y)) then
+        begin
+          return Ok(ItemVisibleCode(Item.Kind))
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  return InteriorVisibleCode(Map, Position)
+end;
+
+// Returns the outdoor coordinate only when the player currently occupies an outdoor area.
+public function OutdoorPlayerPosition(State: GameState): result of WorldPosition, string;
+begin
+  case State.Player of
+    PlayerPosition.Outdoor(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error('player does not occupy an outdoor position')
+    end
+  end
+end;
+
+// Returns the interior pose only when the player currently occupies a first-person area.
+public function FirstPersonPlayerPose(State: GameState): result of FirstPersonPose, string;
+begin
+  case State.Player of
+    PlayerPosition.FirstPerson(Value):
+    begin
+      return Ok(Value)
+    end
+    else
+    begin
+      return Error('player does not occupy a first-person position')
+    end
+  end
+end;
+
+// Creates the initial player state at the metadata-defined spawn coordinate.
+public function NewGame(Metadata: WorldMetadata): GameState;
+begin
+  return record
+    Area := AreaKind.OutdoorRegion;
+    AreaId := Metadata.OutdoorAreaId;
+    Player := PlayerPosition.Outdoor(Metadata.Spawn);
+    ReturnLocation := ReturnLocation.NoReturnLocation;
+    Exploration := EmptyExploration();
+    Items := InitialDungeonItems(Metadata);
+    Npc := InitialDungeonNpc();
+    Health := PlayerMaximumHealth;
+    Hostiles := [InitialDungeonHostile(Metadata)];
+    RandomState := InitialRandomState(Metadata.Seed);
+  end
+end;
+
+// Requires exactly the known items, each on its own placement, carried, or worn in a fitting free slot.
+function ValidateItems(Metadata: WorldMetadata; Map: InteriorMap; Items: array of GameItem): result of array of GameItem, string;
+begin
+  if Std.Arrays.Length(Items) <> Std.Arrays.Length(Map.Items) then
+  begin
+    return Error('game state must contain exactly the initial dungeon items')
+  end;
+  mutable var WeaponWorn: boolean := false;
+  mutable var BodyWorn: boolean := false;
+  for Index: integer := 0 to Std.Arrays.Length(Items) - 1 do
+  begin
+    var Item: GameItem := Items[Index];
+    if try KnownItemKind(Item.Id) <> Item.Kind then
+    begin
+      return Error('game state item identity and kind do not match')
+    end;
+
+    for Other: integer := 0 to Index - 1 do
+    begin
+      if Items[Other].Id = Item.Id then
+      begin
+        return Error('game state contains a duplicate item identity')
+      end
+    end;
+
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, Position):
+      begin
+        if AreaId <> Metadata.DungeonAreaId then
+        begin
+          return Error('initial dungeon item names an unknown area')
+        end;
+
+        if not SamePosition(Position, try InitialItemPosition(Map, Item.Id)) then
+        begin
+          return Error('initial dungeon item is outside its authoritative placement')
+        end
+      end;
+      ItemLocation.CarriedByPlayer:
+      begin
+      end;
+      ItemLocation.EquippedByPlayer(Slot):
+      begin
+        case ItemSlot(Item.Kind) of
+          Some(Fitting):
+          begin
+            if Fitting <> Slot then
+            begin
+              return Error('worn item does not fit its slot')
+            end
+          end;
+          None:
+          begin
+            return Error('game state wears an item that cannot be worn')
+          end
+        end;
+
+        if Slot = EquipmentSlot.Weapon then
+        begin
+          if WeaponWorn then
+          begin
+            return Error('only one item can be worn in each slot')
+          end;
+
+          WeaponWorn := true
+        end
+        else
+        begin
+          if BodyWorn then
+          begin
+            return Error('only one item can be worn in each slot')
+          end;
+
+          BodyWorn := true
+        end
+      end
+    end
+  end;
+
+  return Ok(Items)
+end;
+
+function ValidateHostiles(Metadata: WorldMetadata; Map: InteriorMap; Hostiles: array of GameHostile): result of array of GameHostile, string;
+begin
+  if Std.Arrays.Length(Hostiles) <> 1 then
+  begin
+    return Error('game state must contain exactly the initial dungeon opponent')
+  end;
+  var Hostile: GameHostile := Hostiles[0];
+  if Hostile.Id <> RestlessSkeletonId then
+  begin
+    return Error('game state contains an unknown opponent identity')
+  end;
+
+  if Hostile.Kind <> HostileKind.RestlessSkeleton then
+  begin
+    return Error('game state opponent identity and kind do not match')
+  end;
+
+  if Hostile.AreaId <> Metadata.DungeonAreaId then
+  begin
+    return Error('initial dungeon opponent names an unknown area')
+  end;
+
+  if (Hostile.Health < 0) or (Hostile.Health > HostileMaximumHealth(Hostile.Kind)) then
+  begin
+    return Error('opponent health is outside its range')
+  end;
+
+  if try InteriorCellAt(Map, Hostile.Position) = InteriorCellKind.Wall then
+  begin
+    return Error('opponent must occupy a traversable field')
+  end;
+
+  if (Hostile.Health > 0) and SamePosition(Hostile.Position, Map.Npc) then
+  begin
+    return Error('standing opponent must not overlap the NPC')
+  end;
+
+  return Ok(Hostiles)
+end;
+
+function ValidateNpc(Npc: GameNpc): result of GameNpc, string;
+begin
+  if Npc.Id <> InitialDungeonNpcId then
+  begin
+    return Error('game state contains an unknown NPC identity')
+  end;
+
+  if Npc.Kind <> NpcKind.OldAdventurer then
+  begin
+    return Error('game state NPC identity and kind do not match')
+  end;
+
+  return Ok(Npc)
+end;
+
+// Validates current-area and return-location invariants for the selected world.
+public function ValidateGameState(Metadata: WorldMetadata; State: GameState): result of GameState, string;
+begin
+  var ValidExploration: ExplorationState := try ValidateExploration(State.Exploration, WorldChunkSize);
+  var DungeonMap: InteriorMap := try InitialDungeonMap();
+  var ValidItems: array of GameItem := try ValidateItems(Metadata, DungeonMap, State.Items);
+  var ValidNpc: GameNpc := try ValidateNpc(State.Npc);
+  var ValidHostiles: array of GameHostile := try ValidateHostiles(Metadata, DungeonMap, State.Hostiles);
+  if (State.Health < 1) or (State.Health > PlayerMaximumHealth) then
+  begin
+    return Error('player health is outside its range')
+  end;
+
+  if (State.RandomState < 0) or (State.RandomState >= RandomStateModulus) then
+  begin
+    return Error('dice generator state is outside its range')
+  end;
+
+  for Area: InteriorDiscoveryArea in ValidExploration.InteriorAreas do
+  begin
+    if Area.AreaId <> Metadata.DungeonAreaId then
+    begin
+      return Error('game state contains discovery for an unknown interior area')
+    end;
+
+    if (Area.Width <> DungeonMap.Width) or (Area.Height <> DungeonMap.Height) then
+    begin
+      return Error('interior discovery dimensions do not match the authoritative area')
+    end
+  end;
+
+  if State.AreaId = Metadata.OutdoorAreaId then
+  begin
+    if State.Area <> AreaKind.OutdoorRegion then
+    begin
+      return Error('outdoor area identity requires outdoor area kind')
+    end;
+
+    case State.Player of
+      PlayerPosition.Outdoor(OutdoorPosition):
+      begin
+        case State.ReturnLocation of
+          ReturnLocation.NoReturnLocation:
+          begin
+            return Ok(State)
+          end
+          else
+          begin
+            return Error('outdoor state must not retain a return location')
+          end
+        end
+      end
+      else
+      begin
+        return Error('outdoor area requires an outdoor player position')
+      end
+    end
+  end;
+
+  if State.AreaId = Metadata.DungeonAreaId then
+  begin
+    if State.Area <> AreaKind.Dungeon then
+    begin
+      return Error('dungeon area identity requires dungeon area kind')
+    end;
+
+    case State.Player of
+      PlayerPosition.FirstPerson(Pose):
+      begin
+        var Map: InteriorMap := try InitialDungeonMap();
+        if try InteriorCellAt(Map, Pose.Position) = InteriorCellKind.Wall then
+        begin
+          return Error('first-person player position must be traversable')
+        end;
+
+        if (Pose.Position.X = Map.Npc.X) and (Pose.Position.Y = Map.Npc.Y) then
+        begin
+          return Error('first-person player position must not overlap the NPC')
+        end;
+
+        if StandingHostileAt(State, State.AreaId, Pose.Position) >= 0 then
+        begin
+          return Error('first-person player position must not overlap a standing opponent')
+        end;
+
+        case State.ReturnLocation of
+          ReturnLocation.ReturnTo(AreaId, Position):
+          begin
+            if AreaId <> Metadata.OutdoorAreaId then
+            begin
+              return Error('dungeon return location must name the outdoor area')
+            end;
+
+            if (Position.X <> Metadata.Entrance.X) or (Position.Y <> Metadata.Entrance.Y) then
+            begin
+              return Error('dungeon return location must name the exact outdoor entrance')
+            end;
+
+            return Ok(State)
+          end
+          else
+          begin
+            return Error('dungeon state requires a return location')
+          end
+        end
+      end
+      else
+      begin
+        return Error('dungeon area requires a first-person player position')
+      end
+    end
+  end;
+
+  return Error('game state names an unknown area identity')
+end;

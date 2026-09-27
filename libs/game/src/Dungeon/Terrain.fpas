@@ -1,0 +1,195 @@
+// Outdoor terrain cells, chunks, world metadata, and their client-safe codes.
+unit Dungeon.Terrain;
+
+uses Dungeon.Coordinates, Std.Arrays;
+
+public const
+  // Schema version written to world metadata and chunk files.
+  WorldFormatVersion: integer := 2;
+  // Selects the deterministic algorithm used for chunks that do not exist yet.
+  WorldGeneratorVersion: integer := 5;
+
+public type
+  // Base material retained when a feature such as a forest or path is present.
+  BaseTerrainKind = enum
+    Grass;
+    Sand;
+    Rock;
+    Water;
+  end;
+  // Optional surface feature rendered above compatible base terrain.
+  TerrainFeatureKind = enum
+    NoFeature;
+    Tree;
+    Forest;
+    Path;
+    River;
+    Entrance;
+  end;
+  // Classifies water without requiring connectivity traversal across an unbounded world.
+  WaterKind = enum
+    NoWater;
+    Sea;
+    Lake;
+    RiverWater;
+  end;
+  // Complete authoritative terrain value for one outdoor world coordinate.
+  WorldCell = record
+    public Base: BaseTerrainKind;
+    public Feature: TerrainFeatureKind;
+    public Water: WaterKind;
+  end;
+  // Diagnostic values behind one generated cell, normalized to the range 0 through 1000.
+  TerrainGenerationSample = record
+    // Very slowly changing field that establishes continent-scale character.
+    public Continentalness: integer;
+    // Combined large-, regional-, and coast-scale height field.
+    public Elevation: integer;
+    // Regional climate field used for deserts and forests.
+    public Moisture: integer;
+    // Smooth vegetation field used for forest interiors and tree-lined edges.
+    public Vegetation: integer;
+    // Fine smooth field used to disturb otherwise regular lake shorelines.
+    public LakeShape: integer;
+    // Ridge-shaped regional field used to form mountain ranges.
+    public Ruggedness: integer;
+    // Final land-versus-sea score after connected ridges are applied.
+    public LandScore: integer;
+    // Ridge strength that can lift narrow connected land bands above sea level.
+    public LandBridge: integer;
+  end;
+  // Immutable identity and generator contract for one outdoor world.
+  WorldMetadata = record
+    public Id: string;
+    public Seed: integer;
+    public FormatVersion: integer;
+    public GeneratorVersion: integer;
+    public ChunkSize: integer;
+    public Spawn: WorldPosition;
+    // Stable server-owned identity and display label of the initial outdoor area.
+    public OutdoorAreaId: string;
+    public OutdoorAreaLabel: string;
+    // Stable server-owned identity and display label of the initial dungeon.
+    public DungeonAreaId: string;
+    public DungeonAreaLabel: string;
+    // Stable identity, source coordinate, and destination of the first area transition.
+    public EntranceId: string;
+    public Entrance: WorldPosition;
+    public EntranceTargetAreaId: string;
+  end;
+  // One complete outdoor chunk in row-major order.
+  WorldChunk = record
+    public Coordinate: ChunkCoordinate;
+    public Cells: array of WorldCell;
+  end;
+
+// Returns an open grass cell without features.
+public function PlainCell(): WorldCell;
+begin
+  return record
+    Base := BaseTerrainKind.Grass;
+    Feature := TerrainFeatureKind.NoFeature;
+    Water := WaterKind.NoWater;
+  end
+end;
+
+// Returns a water cell of one kind with its feature.
+public function WaterCell(Kind: WaterKind; Feature: TerrainFeatureKind): WorldCell;
+begin
+  return record
+    Base := BaseTerrainKind.Water;
+    Feature := Feature;
+    Water := Kind;
+  end
+end;
+
+// Returns whether the player may enter a generated cell.
+public function CellIsWalkable(Cell: WorldCell): boolean;
+begin
+  return (Cell.Base = BaseTerrainKind.Grass) or (Cell.Base = BaseTerrainKind.Sand)
+end;
+
+// Returns one cell after validating local coordinates and chunk shape.
+public function ChunkCell(Chunk: WorldChunk; LocalX: integer; LocalY: integer): WorldCell;
+begin
+  if ((LocalX < 0) or (LocalX >= WorldChunkSize)) or ((LocalY < 0) or (LocalY >= WorldChunkSize)) then
+  begin
+    panic('local coordinate is outside the chunk')
+  end;
+
+  if Std.Arrays.Length(Chunk.Cells) <> WorldChunkSize * WorldChunkSize then
+  begin
+    panic('chunk cell count does not match chunk size')
+  end;
+
+  return Chunk.Cells[(LocalY * WorldChunkSize) + LocalX]
+end;
+
+// Maps an authoritative cell to one compact client-safe presentation code.
+public function VisibleCellCode(Cell: WorldCell): string;
+begin
+  case Cell.Feature of
+    TerrainFeatureKind.Tree:
+    begin
+      return 't'
+    end;
+    TerrainFeatureKind.Forest:
+    begin
+      return 'f'
+    end;
+    TerrainFeatureKind.Path:
+    begin
+      return 'p'
+    end;
+    TerrainFeatureKind.River:
+    begin
+      return 'r'
+    end;
+    TerrainFeatureKind.Entrance:
+    begin
+      return 'e'
+    end
+    else
+    begin
+    end
+  end;
+
+  case Cell.Water of
+    WaterKind.Sea:
+    begin
+      return 'o'
+    end;
+    WaterKind.Lake:
+    begin
+      return 'l'
+    end
+    else
+    begin
+    end
+  end;
+
+  case Cell.Base of
+    BaseTerrainKind.Grass:
+    begin
+      return 'g'
+    end;
+    BaseTerrainKind.Sand:
+    begin
+      return 'd'
+    end;
+    BaseTerrainKind.Rock:
+    begin
+      return 'm'
+    end
+    else
+    begin
+      return 'o'
+    end
+  end
+end;
+
+// Returns whether the server may place or move a player onto one cell.
+public function IsWalkable(Cell: WorldCell): boolean;
+begin
+  return CellIsWalkable(Cell)
+end;

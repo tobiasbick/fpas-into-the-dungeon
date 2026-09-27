@@ -7,8 +7,9 @@ visible transition.
 
 ## Ownership and modules
 
-`Dungeon.Game` owns signed world coordinates, terrain layers, deterministic
-generation, passability, and player movement. A world cell separates base
+`Dungeon.Coordinates` owns signed world coordinates, `Dungeon.Terrain` and its
+subunits own terrain layers, deterministic generation, and passability, and
+`Dungeon.Movement` owns player movement. A world cell separates base
 terrain (`grass`, `sand`, `rock`, or `water`) from an optional feature and a
 water classification. This lets paths and later bridges remain independent of
 the material below them.
