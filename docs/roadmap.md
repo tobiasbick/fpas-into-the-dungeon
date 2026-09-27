@@ -308,19 +308,27 @@ when a rule needs them; until then the character has derived values.
   slots, and turn costs before implementation in the architecture
   documentation.
 - [ ] Derive the character's values from base values plus equipment; let the
-  combat rules read the derived values instead of fixed numbers.
+  combat rules read the derived values instead of fixed numbers. Unarmed
+  damage drops to d3 so a weapon matters; the deterministic combat
+  expectations change accordingly.
 - [ ] Offer a weapon slot and a body slot.
-- [ ] Place a **rusty short sword** (damage d6+1 instead of d4+1) and a
+- [ ] Let an interior hold several floor items instead of one fixed item field.
+- [ ] Place a **rusty short sword** (damage d6+1 instead of unarmed d3) and a
   **leather jerkin** (armor +2, raising the skeleton's hit threshold from 9 to
-  11) as floor items in the initial dungeon.
-- [ ] Equip and unequip from the inventory; each change consumes one turn so
-  gear cannot be swapped for free during a fight.
+  11) as floor items in the initial dungeon. Both lie off the main route and
+  outside the skeleton's sight, so exploring before the fight pays off.
+- [ ] Open an inventory overlay with `I`: select with W/S or the arrow keys,
+  equip or unequip with `Enter`, close with `Escape`. Each change consumes one
+  turn so gear cannot be swapped for free during a fight.
 - [ ] Validate on the server that an item is equippable, owned, and fits its
   slot.
 - [ ] Show a character sheet overlay on `C` with the derived values, their
   sources, and the equipment; list equipped items in the context panel.
 - [ ] Persist equipment in the next savegame format and project it in the next
   protocol version.
+- [ ] Add a timer command to Functional Pascal's `Std.Tui` that delivers a
+  `Tick` message to the interactive loop after a requested delay; the live loop
+  currently delivers ticks only in headless test runs.
 - [ ] Animate a resolved combat turn on the client only, driven by TUI ticks:
   a weapon swing, a hit flash or dodge on the skeleton, its lunge before the
   damage frame, rising damage numbers, and its collapse. The server protocol
