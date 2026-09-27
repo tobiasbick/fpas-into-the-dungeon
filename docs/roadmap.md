@@ -260,7 +260,7 @@ branching world effects, and LLM-generated behavior remain outside this phase.
 The user accepted the complete slice, including the upright first-person figure
 that replaced the initial floor marker.
 
-## 12. Combat — IN REVIEW
+## 12. Combat — DONE
 
 Introduce one small server-authoritative combat loop with one opponent. The
 design keeps the grid-based first-person presentation of classic dungeon
@@ -286,18 +286,66 @@ protocol stays sufficient and every fight is reproducible.
 - [x] Cover perception, pursuit, deterministic fights, victory, defeat,
   healing, validation, protocol bounds, persistence, TUI behavior, and a
   complete TCP fight.
-- [ ] Review the complete combat slice with the user and obtain explicit
+- [x] Review the complete combat slice with the user and obtain explicit
   acceptance.
 
 The implemented slice uses protocol version 11 and savegame format 5.
 Multiple opponents, loot, experience, ranged attacks, spells, real-time combat,
 and equipment remain outside this phase.
+The user accepted the slice after `Space` was mapped to the terminal's
+dedicated space key kind.
 
-## 13. Character progression — LATER
+## 13. Character progression — NEXT
 
-Define character attributes and progression only after interaction, inventory,
-and combat provide concrete requirements. Equipment belongs here unless an
-earlier slice demonstrates that it needs its own stage.
+Progression starts with equipment because it changes the existing fight at
+once, while experience and levels need more opponents than the initial dungeon
+provides. Named attributes such as strength or dexterity are introduced only
+when a rule needs them; until then the character has derived values.
+
+### 13a. Equipment, character sheet, and combat animation — NEXT
+
+- [ ] Design derived values (attack, damage, armor, maximum health), equipment
+  slots, and turn costs before implementation in the architecture
+  documentation.
+- [ ] Derive the character's values from base values plus equipment; let the
+  combat rules read the derived values instead of fixed numbers.
+- [ ] Offer a weapon slot and a body slot.
+- [ ] Place a **rusty short sword** (damage d6+1 instead of d4+1) and a
+  **leather jerkin** (armor +2, raising the skeleton's hit threshold from 9 to
+  11) as floor items in the initial dungeon.
+- [ ] Equip and unequip from the inventory; each change consumes one turn so
+  gear cannot be swapped for free during a fight.
+- [ ] Validate on the server that an item is equippable, owned, and fits its
+  slot.
+- [ ] Show a character sheet overlay on `C` with the derived values, their
+  sources, and the equipment; list equipped items in the context panel.
+- [ ] Persist equipment in the next savegame format and project it in the next
+  protocol version.
+- [ ] Animate a resolved combat turn on the client only, driven by TUI ticks:
+  a weapon swing, a hit flash or dodge on the skeleton, its lunge before the
+  damage frame, rising damage numbers, and its collapse. The server protocol
+  stays unchanged.
+- [ ] Measure first-person frame cost first; cache the wall image if a full
+  raycast per animation frame is too slow.
+- [ ] Keep animations short; a further key press completes the running
+  animation at once and is not lost.
+- [ ] Cover derivation, validation, turn costs, combat effects, persistence,
+  TUI behavior, tick-driven animation frames, and a complete TCP fight with
+  equipment.
+- [ ] Synchronize architecture, product terminology, UI, persistence, and
+  roadmap documentation.
+- [ ] Review the complete equipment slice with the user and obtain explicit
+  acceptance.
+
+Item rarity, durability, shops, loot tables, two-handed weapons, and further
+slots remain outside this slice.
+
+### 13b. Experience and levels — LATER
+
+Experience waits until generated content (stage 14) supplies enough opponents
+to make it meaningful. The preferred direction is learning by doing, as in
+Dungeon Master: the character improves in what it actually does, which suits a
+game without class selection at the start.
 
 ## 14. Generated game content — LATER
 
