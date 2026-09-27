@@ -1,0 +1,106 @@
+// Starts, clocks, and stops the client-only combat animation of a resolved turn.
+unit Dungeon.Client.Ui.Playback;
+
+uses
+  Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Layout, Dungeon.Client.Animation,
+  Dungeon.Client.Model, Dungeon.Client.Raycast, Dungeon.Protocol, Std.Task, Std.Tui;
+
+// Sends one frame event per animation interval until cancelled; it never fails.
+function RunAnimationClock(Events: channel of ClientEvent; Token: CancellationToken): result of boolean, string;
+begin
+  while true do
+  begin
+    var Winner: integer := Select([
+                                    CancellationCase(Token, procedure() begin end),
+                                    TimerCase(AnimationFrameMilliseconds, procedure() begin end)
+                                  ]);
+    if Winner = 0 then
+    begin
+      return Ok(true)
+    end;
+
+    case SendWithCancellation(Events, ClientEvent.AnimationTick(AnimationFrameMilliseconds), Token) of
+      Ok(Sent):
+      begin
+      end;
+      Error(Reason):
+      begin
+        return Ok(true)
+      end
+    end
+  end;
+
+  return Ok(true)
+end;
+
+// Ends a running animation at once and stops its clock; the still frame shows the final state.
+public function StopAnimation(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+begin
+  if not State.Animation.Active then
+  begin
+    return State
+  end;
+
+  Cmd.CancelSubscription(AnimationSubscriptionId);
+  mutable var Next: ClientModel := State;
+  Next.Animation := NoAnimation();
+  return Next
+end;
+
+function WieldsWeapon(Inventory: array of VisibleInventoryItem): boolean;
+begin
+  for Item: VisibleInventoryItem in Inventory do
+  begin
+    if Item.Equipped and (Item.Slot = VisibleItemSlot.Weapon) then
+    begin
+      return true
+    end
+  end;
+
+  return false
+end;
+
+// Rebuilds the projected first-person state from the model for rendering.
+public function FirstPersonFromModel(State: ClientModel): FirstPersonVisibleState;
+begin
+  return record
+    Title := State.PrimaryTitle;
+    Status := State.PrimaryStatus;
+    Width := State.Width;
+    Height := State.Height;
+    Rows := State.Rows;
+    KnowledgeRows := State.KnowledgeRows;
+    PlayerX := State.PlayerX;
+    PlayerY := State.PlayerY;
+    Facing := State.FirstPersonFacing;
+    Inventory := State.Inventory;
+    Health := State.Health;
+    MaxHealth := State.MaxHealth;
+    Character := State.Character;
+    CombatLog := [];
+    CombatEvents := [];
+  end
+end;
+
+// Starts playback of a first-person turn's events, rendering walls and floor once for all frames.
+public function StartCombatAnimation(
+  State: ClientModel;
+  Events: array of VisibleCombatEvent;
+  Cmd: TuiCmdOutput
+): ClientModel;
+begin
+  mutable var Next: ClientModel := StopAnimation(State, Cmd);
+  var Animation: CombatAnimation := StartAnimation(Events, WieldsWeapon(State.Inventory));
+  if not Animation.Active then
+  begin
+    return Next
+  end;
+  var Viewport: WorldViewport := DesiredWorldViewport(Next);
+  var ClockEvents: channel of ClientEvent := Next.Events;
+  Next.Animation := Animation;
+  Next.AnimationScene := RenderFirstPersonScene(FirstPersonFromModel(Next), Viewport.Width, Viewport.Height);
+  Cmd.ReplaceSubscription(AnimationSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
+    return RunAnimationClock(ClockEvents, Token)
+  end);
+  return Next
+end;

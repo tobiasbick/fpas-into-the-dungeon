@@ -1,0 +1,207 @@
+// Terminal layout rules: panel sizes, docking, requested world and map viewports, and text wrapping.
+unit Dungeon.Client.Ui.Layout;
+
+uses Dungeon.Client.Model, Dungeon.Protocol, Std.Arrays, Std.Str;
+
+public const
+  // Smallest terminal width and height that dock the context sidebar and message panel.
+  MinimumDockedContextWidth: integer := 72;
+  MinimumDockedMessagesHeight: integer := 18;
+  // Entries kept in the message history and lines shown by the docked message panel.
+  MaximumMessages: integer := 8;
+  DockedMessageLines: integer := 4;
+  // Heights of the docked message panel and the status line, frames included.
+  MessagePanelHeight: integer := 6;
+  StatusPanelHeight: integer := 3;
+  // Five content rows plus the frame; independent of current interaction text.
+  EnvironmentPanelHeight: integer := 7;
+  // Terminals at least this large show the exploration map at MapScaleNumerator / MapScaleDenominator.
+  MinimumScaledMapWidth: integer := 60;
+  MinimumScaledMapHeight: integer := 20;
+  MapScaleNumerator: integer := 4;
+  MapScaleDenominator: integer := 5;
+
+public type
+  // World or map window size requested from the server, in fields.
+  WorldViewport = record
+    public Width: integer;
+    public Height: integer;
+  end;
+
+// Returns whether the terminal fits the context sidebar beside the primary view.
+public function ContextCanDock(State: ClientModel): boolean;
+begin
+  mutable var AvailableHeight: integer := State.ViewportHeight - StatusPanelHeight;
+  if State.MessagePanelVisible and (State.ViewportHeight >= MinimumDockedMessagesHeight) then
+  begin
+    AvailableHeight := AvailableHeight - MessagePanelHeight
+  end;
+
+  // Preserve room for the existing character and inventory summary below the hint.
+  return (State.ViewportWidth >= MinimumDockedContextWidth) and
+         (AvailableHeight >= EnvironmentPanelHeight + 14)
+end;
+
+// Returns whether the terminal fits the message panel below the primary view.
+public function MessagesCanDock(State: ClientModel): boolean;
+begin
+  return State.ViewportHeight >= MinimumDockedMessagesHeight
+end;
+
+// Returns the terminal columns available to the primary view.
+public function PrimaryTerminalWidth(State: ClientModel): integer;
+begin
+  if State.ContextPanelVisible and ContextCanDock(State) then
+  begin
+    return (State.ViewportWidth * 2) div 3
+  end;
+
+  return State.ViewportWidth
+end;
+
+// Returns the world size the primary view can show; map fields take two columns.
+public function DesiredWorldViewport(State: ClientModel): WorldViewport;
+begin
+  var PrimaryWidth: integer := PrimaryTerminalWidth(State);
+  mutable var PrimaryHeight: integer := State.ViewportHeight - StatusPanelHeight;
+  if State.MessagePanelVisible and MessagesCanDock(State) then
+  begin
+    PrimaryHeight := PrimaryHeight - MessagePanelHeight
+  end;
+  mutable var Width: integer := PrimaryWidth - 2;
+  if not State.HasVisibleState or (State.View = ViewKind.Map) then
+  begin
+    Width := Width div 2
+  end;
+  mutable var Height: integer := PrimaryHeight - 2;
+  if Width < 1 then
+  begin
+    Width := 1
+  end;
+
+  if Height < 1 then
+  begin
+    Height := 1
+  end;
+
+  return record
+    Width := Width;
+    Height := Height;
+  end
+end;
+
+// Returns the exploration-map window size for the terminal, within protocol limits.
+public function DesiredMapViewport(State: ClientModel): WorldViewport;
+begin
+  mutable var Width: integer := State.ViewportWidth - 4;
+  mutable var Height: integer := State.ViewportHeight - 6;
+  if State.ViewportWidth >= MinimumScaledMapWidth then
+  begin
+    Width := ((State.ViewportWidth * MapScaleNumerator) div MapScaleDenominator) - 4
+  end;
+
+  if State.ViewportHeight >= MinimumScaledMapHeight then
+  begin
+    Height := ((State.ViewportHeight * MapScaleNumerator) div MapScaleDenominator) - 6
+  end;
+
+  if Width < 1 then
+  begin
+    Width := 1
+  end;
+
+  if Height < 1 then
+  begin
+    Height := 1
+  end;
+
+  if Width > MaximumExplorationMapWidth then
+  begin
+    Width := MaximumExplorationMapWidth
+  end;
+
+  if Height > MaximumExplorationMapHeight then
+  begin
+    Height := MaximumExplorationMapHeight
+  end;
+
+  return record
+    Width := Width;
+    Height := Height;
+  end
+end;
+
+// Wrap presentation text at word boundaries, splitting oversized words as needed.
+public function WrappedLines(Text: string; AvailableWidth: integer): array of string;
+begin
+  mutable var Width: integer := AvailableWidth;
+  if Width < 1 then
+  begin
+    Width := 1
+  end;
+  mutable var Lines: array of string := [];
+  mutable var Remaining: string := Text;
+  while Std.Str.Length(Remaining) > 0 do
+  begin
+    mutable var Count: integer := Std.Str.Length(Remaining);
+    if Count > Width then
+    begin
+      Count := Width;
+      mutable var Split: integer := Width;
+      while (Split > 0) and (Std.Str.CharAt(Remaining, Split) <> ' ') do
+      begin
+        Split := Split - 1
+      end;
+
+      if Split > 0 then
+      begin
+        Count := Split
+      end
+    end;
+    mutable var Line: string := '';
+    for I: integer := 0 to Count - 1 do
+    begin
+      Line := Line + Std.Str.CharAt(Remaining, I)
+    end;
+
+    Std.Arrays.Push(Lines, Line);
+    mutable var Rest: string := '';
+    for I: integer := Count to Std.Str.Length(Remaining) - 1 do
+    begin
+      Rest := Rest + Std.Str.CharAt(Remaining, I)
+    end;
+
+    Remaining := Std.Str.Trim(Rest)
+  end;
+
+  return Lines
+end;
+
+// Returns the open description wrapped to the description overlay width.
+public function DescriptionLines(State: ClientModel): array of string;
+begin
+  mutable var Width: integer := State.ViewportWidth - 8;
+  if Width > 64 then
+  begin
+    Width := 64
+  end;
+
+  return WrappedLines(State.DescriptionText, Width)
+end;
+
+// Returns how many description lines one overlay page shows.
+public function DescriptionPageHeight(State: ClientModel): integer;
+begin
+  mutable var Height: integer := State.ViewportHeight - 8;
+  if Height > 12 then
+  begin
+    Height := 12
+  end;
+
+  if Height < 1 then
+  begin
+    Height := 1
+  end;
+
+  return Height
+end;
