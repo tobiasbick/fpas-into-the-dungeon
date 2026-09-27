@@ -1,0 +1,133 @@
+// Sends projections and rejections and commits accepted states and turns.
+unit Dungeon.Server.Replies;
+
+uses
+  Dungeon.Server.Projection, Dungeon.Server.Session, Dungeon.Combat, Dungeon.Exploration,
+  Dungeon.GameState, Dungeon.Protocol, Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport,
+  Dungeon.World, Std.Net, Std.Str, Std.Task;
+
+// Encodes and sends one server message.
+public function SendMessage(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
+begin
+  return WriteLine(ConnectionValue, EncodeServer(Message), Token)
+end;
+
+// Projects the state, sends it, and returns the world session with its possibly grown cache.
+public function SendProjection(
+  ConnectionValue: Connection;
+  World: WorldSession;
+  State: GameState;
+  Viewport: ViewportSize;
+  Report: TurnReport;
+  Token: CancellationToken
+): result of WorldSession, string;
+begin
+  var Projection: SessionProjection := try ProjectSession(World, State, Viewport, Report);
+  var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Projection.State), Token);
+  return Ok(Projection.World)
+end;
+
+// Sends a rejection with a stable code and a player-facing message.
+public function Reject(
+  ConnectionValue: Connection;
+  Code: string;
+  Message: string;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  return SendMessage(ConnectionValue, ServerMessage.Rejected(Code, Message), Token)
+end;
+
+// Reveals the accepted state, makes it current, and sends its projection with the turn's report.
+function CommitTurn(
+  Session: ServerSession;
+  Changed: GameState;
+  Report: TurnReport;
+  ConnectionValue: Connection;
+  Token: CancellationToken
+): result of ServerSession, string;
+begin
+  var Revealed: GameState := try RevealCurrentArea(Session.World.Metadata, Changed);
+  mutable var Next: ServerSession := Session;
+  Next.State := Some(Revealed);
+  Next.World := try SendProjection(ConnectionValue, Session.World, Revealed, Session.Viewport, Report, Token);
+  return Ok(Next)
+end;
+
+// Reveals the accepted state, makes it current, and sends its projection without combat messages.
+public function CommitState(
+  Session: ServerSession;
+  Changed: GameState;
+  ConnectionValue: Connection;
+  Token: CancellationToken
+): result of ServerSession, string;
+begin
+  return CommitTurn(Session, Changed, NoTurnReport(), ConnectionValue, Token)
+end;
+
+// Joins one turn's messages into the bounded defeat summary.
+function DefeatSummary(Log: array of string): string;
+begin
+  mutable var Summary: string := '';
+  for Entry: string in Log do
+  begin
+    if Summary = '' then
+    begin
+      Summary := Entry
+    end
+    else
+    begin
+      Summary := (Summary + ' ') + Entry
+    end
+  end;
+
+  if Summary = '' then
+  begin
+    Summary := 'You have fallen.'
+  end;
+
+  if Std.Str.Length(Summary) > MaximumCombatLogTextLength then
+  begin
+    Summary := Std.Str.Substring(Summary, Std.Str.Length(Summary) - MaximumCombatLogTextLength, MaximumCombatLogTextLength)
+  end;
+
+  return Summary
+end;
+
+// Resolves one time-consuming intention; defeat ends the game session but keeps the connection.
+public function PlayTurn(
+  Session: ServerSession;
+  Action: TurnAction;
+  RejectionCode: string;
+  ConnectionValue: Connection;
+  Token: CancellationToken
+): result of ServerSession, string;
+begin
+  case ResolveTurn(Session.World.Metadata, try RequireActiveState(Session.State), Action) of
+    Ok(Outcome):
+    begin
+      case Outcome of
+        TurnOutcome.Continued(Changed, Log, Events):
+        begin
+          return CommitTurn(Session, Changed, record
+            Log := Log;
+            Events := Events;
+          end, ConnectionValue, Token)
+        end;
+        TurnOutcome.Defeated(Log):
+        begin
+          var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
+          mutable var Ended: ServerSession := Session;
+          Ended.State := None;
+          Ended.ActiveDialogueNpcId := None;
+          return Ok(Ended)
+        end
+      end
+    end;
+    Error(Reason):
+    begin
+      var Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
+      return Ok(Session)
+    end
+  end
+end;

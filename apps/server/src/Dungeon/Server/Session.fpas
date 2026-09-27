@@ -1,0 +1,186 @@
+// Per-connection session state and the rules deciding which messages a session accepts.
+unit Dungeon.Server.Session;
+
+uses Dungeon.Server.Config, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Protocol, Dungeon.World;
+
+public type
+  // Accepted client viewport in fields, bounded by the server policy.
+  ViewportSize = record
+    public Width: integer;
+    public Height: integer;
+  end;
+  // Per-connection state carried between client messages after the handshake.
+  ServerSession = record
+    public World: WorldSession;
+    public State: option of GameState;
+    public ActiveDialogueNpcId: option of string;
+    public Viewport: ViewportSize;
+    // Set when the connection must close after the current message.
+    public Finished: boolean;
+  end;
+
+// Bounds a requested viewport by the server policy; non-positive sizes are an error.
+public function ResolveViewport(Width: integer; Height: integer; Config: ServerConfig): result of ViewportSize, string;
+begin
+  if (Width < 1) or (Height < 1) then
+  begin
+    return Error('viewport dimensions must be positive')
+  end;
+  mutable var BoundedWidth: integer := Width;
+  mutable var BoundedHeight: integer := Height;
+  if BoundedWidth > Config.MaximumViewWidth then
+  begin
+    BoundedWidth := Config.MaximumViewWidth
+  end;
+
+  if BoundedHeight > Config.MaximumViewHeight then
+  begin
+    BoundedHeight := Config.MaximumViewHeight
+  end;
+
+  return Ok(record
+    Width := BoundedWidth;
+    Height := BoundedHeight;
+  end)
+end;
+
+function MaximumIntersectingChunks(Length: integer): integer;
+begin
+  if Length = 1 then
+  begin
+    return 1
+  end;
+
+  return ((Length - 2) div WorldChunkSize) + 2
+end;
+
+// Returns the chunk cache size that holds every chunk of the largest allowed viewport.
+public function RequiredCacheCapacity(Config: ServerConfig): integer;
+begin
+  return (MaximumIntersectingChunks(Config.MaximumViewWidth) + 2) *
+         (MaximumIntersectingChunks(Config.MaximumViewHeight) + 2)
+end;
+
+// Returns whether a message needs an active game session.
+public function RequiresActiveSession(Message: ClientMessage): boolean;
+begin
+  case Message of
+    ClientMessage.Viewport(Width, Height):
+    begin
+      return true
+    end;
+    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+    begin
+      return true
+    end;
+    ClientMessage.Move(DeltaX, DeltaY):
+    begin
+      return true
+    end;
+    ClientMessage.StepFirstPerson(Direction):
+    begin
+      return true
+    end;
+    ClientMessage.TurnFirstPerson(Direction):
+    begin
+      return true
+    end;
+    ClientMessage.Interact:
+    begin
+      return true
+    end;
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      return true
+    end;
+    ClientMessage.EndDialogue:
+    begin
+      return true
+    end;
+    ClientMessage.SaveGame:
+    begin
+      return true
+    end;
+    ClientMessage.Attack:
+    begin
+      return true
+    end;
+    ClientMessage.Wait:
+    begin
+      return true
+    end;
+    ClientMessage.Equip(ItemId):
+    begin
+      return true
+    end;
+    ClientMessage.Unequip(ItemId):
+    begin
+      return true
+    end
+    else
+    begin
+      return false
+    end
+  end
+end;
+
+// Returns whether a message may arrive while a dialogue is active.
+public function AllowedWhileDialogueActive(Message: ClientMessage): boolean;
+begin
+  case Message of
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      return true
+    end;
+    ClientMessage.EndDialogue:
+    begin
+      return true
+    end;
+    ClientMessage.Viewport(Width, Height):
+    begin
+      return true
+    end;
+    ClientMessage.Disconnect:
+    begin
+      return true
+    end
+    else
+    begin
+      return false
+    end
+  end
+end;
+
+// Returns whether a message needs an active dialogue.
+public function RequiresActiveDialogue(Message: ClientMessage): boolean;
+begin
+  case Message of
+    ClientMessage.DialogueChoice(ChoiceId):
+    begin
+      return true
+    end;
+    ClientMessage.EndDialogue:
+    begin
+      return true
+    end
+    else
+    begin
+      return false
+    end
+  end
+end;
+
+// Returns the active game state; without a started session it is an error.
+public function RequireActiveState(State: option of GameState): result of GameState, string;
+begin
+  case State of
+    Some(Value):
+    begin
+      return Ok(Value)
+    end;
+    None:
+    begin
+      return Error('server session has no active game state')
+    end
+  end
+end;

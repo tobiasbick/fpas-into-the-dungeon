@@ -58,6 +58,10 @@ these projects.
   `.Character` render the first-person view, combat animation, inventory, and
   character sheet.
 - `apps/server` owns the server program entry point and server lifetime.
+  `Dungeon.Server` runs the handshake, message loop, and listener; its subunits
+  own the policy (`Config`), per-connection session rules (`Session`),
+  enumeration conversions (`Mapping`), client-safe projections (`Projection`),
+  replies and turn commits (`Replies`), and message handling (`Handling`).
 - `libs/game` owns the authoritative world model, rules, and simulation,
   including the deterministic outdoor terrain generator. It has one unit per
   concern, layered without cycles:
