@@ -56,7 +56,9 @@ these projects.
   (network events), `Playback` (combat animation clock), `MapCells`,
   `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`, and
   `.Character` render the first-person view, combat animation, inventory, and
-  character sheet.
+  character sheet. The raycaster's subunits own ray casting (`Rays`), pixels and
+  lighting (`Pixels`), wall and floor textures (`Textures`), pixel art (`Art`),
+  and sprites with animation effects (`Sprites`).
 - `apps/server` owns the server program entry point and server lifetime.
   `Dungeon.Server` runs the handshake, message loop, and listener; its subunits
   own the policy (`Config`), per-connection session rules (`Session`),

@@ -1,0 +1,148 @@
+// Masonry and tablet wall textures and projected floor materials.
+unit Dungeon.Client.Raycast.Textures;
+
+uses
+  Dungeon.Client.Raycast.Pixels, Dungeon.Client.Raycast.Rays, Dungeon.Protocol, Std.Conv, Std.Math;
+
+// Distance- and side-shaded base color of stone walls.
+function StonePixel(Hit: FirstPersonRayHit): integer;
+begin
+  mutable var Shade: integer := 218 - Trunc(Hit.Distance * 22.0);
+  Shade := Std.Math.Clamp(Shade, 48, 218);
+  if Hit.VerticalSide then
+  begin
+    Shade := (Shade * 4) div 5
+  end;
+
+  return Rgb(Shade, (Shade * 9) div 10, (Shade * 4) div 5)
+end;
+
+// Distance- and side-shaded slate color of the inspectable tablet.
+function SlatePixel(Hit: FirstPersonRayHit): integer;
+begin
+  mutable var TabletShade: integer := 188 - Trunc(Hit.Distance * 16.0);
+  TabletShade := Std.Math.Clamp(TabletShade, 72, 188);
+  if Hit.VerticalSide then
+  begin
+    TabletShade := (TabletShade * 4) div 5
+  end;
+
+  return Rgb((TabletShade * 3) div 5, (TabletShade * 4) div 5, TabletShade)
+end;
+
+function Fraction(Value: real): real;
+begin
+  return Value - IntToReal(Std.Math.Floor(Value))
+end;
+
+// Deterministic 0..12 variation per stone so identical wall fields always look the same.
+function StoneVariation(Hit: FirstPersonRayHit; Course: integer; Stone: integer): integer;
+begin
+  mutable var Side: integer := 0;
+  if Hit.VerticalSide then
+  begin
+    Side := 1
+  end;
+  var Mixed: integer := ((((Hit.MapX * 92821) + (Hit.MapY * 68917)) + (Course * 1193)) + (Stone * 409)) +
+                        (Side * 7);
+  return ((Mixed mod 13) + 13) mod 13
+end;
+
+// Masonry with four staggered courses and two stones per field; V runs 0..1 down the wall.
+// Mortar joints appear only while the wall is tall enough to show them without flicker.
+function StoneTexel(Hit: FirstPersonRayHit; V: real; WallHeight: integer): integer;
+begin
+  var Base: integer := StonePixel(Hit);
+  var Course: integer := Std.Math.Clamp(Std.Math.Floor(V * 4.0), 0, 3);
+  var Along: real := (Hit.WallX * 2.0) + (IntToReal(Course mod 2) * 0.5);
+  var Stone: integer := Std.Math.Floor(Along);
+  if WallHeight >= 12 then
+  begin
+    if (Fraction(V * 4.0) < 0.09) or (Fraction(Along) < 0.05) then
+    begin
+      return Darken(Base, 62, 100)
+    end
+  end;
+
+  return Darken(Base, 90 + StoneVariation(Hit, Course, Stone), 102)
+end;
+
+// Stone wall with an inset, framed slate panel carrying engraved lines.
+function TabletTexel(Hit: FirstPersonRayHit; V: real; WallHeight: integer): integer;
+begin
+  if ((Hit.WallX < 0.2) or (Hit.WallX > 0.8)) or ((V < 0.26) or (V > 0.74)) then
+  begin
+    return StoneTexel(Hit, V, WallHeight)
+  end;
+  var Slate: integer := SlatePixel(Hit);
+  if ((Hit.WallX < 0.24) or (Hit.WallX > 0.76)) or ((V < 0.3) or (V > 0.7)) then
+  begin
+    return Darken(Slate, 55, 100)
+  end;
+
+  if (WallHeight >= 16) and
+     (((Hit.WallX > 0.3) and (Hit.WallX < 0.7)) and (Fraction(V * 10.0) < 0.18)) then
+  begin
+    return Darken(Slate, 72, 100)
+  end;
+
+  return Slate
+end;
+
+// Returns the textured wall pixel at height V of one wall slice.
+public function WallTexel(Hit: FirstPersonRayHit; V: real; WallHeight: integer): integer;
+begin
+  if Hit.FieldCode = UnknownFieldCode then
+  begin
+    return UnknownPixel
+  end;
+
+  if Hit.FieldCode = InteriorTabletCode then
+  begin
+    return TabletTexel(Hit, V, WallHeight)
+  end;
+
+  return StoneTexel(Hit, V, WallHeight)
+end;
+
+// Projects one floor pixel onto its field; exits color only their floor.
+// Unknown samples and samples behind opaque geometry reveal no material.
+public function ProjectFloorPixel(
+  Value: FirstPersonVisibleState;
+  Camera: FirstPersonCamera;
+  CameraX: real;
+  Distance: real;
+  WallDistance: real
+): integer;
+begin
+  if Distance >= WallDistance then
+  begin
+    return Lit(FloorPixel, Distance)
+  end;
+  var FloorX: real := Camera.EyeX + Distance * (Camera.DirectionX + Camera.PlaneX * CameraX);
+  var FloorY: real := Camera.EyeY + Distance * (Camera.DirectionY + Camera.PlaneY * CameraX);
+  var Code: string := FieldAt(Value, Std.Math.Floor(FloorX), Std.Math.Floor(FloorY));
+  if Code = UnknownFieldCode then
+  begin
+    return UnknownPixel
+  end;
+  mutable var Material: integer := FloorPixel;
+  if Code = InteriorExitCode then
+  begin
+    Material := ExitFloorPixel
+  end;
+
+  // One flagstone per field, so joints never run down a corridor's center; they fade
+  // out before they would alias with distance.
+  if Distance < 3.5 then
+  begin
+    var JointX: real := Fraction(FloorX);
+    var JointY: real := Fraction(FloorY);
+    if ((JointX < 0.03) or (JointX > 0.97)) or ((JointY < 0.03) or (JointY > 0.97)) then
+    begin
+      Material := Darken(Material, 74, 100)
+    end
+  end;
+
+  return Lit(Material, Distance)
+end;
