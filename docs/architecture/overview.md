@@ -82,7 +82,9 @@ these projects.
     outdoor sight and discovery updates, and interior line of sight.
 - `libs/world` owns validated world, chunk, and savegame persistence,
   creation of missing chunks through the `libs/game` generator, visible-window
-  composition, prefetching, and bounded caching. `Dungeon.World.Savegame` owns the
+  composition, prefetching, and bounded caching. `Dungeon.World` owns world
+  sessions, the chunk cache, and visible windows; `Dungeon.World.Encoding` owns
+  the exact JSON formats of world metadata and chunks. `Dungeon.World.Savegame` owns the
   savegame file and its format version; its subunits `Player`, `Entities`, and
   `Discovery` encode and strictly decode the parts of the saved state.
 - `libs/protocol` owns commands and visible-state messages shared by client and
