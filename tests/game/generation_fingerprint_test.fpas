@@ -1,0 +1,141 @@
+// Pins generator version 5 output so generation optimizations stay bit-identical.
+program GenerationFingerprintTest;
+
+uses Dungeon.Game, Std.Arrays, Std.Conv, Std.Results, Std.Test;
+
+function BaseOrdinal(Value: BaseTerrainKind): integer;
+begin
+  case Value of
+    BaseTerrainKind.Grass:
+    begin
+      return 0
+    end;
+    BaseTerrainKind.Sand:
+    begin
+      return 1
+    end;
+    BaseTerrainKind.Rock:
+    begin
+      return 2
+    end;
+    BaseTerrainKind.Water:
+    begin
+      return 3
+    end
+  end
+end;
+
+function FeatureOrdinal(Value: TerrainFeatureKind): integer;
+begin
+  case Value of
+    TerrainFeatureKind.NoFeature:
+    begin
+      return 0
+    end;
+    TerrainFeatureKind.Tree:
+    begin
+      return 1
+    end;
+    TerrainFeatureKind.Forest:
+    begin
+      return 2
+    end;
+    TerrainFeatureKind.Path:
+    begin
+      return 3
+    end;
+    TerrainFeatureKind.River:
+    begin
+      return 4
+    end;
+    TerrainFeatureKind.Entrance:
+    begin
+      return 5
+    end
+  end
+end;
+
+function WaterOrdinal(Value: WaterKind): integer;
+begin
+  case Value of
+    WaterKind.NoWater:
+    begin
+      return 0
+    end;
+    WaterKind.Sea:
+    begin
+      return 1
+    end;
+    WaterKind.Lake:
+    begin
+      return 2
+    end;
+    WaterKind.RiverWater:
+    begin
+      return 3
+    end
+  end
+end;
+
+// Encodes every layer of one cell so that no terrain difference can cancel out.
+function CellCode(Cell: WorldCell): integer;
+begin
+  return ((BaseOrdinal(Cell.Base) * 100) + (FeatureOrdinal(Cell.Feature) * 10)) +
+         WaterOrdinal(Cell.Water)
+end;
+
+function Coordinate(X: integer; Y: integer): ChunkCoordinate;
+begin
+  return record
+    X := X;
+    Y := Y;
+  end
+end;
+
+begin
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('fingerprint', 12345));
+  // Spawn and entrance chunks, desert and lake chunks, and a spread of distant and negative chunks.
+  var Chunks: array of ChunkCoordinate := [
+                                            Coordinate(ChunkForCoordinate(Metadata.Spawn.X), ChunkForCoordinate(Metadata.Spawn.Y)),
+                                            Coordinate(ChunkForCoordinate(Metadata.Entrance.X), ChunkForCoordinate(Metadata.Entrance.Y)),
+                                            Coordinate(-1, -1),
+                                            Coordinate(37, -12),
+                                            Coordinate(-80, 45),
+                                            Coordinate(-3, -30),
+                                            Coordinate(-11, -28),
+                                            Coordinate(-27, -27),
+                                            Coordinate(-3000, 2000)
+                                          ];
+  mutable var Fingerprint: integer := 17;
+  mutable var Counts: array of integer := Std.Arrays.Fill(0, 400);
+  for Chunk: ChunkCoordinate in Chunks do
+  begin
+    for Cell: WorldCell in GenerateChunk(Metadata, Chunk).Cells do
+    begin
+      var Code: integer := CellCode(Cell);
+      Fingerprint := ((Fingerprint * 31) + Code) mod 1000000007;
+      Counts[Code] := Counts[Code] + 1
+    end
+  end;
+  mutable var Distribution: string := '';
+  for Code: integer := 0 to 399 do
+  begin
+    if Counts[Code] > 0 then
+    begin
+      Distribution := ((Distribution + IntToStr(Code)) + '=') + (IntToStr(Counts[Code]) + ' ')
+    end
+  end;
+
+  AssertEquals('0=71023 10=2802 20=16101 30=665 50=2 100=3014 130=49 200=15484 301=32768 302=5265 343=283 ', Distribution);
+  AssertEquals(147596975, Fingerprint);
+  // The chunk path must agree with independent per-cell generation, including a lake shore.
+  var ShoreChunk: WorldChunk := GenerateChunk(Metadata, Coordinate(-11, -28));
+  for LocalY: integer := 0 to WorldChunkSize - 1 do
+  begin
+    for LocalX: integer := 0 to WorldChunkSize - 1 do
+    begin
+      AssertEquals(CellCode(GenerateWorldCell(Metadata, (-11 * WorldChunkSize) + LocalX, (-28 * WorldChunkSize) +
+                                                                                         LocalY)), CellCode(ChunkCell(ShoreChunk, LocalX, LocalY)))
+    end
+  end
+end.
