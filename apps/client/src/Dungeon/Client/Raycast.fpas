@@ -14,6 +14,11 @@ public type
     public VerticalSide: boolean;
     // Whether the ray crossed the traversable exit before reaching the wall.
     public SawExit: boolean;
+    // Hit position along the wall face, from 0 inclusive to 1 exclusive; drives the wall texture.
+    public WallX: real;
+    // Grid coordinate of the intersected field; keeps texture variation stable per wall field.
+    public MapX: integer;
+    public MapY: integer;
   end;
 
 const
@@ -135,9 +140,11 @@ begin
     Iterations := Iterations + 1
   end;
   mutable var Distance: real := SideDistanceY - DeltaDistanceY;
+  mutable var WallX: real := PositionX + Distance * RayDirectionX;
   if VerticalSide then
   begin
-    Distance := SideDistanceX - DeltaDistanceX
+    Distance := SideDistanceX - DeltaDistanceX;
+    WallX := PositionY + Distance * RayDirectionY
   end;
 
   if Distance < MinimumRayDistance then
@@ -150,33 +157,53 @@ begin
     FieldCode := FieldCode;
     VerticalSide := VerticalSide;
     SawExit := SawExit;
+    WallX := WallX - IntToReal(Std.Math.Floor(WallX));
+    MapX := MapX;
+    MapY := MapY;
   end
 end;
 
-function SolidCell(Red: integer; Green: integer; Blue: integer): TuiCell;
+// Packs one RGB color into a single integer pixel value.
+function Rgb(Red: integer; Green: integer; Blue: integer): integer;
 begin
-  var Color: TuiColor := TuiColor.FromRgb(Red, Green, Blue);
-  return TuiCell.Styled(' ', TuiStyle.FromColors(Color, Color))
+  return ((Red * 65536) + (Green * 256)) + Blue
 end;
 
-function WallCell(Hit: FirstPersonRayHit): TuiCell;
+function PixelColor(Pixel: integer): TuiColor;
 begin
-  if Hit.FieldCode = UnknownFieldCode then
+  return TuiColor.FromRgb(Pixel div 65536, (Pixel div 256) mod 256, Pixel mod 256)
+end;
+
+// Scales a packed color toward black; Numerator / Denominator is at most one.
+function Darken(Pixel: integer; Numerator: integer; Denominator: integer): integer;
+begin
+  return Rgb(((Pixel div 65536) * Numerator) div Denominator, (((Pixel div 256) mod 256) * Numerator) div
+                                                              Denominator, ((Pixel mod 256) * Numerator) div
+                                                                           Denominator)
+end;
+
+// Combines two stacked pixels into one terminal cell; equal halves stay a plain space.
+function HalfBlockCell(Upper: integer; Lower: integer): TuiCell;
+begin
+  if Upper = Lower then
   begin
-    return SolidCell(18, 21, 25)
+    var Color: TuiColor := PixelColor(Upper);
+    return TuiCell.Styled(' ', TuiStyle.FromColors(Color, Color))
   end;
 
-  if Hit.FieldCode = InteriorTabletCode then
-  begin
-    mutable var TabletShade: integer := 188 - Trunc(Hit.Distance * 16.0);
-    TabletShade := Std.Math.Clamp(TabletShade, 72, 188);
-    if Hit.VerticalSide then
-    begin
-      TabletShade := (TabletShade * 4) div 5
-    end;
+  return TuiCell.Styled('▀', TuiStyle.FromColors(PixelColor(Upper), PixelColor(Lower)))
+end;
 
-    return SolidCell((TabletShade * 3) div 5, (TabletShade * 4) div 5, TabletShade)
-  end;
+const
+  // Packed RGB values of the fixed ceiling, floor, exit floor, and unknown-space colors.
+  CeilingPixel: integer := 790553;
+  FloorPixel: integer := 2499103;
+  ExitFloorPixel: integer := 6046740;
+  UnknownPixel: integer := 1185049;
+
+// Distance- and side-shaded base color of stone walls.
+function StonePixel(Hit: FirstPersonRayHit): integer;
+begin
   mutable var Shade: integer := 218 - Trunc(Hit.Distance * 22.0);
   Shade := Std.Math.Clamp(Shade, 48, 218);
   if Hit.VerticalSide then
@@ -184,153 +211,468 @@ begin
     Shade := (Shade * 4) div 5
   end;
 
-  return SolidCell(Shade, (Shade * 9) div 10, (Shade * 4) div 5)
+  return Rgb(Shade, (Shade * 9) div 10, (Shade * 4) div 5)
 end;
 
-function CeilingCell(): TuiCell;
+// Distance- and side-shaded slate color of the inspectable tablet.
+function SlatePixel(Hit: FirstPersonRayHit): integer;
 begin
-  return SolidCell(12, 16, 25)
-end;
-
-function FloorCell(PlayerOnExit: boolean): TuiCell;
-begin
-  if PlayerOnExit then
+  mutable var TabletShade: integer := 188 - Trunc(Hit.Distance * 16.0);
+  TabletShade := Std.Math.Clamp(TabletShade, 72, 188);
+  if Hit.VerticalSide then
   begin
-    return SolidCell(92, 68, 20)
+    TabletShade := (TabletShade * 4) div 5
   end;
 
-  return SolidCell(38, 34, 31)
+  return Rgb((TabletShade * 3) div 5, (TabletShade * 4) div 5, TabletShade)
 end;
 
-function ItemFloorCell(): TuiCell;
+function Fraction(Value: real): real;
 begin
-  return TuiCell.Styled('●', TuiStyle.FromColors(TuiColor.FromRgb(255, 220, 96), TuiColor.FromRgb(78, 57, 24)))
+  return Value - IntToReal(Std.Math.Floor(Value))
 end;
 
-function NpcFloorCell(): TuiCell;
+// Deterministic 0..12 variation per stone so identical wall fields always look the same.
+function StoneVariation(Hit: FirstPersonRayHit; Course: integer; Stone: integer): integer;
 begin
-  return TuiCell.Styled('♟', TuiStyle.FromColors(TuiColor.FromRgb(225, 210, 255), TuiColor.FromRgb(62, 43, 82)))
+  mutable var Side: integer := 0;
+  if Hit.VerticalSide then
+  begin
+    Side := 1
+  end;
+  var Mixed: integer := ((((Hit.MapX * 92821) + (Hit.MapY * 68917)) + (Course * 1193)) + (Stone * 409)) +
+                        (Side * 7);
+  return ((Mixed mod 13) + 13) mod 13
 end;
 
-// Projects a floor sample onto the actual field; exits color only their floor.
-// Unknown samples and samples behind opaque geometry reveal no material.
-function ProjectFloor(
-  Value: FirstPersonVisibleState;
-  X: integer;
-  Y: integer;
-  Width: integer;
-  Height: integer;
-  Scale: real
-): TuiCell;
+// Masonry with four staggered courses and two stones per field; V runs 0..1 down the wall.
+// Mortar joints appear only while the wall is tall enough to show them without flicker.
+function StoneTexel(Hit: FirstPersonRayHit; V: real; WallHeight: integer): integer;
 begin
-  var Denominator: integer := (2 * Y - Height) + 1;
-  if Denominator <= 0 then
+  var Base: integer := StonePixel(Hit);
+  var Course: integer := Std.Math.Clamp(Std.Math.Floor(V * 4.0), 0, 3);
+  var Along: real := (Hit.WallX * 2.0) + (IntToReal(Course mod 2) * 0.5);
+  var Stone: integer := Std.Math.Floor(Along);
+  if WallHeight >= 12 then
   begin
-    return FloorCell(false)
+    if (Fraction(V * 4.0) < 0.09) or (Fraction(Along) < 0.05) then
+    begin
+      return Darken(Base, 62, 100)
+    end
   end;
-  mutable var CameraX: real := 0.0;
-  if Width > 1 then
+
+  return Darken(Base, 90 + StoneVariation(Hit, Course, Stone), 102)
+end;
+
+// Stone wall with an inset, framed slate panel carrying engraved lines.
+function TabletTexel(Hit: FirstPersonRayHit; V: real; WallHeight: integer): integer;
+begin
+  if ((Hit.WallX < 0.2) or (Hit.WallX > 0.8)) or ((V < 0.26) or (V > 0.74)) then
   begin
-    CameraX := ((2.0 * IntToReal(X)) / IntToReal(Width - 1)) - 1.0
+    return StoneTexel(Hit, V, WallHeight)
   end;
-  var Distance: real := Scale / IntToReal(Denominator);
-  var Hit: FirstPersonRayHit := CastFirstPersonRay(Value, CameraX);
-  if Distance >= Hit.Distance then
+  var Slate: integer := SlatePixel(Hit);
+  if ((Hit.WallX < 0.24) or (Hit.WallX > 0.76)) or ((V < 0.3) or (V > 0.7)) then
   begin
-    return FloorCell(false)
+    return Darken(Slate, 55, 100)
   end;
+
+  if (WallHeight >= 16) and
+     (((Hit.WallX > 0.3) and (Hit.WallX < 0.7)) and (Fraction(V * 10.0) < 0.18)) then
+  begin
+    return Darken(Slate, 72, 100)
+  end;
+
+  return Slate
+end;
+
+function WallTexel(Hit: FirstPersonRayHit; V: real; WallHeight: integer): integer;
+begin
+  if Hit.FieldCode = UnknownFieldCode then
+  begin
+    return UnknownPixel
+  end;
+
+  if Hit.FieldCode = InteriorTabletCode then
+  begin
+    return TabletTexel(Hit, V, WallHeight)
+  end;
+
+  return StoneTexel(Hit, V, WallHeight)
+end;
+
+// Torchlight falloff for floor and ceiling: full color near the eye, darker with depth.
+function Lit(Pixel: integer; Distance: real): integer;
+begin
+  if Distance <= 1.5 then
+  begin
+    return Pixel
+  end;
+  var Light: integer := Std.Math.Clamp(100 - Trunc((Distance - 1.5) * 11.0), 34, 100);
+  return Darken(Pixel, Light, 100)
+end;
+
+type
+  // Rendering eye and camera shared by walls, floor, and sprites of one frame.
+  FirstPersonCamera = record
+    EyeX: real;
+    EyeY: real;
+    DirectionX: real;
+    DirectionY: real;
+    PlaneX: real;
+    PlaneY: real;
+  end;
+  // One upright billboard: pixel art standing on the floor at a field center.
+  Sprite = record
+    WorldX: real;
+    WorldY: real;
+    // Field-relative height of the figure; width follows the art's aspect ratio.
+    HeightFraction: real;
+    Art: array of string;
+  end;
+
+function FrameCamera(Value: FirstPersonVisibleState): FirstPersonCamera;
+begin
   var Camera: array of real := CameraDirection(Value.Facing);
-  var FloorX: real := ((IntToReal(Value.PlayerX) + 0.5) - Camera[0] * CameraBackOffset) +
-                      Distance * (Camera[0] + Camera[2] * CameraX);
-  var FloorY: real := ((IntToReal(Value.PlayerY) + 0.5) - Camera[1] * CameraBackOffset) +
-                      Distance * (Camera[1] + Camera[3] * CameraX);
-  var SampleX: integer := Std.Math.Floor(FloorX);
-  var SampleY: integer := Std.Math.Floor(FloorY);
-  var Code: string := FieldAt(Value, SampleX, SampleY);
+  return record
+    EyeX := (IntToReal(Value.PlayerX) + 0.5) - Camera[0] * CameraBackOffset;
+    EyeY := (IntToReal(Value.PlayerY) + 0.5) - Camera[1] * CameraBackOffset;
+    DirectionX := Camera[0];
+    DirectionY := Camera[1];
+    PlaneX := Camera[2];
+    PlaneY := Camera[3];
+  end
+end;
+
+// Projects one floor pixel onto its field; exits color only their floor.
+// Unknown samples and samples behind opaque geometry reveal no material.
+function ProjectFloorPixel(
+  Value: FirstPersonVisibleState;
+  Camera: FirstPersonCamera;
+  CameraX: real;
+  Distance: real;
+  WallDistance: real
+): integer;
+begin
+  if Distance >= WallDistance then
+  begin
+    return Lit(FloorPixel, Distance)
+  end;
+  var FloorX: real := Camera.EyeX + Distance * (Camera.DirectionX + Camera.PlaneX * CameraX);
+  var FloorY: real := Camera.EyeY + Distance * (Camera.DirectionY + Camera.PlaneY * CameraX);
+  var Code: string := FieldAt(Value, Std.Math.Floor(FloorX), Std.Math.Floor(FloorY));
   if Code = UnknownFieldCode then
   begin
-    return SolidCell(18, 21, 25)
+    return UnknownPixel
+  end;
+  mutable var Material: integer := FloorPixel;
+  if Code = InteriorExitCode then
+  begin
+    Material := ExitFloorPixel
   end;
 
-  if Code = InteriorItemCode then
+  // One flagstone per field, so joints never run down a corridor's center; they fade
+  // out before they would alias with distance.
+  if Distance < 3.5 then
   begin
-    // One small disc at the field center, rather than tiling the entire floor with coins.
-    var LocalX: real := (FloorX - IntToReal(SampleX)) - 0.5;
-    var LocalY: real := (FloorY - IntToReal(SampleY)) - 0.5;
-    if LocalX * LocalX + LocalY * LocalY <= 0.0256 then
+    var JointX: real := Fraction(FloorX);
+    var JointY: real := Fraction(FloorY);
+    if ((JointX < 0.03) or (JointX > 0.97)) or ((JointY < 0.03) or (JointY > 0.97)) then
     begin
-      return ItemFloorCell()
+      Material := Darken(Material, 74, 100)
     end
   end;
 
-  if Code = InteriorNpcCode then
-  begin
-    // A slightly larger centered marker keeps the stationary NPC distinct from floor items.
-    var LocalX: real := (FloorX - IntToReal(SampleX)) - 0.5;
-    var LocalY: real := (FloorY - IntToReal(SampleY)) - 0.5;
-    if LocalX * LocalX + LocalY * LocalY <= 0.0625 then
-    begin
-      return NpcFloorCell()
-    end
-  end;
-
-  return FloorCell(Code = InteriorExitCode)
+  return Lit(Material, Distance)
 end;
 
-// Renders walls and floor with the same rearward eye and projection at every distance.
-public function RenderFirstPersonGrid(Value: FirstPersonVisibleState; Width: integer; Height: integer): TuiCellGrid;
+// Old adventurer: hood, face, cloak with rope belt, lantern at her side, and walking staff.
+function NpcArt(): array of string;
 begin
-  mutable var SafeWidth: integer := Width;
-  mutable var SafeHeight: integer := Height;
-  if SafeWidth < 0 then
+  return [
+           '....hHHh....',
+           '...hHHHHh...',
+           '..hHHHHHHh..',
+           '..hHFFFFHh..',
+           '..hFEFFEFh..',
+           '..hFFFFFFh..',
+           '...hFFFFh...',
+           '..cCCCCCCc.S',
+           '.cCCCCCCCCcS',
+           '.cCCCCCCCCcS',
+           '.cCCRRRRCCcS',
+           'MCCCCCCCCCcS',
+           'LCCCCCCCCCcS',
+           'LcCCCCCCCCcS',
+           'McCCCCCCCCcS',
+           '.cCCCCCCCCcS',
+           '.cCCCCCCCCcS',
+           '.cCCCCCCCCCS',
+           '..cCCCCCCCcS',
+           '..BBB..BBB.S'
+         ]
+end;
+
+// Ancient coin lying on the floor.
+function ItemArt(): array of string;
+begin
+  return ['.oOOo.', 'oOYYOo', '.oOOo.']
+end;
+
+// Maps one art character to a packed color; zero marks a transparent pixel.
+function ArtPixel(Code: string): integer;
+begin
+  case Code of
+    'h':
+    begin
+      return Rgb(58, 40, 82)
+    end;
+    'H':
+    begin
+      return Rgb(96, 70, 132)
+    end;
+    'F':
+    begin
+      return Rgb(214, 170, 130)
+    end;
+    'E':
+    begin
+      return Rgb(40, 28, 24)
+    end;
+    'C':
+    begin
+      return Rgb(112, 84, 146)
+    end;
+    'c':
+    begin
+      return Rgb(72, 52, 100)
+    end;
+    'R':
+    begin
+      return Rgb(176, 144, 92)
+    end;
+    'S':
+    begin
+      return Rgb(128, 88, 50)
+    end;
+    'M':
+    begin
+      return Rgb(96, 86, 74)
+    end;
+    'L':
+    begin
+      return Rgb(255, 214, 110)
+    end;
+    'B':
+    begin
+      return Rgb(62, 46, 36)
+    end;
+    'o':
+    begin
+      return Rgb(150, 110, 30)
+    end;
+    'O':
+    begin
+      return Rgb(230, 180, 60)
+    end;
+    'Y':
+    begin
+      return Rgb(255, 235, 140)
+    end
+    else
+    begin
+      return 0
+    end
+  end
+end;
+
+// Collects visible NPC and item fields as billboards.
+function VisibleSprites(Value: FirstPersonVisibleState): array of Sprite;
+begin
+  mutable var Sprites: array of Sprite := [];
+  for Y: integer := 0 to Value.Height - 1 do
   begin
-    SafeWidth := 0
+    for X: integer := 0 to Value.Width - 1 do
+    begin
+      var Code: string := FieldAt(Value, X, Y);
+      if Code = InteriorNpcCode then
+      begin
+        Std.Arrays.Push(Sprites, record
+          WorldX := IntToReal(X) + 0.5;
+          WorldY := IntToReal(Y) + 0.5;
+          HeightFraction := 0.86;
+          Art := NpcArt();
+        end)
+      end;
+
+      if Code = InteriorItemCode then
+      begin
+        Std.Arrays.Push(Sprites, record
+          WorldX := IntToReal(X) + 0.5;
+          WorldY := IntToReal(Y) + 0.5;
+          HeightFraction := 0.1;
+          Art := ItemArt();
+        end)
+      end
+    end
   end;
 
-  if SafeHeight < 0 then
+  return Sprites
+end;
+
+// Returns the sprite's depth along the view direction; values near zero are behind the eye.
+function SpriteDepth(Camera: FirstPersonCamera; Item: Sprite): real;
+begin
+  var RelativeX: real := Item.WorldX - Camera.EyeX;
+  var RelativeY: real := Item.WorldY - Camera.EyeY;
+  var InverseDeterminant: real := 1.0 /
+                                  ((Camera.PlaneX * Camera.DirectionY) - (Camera.DirectionX * Camera.PlaneY));
+  return InverseDeterminant * ((- Camera.PlaneY * RelativeX) + (Camera.PlaneX * RelativeY))
+end;
+
+// Draws one billboard into the pixel buffer, hidden behind nearer walls.
+function DrawSprite(
+  Pixels: array of integer;
+  Depths: array of real;
+  Camera: FirstPersonCamera;
+  Item: Sprite;
+  Width: integer;
+  PixelHeight: integer
+): array of integer;
+begin
+  mutable var Drawn: array of integer := Pixels;
+  var RelativeX: real := Item.WorldX - Camera.EyeX;
+  var RelativeY: real := Item.WorldY - Camera.EyeY;
+  var InverseDeterminant: real := 1.0 /
+                                  ((Camera.PlaneX * Camera.DirectionY) - (Camera.DirectionX * Camera.PlaneY));
+  var Lateral: real := InverseDeterminant *
+                       ((Camera.DirectionY * RelativeX) - (Camera.DirectionX * RelativeY));
+  var Depth: real := SpriteDepth(Camera, Item);
+  if Depth < 0.2 then
   begin
-    SafeHeight := 0
+    return Drawn
+  end;
+  var ArtHeight: integer := Std.Arrays.Length(Item.Art);
+  var ArtWidth: integer := Std.Str.Length(Item.Art[0]);
+  var FieldHeight: real := (IntToReal(PixelHeight) * TerminalAspectCorrection) / Depth;
+  var FloorLine: real := (IntToReal(PixelHeight) + FieldHeight) / 2.0;
+  var SpriteHeight: real := FieldHeight * Item.HeightFraction;
+  var SpriteWidth: real := (SpriteHeight * IntToReal(ArtWidth)) / IntToReal(ArtHeight);
+  var CenterX: real := (IntToReal(Width - 1) / 2.0) * (1.0 + (Lateral / Depth));
+  var Left: real := CenterX - (SpriteWidth / 2.0);
+  var Top: real := FloorLine - SpriteHeight;
+  // Distance darkening matches the wall falloff so figures sit in the same light.
+  var Light: integer := Std.Math.Clamp(218 - Trunc(Depth * 22.0), 96, 218);
+  var FirstColumn: integer := Std.Math.Max(0, Std.Math.Floor(Left));
+  var LastColumn: integer := Std.Math.Min(Width - 1, Std.Math.Floor(Left + SpriteWidth));
+  var FirstRow: integer := Std.Math.Max(0, Std.Math.Floor(Top));
+  var LastRow: integer := Std.Math.Min(PixelHeight - 1, Std.Math.Floor(FloorLine));
+  for Column: integer := FirstColumn to LastColumn do
+  begin
+    if Depth < Depths[Column] then
+    begin
+      var ArtX: integer := Trunc((((IntToReal(Column) + 0.5) - Left) * IntToReal(ArtWidth)) /
+                                 SpriteWidth);
+      if (ArtX >= 0) and (ArtX < ArtWidth) then
+      begin
+        for Row: integer := FirstRow to LastRow do
+        begin
+          var ArtY: integer := Trunc((((IntToReal(Row) + 0.5) - Top) * IntToReal(ArtHeight)) /
+                                     SpriteHeight);
+          if (ArtY >= 0) and (ArtY < ArtHeight) then
+          begin
+            var Color: integer := ArtPixel(Std.Str.CharAt(Item.Art[ArtY], ArtX));
+            if Color <> 0 then
+            begin
+              Drawn[(Row * Width) + Column] := Darken(Color, Light, 218)
+            end
+          end
+        end
+      end
+    end
+  end;
+
+  return Drawn
+end;
+
+// Renders walls, floor, and upright sprites at two pixels per terminal cell.
+// One ray per column feeds both the wall slice and the depth buffer used for occlusion.
+public function RenderFirstPersonGrid(Value: FirstPersonVisibleState; Width: integer; Height: integer): TuiCellGrid;
+begin
+  var SafeWidth: integer := Std.Math.Max(0, Width);
+  var SafeHeight: integer := Std.Math.Max(0, Height);
+  var PixelHeight: integer := SafeHeight * 2;
+  var Scale: real := IntToReal(PixelHeight) * TerminalAspectCorrection;
+  var Camera: FirstPersonCamera := FrameCamera(Value);
+  mutable var Pixels: array of integer := Std.Arrays.Fill(CeilingPixel, SafeWidth * PixelHeight);
+  mutable var Depths: array of real := [];
+  for X: integer := 0 to SafeWidth - 1 do
+  begin
+    mutable var CameraX: real := 0.0;
+    if SafeWidth > 1 then
+    begin
+      CameraX := ((2.0 * IntToReal(X)) / IntToReal(SafeWidth - 1)) - 1.0
+    end;
+    var Hit: FirstPersonRayHit := CastFirstPersonRay(Value, CameraX);
+    Std.Arrays.Push(Depths, Hit.Distance);
+    var ProjectedHeight: real := Scale / Hit.Distance;
+    var WallHeight: integer := Std.Math.Clamp(Trunc(ProjectedHeight), 1, PixelHeight);
+    var WallTop: integer := (PixelHeight - WallHeight) div 2;
+    var WallBottom: integer := WallTop + WallHeight;
+    // Texture rows follow the unclipped projection so close walls keep a stable pattern.
+    var ProjectedTop: real := (IntToReal(PixelHeight) - ProjectedHeight) / 2.0;
+    for Y: integer := 0 to WallTop - 1 do
+    begin
+      var CeilingDenominator: integer := (PixelHeight - (2 * Y)) - 1;
+      if CeilingDenominator > 0 then
+      begin
+        Pixels[(Y * SafeWidth) + X] := Lit(CeilingPixel, Scale / IntToReal(CeilingDenominator))
+      end
+    end;
+
+    for Y: integer := WallTop to WallBottom - 1 do
+    begin
+      var V: real := ((IntToReal(Y) + 0.5) - ProjectedTop) / ProjectedHeight;
+      Pixels[(Y * SafeWidth) + X] := WallTexel(Hit, V, WallHeight)
+    end;
+
+    for Y: integer := WallBottom to PixelHeight - 1 do
+    begin
+      var Denominator: integer := (2 * Y - PixelHeight) + 1;
+      mutable var Floor: integer := Lit(FloorPixel, 1000.0);
+      if Denominator > 0 then
+      begin
+        Floor := ProjectFloorPixel(Value, Camera, CameraX, Scale / IntToReal(Denominator), Hit.Distance)
+      end;
+
+      Pixels[(Y * SafeWidth) + X] := Floor
+    end
+  end;
+  // Painter's order: far sprites first so nearer figures cover them.
+  mutable var Remaining: array of Sprite := VisibleSprites(Value);
+  while Std.Arrays.Length(Remaining) > 0 do
+  begin
+    mutable var Farthest: integer := 0;
+    for Index: integer := 1 to Std.Arrays.Length(Remaining) - 1 do
+    begin
+      if SpriteDepth(Camera, Remaining[Index]) > SpriteDepth(Camera, Remaining[Farthest]) then
+      begin
+        Farthest := Index
+      end
+    end;
+
+    Pixels := DrawSprite(Pixels, Depths, Camera, Remaining[Farthest], SafeWidth, PixelHeight);
+    Remaining := Std.Arrays.Concat(Std.Arrays.Slice(Remaining, 0, Farthest), Std.Arrays.Slice(Remaining, Farthest +
+                                                                                                         1, (Std.Arrays.Length(Remaining) - Farthest) -
+                                                                                                            1))
   end;
   mutable var Cells: array of TuiCell := [];
   for Y: integer := 0 to SafeHeight - 1 do
   begin
     for X: integer := 0 to SafeWidth - 1 do
     begin
-      mutable var CameraX: real := 0.0;
-      if SafeWidth > 1 then
-      begin
-        CameraX := ((2.0 * IntToReal(X)) / IntToReal(SafeWidth - 1)) - 1.0
-      end;
-      var Hit: FirstPersonRayHit := CastFirstPersonRay(Value, CameraX);
-      mutable var WallHeight: integer := Trunc((IntToReal(SafeHeight) * TerminalAspectCorrection) /
-                                               Hit.Distance);
-      if WallHeight < 1 then
-      begin
-        WallHeight := 1
-      end;
-
-      if WallHeight > SafeHeight then
-      begin
-        WallHeight := SafeHeight
-      end;
-      var WallTop: integer := (SafeHeight - WallHeight) div 2;
-      var WallBottom: integer := WallTop + WallHeight;
-      if Y < WallTop then
-      begin
-        Std.Arrays.Push(Cells, CeilingCell())
-      end
-      else
-      begin
-        if Y < WallBottom then
-        begin
-          Std.Arrays.Push(Cells, WallCell(Hit))
-        end
-        else
-        begin
-          Std.Arrays.Push(Cells, ProjectFloor(Value, X, Y, SafeWidth, SafeHeight, IntToReal(SafeHeight) *
-                                                                                  TerminalAspectCorrection))
-        end
-      end
+      Std.Arrays.Push(Cells, HalfBlockCell(Pixels[((2 * Y) * SafeWidth) + X], Pixels[(((2 * Y) + 1) * SafeWidth) +
+                                                                                     X]))
     end
   end;
 

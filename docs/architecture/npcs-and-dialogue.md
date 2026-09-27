@@ -47,8 +47,9 @@ Protocol version `10` adds `dialogue_choice` and `end_dialogue` intentions plus
 `dialogue` and `dialogue_ended` responses. IDs, text, choice count, unique
 choice identities, and exact JSON field sets are bounded and validated.
 
-Mara is a dynamic `n` cell only while her field is currently visible. Both the
-first-person renderer and exploration map use a distinct NPC marker. A
+Mara is a dynamic `n` cell only while her field is currently visible. The
+first-person renderer draws her as a standing pixel-art figure, and the
+exploration map uses a distinct NPC marker. A
 remembered field retains only static floor geometry, so Fog of War does not
 claim that Mara is still visible there.
 

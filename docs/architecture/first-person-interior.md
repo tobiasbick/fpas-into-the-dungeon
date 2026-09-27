@@ -40,12 +40,23 @@ outdoor chunks.
 
 `Dungeon.Client.Raycast` is a pure presentation module. It derives a cardinal
 camera and fixed field of view from a validated first-person state, finds the
-nearest opaque field for each terminal column with grid DDA, corrects wall
-distance for perspective, and fills every output cell with ceiling, wall, or
-floor. Walls use deterministic distance and side shading. The tablet projection
-is opaque and uses a distinct material without changing the wall geometry. The
-projected exit floor and the visible Ancient coin use distinct gold materials;
-rays crossing them never recolor walls. The visual eye is shifted 0.35 fields
+nearest opaque field for each terminal column with one grid DDA ray, corrects
+wall distance for perspective, and fills a pixel buffer with ceiling, wall, or
+floor. Each terminal cell holds two stacked pixels: equal halves render as a
+colored space, differing halves as an upper-half block whose foreground is the
+upper pixel and whose background is the lower pixel. Walls use deterministic
+distance and side shading plus a masonry texture: four staggered stone courses
+and two stones per field width, with a stable per-stone tint derived from the
+hit field and darker mortar joints that appear only while the wall is tall
+enough to show them without flicker. The tablet projection is opaque and draws
+a framed slate panel with engraved lines inset into that masonry, without
+changing the wall geometry. Floor and ceiling keep their base colors within
+1.5 fields of the eye and darken with depth like torchlight; the floor shows
+one flagstone per field whose joints fade out beyond 3.5 fields. The
+projected exit floor uses a distinct gold material; rays crossing it never
+recolor walls. Currently visible NPC and item fields are drawn as upright
+pixel-art billboards at their field centers, scaled by depth, darkened like
+walls, and hidden behind nearer walls through the per-column wall depth. The visual eye is shifted 0.35 fields
 back from the occupied field's center, opposite the facing direction. It stays
 inside that field even when a wall is directly behind the player. A camera-plane
 scale of 1.0 gives a 90-degree horizontal view; the vertical projection scale
@@ -59,8 +70,8 @@ the existing forward sight cone, without revealing a whole sideways corridor.
 Unknown and remembered-but-not-currently-visible fields both stop first-person
 rays as dark fog. Wall and floor sampling consult the same server-provided
 knowledge mask; map memory never extends current first-person sight.
-The fixed NPC uses a distinct floor marker only while her field is currently
-visible. Remembered map geometry does not retain that dynamic marker.
+The fixed NPC appears as a standing figure only while her field is currently
+visible. Remembered map geometry does not retain that dynamic figure.
 The server includes exposed wall faces even when a wall's center is occluded
 by its neighbor, preventing false fog gaps in continuous corridor walls.
 See the client UI specification for presentation

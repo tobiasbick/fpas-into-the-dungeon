@@ -96,6 +96,24 @@ begin
   end
 end;
 
+// Counts cells whose glyph or either color differs between two equally sized grids.
+function DifferentCells(Left: TuiCellGrid; Right: TuiCellGrid): integer;
+begin
+  mutable var Count: integer := 0;
+  for I: integer := 0 to Std.Arrays.Length(Left.Cells) - 1 do
+  begin
+    var A: TuiStyle := Std.Options.Unwrap(Left.Cells[I].ConcreteStyle);
+    var B: TuiStyle := Std.Options.Unwrap(Right.Cells[I].ConcreteStyle);
+    if (((Left.Cells[I].Glyph <> Right.Cells[I].Glyph) or (A.Background.Red <> B.Background.Red)) or ((A.Background.Green <> B.Background.Green) or (A.Background.Blue <> B.Background.Blue))) or
+       (((A.Foreground.Red <> B.Foreground.Red) or (A.Foreground.Green <> B.Foreground.Green)) or (A.Foreground.Blue <> B.Foreground.Blue)) then
+    begin
+      Count := Count + 1
+    end
+  end;
+
+  return Count
+end;
+
 function BackgroundRed(Cell: TuiCell): integer;
 begin
   return Std.Options.Unwrap(Cell.ConcreteStyle).Background.Red
@@ -106,7 +124,17 @@ begin
   return Std.Options.Unwrap(Cell.ConcreteStyle).Background.Blue
 end;
 
+// Every exit pixel is warmer than the plain floor at the same depth: more red, less blue.
+procedure AssertGoldOverFloor(A: TuiColor; B: TuiColor);
+begin
+  AssertTrue(A.Red > B.Red);
+  AssertTrue(A.Red > A.Green);
+  AssertTrue(A.Green > A.Blue);
+  AssertTrue(A.Blue <= B.Blue)
+end;
+
 // Removing a traversable exit may change floor pixels only, never walls or sky.
+// Both stacked pixels of a cell are compared: background is the lower, foreground the upper half.
 function VerifyExitMaterial(Value: FirstPersonVisibleState; Width: integer; Height: integer): integer;
 begin
   mutable var Plain: FirstPersonVisibleState := Value;
@@ -116,21 +144,34 @@ begin
   mutable var GoldCount: integer := 0;
   for I: integer := 0 to Std.Arrays.Length(Actual.Cells) - 1 do
   begin
-    var A: TuiColor := Std.Options.Unwrap(Actual.Cells[I].ConcreteStyle).Background;
-    var B: TuiColor := Std.Options.Unwrap(Expected.Cells[I].ConcreteStyle).Background;
+    var ActualStyle: TuiStyle := Std.Options.Unwrap(Actual.Cells[I].ConcreteStyle);
+    var ExpectedStyle: TuiStyle := Std.Options.Unwrap(Expected.Cells[I].ConcreteStyle);
+    var A: TuiColor := ActualStyle.Background;
+    var B: TuiColor := ExpectedStyle.Background;
     if ((A.Red <> B.Red) or (A.Green <> B.Green)) or (A.Blue <> B.Blue) then
     begin
-      AssertEquals(92, A.Red);
-      AssertEquals(68, A.Green);
-      AssertEquals(20, A.Blue);
-      AssertEquals(38, B.Red);
-      AssertEquals(34, B.Green);
-      AssertEquals(31, B.Blue);
+      AssertGoldOverFloor(A, B);
+      GoldCount := GoldCount + 1
+    end;
+    var UpperA: TuiColor := ActualStyle.Foreground;
+    var UpperB: TuiColor := ExpectedStyle.Foreground;
+    if (Actual.Cells[I].Glyph = '▀') and
+       (((UpperA.Red <> UpperB.Red) or (UpperA.Green <> UpperB.Green)) or (UpperA.Blue <> UpperB.Blue)) then
+    begin
+      AssertGoldOverFloor(UpperA, UpperB);
       GoldCount := GoldCount + 1
     end
   end;
 
   return GoldCount
+end;
+
+// Classifies a cell's lower pixel as stone wall, including darkened mortar: fog is red 18,
+// ceiling at most 12, plain floor at most 38, and the gold exit floor has almost no blue.
+function IsWallCell(Cell: TuiCell): boolean;
+begin
+  var Color: TuiColor := Std.Options.Unwrap(Cell.ConcreteStyle).Background;
+  return (Color.Red > 60) and ((Color.Blue * 2) > Color.Red)
 end;
 
 begin
@@ -213,24 +254,50 @@ begin
   mutable var ItemAhead: FirstPersonVisibleState := FixedState(FirstPersonFacing.West);
   ItemAhead.Rows[1] := Std.Str.SetCharAt(ItemAhead.Rows[1], 8, 'i');
   var ItemGrid: TuiCellGrid := RenderFirstPersonGrid(ItemAhead, 41, 21);
-  mutable var ItemPixels: integer := 0;
-  for Cell: TuiCell in ItemGrid.Cells do
+  ItemAhead.Rows[1] := Std.Str.SetCharAt(ItemAhead.Rows[1], 8, '.');
+  var CollectedGrid: TuiCellGrid := RenderFirstPersonGrid(ItemAhead, 41, 21);
+  // The coin is a small floor object: visible, but far smaller than one screen row.
+  var ItemCells: integer := DifferentCells(ItemGrid, CollectedGrid);
+  AssertTrue(ItemCells > 0);
+  AssertTrue(ItemCells < 41);
+  // Once collected, the field renders exactly like the plain corridor.
+  AssertEquals(0, DifferentCells(CollectedGrid, RenderFirstPersonGrid(FixedState(FirstPersonFacing.West), 41, 21)));
+  // The NPC is an upright figure: it changes cells above the horizon, not only the floor.
+  var NpcCorridor: FirstPersonVisibleState := record
+    Title := 'NPC figure';
+    Status := '';
+    Width := 7;
+    Height := 3;
+    Rows := ['#######', '#..n..#', '#######'];
+    KnowledgeRows := ['vvvvvvv', 'vvvvvvv', 'vvvvvvv'];
+    PlayerX := 1;
+    PlayerY := 1;
+    Facing := FirstPersonFacing.East;
+    Inventory := [];
+  end;
+  mutable var EmptyCorridor: FirstPersonVisibleState := NpcCorridor;
+  EmptyCorridor.Rows[1] := '#.....#';
+  var NpcFigure: TuiCellGrid := RenderFirstPersonGrid(NpcCorridor, 61, 25);
+  var EmptyFigure: TuiCellGrid := RenderFirstPersonGrid(EmptyCorridor, 61, 25);
+  mutable var UpperNpcCells: integer := 0;
+  for I: integer := 0 to (12 * 61) - 1 do
   begin
-    if Cell.Glyph = '●' then
+    if DifferentCells(TuiCellGrid.Create(1, 1, [NpcFigure.Cells[I]]), TuiCellGrid.Create(1, 1, [
+                                                                                                 EmptyFigure.Cells[I]
+                                                                                               ])) >
+       0 then
     begin
-      AssertEquals(78, BackgroundRed(Cell));
-      ItemPixels := ItemPixels + 1
+      UpperNpcCells := UpperNpcCells + 1
     end
   end;
 
-  AssertTrue(ItemPixels > 0);
-  AssertTrue(ItemPixels < 41);
-  ItemAhead.Rows[1] := Std.Str.SetCharAt(ItemAhead.Rows[1], 8, '.');
-  var CollectedGrid: TuiCellGrid := RenderFirstPersonGrid(ItemAhead, 41, 21);
-  for Cell: TuiCell in CollectedGrid.Cells do
-  begin
-    AssertFalse(Cell.Glyph = '●')
-  end;
+  AssertTrue(UpperNpcCells > 0);
+  // Walls hide figures standing behind them.
+  mutable var HiddenNpc: FirstPersonVisibleState := NpcCorridor;
+  HiddenNpc.Rows[1] := '#.#n..#';
+  mutable var HiddenEmpty: FirstPersonVisibleState := NpcCorridor;
+  HiddenEmpty.Rows[1] := '#.#...#';
+  AssertEquals(0, DifferentCells(RenderFirstPersonGrid(HiddenNpc, 61, 25), RenderFirstPersonGrid(HiddenEmpty, 61, 25)));
   var Occluded: FirstPersonVisibleState := record
     Title := 'Occlusion';
     Status := '';
@@ -296,14 +363,14 @@ begin
   AssertTrue(FrontWallRed > 100);
   AssertEquals(38, BackgroundRed(SidePathGrid.Cells[(10 * 21) + 10]));
   AssertEquals(12, BackgroundRed(SidePathGrid.Cells[1 * 21]));
-  AssertTrue(BackgroundRed(SidePathGrid.Cells[5 * 21]) > 100);
+  AssertTrue(IsWallCell(SidePathGrid.Cells[5 * 21]));
   AssertEquals(38, BackgroundRed(SidePathGrid.Cells[9 * 21]));
   mutable var LeftBlocked: FirstPersonVisibleState := FrontWallWithSidePaths;
   LeftBlocked.Rows[2] := '##..#';
   var OneSidePathGrid: TuiCellGrid := RenderFirstPersonGrid(LeftBlocked, 21, 11);
-  AssertTrue(BackgroundRed(OneSidePathGrid.Cells[1 * 21]) > 100);
+  AssertTrue(IsWallCell(OneSidePathGrid.Cells[1 * 21]));
   AssertEquals(12, BackgroundRed(OneSidePathGrid.Cells[(1 * 21) + 20]));
-  AssertTrue(BackgroundRed(OneSidePathGrid.Cells[(5 * 21) + 20]) > 100);
+  AssertTrue(IsWallCell(OneSidePathGrid.Cells[(5 * 21) + 20]));
   mutable var UnknownSide: FirstPersonVisibleState := LeftBlocked;
   UnknownSide.Rows[2] := '#?..#';
   UnknownSide.KnowledgeRows[2] := 'vuvvv';
@@ -314,43 +381,59 @@ begin
   ScreenshotState.PlayerX := 1;
   ScreenshotState.PlayerY := 1;
   var ScreenshotGrid: TuiCellGrid := RenderFirstPersonGrid(ScreenshotState, 21, 11);
-  // The western boundary continues south: its front plane must remain seamless.
+  // The western boundary continues south: its front plane keeps one wall height across the view.
   for Y: integer := 0 to 10 do
   begin
-    AssertEquals(BackgroundRed(ScreenshotGrid.Cells[(Y * 21) + 10]), BackgroundRed(ScreenshotGrid.Cells[Y *
-                                                                                                        21]))
+    AssertEquals(IsWallCell(ScreenshotGrid.Cells[(Y * 21) + 10]), IsWallCell(ScreenshotGrid.Cells[Y *
+                                                                                                  21]))
   end;
 
-  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[3 * 21]) > 100);
-  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[5 * 21]) > 100);
-  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[7 * 21]) > 100);
-  AssertTrue(BackgroundRed(ScreenshotGrid.Cells[(1 * 21) + 20]) > 100);
+  AssertTrue(IsWallCell(ScreenshotGrid.Cells[3 * 21]));
+  AssertTrue(IsWallCell(ScreenshotGrid.Cells[5 * 21]));
+  AssertTrue(IsWallCell(ScreenshotGrid.Cells[7 * 21]));
+  AssertTrue(IsWallCell(ScreenshotGrid.Cells[(1 * 21) + 20]));
   AssertEquals(12, BackgroundRed(ScreenshotGrid.Cells[10]));
   AssertEquals(38, BackgroundRed(ScreenshotGrid.Cells[(10 * 21) + 10]));
   mutable var BothSidePathsState: FirstPersonVisibleState := FixedState(FirstPersonFacing.East);
   BothSidePathsState.PlayerX := 7;
   BothSidePathsState.PlayerY := 5;
   var BothSidePathsGrid: TuiCellGrid := RenderFirstPersonGrid(BothSidePathsState, 21, 11);
-  // Both branches run alongside the same eastern wall plane.
+  // Both branches run alongside the same eastern wall plane at one wall height.
   for Y: integer := 0 to 10 do
   begin
-    AssertEquals(BackgroundRed(BothSidePathsGrid.Cells[(Y * 21) + 10]), BackgroundRed(BothSidePathsGrid.Cells[Y *
-                                                                                                              21]));
-    AssertEquals(BackgroundRed(BothSidePathsGrid.Cells[(Y * 21) + 10]), BackgroundRed(BothSidePathsGrid.Cells[(Y * 21) +
-                                                                                                              20]))
+    AssertEquals(IsWallCell(BothSidePathsGrid.Cells[(Y * 21) + 10]), IsWallCell(BothSidePathsGrid.Cells[Y *
+                                                                                                        21]));
+    AssertEquals(IsWallCell(BothSidePathsGrid.Cells[(Y * 21) + 10]), IsWallCell(BothSidePathsGrid.Cells[(Y * 21) +
+                                                                                                        20]))
   end;
 
-  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[4 * 21]) > 100);
-  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[5 * 21]) > 100);
-  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[(5 * 21) + 20]) > 100);
-  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[7 * 21]) > 100);
-  AssertTrue(BackgroundRed(BothSidePathsGrid.Cells[(7 * 21) + 20]) > 100);
+  AssertTrue(IsWallCell(BothSidePathsGrid.Cells[4 * 21]));
+  AssertTrue(IsWallCell(BothSidePathsGrid.Cells[5 * 21]));
+  AssertTrue(IsWallCell(BothSidePathsGrid.Cells[(5 * 21) + 20]));
+  AssertTrue(IsWallCell(BothSidePathsGrid.Cells[7 * 21]));
+  AssertTrue(IsWallCell(BothSidePathsGrid.Cells[(7 * 21) + 20]));
   mutable var ExitState: FirstPersonVisibleState := FixedState(FirstPersonFacing.South);
   ExitState.PlayerX := 1;
   ExitState.PlayerY := 7;
   var ExitGrid: TuiCellGrid := RenderFirstPersonGrid(ExitState, 21, 11);
-  AssertTrue(BackgroundBlue(ExitGrid.Cells[(5 * 21) + 10]) > 100);
+  AssertTrue(IsWallCell(ExitGrid.Cells[(5 * 21) + 10]));
   AssertEquals(92, BackgroundRed(ExitGrid.Cells[(10 * 21) + 10]));
+  // A near stone wall shows masonry: stones and mortar joints, not one flat color.
+  var MasonryGrid: TuiCellGrid := RenderFirstPersonGrid(FixedState(FirstPersonFacing.East), 41, 21);
+  mutable var WallReds: array of integer := [];
+  for Cell: TuiCell in MasonryGrid.Cells do
+  begin
+    if IsWallCell(Cell) and not Std.Arrays.Contains(WallReds, BackgroundRed(Cell)) then
+    begin
+      Std.Arrays.Push(WallReds, BackgroundRed(Cell))
+    end
+  end;
+
+  AssertTrue(Std.Arrays.Length(WallReds) >= 3);
+  // Torchlight: the floor keeps its full color near the eye and darkens toward the horizon.
+  var CorridorGrid: TuiCellGrid := RenderFirstPersonGrid(FixedState(FirstPersonFacing.West), 41, 21);
+  AssertEquals(38, BackgroundRed(CorridorGrid.Cells[(20 * 41) + 20]));
+  AssertTrue(BackgroundRed(CorridorGrid.Cells[(11 * 41) + 20]) < 38);
   var NearGrid: TuiCellGrid := RenderFirstPersonGrid(FixedState(FirstPersonFacing.East), 9, 20);
   var FarGrid: TuiCellGrid := RenderFirstPersonGrid(FixedState(FirstPersonFacing.West), 9, 20);
   AssertEquals(9, NearGrid.Width);
@@ -361,10 +444,11 @@ begin
              BackgroundRed(FarGrid.Cells[(10 * 9) + 4]));
   AssertEquals(12, BackgroundRed(FarGrid.Cells[4]));
   AssertEquals(38, BackgroundRed(FarGrid.Cells[(19 * 9) + 4]));
+  // Every cell is either one uniform pixel pair or an upper-half block over a lower pixel.
   for Cell: TuiCell in FarGrid.Cells do
   begin
     AssertTrue(Std.Options.IsSome(Cell.ConcreteStyle));
-    AssertEquals(' ', Cell.Glyph)
+    AssertTrue((Cell.Glyph = ' ') or (Cell.Glyph = '▀'))
   end;
   var Empty: TuiCellGrid := RenderFirstPersonGrid(FixedState(FirstPersonFacing.West), 0, 0);
   AssertEquals(0, Empty.Width);

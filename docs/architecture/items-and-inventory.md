@@ -43,7 +43,8 @@ pickup, the field returns to its underlying floor presentation. The context
 panel lists `Ancient coin` under `Quick inventory`; an empty inventory is shown
 as `Empty`.
 
-The first-person coin occupies a small disc at the center of its floor field.
+The first-person coin is a small pixel-art billboard lying at the center of its
+floor field.
 The fixed-height Environment panel above Context displays the interaction hint.
 Only with the sidebar hidden or unable to dock is the hint painted over the
 bottom image row without resizing the view. The server supplies
