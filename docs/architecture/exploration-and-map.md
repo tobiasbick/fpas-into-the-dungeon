@@ -102,7 +102,10 @@ first response the overlay displays `Loading map...`. During a later request it
 keeps the previous valid projection and displays `Updating map...` in the
 status view so the overlay retains its size and position; a
 recoverable rejection also keeps that projection and reports the error in the
-status view. Overlay input never becomes a movement or transition intention.
+status view. The client network adapter reports a rejected map request as a
+distinct map rejection, so only that rejection resolves the in-flight map
+request and rejections of other intentions leave it pending. Overlay input
+never becomes a movement or transition intention.
 
 ## Persistence
 

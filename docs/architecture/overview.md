@@ -50,12 +50,15 @@ these projects.
 - `apps/client` owns the client program entry point, input handling, and the
   connection to the game simulation.
 - `apps/server` owns the server program entry point and server lifetime.
-- `libs/game` owns the authoritative world model, rules, and simulation.
+- `libs/game` owns the authoritative world model, rules, and simulation,
+  including the deterministic outdoor terrain generator.
 - `libs/world` owns validated world, chunk, and savegame persistence,
-  missing-chunk generation, visible-window composition, prefetching, and
-  bounded caching.
+  creation of missing chunks through the `libs/game` generator, visible-window
+  composition, prefetching, and bounded caching.
 - `libs/protocol` owns commands and visible-state messages shared by client and
-  server. It contains no game rules.
+  server, including the one-character cell and knowledge code alphabet of
+  visible rows. It contains no game rules; a server contract test verifies that
+  every code produced by `libs/game` belongs to that alphabet.
 - `libs/persistence` currently owns the shared runtime path and configuration
   interface. Authoritative world files are owned by `libs/world`.
 - `tools/world-preview` samples final terrain or one normalized generator field

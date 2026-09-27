@@ -2,8 +2,8 @@
 unit Dungeon.World.Savegame;
 
 uses
-  Dungeon.Exploration.Model, Dungeon.Game, Dungeon.World, Std.Arrays, Std.Conv, Std.Dictionaries,
-  Std.Fs, Std.Json, Std.Math, Std.Options, Std.Path, Std.Str;
+  Dungeon.Exploration.Model, Dungeon.Game, Dungeon.World, Std.Arrays, Std.Conv, Std.Fs, Std.Json,
+  Std.Json.Fields, Std.Path, Std.Str;
 
 public const
   // Current-only savegame schema written below each selected world.
@@ -16,130 +16,6 @@ public type
     InvalidRemoved(Reason: string);
     Loaded(State: GameState);
   end;
-
-function RequiredField(Fields: dict of string to JsonValue; Name: string): result of JsonValue, string;
-begin
-  case Std.Dictionaries.Get(Fields, Name) of
-    Some(Value):
-    begin
-      return Ok(Value)
-    end;
-    None:
-    begin
-      return Error('savegame is missing field ' + Name)
-    end
-  end
-end;
-
-function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.String(Value):
-    begin
-      return Ok(Value)
-    end
-    else
-    begin
-      return Error(('savegame field ' + Name) + ' must be a string')
-    end
-  end
-end;
-
-function IntegerField(Fields: dict of string to JsonValue; Name: string): result of integer, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.Number(Value):
-    begin
-      var IntegerValue: integer := Trunc(Value);
-      if IntToReal(IntegerValue) <> Value then
-      begin
-        return Error(('savegame field ' + Name) + ' must be an integer')
-      end;
-
-      return Ok(IntegerValue)
-    end
-    else
-    begin
-      return Error(('savegame field ' + Name) + ' must be a number')
-    end
-  end
-end;
-
-function BooleanField(Fields: dict of string to JsonValue; Name: string): result of boolean, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.Bool(Value):
-    begin
-      return Ok(Value)
-    end
-    else
-    begin
-      return Error(('savegame field ' + Name) + ' must be a boolean')
-    end
-  end
-end;
-
-function ObjectField(Fields: dict of string to JsonValue; Name: string): result of dict of string to JsonValue, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.Object(Value):
-    begin
-      return Ok(Value)
-    end
-    else
-    begin
-      return Error(('savegame field ' + Name) + ' must be an object')
-    end
-  end
-end;
-
-function ArrayField(Fields: dict of string to JsonValue; Name: string): result of array of JsonValue, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.ArrayValue(Items):
-    begin
-      return Ok(Items)
-    end
-    else
-    begin
-      return Error(('savegame field ' + Name) + ' must be an array')
-    end
-  end
-end;
-
-function StringArrayField(Fields: dict of string to JsonValue; Name: string): result of array of string, string;
-begin
-  mutable var Values: array of string := [];
-  for Item: JsonValue in try ArrayField(Fields, Name) do
-  begin
-    case Item of
-      JsonValue.String(Value):
-      begin
-        Std.Arrays.Push(Values, Value)
-      end
-      else
-      begin
-        return Error(('savegame field ' + Name) + ' must contain only strings')
-      end
-    end
-  end;
-
-  return Ok(Values)
-end;
-
-function ObjectFields(Text: string): result of dict of string to JsonValue, string;
-begin
-  case try Std.Json.Parse(Text) of
-    JsonValue.Object(Fields):
-    begin
-      return Ok(Fields)
-    end
-    else
-    begin
-      return Error('savegame root must be an object')
-    end
-  end
-end;
 
 function AreaKindName(Value: AreaKind): string;
 begin
@@ -651,21 +527,6 @@ begin
   return ValidateExploration(State, WorldChunkSize)
 end;
 
-function EnsureDirectory(Path: string): result of boolean, string;
-begin
-  if Std.Fs.Exists(Path) then
-  begin
-    if Std.Fs.IsDir(Path) then
-    begin
-      return Ok(true)
-    end;
-
-    return Error('savegame path exists but is not a directory: ' + Path)
-  end;
-
-  return Std.Fs.CreateDir(Path)
-end;
-
 function SaveGameDirectory(World: WorldSession): string;
 begin
   return Std.Path.Join([World.Directory, 'saves'])
@@ -700,10 +561,9 @@ begin
   return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation), 'exploration': EncodeExploration(State.Exploration), 'items': JsonValue.ArrayValue(EncodeItems(State.Items)), 'npc': EncodeNpc(State.Npc)]))
 end;
 
-// Decodes an exact current-version save and validates it against selected-world invariants.
-public function DecodeSaveGame(Text: string; Metadata: WorldMetadata): result of GameState, string;
+function DecodeSaveGameFields(Text: string; Metadata: WorldMetadata): result of GameState, string;
 begin
-  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  var Fields: dict of string to JsonValue := try ParseObject(Text);
   if Std.Dictionaries.Length(Fields) <> 9 then
   begin
     return Error('savegame has an unexpected field set')
@@ -729,6 +589,22 @@ begin
   end;
 
   return ValidateGameState(Metadata, State)
+end;
+
+// Decodes an exact current-version save and validates it against selected-world invariants.
+// Every error is prefixed with `invalid savegame:`.
+public function DecodeSaveGame(Text: string; Metadata: WorldMetadata): result of GameState, string;
+begin
+  case DecodeSaveGameFields(Text, Metadata) of
+    Ok(Value):
+    begin
+      return Ok(Value)
+    end;
+    Error(Message):
+    begin
+      return Error('invalid savegame: ' + Message)
+    end
+  end
 end;
 
 // Loads the selected world's save, distinguishing a missing file from invalid or failed I/O.
@@ -776,6 +652,6 @@ end;
 public function WriteSaveGame(World: WorldSession; State: GameState): result of boolean, string;
 begin
   var Valid: GameState := try ValidateGameState(World.Metadata, State);
-  var DirectoryReady: boolean := try EnsureDirectory(SaveGameDirectory(World));
+  var DirectoryReady: boolean := try Std.Fs.CreateDirAll(SaveGameDirectory(World));
   return Std.Fs.WriteTextAtomic(SaveGamePath(World), EncodeSaveGame(World.Metadata.Id, Valid))
 end;

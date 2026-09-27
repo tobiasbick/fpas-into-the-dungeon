@@ -19,9 +19,9 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-The source currently requires Functional Pascal revision `0408cc6e` or newer;
-it uses receiver calls and higher-order string operations available from that
-revision.
+The source currently requires Functional Pascal revision `415bc6c7` or newer;
+it uses `Std.Json.Fields`, `Std.Toml.Fields`, and `Std.Fs.CreateDirAll`, which
+are available from that revision.
 
 Run the server first. Both programs use `127.0.0.1:4040` by default and create
 their TOML configuration under `~/.fpas-into-the-dungeon/config/`. Optional

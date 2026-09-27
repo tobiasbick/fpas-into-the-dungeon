@@ -1,7 +1,7 @@
 // Versioned JSON message contract shared by the client and server.
 unit Dungeon.Protocol;
 
-uses Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Math, Std.Options, Std.Str;
+uses Std.Arrays, Std.Conv, Std.Json, Std.Json.Fields, Std.Str;
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
@@ -20,6 +20,34 @@ public const
   MaximumDialogueChoices: integer := 4;
   MaximumDialogueIdLength: integer := 128;
   MaximumDialogueTextLength: integer := 2048;
+  // Bound for short dialogue labels: the speaker name and each choice text.
+  MaximumDialogueLabelLength: integer := 128;
+  // One-character wire alphabet for visible-state and exploration-map rows. Dungeon.Game
+  // produces the terrain and interior codes; the server contract test keeps both aligned.
+  // Field whose content is undiscovered in both map and interior rows.
+  UnknownFieldCode: string := '?';
+  // Outdoor map rows.
+  MapGrassCode: string := 'g';
+  MapTreeCode: string := 't';
+  MapForestCode: string := 'f';
+  MapDesertCode: string := 'd';
+  MapMountainCode: string := 'm';
+  MapSeaCode: string := 'o';
+  MapRiverCode: string := 'r';
+  MapLakeCode: string := 'l';
+  MapPathCode: string := 'p';
+  MapEntranceCode: string := 'e';
+  // First-person and interior map rows; item and NPC codes appear only in currently visible fields.
+  InteriorWallCode: string := '#';
+  InteriorFloorCode: string := '.';
+  InteriorExitCode: string := 'x';
+  InteriorTabletCode: string := 't';
+  InteriorItemCode: string := 'i';
+  InteriorNpcCode: string := 'n';
+  // Knowledge rows: undiscovered, remembered, or currently visible.
+  KnowledgeUndiscoveredCode: string := 'u';
+  KnowledgeRememberedCode: string := 'r';
+  KnowledgeVisibleCode: string := 'v';
 
 public type
   // Selects the renderer the client must use for a visible state.
@@ -148,20 +176,6 @@ public type
     Rejected(Code: string; Message: string);
     ErrorMessage(Code: string; Message: string);
   end;
-
-function RequiredField(Fields: dict of string to JsonValue; Name: string): result of JsonValue, string;
-begin
-  case Std.Dictionaries.Get(Fields, Name) of
-    Some(Value):
-    begin
-      return Ok(Value)
-    end;
-    None:
-    begin
-      return Error('message is missing field ' + Name)
-    end
-  end
-end;
 
 function ViewName(Value: ViewKind): string;
 begin
@@ -323,69 +337,45 @@ begin
   end
 end;
 
-function IsVisibleCellCode(Value: string): boolean;
+// Returns whether one character belongs to the outdoor map-row alphabet, including UnknownFieldCode.
+public function IsMapCellCode(Value: string): boolean;
 begin
-  case Value of
-    '?':
-    begin
-      return true
-    end;
-    'g':
-    begin
-      return true
-    end;
-    't':
-    begin
-      return true
-    end;
-    'f':
-    begin
-      return true
-    end;
-    'd':
-    begin
-      return true
-    end;
-    'm':
-    begin
-      return true
-    end;
-    'o':
-    begin
-      return true
-    end;
-    'r':
-    begin
-      return true
-    end;
-    'l':
-    begin
-      return true
-    end;
-    'p':
-    begin
-      return true
-    end;
-    'e':
-    begin
-      return true
-    end
-    else
-    begin
-      return false
-    end
-  end
+  return Std.Arrays.Contains([
+                               UnknownFieldCode,
+                               MapGrassCode,
+                               MapTreeCode,
+                               MapForestCode,
+                               MapDesertCode,
+                               MapMountainCode,
+                               MapSeaCode,
+                               MapRiverCode,
+                               MapLakeCode,
+                               MapPathCode,
+                               MapEntranceCode
+                             ], Value)
 end;
 
-function IsFirstPersonCellCode(Value: string): boolean;
+// Returns whether one character belongs to the interior-row alphabet, including UnknownFieldCode.
+public function IsInteriorCellCode(Value: string): boolean;
 begin
-  return (Value = '?') or
-         ((Value = '#') or ((Value = 't') or ((Value = 'i') or ((Value = 'n') or ((Value = '.') or (Value = 'x'))))))
+  return Std.Arrays.Contains([
+                               UnknownFieldCode,
+                               InteriorWallCode,
+                               InteriorFloorCode,
+                               InteriorExitCode,
+                               InteriorTabletCode,
+                               InteriorItemCode,
+                               InteriorNpcCode
+                             ], Value)
 end;
 
 function IsKnowledgeCode(Value: string): boolean;
 begin
-  return (Value = 'u') or ((Value = 'r') or (Value = 'v'))
+  return Std.Arrays.Contains([
+                               KnowledgeUndiscoveredCode,
+                               KnowledgeRememberedCode,
+                               KnowledgeVisibleCode
+                             ], Value)
 end;
 
 function ValidateKnowledgeRows(
@@ -416,12 +406,12 @@ begin
         return Error('knowledge row contains an unknown field code')
       end;
 
-      if (KnowledgeCode = 'u') and (TerrainCode <> '?') then
+      if (KnowledgeCode = KnowledgeUndiscoveredCode) and (TerrainCode <> UnknownFieldCode) then
       begin
         return Error('undiscovered field must not expose terrain')
       end;
 
-      if (KnowledgeCode <> 'u') and (TerrainCode = '?') then
+      if (KnowledgeCode <> KnowledgeUndiscoveredCode) and (TerrainCode = UnknownFieldCode) then
       begin
         return Error('known field must include terrain')
       end
@@ -433,13 +423,9 @@ end;
 
 function EncodeRows(Rows: array of string): array of JsonValue;
 begin
-  mutable var Values: array of JsonValue := [];
-  for Row: string in Rows do
-  begin
-    Values := Std.Arrays.Concat(Values, [JsonValue.String(Row)])
-  end;
-
-  return Values
+  return Std.Arrays.Map(Rows, function(Row: string): JsonValue begin
+    return JsonValue.String(Row)
+  end)
 end;
 
 function EncodeInventory(Items: array of VisibleInventoryItem): array of JsonValue;
@@ -472,7 +458,7 @@ begin
   end;
 
   if (Std.Str.Length(Value.Speaker) = 0) or
-     (Std.Str.Length(Value.Speaker) > MaximumVisibleInventoryTextLength) then
+     (Std.Str.Length(Value.Speaker) > MaximumDialogueLabelLength) then
   begin
     return Error('dialogue speaker has an invalid length')
   end;
@@ -497,7 +483,7 @@ begin
     end;
 
     if (Std.Str.Length(Choice.Text) = 0) or
-       (Std.Str.Length(Choice.Text) > MaximumVisibleInventoryTextLength) then
+       (Std.Str.Length(Choice.Text) > MaximumDialogueLabelLength) then
     begin
       return Error('dialogue choice text has an invalid length')
     end;
@@ -512,35 +498,6 @@ begin
   end;
 
   return Ok(Value)
-end;
-
-function StringArrayField(Fields: dict of string to JsonValue; Name: string): result of array of string, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.ArrayValue(Items):
-    begin
-      mutable var Values: array of string := [];
-      for Item: JsonValue in Items do
-      begin
-        case Item of
-          JsonValue.String(Value):
-          begin
-            Values := Std.Arrays.Concat(Values, [Value])
-          end
-          else
-          begin
-            return Error(('message field ' + Name) + ' must contain only strings')
-          end
-        end
-      end;
-
-      return Ok(Values)
-    end
-    else
-    begin
-      return Error(('message field ' + Name) + ' must be an array')
-    end
-  end
 end;
 
 function ValidateInventory(Items: array of VisibleInventoryItem): result of array of VisibleInventoryItem, string;
@@ -600,7 +557,7 @@ begin
     for Index: integer := 0 to Std.Str.Length(Row) - 1 do
     begin
       var Code: string := Std.Str.CharAt(Row, Index);
-      if not IsVisibleCellCode(Code) then
+      if not IsMapCellCode(Code) then
       begin
         return Error('visible-state row contains an unknown cell code')
       end
@@ -619,7 +576,7 @@ begin
     return Error('visible-state local and world player positions disagree')
   end;
 
-  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> 'v' then
+  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> KnowledgeVisibleCode then
   begin
     return Error('visible-state player field must be currently visible')
   end;
@@ -660,12 +617,12 @@ begin
     for Index: integer := 0 to Std.Str.Length(Row) - 1 do
     begin
       var Code: string := Std.Str.CharAt(Row, Index);
-      if not IsFirstPersonCellCode(Code) then
+      if not IsInteriorCellCode(Code) then
       begin
         return Error('first-person row contains an unknown field code')
       end;
 
-      if Code = 'x' then
+      if Code = InteriorExitCode then
       begin
         ExitCount := ExitCount + 1
       end
@@ -682,14 +639,13 @@ begin
   begin
     return Error('first-person player position is outside the area')
   end;
-
-  if (((Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '#') or (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = 't')) or (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = 'n')) or
-     (Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX) = '?') then
+  var PlayerCode: string := Std.Str.CharAt(Value.Rows[Value.PlayerY], Value.PlayerX);
+  if Std.Arrays.Contains([InteriorWallCode, InteriorTabletCode, InteriorNpcCode, UnknownFieldCode], PlayerCode) then
   begin
     return Error('first-person player position must be traversable')
   end;
 
-  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> 'v' then
+  if Std.Str.CharAt(Value.KnowledgeRows[Value.PlayerY], Value.PlayerX) <> KnowledgeVisibleCode then
   begin
     return Error('first-person player field must be currently visible')
   end;
@@ -737,14 +693,14 @@ begin
       var Code: string := Std.Str.CharAt(Row, X);
       if Value.View = ViewKind.Map then
       begin
-        if not IsVisibleCellCode(Code) then
+        if not IsMapCellCode(Code) then
         begin
           return Error('exploration map contains an unknown outdoor field code')
         end
       end
       else
       begin
-        if not IsFirstPersonCellCode(Code) then
+        if not IsInteriorCellCode(Code) then
         begin
           return Error('exploration map contains an unknown interior field code')
         end
@@ -763,7 +719,7 @@ begin
   begin
     var PlayerLocalX: integer := Value.PlayerWorldX - Value.OriginX;
     var PlayerLocalY: integer := Value.PlayerWorldY - Value.OriginY;
-    if Std.Str.CharAt(Value.KnowledgeRows[PlayerLocalY], PlayerLocalX) <> 'v' then
+    if Std.Str.CharAt(Value.KnowledgeRows[PlayerLocalY], PlayerLocalX) <> KnowledgeVisibleCode then
     begin
       return Error('exploration map player field must be currently visible')
     end
@@ -787,57 +743,9 @@ begin
   end
 end;
 
-function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.String(Value):
-    begin
-      return Ok(Value)
-    end
-    else
-    begin
-      return Error(('message field ' + Name) + ' must be a string')
-    end
-  end
-end;
-
-function IntegerField(Fields: dict of string to JsonValue; Name: string): result of integer, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.Number(Value):
-    begin
-      var IntegerValue: integer := Trunc(Value);
-      if IntToReal(IntegerValue) <> Value then
-      begin
-        return Error(('message field ' + Name) + ' must be an integer')
-      end;
-
-      return Ok(IntegerValue)
-    end
-    else
-    begin
-      return Error(('message field ' + Name) + ' must be a number')
-    end
-  end
-end;
-
-function BooleanField(Fields: dict of string to JsonValue; Name: string): result of boolean, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.Bool(Value):
-    begin
-      return Ok(Value)
-    end
-    else
-    begin
-      return Error(('message field ' + Name) + ' must be a boolean')
-    end
-  end
-end;
-
 function InventoryField(Fields: dict of string to JsonValue; Name: string): result of array of VisibleInventoryItem, string;
 begin
-  case try RequiredField(Fields, Name) of
+  case try Field(Fields, Name) of
     JsonValue.ArrayValue(Values):
     begin
       mutable var Items: array of VisibleInventoryItem := [];
@@ -874,7 +782,7 @@ end;
 
 function DialogueChoicesField(Fields: dict of string to JsonValue; Name: string): result of array of VisibleDialogueChoice, string;
 begin
-  case try RequiredField(Fields, Name) of
+  case try Field(Fields, Name) of
     JsonValue.ArrayValue(Values):
     begin
       mutable var Choices: array of VisibleDialogueChoice := [];
@@ -922,20 +830,6 @@ begin
     Text := try StringField(Fields, 'text');
     Choices := try DialogueChoicesField(Fields, 'choices');
   end)
-end;
-
-function ObjectFields(Text: string): result of dict of string to JsonValue, string;
-begin
-  case try Std.Json.Parse(Text) of
-    JsonValue.Object(Fields):
-    begin
-      return Ok(Fields)
-    end
-    else
-    begin
-      return Error('message root must be an object')
-    end
-  end
 end;
 
 // Encodes one client message as a compact JSON object for line transport.
@@ -1000,7 +894,7 @@ end;
 // Decodes one client message and rejects missing, mistyped, or unknown fields.
 public function DecodeClient(Text: string): result of ClientMessage, string;
 begin
-  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  var Fields: dict of string to JsonValue := try ParseObject(Text);
   case try StringField(Fields, 'type') of
     'hello':
     begin
@@ -1200,7 +1094,7 @@ end;
 // Decodes one server message and validates visible-state dimensions and coordinates.
 public function DecodeServer(Text: string): result of ServerMessage, string;
 begin
-  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  var Fields: dict of string to JsonValue := try ParseObject(Text);
   case try StringField(Fields, 'type') of
     'welcome':
     begin

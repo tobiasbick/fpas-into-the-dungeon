@@ -1,7 +1,25 @@
 // Runtime paths plus persistent client-network and server-world configuration.
 unit Dungeon.RuntimeData;
 
-uses Std.Dictionaries, Std.Env, Std.Fs, Std.Options, Std.Path, Std.Str, Std.Toml;
+uses Std.Env, Std.Fs, Std.Path, Std.Str, Std.Toml, Std.Toml.Fields;
+
+const
+  // Complete current key sets; any other key marks an obsolete configuration file.
+  ClientConfigFields: array of string := [
+                                           'host',
+                                           'port',
+                                           'context_panel_visible',
+                                           'message_panel_visible'
+                                         ];
+  ServerConfigFields: array of string := [
+                                           'host',
+                                           'port',
+                                           'world_id',
+                                           'world_seed',
+                                           'chunk_cache_limit',
+                                           'max_view_width',
+                                           'max_view_height'
+                                         ];
 
 public type
   // Validated endpoint configuration shared by client and server startup.
@@ -140,35 +158,6 @@ begin
   end
 end;
 
-function EnsureDirectory(Path: string): result of boolean, string;
-begin
-  if Std.Fs.Exists(Path) then
-  begin
-    if Std.Fs.IsDir(Path) then
-    begin
-      return Ok(true)
-    end;
-
-    return Error('runtime path exists but is not a directory: ' + Path)
-  end;
-
-  case Std.Fs.CreateDir(Path) of
-    Ok(Created):
-    begin
-      return Ok(Created)
-    end;
-    Error(Message):
-    begin
-      if Std.Fs.IsDir(Path) then
-      begin
-        return Ok(true)
-      end;
-
-      return Error((('cannot create runtime directory ' + Path) + ': ') + Message)
-    end
-  end
-end;
-
 function EncodeClientConfig(Network: NetworkConfig; Preferences: ClientPreferences): string;
 begin
   return Std.Toml.Stringify(TomlValue.Table(['host': TomlValue.String(Network.Host), 'port': TomlValue.Integer(Network.Port), 'context_panel_visible': TomlValue.Boolean(Preferences.ContextPanelVisible), 'message_panel_visible': TomlValue.Boolean(Preferences.MessagePanelVisible)]))
@@ -215,76 +204,57 @@ end;
 
 function PrepareShared(Paths: RuntimePaths): result of boolean, string;
 begin
-  var RootReady: boolean := try EnsureDirectory(Paths.Root);
-  var ConfigReady: boolean := try EnsureDirectory(Paths.Config);
-  var LogsReady: boolean := try EnsureDirectory(Paths.Logs);
-  var CacheReady: boolean := try EnsureDirectory(Paths.Cache);
+  var RootReady: boolean := try Std.Fs.CreateDirAll(Paths.Root);
+  var ConfigReady: boolean := try Std.Fs.CreateDirAll(Paths.Config);
+  var LogsReady: boolean := try Std.Fs.CreateDirAll(Paths.Logs);
+  var CacheReady: boolean := try Std.Fs.CreateDirAll(Paths.Cache);
   return Ok(true)
 end;
 
-function ReadNetworkConfig(Path: string): result of NetworkConfig, string;
+type
+  // Complete contents of client.toml.
+  ClientFileConfig = record
+    Network: NetworkConfig;
+    Preferences: ClientPreferences;
+  end;
+  // Complete contents of server.toml.
+  ServerFileConfig = record
+    Network: NetworkConfig;
+    World: ServerWorldConfig;
+  end;
+
+// Adds the file path and recovery guidance to one configuration error.
+function ConfigurationError(Path: string; Message: string): string;
 begin
-  var Text: string := try Std.Fs.ReadText(Path);
-  mutable var Fields: dict of string to TomlValue := [:];
-  case try Std.Toml.Parse(Text) of
-    TomlValue.Table(Value):
-    begin
-      Fields := Value
-    end
-    else
-    begin
-      return Error('configuration root must be a TOML table: ' + Path)
-    end
-  end;
-  mutable var Host: string := '';
-  case Fields.Get('host') of
-    Some(HostValue):
-    begin
-      case HostValue of
-        TomlValue.String(Value):
-        begin
-          Host := Value
-        end
-        else
-        begin
-          return Error('configuration field host must be a string: ' + Path)
-        end
-      end
-    end;
-    None:
-    begin
-      return Error('configuration is missing field host: ' + Path)
-    end
-  end;
-  mutable var Port: integer := 0;
-  case Fields.Get('port') of
-    Some(PortValue):
-    begin
-      case PortValue of
-        TomlValue.Integer(Value):
-        begin
-          Port := Value
-        end
-        else
-        begin
-          return Error('configuration field port must be an integer: ' + Path)
-        end
-      end
-    end;
-    None:
-    begin
-      return Error('configuration is missing field port: ' + Path)
-    end
-  end;
+  return (('invalid configuration: ' + Message) + '; edit, delete or recreate it: ') + Path
+end;
 
-  if Host.Trim().Length() = 0 then
+// Reads one configuration table and rejects keys outside the current schema.
+function ReadConfigTable(Path: string; Allowed: array of string): result of dict of string to TomlValue, string;
+begin
+  var Fields: dict of string to TomlValue := try ParseTable(try Std.Fs.ReadText(Path));
+  var Known: boolean := try RequireOnlyFields(Fields, Allowed);
+  return Ok(Fields)
+end;
+
+function NonEmptyString(Fields: dict of string to TomlValue; Name: string): result of string, string;
+begin
+  var Value: string := try StringField(Fields, Name);
+  if Value.Trim().Length() = 0 then
   begin
-    return Error('configuration field host must not be empty: ' + Path)
+    return Error(('field ' + Name) + ' must not be empty')
   end;
 
+  return Ok(Value)
+end;
+
+function ReadNetworkConfig(Fields: dict of string to TomlValue): result of NetworkConfig, string;
+begin
+  var Host: string := try NonEmptyString(Fields, 'host');
+  var Port: integer := try IntegerField(Fields, 'port');
   if (Port < 1) or (Port > 65535) then
   begin
-    return Error('configuration field port must be between 1 and 65535: ' + Path)
+    return Error('field port must be between 1 and 65535')
   end;
 
   return Ok(record
@@ -293,140 +263,73 @@ begin
   end)
 end;
 
-function RequiredBoolean(Fields: dict of string to TomlValue; Name: string; Path: string): result of boolean, string;
+function ReadClientFields(Path: string): result of ClientFileConfig, string;
 begin
-  case Fields.Get(Name) of
-    Some(FieldValue):
-    begin
-      case FieldValue of
-        TomlValue.Boolean(Value):
-        begin
-          return Ok(Value)
-        end
-        else
-        begin
-          return Error((('configuration field ' + Name) + ' must be a boolean: ') + Path)
-        end
-      end
-    end;
-    None:
-    begin
-      return Error((('configuration is missing field ' + Name) + ': ') + Path)
-    end
-  end
-end;
-
-function ReadClientPreferences(Path: string): result of ClientPreferences, string;
-begin
-  var Text: string := try Std.Fs.ReadText(Path);
-  mutable var Fields: dict of string to TomlValue := [:];
-  case try Std.Toml.Parse(Text) of
-    TomlValue.Table(Value):
-    begin
-      Fields := Value
-    end
-    else
-    begin
-      return Error('configuration root must be a TOML table: ' + Path)
-    end
-  end;
-
-  if Fields.Length() <> 4 then
-  begin
-    return Error('client configuration must contain exactly host, port, context_panel_visible, and message_panel_visible; delete or recreate it: ' +
-                 Path)
-  end;
-
+  var Fields: dict of string to TomlValue := try ReadConfigTable(Path, ClientConfigFields);
   return Ok(record
-    ContextPanelVisible := try RequiredBoolean(Fields, 'context_panel_visible', Path);
-    MessagePanelVisible := try RequiredBoolean(Fields, 'message_panel_visible', Path);
+    Network := try ReadNetworkConfig(Fields);
+    Preferences := record
+      ContextPanelVisible := try BooleanField(Fields, 'context_panel_visible');
+      MessagePanelVisible := try BooleanField(Fields, 'message_panel_visible');
+    end;
   end)
 end;
 
-function RequiredString(Fields: dict of string to TomlValue; Name: string; Path: string): result of string, string;
+// Reads and validates client.toml; every error names the file and how to recover.
+function ReadClientConfig(Path: string): result of ClientFileConfig, string;
 begin
-  case Fields.Get(Name) of
-    Some(FieldValue):
+  case ReadClientFields(Path) of
+    Ok(Value):
     begin
-      case FieldValue of
-        TomlValue.String(Value):
-        begin
-          if Value.Trim().Length() = 0 then
-          begin
-            return Error((('configuration field ' + Name) + ' must not be empty: ') + Path)
-          end;
-
-          return Ok(Value)
-        end
-        else
-        begin
-          return Error((('configuration field ' + Name) + ' must be a string: ') + Path)
-        end
-      end
+      return Ok(Value)
     end;
-    None:
+    Error(Message):
     begin
-      return Error((('configuration is missing field ' + Name) + ': ') + Path)
+      return Error(ConfigurationError(Path, Message))
     end
   end
 end;
 
-function RequiredInteger(Fields: dict of string to TomlValue; Name: string; Path: string): result of integer, string;
+function ReadServerFields(Path: string): result of ServerFileConfig, string;
 begin
-  case Fields.Get(Name) of
-    Some(FieldValue):
-    begin
-      case FieldValue of
-        TomlValue.Integer(Value):
-        begin
-          return Ok(Value)
-        end
-        else
-        begin
-          return Error((('configuration field ' + Name) + ' must be an integer: ') + Path)
-        end
-      end
-    end;
-    None:
-    begin
-      return Error((('configuration is missing field ' + Name) + ': ') + Path)
-    end
-  end
+  var Fields: dict of string to TomlValue := try ReadConfigTable(Path, ServerConfigFields);
+  var World: ServerWorldConfig := record
+    Id := try NonEmptyString(Fields, 'world_id');
+    Seed := try IntegerField(Fields, 'world_seed');
+    ChunkCacheLimit := try IntegerField(Fields, 'chunk_cache_limit');
+    MaximumViewWidth := try IntegerField(Fields, 'max_view_width');
+    MaximumViewHeight := try IntegerField(Fields, 'max_view_height');
+  end;
+
+  if World.ChunkCacheLimit < 9 then
+  begin
+    return Error('field chunk_cache_limit must be at least 9')
+  end;
+
+  if (World.MaximumViewWidth < 1) or (World.MaximumViewHeight < 1) then
+  begin
+    return Error('maximum viewport dimensions must be positive')
+  end;
+
+  return Ok(record
+    Network := try ReadNetworkConfig(Fields);
+    World := World;
+  end)
 end;
 
-function ReadServerWorldConfig(Path: string): result of ServerWorldConfig, string;
+// Reads and validates server.toml; every error names the file and how to recover.
+function ReadServerConfig(Path: string): result of ServerFileConfig, string;
 begin
-  var Text: string := try Std.Fs.ReadText(Path);
-  mutable var Fields: dict of string to TomlValue := [:];
-  case try Std.Toml.Parse(Text) of
-    TomlValue.Table(Value):
+  case ReadServerFields(Path) of
+    Ok(Value):
     begin
-      Fields := Value
-    end
-    else
+      return Ok(Value)
+    end;
+    Error(Message):
     begin
-      return Error('configuration root must be a TOML table: ' + Path)
+      return Error(ConfigurationError(Path, Message))
     end
-  end;
-  var Value: ServerWorldConfig := record
-    Id := try RequiredString(Fields, 'world_id', Path);
-    Seed := try RequiredInteger(Fields, 'world_seed', Path);
-    ChunkCacheLimit := try RequiredInteger(Fields, 'chunk_cache_limit', Path);
-    MaximumViewWidth := try RequiredInteger(Fields, 'max_view_width', Path);
-    MaximumViewHeight := try RequiredInteger(Fields, 'max_view_height', Path);
-  end;
-
-  if Value.ChunkCacheLimit < 9 then
-  begin
-    return Error('configuration field chunk_cache_limit must be at least 9: ' + Path)
-  end;
-
-  if (Value.MaximumViewWidth < 1) or (Value.MaximumViewHeight < 1) then
-  begin
-    return Error('configured maximum viewport dimensions must be positive: ' + Path)
-  end;
-
-  return Ok(Value)
+  end
 end;
 
 // Prepares shared client directories and loads or creates client.toml.
@@ -435,20 +338,20 @@ begin
   var Paths: RuntimePaths := RuntimePathsForRoot(try ResolveDataRoot(DataRootOverride));
   var SharedReady: boolean := try PrepareShared(Paths);
   var ConfigReady: boolean := try EnsureClientConfigFile(Paths.ClientConfig, DefaultNetworkConfig(), DefaultClientPreferences());
+  var Config: ClientFileConfig := try ReadClientConfig(Paths.ClientConfig);
   return Ok(record
     Paths := Paths;
-    Network := try ReadNetworkConfig(Paths.ClientConfig);
+    Network := Config.Network;
     World := DefaultServerWorldConfig();
-    Preferences := try ReadClientPreferences(Paths.ClientConfig);
+    Preferences := Config.Preferences;
   end)
 end;
 
 // Atomically updates client presentation preferences while preserving the configured endpoint.
 public function SaveClientPreferences(Path: string; Preferences: ClientPreferences): result of boolean, string;
 begin
-  var Network: NetworkConfig := try ReadNetworkConfig(Path);
-  var Current: ClientPreferences := try ReadClientPreferences(Path);
-  return Std.Fs.WriteTextAtomic(Path, EncodeClientConfig(Network, Preferences))
+  var Current: ClientFileConfig := try ReadClientConfig(Path);
+  return Std.Fs.WriteTextAtomic(Path, EncodeClientConfig(Current.Network, Preferences))
 end;
 
 // Prepares server directories, including worlds, and loads or creates server.toml.
@@ -456,12 +359,13 @@ public function LoadServerRuntime(DataRootOverride: option of string): result of
 begin
   var Paths: RuntimePaths := RuntimePathsForRoot(try ResolveDataRoot(DataRootOverride));
   var SharedReady: boolean := try PrepareShared(Paths);
-  var WorldsReady: boolean := try EnsureDirectory(Paths.Worlds);
+  var WorldsReady: boolean := try Std.Fs.CreateDirAll(Paths.Worlds);
   var ConfigReady: boolean := try EnsureServerConfigFile(Paths.ServerConfig, DefaultNetworkConfig(), DefaultServerWorldConfig());
+  var Config: ServerFileConfig := try ReadServerConfig(Paths.ServerConfig);
   return Ok(record
     Paths := Paths;
-    Network := try ReadNetworkConfig(Paths.ServerConfig);
-    World := try ReadServerWorldConfig(Paths.ServerConfig);
+    Network := Config.Network;
+    World := Config.World;
     Preferences := DefaultClientPreferences();
   end)
 end;

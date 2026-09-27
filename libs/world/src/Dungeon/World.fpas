@@ -1,9 +1,7 @@
 // Persistent chunk loading, creation, caching, and visible-window composition.
 unit Dungeon.World;
 
-uses
-  Dungeon.Game, Std.Arrays, Std.Conv, Std.Dictionaries, Std.Fs, Std.Json, Std.Math, Std.Options,
-  Std.Path, Std.Str;
+uses Dungeon.Game, Std.Arrays, Std.Conv, Std.Fs, Std.Json, Std.Json.Fields, Std.Path, Std.Str;
 
 public const
   // Default deterministic seed used only when creating a selected world for the first time.
@@ -66,35 +64,6 @@ public type
     public State: GameState;
   end;
 
-function EnsureDirectory(Path: string): result of boolean, string;
-begin
-  if Std.Fs.Exists(Path) then
-  begin
-    if Std.Fs.IsDir(Path) then
-    begin
-      return Ok(true)
-    end;
-
-    return Error('world path exists but is not a directory: ' + Path)
-  end;
-
-  case Std.Fs.CreateDir(Path) of
-    Ok(Created):
-    begin
-      return Ok(Created)
-    end;
-    Error(Message):
-    begin
-      if Std.Fs.IsDir(Path) then
-      begin
-        return Ok(true)
-      end;
-
-      return Error((('cannot create world directory ' + Path) + ': ') + Message)
-    end
-  end
-end;
-
 function AllWorldIdCharactersAllowed(AllAllowed: boolean; Character: string): boolean;
 begin
   return AllAllowed and AllowedWorldIdCharacters.Contains(Character)
@@ -115,106 +84,11 @@ begin
   return Ok(WorldId)
 end;
 
-function RequiredField(Fields: dict of string to JsonValue; Name: string): result of JsonValue, string;
-begin
-  case Fields.Get(Name) of
-    Some(Value):
-    begin
-      return Ok(Value)
-    end;
-    None:
-    begin
-      return Error('world data is missing field ' + Name)
-    end
-  end
-end;
-
-function StringField(Fields: dict of string to JsonValue; Name: string): result of string, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.String(Value):
-    begin
-      return Ok(Value)
-    end
-    else
-    begin
-      return Error(('world data field ' + Name) + ' must be a string')
-    end
-  end
-end;
-
-function IntegerField(Fields: dict of string to JsonValue; Name: string): result of integer, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.Number(Value):
-    begin
-      var IntegerValue: integer := Trunc(Value);
-      if IntToReal(IntegerValue) <> Value then
-      begin
-        return Error(('world data field ' + Name) + ' must be an integer')
-      end;
-
-      return Ok(IntegerValue)
-    end
-    else
-    begin
-      return Error(('world data field ' + Name) + ' must be a number')
-    end
-  end
-end;
-
-function StringArrayField(Fields: dict of string to JsonValue; Name: string): result of array of string, string;
-begin
-  case try RequiredField(Fields, Name) of
-    JsonValue.ArrayValue(Items):
-    begin
-      mutable var Values: array of string := [];
-      for Item: JsonValue in Items do
-      begin
-        case Item of
-          JsonValue.String(Value):
-          begin
-            Std.Arrays.Push(Values, Value)
-          end
-          else
-          begin
-            return Error(('world data field ' + Name) + ' must contain only strings')
-          end
-        end
-      end;
-
-      return Ok(Values)
-    end
-    else
-    begin
-      return Error(('world data field ' + Name) + ' must be an array')
-    end
-  end
-end;
-
-function ObjectFields(Text: string): result of dict of string to JsonValue, string;
-begin
-  case try Std.Json.Parse(Text) of
-    JsonValue.Object(Fields):
-    begin
-      return Ok(Fields)
-    end
-    else
-    begin
-      return Error('world data root must be an object')
-    end
-  end
-end;
-
 function EncodeRows(Rows: array of string): array of JsonValue;
 begin
-  mutable var Values: array of JsonValue := [];
-  for Row: string in Rows do
-  begin
-    Std.Arrays.Push(Values, JsonValue.String(Row))
-  end;
-
-  return Values
+  return Std.Arrays.Map(Rows, function(Row: string): JsonValue begin
+    return JsonValue.String(Row)
+  end)
 end;
 
 function EncodeMetadata(Metadata: WorldMetadata): string;
@@ -222,9 +96,9 @@ begin
   return Std.Json.Stringify(JsonValue.Object(['version': JsonValue.Number(IntToReal(Metadata.FormatVersion)), 'id': JsonValue.String(Metadata.Id), 'seed': JsonValue.Number(IntToReal(Metadata.Seed)), 'generator_version': JsonValue.Number(IntToReal(Metadata.GeneratorVersion)), 'chunk_size': JsonValue.Number(IntToReal(Metadata.ChunkSize)), 'spawn_x': JsonValue.Number(IntToReal(Metadata.Spawn.X)), 'spawn_y': JsonValue.Number(IntToReal(Metadata.Spawn.Y)), 'outdoor_area_id': JsonValue.String(Metadata.OutdoorAreaId), 'outdoor_area_label': JsonValue.String(Metadata.OutdoorAreaLabel), 'dungeon_area_id': JsonValue.String(Metadata.DungeonAreaId), 'dungeon_area_label': JsonValue.String(Metadata.DungeonAreaLabel), 'entrance_id': JsonValue.String(Metadata.EntranceId), 'entrance_x': JsonValue.Number(IntToReal(Metadata.Entrance.X)), 'entrance_y': JsonValue.Number(IntToReal(Metadata.Entrance.Y)), 'entrance_target_area_id': JsonValue.String(Metadata.EntranceTargetAreaId)]))
 end;
 
-function DecodeMetadata(Text: string; ExpectedId: string): result of WorldMetadata, string;
+function DecodeMetadataFields(Text: string; ExpectedId: string): result of WorldMetadata, string;
 begin
-  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  var Fields: dict of string to JsonValue := try ParseObject(Text);
   if Std.Dictionaries.Length(Fields) <> 15 then
   begin
     return Error('world metadata must contain exactly the current schema fields')
@@ -272,6 +146,21 @@ begin
   end;
 
   return ValidateWorldMetadata(Metadata)
+end;
+
+// Decodes world metadata; errors name the world metadata as their source.
+function DecodeMetadata(Text: string; ExpectedId: string): result of WorldMetadata, string;
+begin
+  case DecodeMetadataFields(Text, ExpectedId) of
+    Ok(Value):
+    begin
+      return Ok(Value)
+    end;
+    Error(Message):
+    begin
+      return Error('invalid world metadata: ' + Message)
+    end
+  end
 end;
 
 function BaseCode(Value: BaseTerrainKind): string;
@@ -488,9 +377,13 @@ begin
   return Ok(Rows)
 end;
 
-function DecodeChunk(Text: string; Metadata: WorldMetadata; ExpectedCoordinate: ChunkCoordinate): result of WorldChunk, string;
+function DecodeChunkFields(
+  Text: string;
+  Metadata: WorldMetadata;
+  ExpectedCoordinate: ChunkCoordinate
+): result of WorldChunk, string;
 begin
-  var Fields: dict of string to JsonValue := try ObjectFields(Text);
+  var Fields: dict of string to JsonValue := try ParseObject(Text);
   if try IntegerField(Fields, 'version') <> WorldFormatVersion then
   begin
     return Error('unsupported chunk format version')
@@ -545,6 +438,21 @@ begin
   return Ok(Chunk)
 end;
 
+// Decodes one stored chunk; errors name the chunk file as their source.
+function DecodeChunk(Text: string; Metadata: WorldMetadata; ExpectedCoordinate: ChunkCoordinate): result of WorldChunk, string;
+begin
+  case DecodeChunkFields(Text, Metadata, ExpectedCoordinate) of
+    Ok(Value):
+    begin
+      return Ok(Value)
+    end;
+    Error(Message):
+    begin
+      return Error('invalid chunk file: ' + Message)
+    end
+  end
+end;
+
 // Returns the stable metadata path for an open world.
 public function WorldMetadataPath(World: WorldSession): string;
 begin
@@ -573,9 +481,9 @@ begin
   begin
     return Error('world chunk cache limit must be positive')
   end;
-  var RootReady: boolean := try EnsureDirectory(WorldsRoot);
+  var RootReady: boolean := try Std.Fs.CreateDirAll(WorldsRoot);
   var Directory: string := Std.Path.Join([WorldsRoot, ValidId]);
-  var DirectoryReady: boolean := try EnsureDirectory(Directory);
+  var DirectoryReady: boolean := try Std.Fs.CreateDirAll(Directory);
   mutable var Empty: WorldSession := record
     Directory := Directory;
     Metadata := try NewWorldMetadata(ValidId, Seed);
@@ -583,7 +491,7 @@ begin
     Clock := 0;
     CacheLimit := CacheLimit;
   end;
-  var ChunksReady: boolean := try EnsureDirectory(Std.Path.Join([Directory, 'chunks']));
+  var ChunksReady: boolean := try Std.Fs.CreateDirAll(Std.Path.Join([Directory, 'chunks']));
   var MetadataPath: string := WorldMetadataPath(Empty);
   mutable var Metadata: WorldMetadata := Empty.Metadata;
   if Std.Fs.Exists(MetadataPath) then
@@ -663,7 +571,7 @@ end;
 
 function ReadOrCreateChunk(World: WorldSession; Coordinate: ChunkCoordinate): result of WorldChunk, string;
 begin
-  var ColumnReady: boolean := try EnsureDirectory(ChunkColumnDirectory(World, Coordinate));
+  var ColumnReady: boolean := try Std.Fs.CreateDirAll(ChunkColumnDirectory(World, Coordinate));
   var Path: string := WorldChunkPath(World, Coordinate);
   if Std.Fs.Exists(Path) then
   begin
