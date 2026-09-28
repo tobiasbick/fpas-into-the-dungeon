@@ -114,11 +114,11 @@ already final.
   damage frame and the player's damage number wait for that lunge. A destroyed
   skeleton is already gone from the state, so the client draws it on the field
   ahead once more and lets it sink into the floor.
-- **Clock:** while an animation runs, the client keeps one background
-  subscription that sends an `AnimationTick` event every 40 ms through the
-  existing client event inbox, using `Select` with a timer and the cancellation
-  token. The subscription ends with the animation, a key press, defeat, or a
-  lost connection. No Functional Pascal change is needed.
+- **Clock:** the client asks the TUI host for its frames with
+  `Cmd.RequestTick(40)`. Each `TuiMsg.Tick` advances the animation by the
+  elapsed time and requests the next frame until the animation ends. A key
+  press, defeat, or a lost connection stops it; a tick still pending then
+  changes nothing.
 - **Input:** a key press during an animation completes it at once and is then
   handled normally, so fast play never feels delayed and no input is lost.
 - **Cost:** a full first-person frame of 128 by 44 cells took about 29 ms,

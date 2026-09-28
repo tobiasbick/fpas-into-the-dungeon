@@ -19,10 +19,10 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-The source currently requires Functional Pascal revision `03ea8e8d` or newer;
-it uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`, and
-context-typed record updates such as `State with Hostiles := []; end`, which
-are available from that revision.
+The source currently requires Functional Pascal revision `1df58c9e` or newer;
+it uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
+context-typed record updates such as `State with Hostiles := []; end`, and
+`Cmd.RequestTick` for combat animation, which are available from that revision.
 
 Run the server first. Both programs use `127.0.0.1:4040` by default and create
 their TOML configuration under `~/.fpas-into-the-dungeon/config/`. Optional

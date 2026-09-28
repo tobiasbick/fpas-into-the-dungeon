@@ -284,9 +284,9 @@ fist, then a white hit flash with a rising damage number or a sideways dodge
 with `miss`, then the opponent's lunge. The red frame and the player's rising
 damage number wait for that lunge; a destroyed opponent sinks into the floor.
 The animation only presents the already resolved state. Any key completes it at
-once and is then handled normally. A client background subscription sends one
-frame event every 40 ms while an animation runs; walls and floor are rendered
-once at its start, so each frame only composes sprites and texts.
+once and is then handled normally. While an animation runs, the client requests
+a host tick every 40 ms; walls and floor are rendered once at its start, so
+each frame only composes sprites and texts.
 
 Defeat returns to the session start screen with a `You have fallen` overlay
 containing the server's summary. `Continue` closes it with `New game` focused,

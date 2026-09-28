@@ -1,47 +1,18 @@
-// Starts, clocks, and stops the client-only combat animation of a resolved turn.
+// Starts, advances, and stops the client-only combat animation of a resolved turn.
 unit Dungeon.Client.Ui.Playback;
 
 uses
   Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Layout, Dungeon.Client.Animation,
   Dungeon.Client.Model, Dungeon.Client.Raycast, Dungeon.Protocol, Std.Task, Std.Tui;
 
-// Sends one frame event per animation interval until cancelled; it never fails.
-function RunAnimationClock(Events: channel of ClientEvent; Token: CancellationToken): result of boolean, string;
-begin
-  while true do
-  begin
-    var Winner: integer := Select([
-                                    CancellationCase(Token, procedure() begin end),
-                                    TimerCase(AnimationFrameMilliseconds, procedure() begin end)
-                                  ]);
-    if Winner = 0 then
-    begin
-      return Ok(true)
-    end;
-
-    case SendWithCancellation(Events, ClientEvent.AnimationTick(AnimationFrameMilliseconds), Token) of
-      Ok(Sent):
-      begin
-      end;
-      Error(Reason):
-      begin
-        return Ok(true)
-      end
-    end
-  end;
-
-  return Ok(true)
-end;
-
-// Ends a running animation at once and stops its clock; the still frame shows the final state.
+// Ends a running animation at once; the still frame shows the final state.
+// A tick still pending from the host arrives later and is ignored.
 public function StopAnimation(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
 begin
   if not State.Animation.Active then
   begin
     return State
   end;
-
-  Cmd.CancelSubscription(AnimationSubscriptionId);
   mutable var Next: ClientModel := State;
   Next.Animation := NoAnimation();
   return Next
@@ -96,11 +67,30 @@ begin
     return Next
   end;
   var Viewport: WorldViewport := DesiredWorldViewport(Next);
-  var ClockEvents: channel of ClientEvent := Next.Events;
   Next.Animation := Animation;
   Next.AnimationScene := RenderFirstPersonScene(FirstPersonFromModel(Next), Viewport.Width, Viewport.Height);
-  Cmd.ReplaceSubscription(AnimationSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
-    return RunAnimationClock(ClockEvents, Token)
-  end);
+  Cmd.RequestTick(AnimationFrameMilliseconds);
+  return Next
+end;
+
+// Advances a running animation by the elapsed time of one host tick and requests the next frame.
+// Ticks after the animation ended change nothing.
+public function AdvanceCombatAnimation(State: ClientModel; Elapsed: integer; Cmd: TuiCmdOutput): ClientModel;
+begin
+  if not State.Animation.Active then
+  begin
+    return State
+  end;
+  mutable var Next: ClientModel := State;
+  Next.Animation := AdvanceAnimation(State.Animation, Elapsed);
+  if Next.Animation.Active then
+  begin
+    Cmd.RequestTick(AnimationFrameMilliseconds)
+  end
+  else
+  begin
+    Next.Animation := NoAnimation()
+  end;
+
   return Next
 end;
