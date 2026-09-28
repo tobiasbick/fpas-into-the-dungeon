@@ -46,6 +46,14 @@ already have completed. A rejected load restores the session menu with the
 server's explanation. If the server removes an invalid save during connection,
 the status explains the removal and only `New game` is offered.
 
+Behind the menu, the client draws a colored ASCII view of an overgrown dungeon
+entrance at dusk. The geometry is generated from the current terminal size:
+small terminals retain the gate and path, while larger terminals add mountains,
+trees, stars, and torches. The menu remains an opaque, focused overlay inside
+the entrance, so decoration never competes with labels or controls. Connection,
+session-selection, pending, information, confirmation, and defeat states share
+the same backdrop.
+
 ## Game screen
 
 The active game uses a bordered main row, an optional framed message panel,

@@ -14,6 +14,33 @@ in [Functional Pascal](https://github.com/tobiasbick/functional-pascal).
 The current version has a TUI client connected to an authoritative game server,
 with a generated, chunked outdoor world and a first-person dungeon view.
 
+## Screenshots
+
+**Start screen**
+
+![Start screen with a dungeon entrance rendered as colored ASCII art](docs/images/start-screen.png)
+
+The start menu sits inside a torch-lit dungeon entrance. The surrounding
+scenery is colored ASCII art generated to fit the current terminal size.
+
+**Outdoor world**
+
+![Outdoor world with terrain, paths, water, mountains, and Fog of War](docs/images/outdoor-world.png)
+
+The outdoor view shows the player among forests, grassland, water, mountains,
+paths, and an entrance. Darker and hidden areas visualize the Fog of War.
+
+> **Development note:** This is a staged preview of the outdoor renderer, not
+> the current playable world. During this early development phase, the outdoor
+> world primarily leads to a single dungeon entrance.
+
+**Dungeon encounter**
+
+![First-person dungeon encounter with a restless skeleton](docs/images/dungeon-skeleton.png)
+
+Interiors use a grid-based first-person view rather than free movement. Here,
+the player faces the restless skeleton in the initial dungeon.
+
 ```powershell
 fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj

@@ -4,10 +4,11 @@ This roadmap records the intended development order without defining the
 complete game in advance. Work proceeds as small end-to-end slices that leave
 the client and server executable and tested.
 
-`DONE` means the current acceptance criteria are met. `NEXT` is the only stage
-that should be detailed enough for immediate implementation. `LATER` gives an
-ordering direction and may change as the project teaches us more. `OPEN` marks
-a question that has not been decided.
+`DONE` means the current acceptance criteria are met. `PARTIAL` means that a
+stage contains a completed substage and explicitly deferred later work. `NEXT`
+is the only stage that should be detailed enough for immediate implementation.
+`LATER` gives an ordering direction and may change as the project teaches us
+more. `OPEN` marks a question that has not been decided.
 
 ## 1. Project foundation — DONE
 
@@ -295,14 +296,14 @@ and equipment remain outside this phase.
 The user accepted the slice after `Space` was mapped to the terminal's
 dedicated space key kind.
 
-## 13. Character progression — IN REVIEW
+## 13. Character progression — PARTIAL
 
 Progression starts with equipment because it changes the existing fight at
 once, while experience and levels need more opponents than the initial dungeon
 provides. Named attributes such as strength or dexterity are introduced only
 when a rule needs them; until then the character has derived values.
 
-### 13a. Equipment, character sheet, and combat animation — IN REVIEW
+### 13a. Equipment, character sheet, and combat animation — DONE
 
 - [x] Design derived values (attack, damage, armor, maximum health), equipment
   slots, and turn costs before implementation in
@@ -340,12 +341,14 @@ when a rule needs them; until then the character has derived values.
   equipment.
 - [x] Synchronize architecture, product terminology, UI, persistence, and
   roadmap documentation.
-- [ ] Review the complete equipment slice with the user and obtain explicit
+- [x] Review the complete equipment slice with the user and obtain explicit
   acceptance.
 
 The implemented slice uses protocol version 12 and savegame format 6.
 Item rarity, durability, shops, loot tables, two-handed weapons, and further
 slots remain outside this slice.
+The user accepted the complete equipment, character-sheet, and combat-animation
+slice.
 
 ### 13b. Experience and levels — LATER
 

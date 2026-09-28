@@ -50,8 +50,9 @@ these projects.
 - `apps/client` owns the client program entry point, input handling, and the
   connection to the game simulation.
   `Dungeon.Client.Ui` holds the TUI update and view entry points; its subunits
-  own one concern each: `Controls` (control and action identities), `Layout`
-  (docking and viewports), `Session` (connection and session lifecycle),
+  own one concern each: `Backdrop` (responsive pre-game ASCII scenery),
+  `Controls` (control and action identities), `Layout` (docking and viewports),
+  `Session` (connection and session lifecycle),
   `Intentions` (queued player requests), `Input` (keys and actions), `Events`
   (network events), `Playback` (combat animation clock), `MapCells`,
   `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`, and
