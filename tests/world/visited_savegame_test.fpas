@@ -1,0 +1,85 @@
+// Verifies that saves retain first-visit entities and reject invalid visit lists.
+program VisitedSavegameTest;
+
+uses
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Interior.InitialDungeon,
+  Dungeon.Items, Dungeon.Movement, Dungeon.Test.InitialAreas, Dungeon.World, Dungeon.World.Savegame,
+  Dungeon.Terrain, Std.Arrays, Std.Conv, Std.Fs, Std.Results, Std.Str, Std.Test, Std.Time;
+
+begin
+  var Root: string := '.temp-data/visited-save-test-' + IntToStr(TimestampMillis());
+  var World: WorldSession := Unwrap(OpenWorld(Root, 'visited', 12345, 16));
+  var Metadata: WorldMetadata := World.Metadata;
+  var Map: InteriorMap := Unwrap(InitialDungeonMap(Metadata));
+  var Fresh: GameState := NewGame(Metadata);
+  AssertTrue(Unwrap(WriteSaveGame(World, Fresh)));
+  AssertEquals(0, Std.Arrays.Length(Unwrap(DecodeSaveGame(EncodeSaveGame(Metadata.Id, Fresh), Metadata))
+                                      .VisitedAreas));
+  var Entered: GameState := Unwrap(ActivateInitialTransition(Metadata, Fresh with Player := PlayerPosition.Outdoor(Metadata.Entrance); end));
+  mutable var Changed: GameState := Entered;
+  Changed.Items[0] := Changed.Items[0] with Location := ItemLocation.CarriedByPlayer; end;
+
+  Changed.Hostiles[0] := Changed.Hostiles[0] with Health := 0; Alerted := true; end;
+
+  Changed.Player := PlayerPosition.FirstPerson(record
+    Position := Map.Exit;
+    Facing := Map.StartFacing;
+  end);
+  var Outside: GameState := Unwrap(ActivateInitialTransition(Metadata, Changed));
+  AssertTrue(Unwrap(WriteSaveGame(World, Outside)));
+  var Saved: string := Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
+  AssertTrue(Std.Str.Contains(Saved, '"visited_areas"'));
+  case Unwrap(LoadSaveGame(World)) of
+    SaveGameLoad.Loaded(State, View):
+    begin
+      AssertTrue(IsOk(ValidateGameState(View, State)));
+      AssertTrue(HasVisitedArea(State, Map.AreaId));
+      var Again: GameState := Unwrap(ActivateInitialTransition(Metadata, State));
+      AssertEquals(3, Std.Arrays.Length(Again.Items));
+      AssertEquals(1, Std.Arrays.Length(Again.Hostiles));
+      AssertTrue(Again.Items[0] = Changed.Items[0]);
+      AssertTrue(Again.Hostiles[0] = Changed.Hostiles[0]);
+      AssertTrue(Unwrap(WriteSaveGame(World, Again)));
+      case Unwrap(LoadSaveGame(World)) of
+        SaveGameLoad.Loaded(Indoor, IndoorView):
+        begin
+          AssertTrue(IsOk(ValidateGameState(IndoorView, Indoor)));
+          AssertTrue(Indoor.Items[0] = Changed.Items[0]);
+          AssertTrue(Indoor.Hostiles[0] = Changed.Hostiles[0])
+        end
+        else
+        begin
+          panic('expected indoor load')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected outdoor load')
+    end
+  end;
+  var VisitJson: string := ('"visited_areas":["' + Map.AreaId) + '"]';
+  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, '"visited_areas":[]'), Metadata)));
+  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, '"visited_areas":["wrong"]'), Metadata)));
+  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, ((('"visited_areas":["' + Map.AreaId) + '","') + Map.AreaId) +
+                                                                      '"]'), Metadata)));
+  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, '"visited_areas":[42]'), Metadata)));
+  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson + ',', ''), Metadata)));
+  var Before: string := Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
+  AssertTrue(IsError(WriteSaveGame(World, Outside with VisitedAreas := []; end)));
+  AssertEquals(Before, Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  AssertTrue(Unwrap(WriteSaveGame(World, Fresh)));
+  case Unwrap(LoadSaveGame(World)) of
+    SaveGameLoad.Loaded(State, View):
+    begin
+      AssertEquals(0, Std.Arrays.Length(State.VisitedAreas));
+      AssertEquals(0, Std.Arrays.Length(State.Items));
+      AssertEquals(0, Std.Arrays.Length(State.Hostiles));
+      AssertTrue(IsOk(ValidateGameState(View, State)))
+    end
+    else
+    begin
+      panic('expected fresh save')
+    end
+  end
+end.

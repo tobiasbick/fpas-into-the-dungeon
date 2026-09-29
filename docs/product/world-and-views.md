@@ -13,6 +13,12 @@ define quests, experience, or levels.
 - **Area identity** is the stable server-owned identifier of one area. It is
   deterministic within the selected world and remains separate from the
   display label shown to players.
+- **Visited area** is a dungeon whose original entities have been created in
+  the current game. It remains visited after leaving, and its visit record
+  survives save/load. A new game starts with no visited areas.
+- **Materialization** is the one-time creation of mutable items and opponents
+  from a dungeon's original placements on its first entry in a game. Revisits
+  retain their current state.
 - **Outdoor region** is an exterior area such as countryside, wilderness, or
   the land between settlements. Outdoor regions may be practically unbounded.
 - **Settlement** is an exterior built-up area such as a village or town.
@@ -49,8 +55,6 @@ define quests, experience, or levels.
   state or only return a description.
 - **Inspectable object** is a world feature that can return a description
   without necessarily changing game state.
-- **Stone tablet** is the first fixed, wall-mounted inspectable object in the
-  initial dungeon.
 - **Item** is a server-owned game object with stable identity, kind, and exactly
   one authoritative location.
 - **Inventory** is the set of items whose authoritative location is the player.
@@ -69,16 +73,6 @@ define quests, experience, or levels.
   threshold, damage, armor, and maximum health. They follow from base values
   plus equipment and are never stored.
 - **Armor** raises the roll an opponent needs to hit the player.
-- **NPC** is a non-player character with stable server-owned identity, kind,
-  placement, and persistent state.
-- **Mara, the old adventurer** is the first fixed NPC. She occupies and blocks
-  one dungeon field and remembers whether she has met the player.
-- **Dialogue** is a connection-scoped conversation controlled by the server.
-  It is not part of the saved world snapshot.
-- **Dialogue frame** is one complete server-provided speaker, text, and ordered
-  set of currently available choices.
-- **Dialogue choice** is a stable server-owned response identity plus
-  client-facing text. The client selects it but does not resolve its effect.
 - **Opponent** is a hostile actor with stable server-owned identity, kind,
   area, position, health, and alert status. A standing opponent blocks its
   field; a destroyed one stays recorded but is never projected.
@@ -88,7 +82,7 @@ define quests, experience, or levels.
   defeat.
 - **Turn** is one time-consuming player action (step, attack, wait, or a change
   of equipment) followed
-  by the opponents' actions. Turning, interaction, dialogue, and saving are not
+  by the opponents' actions. Turning, interaction, and saving are not
   turns.
 - **Attack** is the player intention that strikes the field directly ahead.
 - **Combat log** is the ordered list of messages describing one resolved turn.
@@ -147,8 +141,6 @@ area.
 - **Exploration map** is an overlay showing the current area's discovered
   world knowledge. It may be panned independently of the player and does not
   replace the primary view or issue movement intentions.
-- **Dialogue overlay** is the framed modal presentation of the current dialogue
-  frame. It owns gameplay input until the server advances or ends the dialogue.
 - **Inventory overlay** lists carried and worn items with a client-owned
   selection; `Enter` asks the server to wear or remove the selected item.
 - **Character sheet** is the overlay that shows health, the server-formatted
@@ -193,21 +185,14 @@ cardinal steps from the spawn. Walking onto it remains ordinary outdoor
 movement; `Enter` requests a server-authoritative interaction, which activates
 the transition on that field. The dungeon is
 an 11 by 9 bounded area with a fixed start pose, walls, floor, corridors, and
-one visible exit field. It also contains a fixed stone tablet on a wall directly
-north of the start. Facing the tablet and pressing `Enter` returns its
-description without changing game state. A fixed Ancient coin can first be
+one visible exit field. A fixed Ancient coin can first be
 inspected from the adjacent start field and then picked up with `Enter` while
 standing on its field. The server removes it from the area, exposes it in the
 visible inventory, and persists its carried state. The server accepts the exit
 interaction only on the exit field and then returns the player to the exact
 outdoor entrance coordinate.
 
-Mara occupies the dead end at dungeon field `(1, 1)`. She blocks movement and
-can be addressed with `Enter` from the adjacent field. Her deterministic
-conversation distinguishes the first and later meeting and conditionally
-offers a question about the Ancient coin while the player carries it. Only the
-meeting flag is persistent; an active conversation ends with the connection.
-While the player is hurt, Mara also offers to tend their wounds.
+Accepted outdoor steps restore one health point, up to the player's maximum.
 
 The restless skeleton rests at field `(3, 3)` in the inner passages that form
 the second route to the exit. It notices the player through line of sight,

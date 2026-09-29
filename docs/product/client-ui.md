@@ -220,10 +220,8 @@ server state supplies validated bounded field rows, dimensions, the area-local
 player coordinate, cardinal facing, title, and status. The client derives a
 cardinal camera and fills the primary view with colored ceiling, floor, and
 distance-shaded walls. The exit is a gold floor field, projected at its actual
-location. A fixed wall-mounted stone tablet uses a distinct blue-gray material
-in the first-person view and a distinct symbol on the exploration map. It
-remains opaque like the wall that carries it. The fixed Ancient coin uses a gold
-marker in the first-person view and exploration map until it is picked up.
+location. The fixed Ancient coin uses a gold marker in the first-person view
+and exploration map until it is picked up.
 In first person it is a small disc in the field center. The Environment panel
 identifies the available action: examine while facing the adjacent coin, or
 pick up when standing on it. Pickup confirmation remains until the next state
@@ -234,9 +232,7 @@ still opens the description overlay. The status view continues to show
 connection and request feedback.
 Walls keep their stone material even when a view ray crosses the exit or coin.
 Moving onto either field colors only the visible part of that floor field.
-The fixed old adventurer uses a distinct NPC marker only while currently
-visible and blocks entry into her field. Remembered map fields retain only
-static geometry rather than a stale character marker.
+Remembered map fields retain only static geometry rather than stale dynamic markers.
 Outdoor map rows
 are never reinterpreted as first-person geometry. The visual eye sits 0.35 fields
 behind the field center, still inside the occupied field, with a 90-degree
@@ -260,21 +256,6 @@ facing direction. `A` and `D` request a one-field step to the left or right.
 leaves both position and facing unchanged. Holding a key may produce separate
 intentions, but it never creates continuous movement, fractional coordinates,
 or arbitrary viewing angles.
-
-## Dialogue overlay
-
-Talking to an NPC opens a centered, framed modal overlay above the current
-game screen. The server provides the speaker, text, and complete ordered choice
-list. W/S and Up/Down move the selection with wraparound, Enter submits the
-selected stable choice ID, and Escape requests a clean dialogue end. While a
-dialogue request is pending, further keys cannot queue another request.
-
-The overlay blocks movement, turning, interaction, the exploration map, and
-the system menu. The server enforces the same restriction so a modified client
-cannot act behind an active conversation. `Alt+X` remains available as the
-global clean disconnect. A viewport response may resize the underlying game
-screen without dismissing the conversation. Dialogue text, selection, and the
-active conversation are transient and are not restored after reconnecting.
 
 ## Combat
 
@@ -333,7 +314,7 @@ server or other players that may exist later.
 - `Enter` requests an interaction with the occupied field or the field directly
   ahead. It activates an entrance under the player, leaves a first-person area
   from its exit field, picks up an item under the player, or examines an
-  inspectable object or starts dialogue with an NPC ahead. A successful
+  inspectable object ahead. A successful
   inspection opens a centered, framed overlay with a title and wrapped text.
   Up/Down scrolls longer descriptions; Enter or Escape closes the overlay.
   Gameplay input is blocked while reading. Short no-target feedback remains in
@@ -351,8 +332,6 @@ server or other players that may exist later.
 - `M` opens or closes the exploration map. While it is open, WASD and the arrow
   keys pan, and `Home` recenters on the player.
 - `Escape` closes the active overlay.
-- In a dialogue overlay, W/S or Up/Down select a response, Enter submits it,
-  and Escape asks the server to end the conversation.
 - `Alt+X` requests a clean disconnect and exits the client.
 - Arrow keys and `Enter` navigate and activate menu entries while a menu owns
   input; no game intention is sent through an overlay.

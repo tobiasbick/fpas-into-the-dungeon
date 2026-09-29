@@ -65,19 +65,28 @@ these projects.
   own the policy (`Config`), per-connection session rules (`Session`),
   enumeration conversions (`Mapping`), client-safe projections (`Projection`),
   replies and turn commits (`Replies`), and message handling (`Handling`).
+  `Session` retains the current interior map and builds area views from it.
+  `InitialAreas` temporarily supplies target geometry on dungeon entry until
+  dungeon level storage is connected. Loading installs the already validated
+  view returned by the world layer.
 - `libs/game` owns the authoritative world model, rules, and simulation,
   including the deterministic outdoor terrain generator. It has one unit per
   concern, layered without cycles:
   - `Dungeon.Coordinates`: positions, facing, relative steps, chunk arithmetic.
   - `Dungeon.Terrain` with `.Noise`, `.Generation`, and `.Placement`: cells,
     chunks, and world metadata; noise; chunk generation; spawn and entrance.
-  - `Dungeon.Items`, `Dungeon.Npcs`, `Dungeon.Hostiles`: kinds, identities,
+  - `Dungeon.Items`, `Dungeon.Hostiles`: kinds, identities,
     and per-kind texts and values.
   - `Dungeon.Interior` and `Dungeon.Interior.InitialDungeon`: interior
     geometry and its validation; the hand-authored initial dungeon.
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
-    read-only queries.
-  - `Dungeon.Movement`, `Dungeon.Interaction`, `Dungeon.Dialogue`,
+    read-only queries; the `AreaView` type pairs world metadata with a supplied
+    current interior map.
+  - `Dungeon.Areas`: pure construction of an area view, requiring no interior
+    outdoors and a matching map in a dungeon; first-visit entity materialization;
+    `.Validation` owns full saved-state checks against all supplied visited
+    maps and placements, without loading or generating geometry.
+  - `Dungeon.Movement`, `Dungeon.Interaction`,
     `Dungeon.Equipment`, `Dungeon.Combat`: the rules that change the state.
   - `Dungeon.Exploration` with `.Model` and `.Sight`: discovery masks,
     outdoor sight and discovery updates, and interior line of sight.
@@ -101,7 +110,17 @@ these projects.
 - `tools/world-preview` samples final terrain or one normalized generator field
   without loading a persistent world.
 - `tests` follows the production modules so each module is exercised through
-  its interface.
+  its interface. `tests/fixtures` is a test-only library exporting
+  `Dungeon.Test.Fixtures`: independent authored dungeon geometry, metadata with
+  an area identity, initial entities at a requested pose, and area-view helpers.
+  Game and client tests consume it; production projects do not depend on it.
+  Fixture geometry and placement identities remain independent of the temporary
+  initial dungeon and of generated output. A separate temporary unit
+  `Dungeon.Test.InitialAreas` supplies initial geometry for legacy tests during
+  their migration; it does not change the independent fixture builders.
+  `tests/server/internal` compiles production server units directly in a
+  separate test project to test session and projection internals without
+  expanding the server library's public exports.
 
 ## Client-server seam
 
@@ -128,8 +147,6 @@ are described in [interaction](interaction.md).
 The server-owned item state, inventory projection, pickup semantics, and
 persistence boundary are described in
 [items and inventory](items-and-inventory.md).
-The fixed NPC, deterministic dialogue graph, session lifecycle, and persistence
-boundary are described in [NPCs and simple dialogue](npcs-and-dialogue.md).
 Turn-based combat, its dice, opponent behavior, defeat, and persistence are
 described in [combat](combat.md).
 

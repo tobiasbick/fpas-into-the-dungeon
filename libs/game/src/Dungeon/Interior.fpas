@@ -1,7 +1,7 @@
 // Bounded interior geometry: field kinds, codes, lookups, item placements, and map validation.
 unit Dungeon.Interior;
 
-uses Dungeon.Coordinates, Dungeon.Items, Std.Arrays;
+uses Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Items, Std.Arrays;
 
 public type
   // Authoritative field material of the fixed initial interior.
@@ -12,20 +12,18 @@ public type
   end;
   // Complete bounded interior geometry with one connected start and exit.
   InteriorMap = record
+    // Stable server-owned identity of the area represented by this geometry.
+    public AreaId: string;
     public Width: integer;
     public Height: integer;
     public Cells: array of InteriorCellKind;
     public Start: InteriorPosition;
     public StartFacing: FacingDirection;
     public Exit: InteriorPosition;
-    // Fixed wall field occupied by the initial dungeon's inspectable stone tablet.
-    public Tablet: InteriorPosition;
     // Initial floor placements of the area's items, each on a distinct floor field.
     public Items: array of ItemPlacement;
-    // Fixed blocking floor placement of the first non-player character.
-    public Npc: InteriorPosition;
-    // Initial floor placement of the first opponent.
-    public Hostile: InteriorPosition;
+    // Initial opponent placements, on distinct floor fields away from items and endpoints.
+    public Hostiles: array of HostilePlacement;
   end;
 
 // Parses one authored interior field code.
@@ -92,21 +90,21 @@ begin
   return Ok(Map.Cells[(Position.Y * Map.Width) + Position.X])
 end;
 
-// Returns the client-safe visible code for geometry or the fixed stone tablet overlay.
+// Returns the client-safe visible code for one interior field.
 public function InteriorVisibleCode(Map: InteriorMap; Position: InteriorPosition): result of string, string;
 begin
   var Cell: InteriorCellKind := try InteriorCellAt(Map, Position);
-  if (Position.X = Map.Tablet.X) and (Position.Y = Map.Tablet.Y) then
-  begin
-    return Ok('t')
-  end;
-
   return Ok(InteriorCellCode(Cell))
 end;
 
 // Validates bounded shape, unique exit, traversable endpoints, and connected floor space.
 public function ValidateInteriorMap(Map: InteriorMap): result of InteriorMap, string;
 begin
+  if Map.AreaId = '' then
+  begin
+    return Error('interior area identity must not be empty')
+  end;
+
   if (Map.Width <= 0) or (Map.Height <= 0) then
   begin
     return Error('interior dimensions must be positive')
@@ -126,31 +124,32 @@ begin
   begin
     return Error('interior exit coordinate must name the exit field')
   end;
-  var TabletCell: InteriorCellKind := try InteriorCellAt(Map, Map.Tablet);
-  if TabletCell <> InteriorCellKind.Wall then
-  begin
-    return Error('interior tablet coordinate must name a wall field')
-  end;
-  var NpcCell: InteriorCellKind := try InteriorCellAt(Map, Map.Npc);
-  if NpcCell <> InteriorCellKind.Floor then
-  begin
-    return Error('interior NPC coordinate must name a floor field')
-  end;
 
-  if SamePosition(Map.Npc, Map.Start) or SamePosition(Map.Npc, Map.Exit) then
+  for Index: integer := 0 to Std.Arrays.Length(Map.Hostiles) - 1 do
   begin
-    return Error('interior NPC coordinate must differ from start and exit')
-  end;
-  var HostileCell: InteriorCellKind := try InteriorCellAt(Map, Map.Hostile);
-  if HostileCell <> InteriorCellKind.Floor then
-  begin
-    return Error('interior opponent coordinate must name a floor field')
-  end;
+    var Placement: HostilePlacement := Map.Hostiles[Index];
+    if try InteriorCellAt(Map, Placement.Position) <> InteriorCellKind.Floor then
+    begin
+      return Error('interior opponent coordinate must name a floor field')
+    end;
 
-  if (SamePosition(Map.Hostile, Map.Start) or SamePosition(Map.Hostile, Map.Exit)) or
-     SamePosition(Map.Hostile, Map.Npc) then
-  begin
-    return Error('interior opponent coordinate must differ from start, exit, and NPC')
+    if SamePosition(Placement.Position, Map.Start) or SamePosition(Placement.Position, Map.Exit) then
+    begin
+      return Error('interior opponent coordinate must differ from start and exit')
+    end;
+
+    for Other: integer := 0 to Index - 1 do
+    begin
+      if Map.Hostiles[Other].Id = Placement.Id then
+      begin
+        return Error('interior opponent placements must name distinct opponents')
+      end;
+
+      if SamePosition(Map.Hostiles[Other].Position, Placement.Position) then
+      begin
+        return Error('interior opponent placements must occupy distinct fields')
+      end
+    end
   end;
 
   for Index: integer := 0 to Std.Arrays.Length(Map.Items) - 1 do
@@ -161,10 +160,22 @@ begin
       return Error('interior item coordinate must name a floor field')
     end;
 
-    if ((SamePosition(Placement.Position, Map.Start) or SamePosition(Placement.Position, Map.Exit)) or SamePosition(Placement.Position, Map.Npc)) or
-       SamePosition(Placement.Position, Map.Hostile) then
+    if SamePosition(Placement.Position, Map.Start) or SamePosition(Placement.Position, Map.Exit) then
     begin
-      return Error('interior item coordinate must differ from start, exit, NPC, and opponent')
+      return Error('interior item coordinate must differ from start and exit')
+    end;
+
+    for Hostile: HostilePlacement in Map.Hostiles do
+    begin
+      if SamePosition(Placement.Position, Hostile.Position) then
+      begin
+        return Error('interior items and opponents must occupy distinct fields')
+      end;
+
+      if Placement.ItemId = Hostile.Id then
+      begin
+        return Error('interior placement identities must be distinct')
+      end
     end;
 
     for Other: integer := 0 to Index - 1 do

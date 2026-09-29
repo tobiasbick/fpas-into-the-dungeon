@@ -1,0 +1,145 @@
+// Independent authored dungeon geometry and state builders for game and view tests.
+unit Dungeon.Test.Fixtures;
+
+uses
+  Dungeon.Areas, Dungeon.Coordinates, Dungeon.Exploration.Model, Dungeon.GameState, Dungeon.Hostiles,
+  Dungeon.Interior, Dungeon.Items, Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays,
+  Std.Results, Std.Str;
+
+const
+  FixtureAreaId: string := 'fixture-world:dungeon:0:0';
+
+// Fixed world metadata with a canonical dungeon identity for map-injection tests.
+// No fixture is persisted; production metadata validation remains unchanged.
+public function FixtureMetadata(): WorldMetadata;
+begin
+  return Std.Results.Unwrap(NewWorldMetadata('fixture-world', 12345)) with DungeonAreaId := FixtureAreaId; EntranceTargetAreaId := FixtureAreaId; end
+end;
+
+// Returns the independent 11 by 9 authored layout with typed, area-scoped placements.
+// Geometry is validated and does not depend on InitialDungeonMap or generation.
+public function FixtureDungeonMap(): InteriorMap;
+begin
+  var Rows: array of string := [
+                                 '###########',
+                                 '#.........#',
+                                 '#.#####.#.#',
+                                 '#.....#.#.#',
+                                 '###.#.#.#.#',
+                                 '#...#...#.#',
+                                 '#.#####.#.#',
+                                 '#x........#',
+                                 '###########'
+                               ];
+  mutable var Cells: array of InteriorCellKind := [];
+  for Row: string in Rows do
+  begin
+    for X: integer := 0 to Std.Str.Length(Row) - 1 do
+    begin
+      Std.Arrays.Push(Cells, Std.Results.Unwrap(InteriorCellFromCode(Std.Str.CharAt(Row, X))))
+    end
+  end;
+
+  return Std.Results.Unwrap(ValidateInteriorMap(record
+    AreaId := FixtureAreaId;
+    Width := 11;
+    Height := 9;
+    Cells := Cells;
+    Start := record
+      X := 9;
+      Y := 1;
+    end;
+    StartFacing := FacingDirection.West;
+    Exit := record
+      X := 1;
+      Y := 7;
+    end;
+    Items := [record
+      ItemId := FixtureAreaId + ':item:0';
+      Kind := ItemKind.AncientCoin;
+      Position := record
+        X := 8;
+        Y := 1;
+      end;
+    end, record
+      ItemId := FixtureAreaId + ':item:1';
+      Kind := ItemKind.RustyShortSword;
+      Position := record
+        X := 7;
+        Y := 4;
+      end;
+    end, record
+      ItemId := FixtureAreaId + ':item:2';
+      Kind := ItemKind.LeatherJerkin;
+      Position := record
+        X := 1;
+        Y := 6;
+      end;
+    end];
+    Hostiles := [record
+      Id := FixtureAreaId + ':hostile:0';
+      Kind := HostileKind.RestlessSkeleton;
+      Position := record
+        X := 3;
+        Y := 3;
+      end;
+    end];
+  end))
+end;
+
+// Creates expected initial entities and an interior pose independently of NewGame.
+// The caller chooses a traversable, unoccupied position when testing valid state.
+public function FixtureDungeonState(Position: InteriorPosition; Facing: FacingDirection): GameState;
+begin
+  var Metadata: WorldMetadata := FixtureMetadata();
+  var Map: InteriorMap := FixtureDungeonMap();
+  mutable var Items: array of GameItem := [];
+  for Placement: ItemPlacement in Map.Items do
+  begin
+    Std.Arrays.Push(Items, record
+      Id := Placement.ItemId;
+      Kind := Placement.Kind;
+      Location := ItemLocation.InInterior(Map.AreaId, Placement.Position);
+    end)
+  end;
+  mutable var Hostiles: array of GameHostile := [];
+  for Placement: HostilePlacement in Map.Hostiles do
+  begin
+    Std.Arrays.Push(Hostiles, record
+      Id := Placement.Id;
+      Kind := Placement.Kind;
+      AreaId := Map.AreaId;
+      Position := Placement.Position;
+      Health := HostileMaximumHealth(Placement.Kind);
+      Alerted := false;
+    end)
+  end;
+
+  return record
+    VisitedAreas := [Map.AreaId];
+    Area := AreaKind.Dungeon;
+    AreaId := Map.AreaId;
+    Player := PlayerPosition.FirstPerson(record
+    Position := Position;
+    Facing := Facing;
+  end);
+    ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance);
+    Exploration := EmptyExploration();
+    Items := Items;
+    Hostiles := Hostiles;
+    Health := PlayerMaximumHealth;
+    RandomState := InitialRandomState(Metadata.Seed);
+  end
+end;
+
+// Pairs fixture metadata with the current fixture map, or no map outdoors.
+// Invalid area or identity combinations fail through the real area-view constructor.
+public function FixtureAreaView(State: GameState): AreaView;
+begin
+  if State.Area = AreaKind.OutdoorRegion then
+  begin
+    return Std.Results.Unwrap(AreaViewFor(FixtureMetadata(), State, None))
+  end;
+
+  return Std.Results.Unwrap(AreaViewFor(FixtureMetadata(), State, Some(FixtureDungeonMap())))
+end;

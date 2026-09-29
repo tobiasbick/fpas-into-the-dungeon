@@ -24,6 +24,18 @@ outdoor area identity and coordinate from which it was entered. Entry and exit
 change current area and return state as one rule result. The outdoor coordinate
 is not repurposed as interior geometry.
 
+`AreaTransitionTarget(View, State)` checks the current entrance or the exit
+of the supplied map and returns the authoritative target identity. Interaction
+returns `TransitionRequested(TargetAreaId)` without changing the state. The
+server supplies the target map to `ActivateAreaTransition(View, State,
+TargetMap)`: entry requires matching geometry, and exit requires `None`.
+The result contains both the replacement state and its matching view. Entry
+validates the target map and calls `MaterializeArea`: first entry adds the area
+to the sorted `VisitedAreas` list and creates its placed items and opponents.
+A revisit preserves their current locations, health, and alert state. Exit
+retains this content and the visit record. Neither pure transition function
+loads a map.
+
 ## Intention and projection
 
 The client sends `interact` after `Enter` on the active game screen with no

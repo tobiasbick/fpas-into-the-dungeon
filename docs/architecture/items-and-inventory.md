@@ -7,14 +7,18 @@ persisted without adding a general loot, equipment, or scripting system.
 ## Authoritative model
 
 `libs/game` owns every item. An item has a stable ID, a kind, and exactly one
-location. The current model permits the fixed Ancient coin either at field
-`8,1` in the initial dungeon or in the player's inventory. Validation requires
-exactly one coin with the expected identity and rejects missing, duplicate,
-unknown, or misplaced item state.
+location. The Ancient coin starts at field `8,1` in the initial dungeon.
+Full validation permits its current location on a traversable field in any
+visited dungeon or in the player's inventory, while requiring its original
+placement identity and kind. The current interaction loop supports pickup;
+the drop intention follows in step 3a. Validation requires
+exactly one coin after the first dungeon visit and rejects missing, duplicate,
+unknown, or invalid floor-item state.
 
-Starting a new game always creates the coin at its initial dungeon field. Area
-transitions and movement preserve its state. The client never creates, moves,
-or owns items.
+Starting a new game creates no dungeon items. First entry materializes the
+coin at its initial dungeon field. Further transitions and movement preserve
+its state, including after save/load. The client never creates, moves, or owns
+items.
 
 ## Interaction
 
@@ -61,7 +65,7 @@ narrow-screen overlay; no new preference or configuration schema is introduced.
 
 ## Persistence
 
-Savegame format 6 stores the complete item array alongside player, return, and
+Savegame format 7 stores the complete item array alongside player, return, and
 exploration state. Each location is an explicit variant: an interior area and
 field, or carried by the player. Loading validates the full state before it can
 replace the active game. Format 3 and all other obsolete schemas are rejected
@@ -70,8 +74,8 @@ and removed according to the current-version-only configuration and save policy.
 An explicit save is the only persistence boundary. Disconnecting, reconnecting,
 or rendering cannot change item ownership. Saving and loading a carried coin
 must preserve exactly one carried coin; starting a new game must restore
-exactly one coin to the dungeon without altering an existing save until the
-next explicit save.
+exactly one coin on the new game's first dungeon entry without altering an
+existing save until the next explicit save.
 
 ## Deferred scope
 

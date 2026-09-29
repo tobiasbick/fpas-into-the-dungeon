@@ -8,6 +8,213 @@ The [level storage contract](../architecture/dungeon-level-storage.md) fixes
 the file schema, final interfaces, error handling, and transition sequence.
 It is part of this plan, not a deferred design task.
 
+## Progress
+
+- [x] Step 1: shared random generator. Combat uses `Dungeon.Random`; the
+  existing deterministic combat results remain covered.
+- [x] Step 2: remove dialogue, Mara, and the tablet; outdoor healing.
+  Protocol version is 13 and savegame format is 7. The removed features have
+  no references in `libs`, `apps`, or `tests`.
+- [ ] Step 3: area view, visited areas, and materialization — in progress.
+- [ ] Step 4: dungeon generator.
+- [ ] Step 5: entrances, world metadata, and generated dungeons in play.
+- [ ] Step 6: complete TCP visit and documentation.
+
+Verification after step 2: changed sources formatted, all affected projects
+passed `fpas check`, game tests passed 10/10, world tests passed 2/2, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 37/37.
+The five removed tests covered only the removed conversation feature.
+The fixed initial dungeon remains until step 5. Steps 3–6 and user acceptance
+of the complete 14a feature are still pending.
+
+Review of steps 1–2 found no gameplay or specification defects. The cleanup
+required before starting step 3 is complete:
+
+- [x] Remove the unused `ArtPixel` palette entries `h`, `H`, `F`, `E`, `C`,
+  `c`, `R`, `L`, and `B`, exposed by deleting the old character artwork.
+  Keep `S` and `M`, which the sword still uses. The source is formatted;
+  client and client-test project checks passed, client tests passed 13/13,
+  and the complete workspace suite passed 37/37 after the cleanup.
+
+Step 3's first bounded slice is complete: item placements carry their kinds,
+opponent placements form an array, and map validation checks collisions and
+unique identities. Initial item and opponent state is derived from placements;
+state validation matches identities and kinds against them. The fixed initial
+dungeon still supplies the existing three items and one opponent. The new
+placement tests cover empty and multiple opponent arrays, invalid fields,
+collisions, duplicate identities, and typed initial state. Inventory fixtures
+now provide the required item kind. Step 3 is not complete.
+
+The compiler blocker is resolved in Functional Pascal commit `d1aac7b9`,
+published on `main` with the user's agreement. Record updates now use the
+declared field type for imported record literals and array elements. New Sema
+and CLI regressions first reproduced `F2006`, then passed after the fix;
+invalid types and fields remain rejected. `cargo fmt`, `cargo build`, the
+release build, and `cargo test --workspace` passed (3,280 tests).
+
+Verification of the first slice with the fixed compiler: changed sources formatted,
+`fpas check dungeon.fpasworkspace` passed, game tests passed 11/11, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 38/38.
+
+Step 3's second bounded slice is complete: `InteriorMap.AreaId` is required and
+nonempty; `InitialDungeonMap(Metadata)` uses the selected world's dungeon
+identity. All existing callers supply their metadata. `AreaView` is declared
+in `Dungeon.GameState`, and exported `Dungeon.Areas.AreaViewFor` takes a
+caller-supplied map. It requires no map and the selected world's area identity
+outdoors, and a matching map in a dungeon. Geometry is supplied validated and
+retained unchanged, without loading or generation. Tests cover world-specific
+map identities, empty identities, missing and wrong maps, unsupported area
+kinds, and retaining a custom map. Existing rules still resolve the initial
+map; migration to the view is the next bounded slice.
+
+Verification of the second slice: all changed sources pass `fpas fmt --check`,
+`fpas check dungeon.fpasworkspace` passed, game tests passed 12/12, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 39/39.
+
+Step 3's test-fixture prerequisite is complete. The workspace includes
+`tests/fixtures/fixtures.fpasprj`, a test-only library exporting
+`Dungeon.Test.Fixtures`. It supplies an independently authored 11 by 9 map,
+metadata with canonical area identity `fixture-world:dungeon:0:0`, typed
+placements with area-scoped IDs, initial state at a requested pose, and an
+area-view helper. The builders do not call `InitialDungeonMap` or `NewGame`.
+No fixture metadata or geometry is persisted. Wall-visibility and visibility
+renderer tests now use the independent fixture map. The fixture contract test
+covers identities, pose, return location, entity initialization, area views,
+and independence of newly built test states.
+
+Verification of the fixture prerequisite: sources formatted and checked,
+`fpas check dungeon.fpasworkspace` passed, game tests passed 13/13, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 40/40.
+
+Step 3's rule map-injection slice is complete:
+
+- `ValidateGameState(View, State)` performs local state, uniqueness, slot,
+  health, dice, discovery-shape, and current-geometry checks without resolving
+  a map. `CurrentInterior` rejects absent and mismatched maps. Independent
+  fixture states are now supported by this validator.
+- `StepFirstPerson`, `TurnFirstPerson`, `Interact`, `ResolveTurn`, and
+  `RevealCurrentArea` take `AreaView` and use caller-supplied geometry. No
+  rule or validator calls `InitialDungeonMap`.
+- `AreaTransitionTarget` and `ActivateAreaTransition(View, State, TargetMap)`
+  use the final interface and return the matching replacement view. Interaction
+  returns `TransitionRequested` without changing state; the server supplies
+  the target map. Existing entities are retained. First-visit materialization
+  is still pending because `NewGame` still creates the initial entities.
+- `ValidateSavedGame(Metadata, State, Maps)` checks supplied placements and
+  then reuses that map for current-state validation. Decode and write call it
+  through a private world-layer initial-map supplier. Until visited areas are
+  introduced, it requires one map matching the metadata's initial dungeon and
+  the existing item and opponent set. The existing floor-item placement rule
+  remains until dropping is implemented.
+- `Dungeon.Server.InitialAreas` is an internal temporary supplier outside
+  game rules. A separate test-only `Dungeon.Test.InitialAreas` adapter keeps
+  legacy initial-area tests running during their fixture migration. Production
+  projects do not depend on the test adapters. Remove them as their callers
+  move to retained session maps and independent fixtures.
+- `map_rules_test.fpas` changes walls, opens a previously blocked field, and
+  relocates the exit. It proves supplied-map validation, steps, turns, sight,
+  opponent turns, interaction eligibility, and transition activation. It also
+  checks missing and wrong current/target maps and demonstrates that unknown
+  placement identities are rejected by full save validation.
+
+Verification of rule map injection: all changed sources pass `fpas fmt --check`,
+`fpas check dungeon.fpasworkspace` passed, game tests passed 14/14, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 41/41. No
+protocol, savegame schema, generated output, or gameplay numbers changed.
+
+Step 3's retained-session-map slice is complete:
+
+- `ServerSession.Interior` holds the current dungeon geometry. New games start
+  without it. Entry installs the transition's returned view; exit and defeat
+  clear the current map. State and geometry are installed together.
+- `SessionAreaView` uses retained geometry for actions and projections.
+  `ProjectSession` and `ProjectExplorationMap` receive `AreaView`; neither
+  resolves the initial map. `Dungeon.Server.InitialAreas` now supplies only
+  entry targets; its unused current-map helper has been removed.
+- `SaveGameLoad.Loaded(State, View)` returns the exact map used for save
+  validation. The server installs it without rebuilding. Handshake inspection
+  discards the loaded values; explicit load reads and validates again.
+  This changes no persisted fields, protocol, or generated output.
+- A separate `tests/server/internal` project compiles server implementation
+  units without adding public exports. Its independent fixture relocates the
+  exit onto a formerly blocked field and verifies retained geometry in both
+  projections, viewport changes, commits, and turns. Missing or mismatched
+  maps fail; defeat clears both game state and geometry. World load tests
+  check the returned view for both indoor and outdoor saves.
+
+Verification of retained session geometry: all changed sources pass
+`fpas fmt --check`, `fpas check dungeon.fpasworkspace` passed, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 42/42.
+The existing TCP tests still cover loading and entering/leaving the dungeon.
+
+Step 3's first-visit lifecycle slice is complete:
+
+- `GameState.VisitedAreas` is strictly sorted without duplicates. `NewGame`
+  creates no dungeon items, opponents, or visit records. `HasVisitedArea` is
+  shared by validation and materialization.
+- `MaterializeArea` creates entities from validated placements only once and
+  inserts the area in canonical order. Entry validates target geometry before
+  materializing and validates the resulting transition before installation.
+  Exit and revisits retain mutable entity state. The obsolete initial entity
+  constructors have been removed from the production map supplier.
+- Per-intention validation requires dungeon entities and discovery to belong
+  to visited areas and the current dungeon to be visited. Geometry and standing
+  opponent collision checks distinguish area identities.
+- Savegame format 7 now requires `visited_areas`. The temporary single-dungeon
+  save supplier passes no map for an unvisited game and one map after a visit.
+  Strict decoding and writing reject visit/entity inconsistencies. Old files
+  without the new field are rejected without migration; there is no second
+  version bump on this feature branch.
+- `area_materialization_test` covers empty new games, placement-derived initial
+  entities, canonical visit order, rejected target geometry, revisit retention,
+  and invalid visit/discovery/entity state. `visited_savegame_test` covers
+  outdoor and indoor loads, revisit after loading a carried item and destroyed
+  opponent, malformed or missing visit lists, and preservation of the previous
+  save on a failed write. Legacy entity tests explicitly materialize through
+  the test-only initial-area adapter until independent-fixture migration.
+
+Verification of first-visit lifecycle: changed sources pass `fpas fmt --check`,
+`fpas check dungeon.fpasworkspace` passed, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 44/44.
+Protocol and generated output are unchanged. The save schema uses this branch's
+already selected format 7.
+
+Step 3's full multi-area validation slice is complete:
+
+- `Dungeon.Areas.Validation` owns the full check behind the unchanged
+  `ValidateSavedGame` interface. It requires exactly one supplied, validated
+  map per visited area, in any order, and rejects duplicate maps and maps from
+  another world. No generation or file access occurs.
+- Entity counts and identity/kind matches establish correspondence with all
+  visited placements. Floor items use their destination area's geometry and
+  may differ from their original field or area; opponent origins remain fixed.
+  Geometry checks include non-current areas and destroyed opponents. Shared
+  state validation rejects duplicate identities and floor occupancy, slot and
+  health errors, and invalid visit lists.
+- Interior discovery dimensions are checked against each area's own map.
+  The current view reuses its supplied map. Per-intention validation supports
+  any visited current dungeon; exact entrance-region return validation follows
+  with the metadata changes in step 5.
+- The two-area regression uses different map widths, area-scoped placements,
+  and identical local opponent coordinates. It proves shuffled map order,
+  transferred items, either current area, outdoor state, and independent
+  non-current discovery. Negative cases cover missing/extra/duplicate maps,
+  foreign worlds, malformed visits, missing/unknown/duplicate entities, wrong
+  kinds, transferred opponents, wall positions, occupied item fields, and
+  incorrect non-current discovery dimensions. Existing placement-position
+  negatives now use walls rather than valid relocated floor positions.
+
+Verification of multi-area validation: changed sources pass `fpas fmt --check`,
+`fpas check dungeon.fpasworkspace` passed, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 45/45.
+No protocol, persisted schema, generated geometry, or gameplay numbers changed.
+
+Step 3 remains incomplete. Next convert the temporary initial-map placement
+identities to world-scoped IDs and remove their fixed-identity lookup helpers.
+Remaining fixture migration follows, then step 3a inventory and dropping.
+The world/server supplier still exposes the one playable initial dungeon;
+multiple stored dungeons are connected in step 5.
+
 ## Ground rules
 
 - Work through the steps in order. After every step `fpas check` passes for

@@ -2,9 +2,9 @@
 program DungeonExplorationTest;
 
 uses
-  Dungeon.Coordinates, Dungeon.Exploration, Dungeon.Exploration.Sight, Dungeon.Exploration.Model,
-  Dungeon.GameState, Dungeon.Interior, Dungeon.Interior.InitialDungeon, Dungeon.Movement,
-  Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays, Std.Results, Std.Test;
+  Dungeon.Test.InitialAreas, Dungeon.Coordinates, Dungeon.Exploration, Dungeon.Exploration.Sight,
+  Dungeon.Exploration.Model, Dungeon.GameState, Dungeon.Interior, Dungeon.Interior.InitialDungeon,
+  Dungeon.Movement, Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays, Std.Results, Std.Test;
 
 function PoseAt(X: integer; Y: integer; Facing: FacingDirection): FirstPersonPose;
 begin
@@ -87,7 +87,8 @@ begin
     OutdoorChunks := [EmptyMaskChunk];
     InteriorAreas := [];
   end, WorldChunkSize)));
-  var Map: InteriorMap := Unwrap(InitialDungeonMap());
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('exploration-rules', 12345));
+  var Map: InteriorMap := Unwrap(InitialDungeonMap(Metadata));
   var SouthPose: FirstPersonPose := PoseAt(1, 1, FacingDirection.South);
   var SouthVisible: array of boolean := InteriorVisibility(Map, SouthPose);
   AssertTrue(SouthVisible[(1 * Map.Width) + 1]);
@@ -132,10 +133,9 @@ begin
   AssertTrue(IsError(ValidateExploration(DuplicateArea, WorldChunkSize)));
   AssertFalse(InteriorIsDiscovered(TwoAreas, 'missing', Map.Width, 0, 0));
   AssertFalse(InteriorIsDiscovered(TwoAreas, 'a-house', Map.Width + 1, 0, 0));
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('exploration-rules', 12345));
   var EmptyGame: GameState := NewGame(Metadata);
   AssertEquals(0, Std.Arrays.Length(EmptyGame.Exploration.OutdoorChunks));
-  var Started: GameState := Unwrap(RevealCurrentArea(Metadata, EmptyGame));
+  var Started: GameState := Unwrap(RevealCurrentArea(InitialAreaView(Metadata, EmptyGame), EmptyGame));
   var Start: WorldPosition := Unwrap(OutdoorPlayerPosition(Started));
   AssertTrue(OutdoorIsDiscovered(Started.Exploration, Start.X, Start.Y));
   AssertTrue(OutdoorIsDiscovered(Started.Exploration, Start.X - OutdoorSightRadius, Start.Y));
@@ -154,22 +154,24 @@ begin
     Feature := TerrainFeatureKind.NoFeature;
     Water := WaterKind.NoWater;
   end));
-  Moved := Unwrap(RevealCurrentArea(Metadata, Moved));
+  Moved := Unwrap(RevealCurrentArea(InitialAreaView(Metadata, Moved), Moved));
   AssertTrue(OutdoorIsDiscovered(Moved.Exploration, Start.X - OutdoorSightRadius, Start.Y));
   AssertTrue(OutdoorIsDiscovered(Moved.Exploration, (Start.X + OutdoorSightRadius) + 1, Start.Y));
   mutable var AtEntrance: GameState := Started;
   AtEntrance.Player := PlayerPosition.Outdoor(Metadata.Entrance);
-  AtEntrance := Unwrap(RevealCurrentArea(Metadata, AtEntrance));
-  var Entered: GameState := Unwrap(RevealCurrentArea(Metadata, Unwrap(ActivateAreaTransition(Metadata, AtEntrance))));
+  AtEntrance := Unwrap(RevealCurrentArea(InitialAreaView(Metadata, AtEntrance), AtEntrance));
+  var JustEntered: GameState := Unwrap(ActivateInitialTransition(Metadata, AtEntrance));
+  var Entered: GameState := Unwrap(RevealCurrentArea(InitialAreaView(Metadata, JustEntered), JustEntered));
   AssertTrue(OutdoorIsDiscovered(Entered.Exploration, Metadata.Entrance.X, Metadata.Entrance.Y));
   AssertTrue(InteriorIsDiscovered(Entered.Exploration, Metadata.DungeonAreaId, Map.Width, Map.Start.X, Map.Start.Y));
   AssertFalse(InteriorIsDiscovered(Entered.Exploration, Metadata.DungeonAreaId, Map.Width, 9, 4));
-  mutable var Turned: GameState := Unwrap(TurnFirstPerson(Metadata, Entered, RelativeTurn.TurnLeft));
-  Turned := Unwrap(RevealCurrentArea(Metadata, Turned));
+  mutable var Turned: GameState := Unwrap(TurnFirstPerson(InitialAreaView(Metadata, Entered), Entered, RelativeTurn.TurnLeft));
+  Turned := Unwrap(RevealCurrentArea(InitialAreaView(Metadata, Turned), Turned));
   AssertTrue(InteriorIsDiscovered(Turned.Exploration, Metadata.DungeonAreaId, Map.Width, 9, 4));
   mutable var AtExit: GameState := Turned;
   AtExit.Player := PlayerPosition.FirstPerson(PoseAt(Map.Exit.X, Map.Exit.Y, FacingDirection.West));
-  var Left: GameState := Unwrap(RevealCurrentArea(Metadata, Unwrap(ActivateAreaTransition(Metadata, AtExit))));
+  var JustLeft: GameState := Unwrap(ActivateInitialTransition(Metadata, AtExit));
+  var Left: GameState := Unwrap(RevealCurrentArea(InitialAreaView(Metadata, JustLeft), JustLeft));
   AssertTrue(OutdoorIsDiscovered(Left.Exploration, Metadata.Entrance.X, Metadata.Entrance.Y));
   AssertTrue(InteriorIsDiscovered(Left.Exploration, Metadata.DungeonAreaId, Map.Width, 9, 4));
   mutable var UnknownAreaState: GameState := Started;
@@ -181,7 +183,7 @@ begin
     Height := Map.Height;
     Fields := UnknownFields;
   end];
-  AssertTrue(IsError(ValidateGameState(Metadata, UnknownAreaState)));
+  AssertTrue(IsError(ValidateInitialSave(Metadata, UnknownAreaState)));
   var WrongAreaShape: ExplorationState := record
     OutdoorChunks := [];
     InteriorAreas := [record

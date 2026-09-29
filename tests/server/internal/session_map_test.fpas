@@ -1,0 +1,170 @@
+// Verifies retained server geometry across projection, viewport changes, turns, and defeat.
+program SessionMapTest;
+
+uses
+  Dungeon.Combat, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Protocol,
+  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.Server.Config,
+  Dungeon.Server.Handling, Dungeon.Server.Projection, Dungeon.Server.Replies, Dungeon.Server.Session,
+  Dungeon.Terrain, Dungeon.Test.Fixtures, Dungeon.World, Std.Net, Std.Options, Std.Results, Std.Str,
+  Std.Task, Std.Test;
+
+function Receive(Client: Connection; Token: CancellationToken): ServerMessage;
+begin
+  var Response: LineRead := Std.Results.Unwrap(ReadLine(NewLineReader(Client), Token));
+  return Std.Results.Unwrap(DecodeServer(Response.Line))
+end;
+
+procedure AssertProjectedExit(Value: VisibleState);
+begin
+  case Value of
+    VisibleState.FirstPersonState(Fields):
+    begin
+      AssertEquals('x', Std.Str.CharAt(Fields.Rows[2], 8));
+      AssertEquals('Press Enter to return to the outdoor region.', Fields.Status)
+    end
+    else
+    begin
+      panic('expected the retained interior projection')
+    end
+  end
+end;
+
+begin
+  var Metadata: WorldMetadata := FixtureMetadata();
+  mutable var Map: InteriorMap := FixtureDungeonMap();
+  Map.Cells[Map.Exit.Y * Map.Width + Map.Exit.X] := InteriorCellKind.Floor;
+  Map.Cells[2 * Map.Width + 8] := InteriorCellKind.ExitField;
+  Map.Exit := record
+    X := 8;
+    Y := 2;
+  end;
+
+  Map := Std.Results.Unwrap(ValidateInteriorMap(Map));
+  var State: GameState := FixtureDungeonState(Map.Exit, FacingDirection.West);
+  var World: WorldSession := record
+    Directory := '.temp-data/unused-session-map';
+    Metadata := Metadata;
+    Cache := [];
+    Clock := 0;
+    CacheLimit := 32;
+  end;
+  var Session: ServerSession := record
+    World := World;
+    State := Some(State);
+    Interior := Some(Map);
+    Viewport := record
+      Width := 20;
+      Height := 12;
+    end;
+    Finished := false;
+  end;
+  var View: AreaView := Std.Results.Unwrap(SessionAreaView(Session, State));
+  AssertTrue(Std.Options.Unwrap(View.Interior).Exit = Map.Exit);
+  var Projected: SessionProjection := Std.Results.Unwrap(ProjectSession(World, View, State, Session.Viewport, NoTurnReport()));
+  AssertProjectedExit(Projected.State);
+  var Overlay: ExplorationMapState := Std.Results.Unwrap(ProjectExplorationMap(State, View, 0, 0, Map.Width, Map.Height));
+  AssertEquals('x', Std.Str.CharAt(Overlay.Rows[2], 8));
+  AssertTrue(IsError(SessionAreaView(Session with Interior := None; end, State)));
+  AssertTrue(IsError(SessionAreaView(Session with Interior := Some(Map with AreaId := 'wrong-area'; end); end, State)));
+  AssertTrue(IsError(ProjectSession(World, record
+    Metadata := Metadata;
+    Interior := None;
+  end, State, Session.Viewport, NoTurnReport())));
+  var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
+  var Client: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Address.Port, 2000));
+  var Server: Connection := Std.Results.Unwrap(Accept(ListenerValue));
+  AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
+  AssertTrue(Std.Results.Unwrap(SetTimeout(Client, 2000)));
+  AssertTrue(Std.Results.Unwrap(SetTimeout(Server, 2000)));
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var Config: ServerConfig := record
+    WorldsRoot := '.temp-data/unused-session-map';
+    WorldId := Metadata.Id;
+    WorldSeed := Metadata.Seed;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 80;
+    MaximumViewHeight := 24;
+  end;
+  var Resized: ServerSession := Std.Results.Unwrap(HandleSessionMessage(Session, ClientMessage.Viewport(40, 20), Server, Config, Token));
+  AssertEquals(40, Resized.Viewport.Width);
+  AssertTrue(Std.Options.Unwrap(Resized.Interior).Exit = Map.Exit);
+  case Receive(Client, Token) of
+    ServerMessage.State(Fields):
+    begin
+      AssertProjectedExit(Fields)
+    end
+    else
+    begin
+      panic('viewport update must project the retained map')
+    end
+  end;
+  var Committed: ServerSession := Std.Results.Unwrap(CommitState(Resized, State, Server, Token));
+  AssertTrue(Std.Options.Unwrap(Committed.Interior).Exit = Map.Exit);
+  case Receive(Client, Token) of
+    ServerMessage.State(Fields):
+    begin
+      AssertProjectedExit(Fields)
+    end
+    else
+    begin
+      panic('accepted state must retain the supplied map')
+    end
+  end;
+  var Waited: ServerSession := Std.Results.Unwrap(PlayTurn(Committed, TurnAction.Wait, 'wait_rejected', Server, Token));
+  AssertTrue(Std.Options.Unwrap(Waited.Interior).Exit = Map.Exit);
+  case Receive(Client, Token) of
+    ServerMessage.State(Fields):
+    begin
+      AssertProjectedExit(Fields)
+    end
+    else
+    begin
+      panic('a turn must retain the supplied map')
+    end
+  end;
+  // Find a deterministic fatal opponent turn; assert the complete session cleanup.
+  mutable var Fatal: GameState := State with Health := 1; end;
+
+  Fatal.Hostiles[0] := Fatal.Hostiles[0] with Position := record
+    X := 7;
+    Y := 2;
+  end; Alerted := true; end;
+  mutable var Found: boolean := false;
+  for Seed: integer := 0 to 100 do
+  begin
+    if not Found then
+    begin
+      Fatal := Fatal with RandomState := Seed; end;
+
+      case Std.Results.Unwrap(ResolveTurn(View, Fatal, TurnAction.Wait)) of
+        TurnOutcome.Defeated(Log):
+        begin
+          Found := true
+        end
+        else
+        begin
+        end
+      end
+    end
+  end;
+
+  AssertTrue(Found);
+  var Defeated: ServerSession := Std.Results.Unwrap(PlayTurn(Committed with State := Some(Fatal); end, TurnAction.Wait, 'wait_rejected', Server, Token));
+  AssertTrue(Std.Options.IsNone(Defeated.State));
+  AssertTrue(Std.Options.IsNone(Defeated.Interior));
+  case Receive(Client, Token) of
+    ServerMessage.Defeated(Text):
+    begin
+      AssertTrue(Std.Str.Length(Text) > 0)
+    end
+    else
+    begin
+      panic('fatal turn must send defeat')
+    end
+  end;
+
+  AssertTrue(Std.Results.Unwrap(Close(Server)));
+  AssertTrue(Std.Results.Unwrap(Close(Client)))
+end.

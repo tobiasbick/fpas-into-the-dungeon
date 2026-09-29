@@ -254,7 +254,7 @@ fixed blocking field in the initial dungeon.
 
 The implemented slice uses protocol version 10 and savegame format 4. It uses
 ordinary Functional Pascal data and functions rather than a scripting system.
-See [NPCs and simple dialogue](architecture/npcs-and-dialogue.md).
+Stage 14a removed this dialogue feature; stage 15 will restore NPCs and dialogue in settlements.
 
 Moving NPCs, schedules, quests, general dialogue scripting, free-text input,
 branching world effects, and LLM-generated behavior remain outside this phase.

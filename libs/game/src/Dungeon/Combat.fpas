@@ -3,12 +3,10 @@ unit Dungeon.Combat;
 
 uses
   Dungeon.Coordinates, Dungeon.Equipment, Dungeon.Exploration.Sight, Dungeon.GameState,
-  Dungeon.Hostiles, Dungeon.Interaction, Dungeon.Interior, Dungeon.Interior.InitialDungeon,
-  Dungeon.Movement, Dungeon.Terrain, Std.Arrays, Std.Conv, Std.Math;
+  Dungeon.Hostiles, Dungeon.Interaction, Dungeon.Interior, Dungeon.Movement, Dungeon.Random,
+  Dungeon.Terrain, Std.Arrays, Std.Conv, Std.Math;
 
 public const
-  // Largest distance in fields at which a dormant opponent notices the player.
-  HostileSightRange: integer := 6;
   // Upper bound of messages and of structured events reported for one resolved turn.
   MaximumTurnLogEntries: integer := 8;
   // Lowest d20 roll with which the restless skeleton hits an unarmored player.
@@ -61,10 +59,10 @@ type
 // Advances the persisted linear congruential generator and returns 1 through Sides.
 function Roll(State: GameState; Sides: integer): DiceRoll;
 begin
-  var Next: integer := ((State.RandomState * 1103515245) + 12345) mod RandomStateModulus;
+  var Draw: RandomDraw := DrawBelow(State.RandomState, Sides);
   return record
-    State := State with RandomState := Next; end;
-    Value := ((Next div 65536) mod Sides) + 1;
+    State := State with RandomState := Draw.State; end;
+    Value := Draw.Value + 1;
   end
 end;
 
@@ -137,7 +135,7 @@ begin
     end
   end;
 
-  return SamePosition(Position, Map.Npc) or (StandingHostileAt(State, State.AreaId, Position) >= 0)
+  return StandingHostileAt(State, State.AreaId, Position) >= 0
 end;
 
 // Returns the first field of a shortest path from Start to Goal, or Start when no path exists.
@@ -275,10 +273,10 @@ begin
 end;
 
 // Resolves the opponents' part of a turn after the player's accepted action.
-function HostilePhase(Progress: TurnProgress): result of TurnProgress, string;
+function HostilePhase(View: AreaView; Progress: TurnProgress): result of TurnProgress, string;
 begin
   var Pose: FirstPersonPose := try FirstPersonPlayerPose(Progress.State);
-  var Map: InteriorMap := try InitialDungeonMap();
+  var Map: InteriorMap := try CurrentInterior(View, Progress.State);
   mutable var Current: TurnProgress := Progress;
   for Index: integer := 0 to Std.Arrays.Length(Current.State.Hostiles) - 1 do
   begin
@@ -333,9 +331,9 @@ end;
 
 // Resolves one time-consuming player action followed by the opponents' turn.
 // Rejected actions return Error and leave time and the dice untouched.
-public function ResolveTurn(Metadata: WorldMetadata; State: GameState; Action: TurnAction): result of TurnOutcome, string;
+public function ResolveTurn(View: AreaView; State: GameState; Action: TurnAction): result of TurnOutcome, string;
 begin
-  var Valid: GameState := try ValidateGameState(Metadata, State);
+  var Valid: GameState := try ValidateGameState(View, State);
   mutable var Progress: TurnProgress := record
     State := Valid;
     Log := [];
@@ -346,7 +344,7 @@ begin
   case Action of
     TurnAction.Step(Direction):
     begin
-      Progress.State := try StepFirstPerson(Metadata, Valid, Direction)
+      Progress.State := try StepFirstPerson(View, Valid, Direction)
     end;
     TurnAction.Attack:
     begin
@@ -375,7 +373,7 @@ begin
 
   if Progress.State.Area = AreaKind.Dungeon then
   begin
-    Progress := try HostilePhase(Progress)
+    Progress := try HostilePhase(View, Progress)
   end;
 
   if Progress.PlayerDefeated then
@@ -383,5 +381,5 @@ begin
     return Ok(TurnOutcome.Defeated(Progress.Log))
   end;
 
-  return Ok(TurnOutcome.Continued(try ValidateGameState(Metadata, Progress.State), Progress.Log, Progress.Events))
+  return Ok(TurnOutcome.Continued(try ValidateGameState(View, Progress.State), Progress.Log, Progress.Events))
 end;

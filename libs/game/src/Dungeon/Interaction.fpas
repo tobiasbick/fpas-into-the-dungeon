@@ -1,28 +1,23 @@
-// The generic Enter interaction: environment hints, pickup, inspection, dialogue start, and exits.
+// The generic Enter interaction: environment hints, pickup, inspection, and exits.
 unit Dungeon.Interaction;
 
 uses
-  Dungeon.Coordinates, Dungeon.Dialogue, Dungeon.GameState, Dungeon.Hostiles, Dungeon.Interior,
-  Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Movement, Dungeon.Npcs, Dungeon.Terrain,
-  Std.Arrays, Std.Conv;
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Items,
+  Dungeon.Movement, Dungeon.Terrain, Std.Arrays, Std.Conv;
 
 public const
   // Successful interaction text when neither the current nor forward field offers an action.
   NoInteractionMessage: string := 'There is nothing to interact with.';
-  // Read-only description returned for the first wall-mounted inspectable object.
-  StoneTabletDescription: string := 'The weathered inscription reads: The dungeon remembers every step.';
 
 public type
   // Successful server-side resolution of one interaction intention.
   InteractionOutcome = enum
-    // The interaction changed the authoritative area and returns its replacement state.
-    Transitioned(State: GameState);
+    // Requests a server-owned transition target without changing the state.
+    TransitionRequested(TargetAreaId: string);
     // The interaction changed mutable state without changing areas.
     StateChanged(State: GameState);
     // Read-only information; an empty title denotes short feedback rather than inspection content.
     Described(Title: string; Text: string);
-    // Starts a server-owned dialogue and returns the updated persistent NPC state.
-    DialogueStarted(State: GameState; Dialogue: NpcDialogue);
   end;
 
 // Describes the available item action for a validated interior state; empty means no item target.
@@ -55,33 +50,6 @@ begin
           begin
           end
         end
-      end
-    end
-    else
-    begin
-    end
-  end;
-
-  return ''
-end;
-
-// Describes the available NPC action when the fixed NPC is directly ahead.
-public function NpcInteractionHint(State: GameState): string;
-begin
-  if State.Area <> AreaKind.Dungeon then
-  begin
-    return ''
-  end;
-
-  case State.Player of
-    PlayerPosition.FirstPerson(Pose):
-    begin
-      var NpcPosition: InteriorPosition := InitialDungeonNpcPosition();
-      var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
-      if (Pose.Position.X + Offset.X = NpcPosition.X) and
-         (Pose.Position.Y + Offset.Y = NpcPosition.Y) then
-      begin
-        return NpcDisplayName(State.Npc.Kind) + ' — Enter: Talk'
       end
     end
     else
@@ -132,34 +100,30 @@ begin
   begin
     return HostileHint
   end;
-  var NpcHint: string := NpcInteractionHint(State);
-  if NpcHint <> '' then
-  begin
-    return NpcHint
-  end;
 
   return ItemInteractionHint(State)
 end;
 
 // Resolves current-field transitions or pickup, then inspection ahead, without implicit movement.
-public function Interact(Metadata: WorldMetadata; State: GameState): result of InteractionOutcome, string;
+public function Interact(View: AreaView; State: GameState): result of InteractionOutcome, string;
 begin
-  var Valid: GameState := try ValidateGameState(Metadata, State);
+  var Metadata: WorldMetadata := View.Metadata;
+  var Valid: GameState := try ValidateGameState(View, State);
   if Valid.Area = AreaKind.OutdoorRegion then
   begin
     var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(Valid);
     if (OutdoorPosition.X = Metadata.Entrance.X) and (OutdoorPosition.Y = Metadata.Entrance.Y) then
     begin
-      return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
+      return Ok(InteractionOutcome.TransitionRequested(try AreaTransitionTarget(View, Valid)))
     end;
 
     return Ok(InteractionOutcome.Described('', NoInteractionMessage))
   end;
-  var Map: InteriorMap := try InitialDungeonMap();
+  var Map: InteriorMap := try CurrentInterior(View, State);
   var Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
   if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
   begin
-    return Ok(InteractionOutcome.Transitioned(try ActivateAreaTransition(Metadata, Valid)))
+    return Ok(InteractionOutcome.TransitionRequested(try AreaTransitionTarget(View, Valid)))
   end;
 
   for Index: integer := 0 to Std.Arrays.Length(Valid.Items) - 1 do
@@ -174,7 +138,7 @@ begin
           mutable var Changed: GameState := Valid;
           Item.Location := ItemLocation.CarriedByPlayer;
           Changed.Items[Index] := Item;
-          return Ok(InteractionOutcome.StateChanged(try ValidateGameState(Metadata, Changed)))
+          return Ok(InteractionOutcome.StateChanged(try ValidateGameState(View, Changed)))
         end
       end
       else
@@ -191,19 +155,6 @@ begin
   if StandingHostileAt(Valid, Valid.AreaId, Target) >= 0 then
   begin
     return Ok(InteractionOutcome.Described('', 'The restless skeleton rattles its bones at you. Press Space to attack.'))
-  end;
-
-  if (Target.X = Map.Npc.X) and (Target.Y = Map.Npc.Y) then
-  begin
-    var Dialogue: NpcDialogue := StartNpcDialogue(Valid);
-    var Changed: GameState := Valid with Npc := (Valid.Npc with HasMetPlayer := true; end); end;
-
-    return Ok(InteractionOutcome.DialogueStarted(try ValidateGameState(Metadata, Changed), Dialogue))
-  end;
-
-  if (Target.X = Map.Tablet.X) and (Target.Y = Map.Tablet.Y) then
-  begin
-    return Ok(InteractionOutcome.Described('Stone tablet', StoneTabletDescription))
   end;
 
   for Item: GameItem in Valid.Items do

@@ -33,12 +33,12 @@ only after `new_game` or `load_game`.
 ```text
 Client: hello, new_game, load_game, save_game, viewport, move,
          first_person_step, first_person_turn, interact, exploration_map,
-         dialogue_choice, end_dialogue, disconnect
-Server: welcome, state, interaction, exploration_map, dialogue,
-        dialogue_ended, save_completed, rejected, error
+         attack, wait, equip, unequip, disconnect
+Server: welcome, state, interaction, exploration_map,
+        save_completed, defeated, rejected, error
 ```
 
-Protocol version `10` is included in the handshake. `hello` includes the initial
+The current protocol version `13` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.

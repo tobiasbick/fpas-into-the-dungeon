@@ -1,0 +1,143 @@
+// Full saved-state validation against exactly one supplied map per visited dungeon.
+unit Dungeon.Areas.Validation;
+
+uses
+  Dungeon.Coordinates, Dungeon.Exploration.Model, Dungeon.GameState, Dungeon.Hostiles,
+  Dungeon.Interior, Dungeon.Items, Dungeon.Terrain, Std.Arrays, Std.Str;
+
+function MapIndex(Maps: array of InteriorMap; AreaId: string): result of integer, string;
+begin
+  for Index: integer := 0 to Std.Arrays.Length(Maps) - 1 do
+  begin
+    if Maps[Index].AreaId = AreaId then
+    begin
+      return Ok(Index)
+    end
+  end;
+
+  return Error('saved state references an area without a supplied map')
+end;
+
+// Requires exact placement identities/kinds and valid mutable positions in every visited area.
+// Geometry is validated once here; no map is generated or loaded, including the current map.
+public function ValidateSavedAreas(Metadata: WorldMetadata; State: GameState; Maps: array of InteriorMap): result of GameState, string;
+begin
+  if Std.Arrays.Length(Maps) <> Std.Arrays.Length(State.VisitedAreas) then
+  begin
+    return Error('saved game requires exactly one map per visited area')
+  end;
+  mutable var ValidMaps: array of InteriorMap := [];
+  mutable var ItemCount: integer := 0;
+  mutable var HostileCount: integer := 0;
+  for Index: integer := 0 to Std.Arrays.Length(Maps) - 1 do
+  begin
+    var Map: InteriorMap := try ValidateInteriorMap(Maps[Index]);
+    if not HasVisitedArea(State, Map.AreaId) or
+       not Std.Str.StartsWith(Map.AreaId, Metadata.Id + ':dungeon:') then
+    begin
+      return Error('saved game map must name a visited dungeon of the selected world')
+    end;
+
+    for Other: integer := 0 to Index - 1 do
+    begin
+      if ValidMaps[Other].AreaId = Map.AreaId then
+      begin
+        return Error('saved game contains duplicate area maps')
+      end
+    end;
+
+    ItemCount := ItemCount + Std.Arrays.Length(Map.Items);
+    HostileCount := HostileCount + Std.Arrays.Length(Map.Hostiles);
+    Std.Arrays.Push(ValidMaps, Map)
+  end;
+
+  for AreaId: string in State.VisitedAreas do
+  begin
+    var Found: integer := try MapIndex(ValidMaps, AreaId)
+  end;
+
+  if (Std.Arrays.Length(State.Items) <> ItemCount) or
+     (Std.Arrays.Length(State.Hostiles) <> HostileCount) then
+  begin
+    return Error('saved entities must correspond exactly to visited-area placements')
+  end;
+
+  for Item: GameItem in State.Items do
+  begin
+    mutable var Matches: integer := 0;
+    for Map: InteriorMap in ValidMaps do
+    begin
+      for Placement: ItemPlacement in Map.Items do
+      begin
+        if (Placement.ItemId = Item.Id) and (Placement.Kind = Item.Kind) then
+        begin
+          Matches := Matches + 1
+        end
+      end
+    end;
+
+    if Matches <> 1 then
+    begin
+      return Error('saved item identity and kind must match exactly one placement')
+    end;
+
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, Position):
+      begin
+        var Destination: integer := try MapIndex(ValidMaps, AreaId);
+        if try InteriorCellAt(ValidMaps[Destination], Position) = InteriorCellKind.Wall then
+        begin
+          return Error('saved floor item must occupy a traversable field')
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  for Hostile: GameHostile in State.Hostiles do
+  begin
+    mutable var Matches: integer := 0;
+    for Map: InteriorMap in ValidMaps do
+    begin
+      for Placement: HostilePlacement in Map.Hostiles do
+      begin
+        if ((Placement.Id = Hostile.Id) and (Placement.Kind = Hostile.Kind)) and
+           (Map.AreaId = Hostile.AreaId) then
+        begin
+          Matches := Matches + 1
+        end
+      end
+    end;
+
+    if Matches <> 1 then
+    begin
+      return Error('saved opponent must match exactly one placement in its origin area')
+    end;
+    var Origin: integer := try MapIndex(ValidMaps, Hostile.AreaId);
+    if try InteriorCellAt(ValidMaps[Origin], Hostile.Position) = InteriorCellKind.Wall then
+    begin
+      return Error('saved opponent must occupy a traversable field')
+    end
+  end;
+
+  for Area: InteriorDiscoveryArea in State.Exploration.InteriorAreas do
+  begin
+    var Index: integer := try MapIndex(ValidMaps, Area.AreaId);
+    if (Area.Width <> ValidMaps[Index].Width) or (Area.Height <> ValidMaps[Index].Height) then
+    begin
+      return Error('interior discovery dimensions do not match its authoritative area')
+    end
+  end;
+  mutable var Current: option of InteriorMap := None;
+  if State.Area = AreaKind.Dungeon then
+  begin
+    Current := Some(ValidMaps[try MapIndex(ValidMaps, State.AreaId)])
+  end;
+
+  return ValidateGameState(record
+    Metadata := Metadata;
+    Interior := Current;
+  end, State)
+end;

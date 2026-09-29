@@ -2,9 +2,9 @@
 program DungeonInventoryTest;
 
 uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interaction, Dungeon.Interior,
-  Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Movement, Dungeon.Terrain,
-  Dungeon.Terrain.Placement, Std.Arrays, Std.Results, Std.Test;
+  Dungeon.Test.InitialAreas, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interaction,
+  Dungeon.Interior, Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Movement,
+  Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays, Std.Results, Std.Test;
 
 function AtOutdoorEntrance(Metadata: WorldMetadata; State: GameState): GameState;
 begin
@@ -39,8 +39,8 @@ end;
 
 begin
   var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('inventory-test', 77191));
-  var Map: InteriorMap := Unwrap(InitialDungeonMap());
-  var Initial: GameState := NewGame(Metadata);
+  var Map: InteriorMap := Unwrap(InitialDungeonMap(Metadata));
+  var Initial: GameState := MaterializedInitialState(Metadata);
   var CoinField: InteriorPosition := Unwrap(InitialItemPosition(Map, InitialDungeonItemId));
   AssertEquals('', ItemInteractionHint(Initial));
   AssertEquals(3, Std.Arrays.Length(Initial.Items));
@@ -62,41 +62,49 @@ begin
   end;
   mutable var Missing: GameState := Initial;
   Missing.Items := [];
-  AssertTrue(IsError(ValidateGameState(Metadata, Missing)));
+  AssertTrue(IsError(ValidateInitialSave(Metadata, Missing)));
   mutable var Duplicate: GameState := Initial;
   Duplicate.Items := [Initial.Items[0], Initial.Items[0]];
-  AssertTrue(IsError(ValidateGameState(Metadata, Duplicate)));
+  AssertTrue(IsError(ValidateInitialSave(Metadata, Duplicate)));
   mutable var UnknownIdentity: GameState := Initial;
   mutable var ChangedItem: GameItem := UnknownIdentity.Items[0];
   ChangedItem.Id := 'unknown:item';
   UnknownIdentity.Items[0] := ChangedItem;
-  AssertTrue(IsError(ValidateGameState(Metadata, UnknownIdentity)));
+  AssertTrue(IsError(ValidateInitialSave(Metadata, UnknownIdentity)));
   mutable var WrongArea: GameState := Initial;
   ChangedItem := WrongArea.Items[0];
   ChangedItem.Location := ItemLocation.InInterior(Metadata.OutdoorAreaId, CoinField);
   WrongArea.Items[0] := ChangedItem;
-  AssertTrue(IsError(ValidateGameState(Metadata, WrongArea)));
+  AssertTrue(IsError(ValidateInitialSave(Metadata, WrongArea)));
   mutable var WrongPosition: GameState := Initial;
   ChangedItem := WrongPosition.Items[0];
-  ChangedItem.Location := ItemLocation.InInterior(Metadata.DungeonAreaId, Map.Start);
+  ChangedItem.Location := ItemLocation.InInterior(Metadata.DungeonAreaId, record
+    X := 0;
+    Y := 0;
+  end);
   WrongPosition.Items[0] := ChangedItem;
-  AssertTrue(IsError(ValidateGameState(Metadata, WrongPosition)));
+  AssertTrue(IsError(ValidateInitialSave(Metadata, WrongPosition)));
   mutable var InvalidMap: InteriorMap := Map;
   InvalidMap.Items := [record
     ItemId := InitialDungeonItemId;
+    Kind := ItemKind.AncientCoin;
     Position := Map.Start;
   end];
   AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
   InvalidMap.Items := [record
     ItemId := InitialDungeonItemId;
-    Position := Map.Tablet;
+    Kind := ItemKind.AncientCoin;
+    Position := record
+      X := 9;
+      Y := 0;
+    end;
   end];
   AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
-  var Entered: GameState := Unwrap(ActivateAreaTransition(Metadata, AtOutdoorEntrance(Metadata, Initial)));
+  var Entered: GameState := Unwrap(ActivateInitialTransition(Metadata, AtOutdoorEntrance(Metadata, Initial)));
   AssertEquals('Ancient coin — Enter: Examine', ItemInteractionHint(Entered));
   AssertEquals('', ItemInteractionHint(AtInteriorPosition(Entered, Map.Start, FacingDirection.East)));
   AssertEquals('i', Unwrap(InteriorVisibleCodeForState(Map, Entered, CoinField)));
-  case Unwrap(Interact(Metadata, Entered)) of
+  case Unwrap(Interact(InitialAreaView(Metadata, Entered), Entered)) of
     InteractionOutcome.Described(Title, Text):
     begin
       AssertEquals(InitialDungeonItemName, Title);
@@ -119,13 +127,13 @@ begin
   begin
     AssertEquals('At your feet: Ancient coin — Enter: Pick up', ItemInteractionHint(AtInteriorPosition(Entered, CoinField, Facing)))
   end;
-  var Collected: GameState := RequireChanged(Unwrap(Interact(Metadata, OnItem)));
+  var Collected: GameState := RequireChanged(Unwrap(Interact(InitialAreaView(Metadata, OnItem), OnItem)));
   AssertEquals('', ItemInteractionHint(Collected));
   AssertEquals(1, Std.Arrays.Length(InventoryItems(Collected)));
   AssertEquals(InitialDungeonItemId, InventoryItems(Collected)[0].Id);
   AssertEquals('.', Unwrap(InteriorVisibleCodeForState(Map, Collected, CoinField)));
-  AssertTrue(IsOk(ValidateGameState(Metadata, Collected)));
-  case Unwrap(Interact(Metadata, Collected)) of
+  AssertTrue(IsOk(ValidateInitialSave(Metadata, Collected)));
+  case Unwrap(Interact(InitialAreaView(Metadata, Collected), Collected)) of
     InteractionOutcome.Described(Title, Text):
     begin
       AssertEquals(NoInteractionMessage, Text)
@@ -138,9 +146,11 @@ begin
 
   AssertEquals(1, Std.Arrays.Length(InventoryItems(Collected)));
   var AtExit: GameState := AtInteriorPosition(Collected, Map.Exit, FacingDirection.West);
-  case Unwrap(Interact(Metadata, AtExit)) of
-    InteractionOutcome.Transitioned(Outside):
+  case Unwrap(Interact(InitialAreaView(Metadata, AtExit), AtExit)) of
+    InteractionOutcome.TransitionRequested(Target):
     begin
+      AssertEquals(Metadata.OutdoorAreaId, Target);
+      var Outside: GameState := Unwrap(ActivateInitialTransition(Metadata, AtExit));
       AssertTrue(Outside.Area = AreaKind.OutdoorRegion);
       AssertEquals(1, Std.Arrays.Length(InventoryItems(Outside)))
     end
