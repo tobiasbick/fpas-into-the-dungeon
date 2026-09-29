@@ -357,11 +357,80 @@ to make it meaningful. The preferred direction is learning by doing, as in
 Dungeon Master: the character improves in what it actually does, which suits a
 game without class selection at the start.
 
-## 14. Generated game content — LATER
+## 14. Generated game content — NEXT
 
 Expand beyond the fixed initial dungeon with generated interiors, dungeons,
 locations, and their contents. Generation remains deterministic and
-server-owned.
+server-owned. The stage is split so each slice stays reviewable: 14a builds the
+infrastructure, 14s adds world management and the server console, 14b adds
+contents, and 14c adds deeper levels.
+
+### 14a. Generated dungeons — NEXT
+
+- [ ] Design entrance sites, the area view, the dungeon generator, and
+  persistence before implementation in
+  [generated dungeons](architecture/generated-dungeons.md), with a step-by-step
+  [implementation plan](plans/14a-generated-dungeons.md).
+- [ ] Place at most one deterministic entrance per entrance region on walkable
+  land; guarantee one within sight of the spawn. Entrances appear on the map
+  once revealed. Raise the world generator version to 6.
+- [ ] Make the entrance region size a world parameter: default from
+  `server.toml` (4 chunks), stored in the world metadata at creation.
+- [ ] Remove the hand-authored initial dungeon, its tablet, Mara, and the
+  complete dialogue feature until stage 15; heal one health point per outdoor
+  step instead. Raise the protocol version to 13.
+- [ ] Resolve interior maps by area identity; pass an area view with the
+  resolved map to the rules and keep the current area's map in the server
+  session.
+- [ ] Generate a 31 by 21 rooms-and-corridors dungeon from the world seed and
+  the entrance region, with one or two restless skeletons far from the start
+  and the coin, sword, and jerkin in room corners.
+- [ ] Validate generated maps (connectivity, exit, room count, floor share, no
+  opponent in sight of the start); retry with derived seeds; pin a fingerprint
+  of fixed regions; measure the generation time.
+- [ ] Never store geometry; materialize opponents and items on first entry and
+  persist only their changes and the visited areas. Validate them against
+  their area's map in savegame format 7.
+- [ ] Return the player to the entrance they used when leaving a generated
+  dungeon.
+- [ ] Cover entrance placement, generator determinism and validation,
+  materialization, persistence, and a complete TCP visit to a generated
+  dungeon.
+- [ ] Synchronize architecture, product terminology, persistence, and roadmap
+  documentation.
+- [ ] Review the generated-dungeon slice with the user and obtain explicit
+  acceptance.
+
+Dungeon names, further opponent kinds, loot tables, and consumables belong to
+14b; stairs and deeper levels to 14c.
+
+### 14s. World management and server console — LATER
+
+- The server supplies defaults and allowed ranges for world parameters (seed,
+  entrance region size, later more); the client's new-game dialog shows them
+  and may override them within the ranges. The server validates and creates a
+  new world with its own identity; earlier worlds are kept.
+- The client lists existing worlds with their parameters and game state and
+  continues a selected one. Worlds of an obsolete format are shown as
+  incompatible with an instruction to delete them. Deleting from the client is
+  deferred.
+- `world_id` in `server.toml` only selects the world active at server start.
+- `dungeon-server --console` shows a live log (connections, created and loaded
+  worlds, rejected requests, errors), a status line, and a settings view. The
+  settings view edits the server defaults such as the entrance region size and
+  later the LLM connection; it validates each value and writes `server.toml`.
+  World parameters changed there apply to new worlds only. Without `--console`
+  the server stays headless.
+- Requires the next protocol version.
+
+### 14b. Dungeon contents — LATER
+
+Several opponent kinds such as a giant rat, loot tables, a first consumable
+item, and deterministic dungeon names.
+
+### 14c. Dungeon levels — LATER
+
+Stairs between levels and deeper, harder levels of a generated dungeon.
 
 ## 15. Broader world simulation — LATER
 

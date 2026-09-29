@@ -9,10 +9,13 @@ Functional Pascal resources:
 - [Language specification and documentation](https://github.com/tobiasbick/functional-pascal/tree/main/docs/pascal)
 - [Formal grammar](https://github.com/tobiasbick/functional-pascal/blob/main/docs/specs/grammar.ebnf)
 
-When development reveals a bug in Functional Pascal or a missing language,
-runtime, tooling, or standard-library capability, create a
-[GitHub issue](https://github.com/tobiasbick/functional-pascal/issues/new) with
-a reproducible report.
+This game is a showcase of what Functional Pascal can do. When development
+reveals a bug in Functional Pascal or a missing language, runtime, tooling, or
+standard-library capability, never work around it silently. Stop and report it
+to the user with a minimal reproduction. With the user's agreement, fix it
+directly in the Functional Pascal repository with tests, or create a
+[GitHub issue](https://github.com/tobiasbick/functional-pascal/issues/new).
+Language or specification changes always need the user's explicit agreement.
 
 Before adding projects or changing module ownership, read the
 [architecture overview](docs/architecture/overview.md). Further game and
@@ -27,6 +30,45 @@ Treat runtime configuration files as current-version only. When their schema
 changes, reject obsolete files with a clear error and instruct the user to
 delete or recreate them. Keep defaults, documentation, and tests aligned with
 the current schema.
+
+## Versioned formats and determinism
+
+- World files, savegames, and the protocol carry a version. Any change to their
+  schema raises the version once per feature branch; obsolete versions are
+  rejected, never migrated.
+- Generated content (terrain, entrances, dungeons) is a pure function of the
+  world seed and stable identities. Any change to generated output raises the
+  world generator version and updates the fingerprint tests deliberately;
+  never adjust a fingerprint to make a test pass without that.
+- The server is authoritative. The client only sends intentions and renders
+  projections.
+
+## Verification
+
+- Format changed files with `fpas fmt`, run `fpas check` for every changed
+  project, and run the relevant test project, for example
+  `fpas test --timeout 600 tests/game/game-tests.fpasprj`.
+- Before handing work back, run the complete suite with
+  `fpas test --timeout 600 dungeon.fpasworkspace`. Report failures with their
+  output; do not call work done while the suite is red.
+- Run long commands in the background and say so.
+
+## Git and plans
+
+- Commit, merge, or push only when the user asks.
+- Implementation plans for a feature branch live in `docs/plans/` on that
+  branch and are deleted after the user accepts the feature.
+- When a plan is given, follow its steps in order and ask before deviating.
+
+## Functional Pascal pitfalls
+
+- A qualified name such as `Std.Math.Abs` requires `uses Std.Math`.
+- Short names from `Std` units and source units share one namespace; an
+  ambiguous short name is an error, so qualify it or drop the unneeded `uses`.
+- Declarations must precede their use within a unit.
+- `event` is reserved; `Pi` is a constant, not a function.
+- Records and payload enums compare structurally with `=` and `<>` when all
+  their fields compare.
 
 ## Functional Pascal source documentation
 
