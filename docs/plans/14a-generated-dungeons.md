@@ -4,6 +4,9 @@ This plan implements [generated dungeons](../architecture/generated-dungeons.md)
 on branch `feat/generated-dungeons`. It lives only on that branch and is deleted
 after the user accepts the slice. Read the architecture document, `AGENTS.md`,
 and the [architecture overview](../architecture/overview.md) first.
+The [level storage contract](../architecture/dungeon-level-storage.md) fixes
+the file schema, final interfaces, error handling, and transition sequence.
+It is part of this plan, not a deferred design task.
 
 ## Ground rules
 
@@ -73,8 +76,11 @@ Acceptance: a case-insensitive search for `mara`, `dialogue`, `npc`, and
 ## Step 3: area view, visited areas, and materialization
 
 Goal: rules receive maps; mutable dungeon content is created on first entry.
-The hand-authored initial dungeon still exists and is resolved through the new
-unit, so the suite stays green.
+The hand-authored initial dungeon still exists, so the suite stays green.
+Use the final map-injection signatures from the storage contract immediately.
+Until step 5, server/world callers supply `InitialDungeonMap(Metadata)` through
+a private helper; game rules never resolve maps. Step 5 replaces only that
+helper with storage access and removes it.
 
 - `Dungeon.Hostiles`: add
   `HostilePlacement = record public Id: string; public Kind: HostileKind; public Position: InteriorPosition; end;`
@@ -101,31 +107,37 @@ unit, so the suite stays green.
     `Dungeon.Areas` imports `GameState`:
     `AreaView = record public Metadata: WorldMetadata; public Interior: option of InteriorMap; end;`
 - New unit `libs/game/src/Dungeon/Areas.fpas`:
-  - `public function ResolveInteriorMap(Metadata: WorldMetadata; AreaId: string): result of InteriorMap, string;`
-    (in this step: only the initial dungeon identity; `InitialDungeonMap`
-    takes the metadata, sets `AreaId`, and names its placements
-    `<area>:item:<n>` and `<area>:hostile:<n>`).
-  - `public function AreaViewFor(Metadata: WorldMetadata; State: GameState): result of AreaView, string;`
+  - `InitialDungeonMap` takes the metadata, sets `AreaId`, and names its
+    placements `<area>:item:<n>` and `<area>:hostile:<n>`; only callers outside
+    pure rules supply it during this intermediate step.
+  - `public function AreaViewFor(Metadata: WorldMetadata; State: GameState; Map: option of InteriorMap): result of AreaView, string;`
   - `public function MaterializeArea(State: GameState; Map: InteriorMap): GameState;`
     adds the area to `VisitedAreas` and creates items
     (`InInterior(Map.AreaId, Position)`) and opponents (full health, not
     alerted) from the placements; a visited area is returned unchanged.
-  - `public function ValidateSavedGame(Metadata: WorldMetadata; State: GameState): result of GameState, string;`
-    resolves every visited area once and requires that items and opponents
+  - `public function ValidateSavedGame(Metadata: WorldMetadata; State: GameState; Maps: array of InteriorMap): result of GameState, string;`
+    receives one map per visited area and requires that items and opponents
     correspond one to one to the placements of the visited areas (same
-    identity and kind; an interior item lies exactly on its placement; an
-    opponent's area is its placement's area), that interior discovery exists
+    identity and kind; an interior item lies on a valid field of its current
+    visited area, which may differ from its origin; an opponent's area is its
+    placement's area), that interior discovery exists
     only for visited areas with matching dimensions, then runs
-    `ValidateGameState` with `AreaViewFor`.
+    `ValidateGameState` with the already resolved current map. Do not generate
+    the current map a second time. Validate opponents on valid fields in every
+    visited area, including those other than the player's current area.
 - Rule signatures take `View: AreaView` instead of `Metadata: WorldMetadata`:
   `StepFirstPerson`, `TurnFirstPerson`, `Interact`, `ResolveTurn`,
   `RevealCurrentArea`. They read the map from `View.Interior` and never
   resolve maps themselves.
-- Transitions: `ActivateAreaTransition(View, State): result of AreaTransition, string`
+- Transitions: `ActivateAreaTransition(View, State, TargetMap): result of AreaTransition, string`
   with `AreaTransition = record public State: GameState; public View: AreaView; end;`.
-  Entering resolves the target map, places the player on its start, sets the
-  return location, and materializes the area. `InteractionOutcome.Transitioned`
-  carries an `AreaTransition`.
+  `TargetMap` is `option of InteriorMap`. `Interact` returns
+  `InteractionOutcome.TransitionRequested(TargetAreaId: string)` without
+  changing state. The server supplies the target map (or `None` for outdoors)
+  and applies the pure transition under the storage contract. Entering places
+  the player on the start, sets the return location, and materializes the area.
+  Remove `InteractionOutcome.Transitioned`; descriptions and pickup retain
+  their existing outcomes.
 - Server: `ServerSession` gains `public Interior: option of InteriorMap;`. New
   game, load, and every transition set it; all rule calls build the view from
   the session. Projection receives the view instead of calling
@@ -144,6 +156,38 @@ Acceptance: re-entering a dungeon keeps defeated opponents and carried items; a
 savegame with an item that matches no placement is rejected; the full suite is
 green.
 
+### Step 3a: bounded inventory and dropping
+
+Complete this substep before step 4. Keep the initial dungeon available while
+proving the item lifecycle with area-view fixtures.
+
+- Add a game-owned maximum of 64 items carried or equipped by the player.
+  Keep the independent protocol bound at 64 and prove agreement in a server
+  contract test without adding a protocol dependency on game rules. Validate
+  the game bound in state and saves; reject pickup at capacity before changing
+  state or time.
+- Add a server-authoritative drop-item intention carrying the selected item
+  identity, within protocol version 13. Bind `D` in the inventory overlay and
+  show its hint. Only a carried item may be dropped; equipped items must first
+  be unequipped. The destination is the occupied ordinary dungeon floor field,
+  with no existing item. Outdoors and exit fields reject the action.
+- Success changes the existing item's location and consumes one turn, using
+  normal opponent resolution and defeat handling. Rejection changes nothing.
+  Reuse existing floor-item projection, inspection, and pickup. Closing or
+  updating the inventory must handle an empty list and a defeated player.
+- Persist each item's immutable origin identity and kind independently of its
+  current location using its generated placement identity. Reject duplicate
+  floor occupancy. Do not require a dropped item to remain in its origin area
+  or at its origin field. Never recreate it on revisiting its origin.
+- Cover pickup at 63 and 64 entries, equipment counting toward capacity,
+  rejected foreign or equipped item drops, occupied floor, outdoors, exit,
+  turn costs, combat defeat, drop and pickup, inventory selection, protocol
+  validation, and save/load of an item transferred between visited areas.
+  Complete the real generated two-dungeon case in step 6.
+
+Acceptance: the 65th item cannot enter the inventory; dropping frees one place;
+an item retains its identity and location across save/load and revisits.
+
 ## Step 4: dungeon generator
 
 Goal: deterministic generated maps; not yet reachable in play.
@@ -160,6 +204,8 @@ Goal: deterministic generated maps; not yet reachable in play.
     centers (integer center `X + W div 2`, `Y + H div 2`) goes horizontal first
     when `DrawBelow(2) = 0`, otherwise vertical first; extra corridor count
     `1 + DrawBelow(2)`, endpoints `DrawBelow(RoomCount)`, skipped when equal.
+    Extra corridors may overlap existing ones; loops are optional. Do not add
+    a loop guarantee or retry condition beyond the stated map validation.
   - Skeleton count `1 + DrawBelow(2)`, ids `<AreaId>:hostile:<n>` from 0; rooms
     ordered by walking distance of their center from the start, farthest
     first, ties by lower room index; never the exit room.
@@ -194,7 +240,9 @@ Goal: the world contains generated dungeons; the hand-authored dungeon is gone.
   - `EntranceSite(Metadata, Region): option of WorldPosition` and
     `EntranceRegionAt(Metadata, Position): option of RegionCoordinate` as
     defined in the architecture document. `EntranceRegionAt` computes at most
-    one natural cell.
+    one natural cell. Check `SpawnEntrance` first and return the spawn region
+    for that exact field, even across a region border; the spawn region has no
+    ordinary candidate. Otherwise inspect the containing region's site.
   - `EntranceFieldsInChunk(Metadata, Coordinate): array of WorldPosition`:
     the spawn entrance when inside the chunk, plus the chunk region's candidate
     when inside the chunk and the region is not the spawn region.
@@ -213,8 +261,36 @@ Goal: the world contains generated dungeons; the hand-authored dungeon is gone.
   fields whose stored cell is clear walkable land, and nowhere else.
 - `Dungeon.Areas`: `DungeonAreaId(Metadata, Region)` builds
   `<world>:dungeon:<rx>:<ry>`; `ParseDungeonAreaId` reverses it and requires a
-  region that has an entrance site; `ResolveInteriorMap` calls
-  `GenerateDungeon`. `GeneratedDungeonLabel := 'Forgotten dungeon'`.
+  region that has an entrance site.
+  `GeneratedDungeonLabel := 'Forgotten dungeon'`.
+- Replace step 3's private initial-map supplier in server/world callers with
+  the exact storage interfaces in the level storage contract. Keep the pure
+  game signatures unchanged; transitions and validation never call the
+  generator or filesystem.
+- Add `Dungeon.World.Interiors` in `libs/world`, with focused codec and storage
+  units as needed. Implement separate read-existing and load-or-create entry
+  operations. Use `worlds/<world-id>/dungeons/<rx>_<ry>/0.json`, with paths
+  derived only from validated region coordinates. Level-file format 1 stores
+  world and generator identity, area identity, level index 0, dimensions,
+  geometry, start pose, exit, and original item/opponent placements. Decode
+  strictly and validate identity, dimensions, map invariants, and placements
+  without regenerating the map. Keep world format 3 and generator version 6
+  as this branch's single version bumps.
+- First entry may generate a missing level only if the area is not already
+  visited in the current game. Validate and atomically publish the level file
+  before installing the transition. Existing level files are immutable; invalid
+  files and I/O failures abort without replacement or changes to game state.
+- Save/load uses read-existing for every visited area, once per validation,
+  passes those maps to pure validation, and reuses the current one when building
+  the loaded session view. A missing or invalid referenced level is a world-data
+  error, separate from malformed save content: preserve the save, report the
+  problem, and never regenerate the level as part of save/load. Failed saving
+  leaves the previous save intact.
+- Level files survive loading an earlier save, starting over, and disconnecting
+  without saving. Their existence does not mark discovery or visited areas in
+  a fresh game. Materialize their original placements only on first entry in
+  that game; restore mutable state solely from an explicit save. A file created
+  before an interrupted transition may be reused without recreating it.
 - Transitions and validation: entering uses `EntranceRegionAt` on the player's
   field; the return location must equal the entrance site of the current
   dungeon's region.
@@ -225,21 +301,53 @@ Goal: the world contains generated dungeons; the hand-authored dungeon is gone.
 - Tests: world storage and chunk tests for entrance fields; entrance tests
   (spawn entrance three steps away, deterministic sites, no site on water, at
   most one site per region besides the spawn entrance, region size bounds);
+  explicitly cover a spawn entrance across positive and negative region
+  boundaries, its owning area identity and exact return location, and coexistence
+  with the receiving region's ordinary entrance;
   metadata round trip; `Dungeon.Test.Fixtures` gains a route helper that turns
   a generated map and a target into first-person step and turn intentions for
   server tests. Update the loopback and full-session tests to walk through a
   generated dungeon.
+- Add storage tests for strict level-file round trips, versions, wrong-world
+  and wrong-area identities, invalid maps and placements, missing referenced
+  files, read/write failures, and atomic creation. Verify that existing file
+  bytes remain unchanged on revisit, failed operations, and new game. Cover
+  the case where a valid file exists but the loaded save has not visited it.
+- Implement the storage contract's failure matrix and transition checkpoints
+  as regressions. Never infer error classes from message text. Update handshake,
+  explicit load, and save handlers together with the changed load result.
 
 ## Step 6: complete TCP visit and documentation
 
 - A server test starts a new game, enters the spawn entrance, defeats or
   avoids the skeletons, picks up an item, leaves, saves, loads, re-enters, and
   checks that defeated opponents and taken items stay gone.
+- A two-dungeon session carries an item from one dungeon to another, drops it,
+  saves, restarts the server, loads, and revisits both areas. The item exists
+  exactly once, at the dropped location, and can be picked up again.
+- Prove across a server restart that revisits and save/load read stored levels
+  with no generator calls. Loading an older save keeps a subsequently created
+  level file while resetting that level's mutable state and discovery to the
+  older save. Failure to store a first-visit level leaves the player outside
+  and the previous save unchanged.
+- Measure complete save and load for deterministic valid states with 1, 10,
+  and 100 visited dungeons. Include items left on the floor, carried and
+  transferred items, defeated and surviving opponents, and discovery masks.
+  Include validation, encoding/decoding, and file access; report elapsed time
+  and peak memory with the measurement method. Verify at most one level-file
+  read per visited area per validation and zero generation calls during save,
+  load, and revisits. Measure first-entry generation and atomic storage
+  separately. Do not convert noisy timings
+  into unit-test assertions. Report results before choosing an optimization;
+  this does not impose a 100-dungeon gameplay limit.
 - Synchronize documentation: architecture overview, area transitions,
   first-person interior, interaction, items, combat, persistent game state,
   runtime data (`dungeon_region_chunks`), product terminology in
   `docs/product/world-and-views.md` (entrance region, entrance site, spawn
   entrance, generated dungeon, visited area, materialization), client UI, and
   the roadmap checklist.
+- Keep future contracts visible: 14b adds stable loot origins and a persisted
+  consumed state while retaining outdoor healing; 13b follows 14b; 14c introduces
+  separate level areas and paired stairs; stage 15 restores NPCs and dialogue.
 - Report to the user: test results, generation time, and anything that
   deviated from this plan. Then wait for review.

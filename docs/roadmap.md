@@ -357,13 +357,16 @@ to make it meaningful. The preferred direction is learning by doing, as in
 Dungeon Master: the character improves in what it actually does, which suits a
 game without class selection at the start.
 
+Implement this slice after 14b and before 14c, so progression can be balanced
+against several opponent kinds before deeper, harder levels are introduced.
+
 ## 14. Generated game content — NEXT
 
 Expand beyond the fixed initial dungeon with generated interiors, dungeons,
 locations, and their contents. Generation remains deterministic and
 server-owned. The stage is split so each slice stays reviewable: 14a builds the
 infrastructure, 14s adds world management and the server console, 14b adds
-contents, and 14c adds deeper levels.
+contents, then 13b adds progression before 14c adds deeper levels.
 
 ### 14a. Generated dungeons — NEXT
 
@@ -371,8 +374,12 @@ contents, and 14c adds deeper levels.
   persistence before implementation in
   [generated dungeons](architecture/generated-dungeons.md), with a step-by-step
   [implementation plan](plans/14a-generated-dungeons.md).
-- [ ] Place at most one deterministic entrance per entrance region on walkable
-  land; guarantee one within sight of the spawn. Entrances appear on the map
+  The [level storage contract](architecture/dungeon-level-storage.md) fixes
+  file schema, final interfaces, error classes, and transition ordering.
+- [ ] Place at most one ordinary deterministic entrance per entrance region on
+  walkable land, replacing the spawn region's candidate with its guaranteed
+  entrance three steps from spawn. This special entrance may cross a region
+  border and remains assigned to the spawn region. Entrances appear on the map
   once revealed. Raise the world generator version to 6.
 - [ ] Make the entrance region size a world parameter: default from
   `server.toml` (4 chunks), stored in the world metadata at creation.
@@ -388,14 +395,27 @@ contents, and 14c adds deeper levels.
 - [ ] Validate generated maps (connectivity, exit, room count, floor share, no
   opponent in sight of the start); retry with derived seeds; pin a fingerprint
   of fixed regions; measure the generation time.
-- [ ] Never store geometry; materialize opponents and items on first entry and
-  persist only their changes and the visited areas. Validate them against
-  their area's map in savegame format 7.
+- [ ] Generate each dungeon's level on first entry and atomically store its
+  immutable geometry and original placements as versioned world data. Load
+  that file on revisits; keep the current map in memory. Invalid files fail
+  without replacement; missing files referenced by a save fail without deleting
+  the save. Do not regenerate levels during save/load validation.
+- [ ] Materialize opponents and items on entry in the current game and persist
+  mutable state and visited areas only through explicit saving. Validate item
+  origins separately from current locations in savegame format 7. Starting
+  over or loading an earlier save keeps the immutable level files.
+- [ ] Limit carried and equipped items together to 64; reject pickup when full
+  without changing state. Allow dropping carried items on an empty ordinary
+  dungeon floor field and picking them up again, including in another dungeon.
+  Persist their locations without duplicating their original placements.
 - [ ] Return the player to the entrance they used when leaving a generated
   dungeon.
 - [ ] Cover entrance placement, generator determinism and validation,
   materialization, persistence, and a complete TCP visit to a generated
   dungeon.
+- [ ] Measure complete save and load operations with 1, 10, and 100 visited
+  dungeons, including reading and validating stored levels; report timings and
+  peak memory. Measure first-time generation and storage separately.
 - [ ] Synchronize architecture, product terminology, persistence, and roadmap
   documentation.
 - [ ] Review the generated-dungeon slice with the user and obtain explicit
@@ -407,14 +427,24 @@ Dungeon names, further opponent kinds, loot tables, and consumables belong to
 ### 14s. World management and server console — LATER
 
 - The server supplies defaults and allowed ranges for world parameters (seed,
-  entrance region size, later more); the client's new-game dialog shows them
+  entrance region size, later more); the client's new-world dialog shows them
   and may override them within the ranges. The server validates and creates a
   new world with its own identity; earlier worlds are kept.
-- The client lists existing worlds with their parameters and game state and
-  continues a selected one. Worlds of an obsolete format are shown as
-  incompatible with an instruction to delete them. Deleting from the client is
-  deferred.
-- `world_id` in `server.toml` only selects the world active at server start.
+- Separate `Create world`, `Continue`, and `Start over` actions. Continue loads
+  the selected world's last explicit save when world format, generator, and
+  savegame versions match the running server. A compatible world without a
+  save can be started at its spawn. Start over begins a fresh game in the same
+  world; its earlier save remains until an explicitly confirmed overwrite.
+- List existing worlds with parameters and save status. Incompatible worlds
+  remain visible with an instruction to delete or recreate them; do not migrate
+  or delete them automatically. Client-side deletion is deferred.
+- Returning to world selection with unsaved progress requires confirmation to
+  discard it or cancellation; never save implicitly. Prepare and validate the
+  selected world before installing it as the active session world.
+- `world_id` in `server.toml` preselects a world at server start. A missing or
+  incompatible selection leaves world selection available and shows the
+  reason; storage I/O failures are reported separately, never treated as a
+  missing world. The server still admits only one player at a time.
 - `dungeon-server --console` shows a live log (connections, created and loaded
   worlds, rejected requests, errors), a status line, and a settings view. The
   settings view edits the server defaults such as the entrance region size and
@@ -428,14 +458,36 @@ Dungeon names, further opponent kinds, loot tables, and consumables belong to
 Several opponent kinds such as a giant rat, loot tables, a first consumable
 item, and deterministic dungeon names.
 
+Generated loot has stable identities derived from its source and is created
+only once. Persist consumed items as consumed rather than deleting their
+identities, so loading or revisiting cannot restore them. Validate item origins
+separately from current locations or consumed state. Using a consumable costs
+one turn when successful; rejected use changes nothing. Outdoor step healing
+remains available; consumables provide healing inside a dungeon. Revise the
+savegame, protocol, and generator versions where their contracts change.
+
 ### 14c. Dungeon levels — LATER
 
 Stairs between levels and deeper, harder levels of a generated dungeon.
+
+Implement after 13b. Each level is a separate area with an identity derived
+from the dungeon and level index. Generate and permanently store its immutable
+layout and original placements on first visit, then materialize its game state.
+Revisits load the same level file; deeper unvisited levels remain ungenerated.
+Paired stairs have deterministic destination areas, landing fields, and facing;
+travel works in both directions and retains each level's state. Only leaving
+the top level returns to the outdoor entrance. An area transition need not
+change view family. Replace the assumption of a single interior-to-outdoor
+return with explicit stair links, and cover multi-level save/load and revisits.
+Choose the initial finite depth and difficulty curve when detailing this slice.
 
 ## 15. Broader world simulation — LATER
 
 Settlements, changing world state, time, weather, and other simulation systems
 will be split further when their first concrete gameplay requirement is known.
+The first settlement slice restores NPCs and deterministic dialogue removed in
+14a, including interaction, presentation, persistence, and end-to-end coverage.
+It does not depend on LLM integration.
 
 ## 16. Multiplayer behavior — LATER
 
