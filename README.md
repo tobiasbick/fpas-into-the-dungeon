@@ -46,10 +46,11 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-The source currently requires Functional Pascal revision `6f7667ff` or newer;
+The source currently requires Functional Pascal revision `3fe5a9e9` or newer;
 it uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
 context-typed record updates such as `State with Hostiles := []; end`, and
-`Cmd.RequestTick` for combat animation. That revision also stops the main task
+`Cmd.RequestTick` for combat animation, and imports the concurrency unit as
+`Std.Tasks` now that `task` is a reserved word. It also stops the main task
 from running queued tasks while it waits, which the in-process client/server
 tests rely on to avoid sporadic deadlocks.
 
