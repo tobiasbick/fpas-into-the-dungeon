@@ -46,10 +46,12 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-The source currently requires Functional Pascal revision `1df58c9e` or newer;
+The source currently requires Functional Pascal revision `6f7667ff` or newer;
 it uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
 context-typed record updates such as `State with Hostiles := []; end`, and
-`Cmd.RequestTick` for combat animation, which are available from that revision.
+`Cmd.RequestTick` for combat animation. That revision also stops the main task
+from running queued tasks while it waits, which the in-process client/server
+tests rely on to avoid sporadic deadlocks.
 
 Run the server first. Both programs use `127.0.0.1:4040` by default and create
 their TOML configuration under `~/.fpas-into-the-dungeon/config/`. Optional

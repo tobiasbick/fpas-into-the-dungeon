@@ -1,0 +1,109 @@
+// Test helpers that drive the real client network adapter and report why a session stalled.
+unit Dungeon.Test.ClientSession;
+
+uses Dungeon.Client, Dungeon.Protocol, Std.Conv, Std.Task;
+
+const
+  // Interval between event probes; also bounds how late a published outcome is noticed.
+  ProbeMillis: integer := 200;
+
+// Publishes how one session task ended, for example `server failed: Network read timed out`.
+// Never blocks: an outcome that does not fit into the channel is dropped.
+public procedure ReportOutcome(
+  Outcomes: channel of string;
+  Name: string;
+  Outcome: result of boolean, string
+);
+begin
+  mutable var Text: string := Name + ' ended normally';
+  case Outcome of
+    Ok(Completed):
+    begin
+    end;
+    Error(Message):
+    begin
+      Text := (Name + ' failed: ') + Message
+    end
+  end;
+  var Queued: result of boolean, string := TrySend(Outcomes, Text)
+end;
+
+// Runs the real client adapter and publishes its outcome to Outcomes before returning it.
+public function RunReportedClient(
+  Host: string;
+  Port: integer;
+  ViewWidth: integer;
+  ViewHeight: integer;
+  Requests: channel of ClientMessage;
+  Events: channel of ClientEvent;
+  Outcomes: channel of string;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  var Outcome: result of boolean, string := RunNetwork(Host, Port, ViewWidth, ViewHeight, Requests, Events, Token);
+  ReportOutcome(Outcomes, 'client', Outcome);
+  return Outcome
+end;
+
+function Reported(Outcomes: channel of string): string;
+begin
+  mutable var Text: string := '';
+  mutable var Reading: boolean := true;
+  while Reading do
+  begin
+    case TryReceive(Outcomes) of
+      Ok(Received):
+      begin
+        case Received of
+          Some(Line):
+          begin
+            Text := (Text + '; ') + Line
+          end;
+          None:
+          begin
+            Reading := false
+          end
+        end
+      end;
+      Error(Message):
+      begin
+        Reading := false
+      end
+    end
+  end;
+
+  return Text
+end;
+
+// Returns the next client event within TimeoutMillis. Fails at once with the published outcomes
+// when a session task ends while an event is expected, and with any outcomes on timeout, so a
+// failed network session reports its cause instead of a bare channel timeout.
+public function NextClientEvent(
+  Events: channel of ClientEvent;
+  Outcomes: channel of string;
+  TimeoutMillis: integer
+): ClientEvent;
+begin
+  mutable var Waited: integer := 0;
+  while Waited < TimeoutMillis do
+  begin
+    case ReceiveWithTimeout(Events, ProbeMillis) of
+      Ok(Value):
+      begin
+        return Value
+      end
+      else
+      begin
+      end
+    end;
+    var Ended: string := Reported(Outcomes);
+    if Ended <> '' then
+    begin
+      panic('a session task ended while a client event was expected' + Ended)
+    end;
+
+    Waited := Waited + ProbeMillis
+  end;
+
+  panic((('no client event within ' + IntToStr(TimeoutMillis)) + ' ms') + Reported(Outcomes))
+end;

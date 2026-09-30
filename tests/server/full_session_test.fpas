@@ -3,8 +3,9 @@ program DungeonFullSessionTest;
 
 uses
   Dungeon.Client, Dungeon.Interaction, Dungeon.Protocol, Dungeon.RuntimeData, Dungeon.Server,
-  Dungeon.Server.Config, Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Conv, Std.Fs, Std.Net,
-  Std.Options, Std.Results, Std.Str, Std.Task, Std.Test, Std.Time, Std.Tui;
+  Dungeon.Server.Config, Dungeon.Terrain, Dungeon.Test.ClientSession, Dungeon.Terrain.Placement,
+  Std.Conv, Std.Fs, Std.Net, Std.Options, Std.Results, Std.Str, Std.Task, Std.Test, Std.Time,
+  Std.Tui;
 
 function TestConfig(WorldsRoot: string): ServerConfig;
 begin
@@ -43,12 +44,25 @@ begin
   AssertTrue(EnsureDirectory(WorldsRoot))
 end;
 
-function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
+function ServeSession(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
 begin
   var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
   var Configured: boolean := try SetTimeout(Client, 30000);
   var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
   var Closed: boolean := try Close(Client);
+  return Outcome
+end;
+
+// Serves one session and publishes its outcome so a stalled test reports the cause.
+function ServeOne(
+  ListenerValue: Listener;
+  Config: ServerConfig;
+  Outcomes: channel of string;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  var Outcome: result of boolean, string := ServeSession(ListenerValue, Config, Token);
+  ReportOutcome(Outcomes, 'server', Outcome);
   return Outcome
 end;
 
@@ -61,13 +75,14 @@ begin
   var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
   var Source: CancellationSource := CreateCancellationSource();
   var Token: CancellationToken := GetCancellationToken(Source);
-  var ServerTask: task := go ServeOne(ListenerValue, Config, Token);
+  var Outcomes: channel of string := CreateChannel(4);
+  var ServerTask: task := go ServeOne(ListenerValue, Config, Outcomes, Token);
   var Requests: channel of ClientMessage := CreateChannel(4);
   var Events: channel of ClientEvent := CreateChannel(8);
-  var ClientTask: task := go RunNetwork('127.0.0.1', Address.Port, 13, 7, Requests, Events, Token);
+  var ClientTask: task := go RunReportedClient('127.0.0.1', Address.Port, 13, 7, Requests, Events, Outcomes, Token);
   var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
   mutable var Model: ClientModel := NewClientModel('127.0.0.1', Address.Port, '', DefaultClientPreferences(), Requests, Events);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved):
     begin
       AssertFalse(SaveAvailable);
@@ -81,7 +96,7 @@ begin
   end;
 
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.StartNewGame, 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(Value):
     begin
       case Value of
@@ -111,7 +126,7 @@ begin
              TuiColorKind.Rgb);
   App.Close();
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Viewport(240, 20), 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(Value):
     begin
       case Value of
@@ -161,7 +176,7 @@ begin
     end;
 
     AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Move(DeltaX, DeltaY), 1000)));
-    case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+    case NextClientEvent(Events, Outcomes, 120000) of
       ClientEvent.State(VisibleValue):
       begin
         case VisibleValue of
@@ -195,7 +210,7 @@ begin
   AssertTrue(SawVisible);
   AssertTrue(SawUndiscovered);
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(VisibleValue):
     begin
       case VisibleValue of
@@ -226,7 +241,7 @@ begin
              TuiColorKind.Rgb);
   FirstPersonApp.Close();
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(VisibleValue):
     begin
       case VisibleValue of
@@ -248,7 +263,7 @@ begin
   end;
 
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.Interaction(Title, Message):
     begin
       AssertEquals('', Title);
@@ -263,7 +278,7 @@ begin
   end;
 
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(VisibleValue):
     begin
       case VisibleValue of
@@ -284,7 +299,7 @@ begin
   end;
 
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.SaveGame, 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.SaveCompleted:
     begin
       Model := UpdateClientEvent(Model, ClientEvent.SaveCompleted, Cmd);
@@ -298,7 +313,7 @@ begin
   end;
 
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(VisibleValue):
     begin
       case VisibleValue of
@@ -321,7 +336,7 @@ begin
   for InteriorStep: integer := 1 to 6 do
   begin
     AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), 1000)));
-    case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+    case NextClientEvent(Events, Outcomes, 120000) of
       ClientEvent.State(VisibleValue):
       begin
         case VisibleValue of
@@ -344,7 +359,7 @@ begin
   end;
 
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(VisibleValue):
     begin
       case VisibleValue of
@@ -367,7 +382,7 @@ begin
   for InteriorStep: integer := 1 to 8 do
   begin
     AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), 1000)));
-    case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+    case NextClientEvent(Events, Outcomes, 120000) of
       ClientEvent.State(VisibleValue):
       begin
         case VisibleValue of
@@ -390,7 +405,7 @@ begin
   end;
 
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
-  case Std.Results.Unwrap(ReceiveWithTimeout(Events, 120000)) of
+  case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(VisibleValue):
     begin
       case VisibleValue of
@@ -416,5 +431,6 @@ begin
   AssertTrue(Std.Results.Unwrap(Std.Task.Wait(ServerTask)));
   AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
   CloseChannel(Requests);
-  CloseChannel(Events)
+  CloseChannel(Events);
+  CloseChannel(Outcomes)
 end.
