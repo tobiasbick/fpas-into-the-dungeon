@@ -1,0 +1,52 @@
+// Verifies that a dropped item is saved at its new field without duplicating its placement.
+program DroppedItemSavegameTest;
+
+uses
+  Dungeon.Coordinates, Dungeon.Equipment, Dungeon.GameState, Dungeon.Interior,
+  Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Test.InitialAreas, Dungeon.Terrain,
+  Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Conv, Std.Results, Std.Test, Std.Time;
+
+begin
+  var Root: string := '.temp-data/dropped-item-save-test-' + IntToStr(TimestampMillis());
+  var World: WorldSession := Unwrap(OpenWorld(Root, 'dropped', 12345, 16));
+  var Metadata: WorldMetadata := World.Metadata;
+  var Map: InteriorMap := Unwrap(InitialDungeonMap(Metadata));
+  var Outside: GameState := NewGame(Metadata) with Player := PlayerPosition.Outdoor(Metadata.Entrance); end;
+  var Entered: GameState := Unwrap(ActivateInitialTransition(Metadata, Outside));
+  var CoinId: string := InitialCoinId(Metadata);
+  mutable var Carrying: GameState := Entered;
+  Carrying.Items[0] := Carrying.Items[0] with Location := ItemLocation.CarriedByPlayer; end;
+  // The entry field is an ordinary floor field, so the coin can be laid down there.
+  var Change: EquipmentChange := Unwrap(DropItem(InitialAreaView(Metadata, Carrying), Carrying, CoinId));
+  AssertTrue(Unwrap(WriteSaveGame(World, Change.State)));
+  case Unwrap(LoadSaveGame(World)) of
+    SaveGameLoad.Loaded(Loaded, View):
+    begin
+      AssertTrue(IsOk(ValidateGameState(View, Loaded)));
+      AssertEquals(3, Std.Arrays.Length(Loaded.Items));
+      AssertEquals(0, Std.Arrays.Length(InventoryItems(Loaded)));
+      AssertTrue(Loaded.Items[0] = Change.State.Items[0]);
+      case Loaded.Items[0].Location of
+        ItemLocation.InInterior(AreaId, Position):
+        begin
+          AssertEquals(Map.AreaId, AreaId);
+          AssertEquals(Map.Start.X, Position.X);
+          AssertEquals(Map.Start.Y, Position.Y)
+        end
+        else
+        begin
+          panic('expected the coin on the floor at the entry field')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected the dropped item to load')
+    end
+  end;
+  // A floor item may never lie on the exit, even in a hand-edited save.
+  mutable var OnExit: GameState := Change.State;
+  OnExit.Items[0] := OnExit.Items[0] with Location := ItemLocation.InInterior(Map.AreaId, Map.Exit); end;
+
+  AssertTrue(IsError(WriteSaveGame(World, OnExit)))
+end.

@@ -15,7 +15,8 @@ It is part of this plan, not a deferred design task.
 - [x] Step 2: remove dialogue, Mara, and the tablet; outdoor healing.
   Protocol version is 13 and savegame format is 7. The removed features have
   no references in `libs`, `apps`, or `tests`.
-- [ ] Step 3: area view, visited areas, and materialization — in progress.
+- [x] Step 3: area view, visited areas, materialization, and step 3a (inventory
+  capacity and dropping). The full suite passed 47/47.
 - [ ] Step 4: dungeon generator.
 - [ ] Step 5: entrances, world metadata, and generated dungeons in play.
 - [ ] Step 6: complete TCP visit and documentation.
@@ -209,11 +210,48 @@ Verification of multi-area validation: changed sources pass `fpas fmt --check`,
 `fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 45/45.
 No protocol, persisted schema, generated geometry, or gameplay numbers changed.
 
-Step 3 remains incomplete. Next convert the temporary initial-map placement
-identities to world-scoped IDs and remove their fixed-identity lookup helpers.
-Remaining fixture migration follows, then step 3a inventory and dropping.
-The world/server supplier still exposes the one playable initial dungeon;
-multiple stored dungeons are connected in step 5.
+Step 3's placement-identity slice is complete: the initial map names its
+placements `<area>:item:<n>` and `<area>:hostile:<n>` through the shared
+`ItemPlacementId` and `HostilePlacementId` helpers, which the generator and the
+level decoder will reuse. The fixed item and opponent identity constants and
+`InitialItemPosition` are removed; the item texts are named after their kinds.
+Tests use `Dungeon.Test.InitialAreas` identity helpers or the placement lists.
+Verification: changed sources pass `fpas fmt --check`, `fpas check
+dungeon.fpasworkspace` passed, and the full suite passed 45/45. One earlier
+full run failed once in `full_session_test` with a 120 s channel timeout while
+waiting for the first state after starting a game; it passed alone five times
+and in the next full run. The cause is not yet found and predates this slice.
+
+Step 3a (bounded inventory and dropping) is implemented:
+
+- `MaximumInventoryItems` (64) lives in `Dungeon.GameState` with
+  `InventoryIsFull`; validation rejects more than 64 carried or worn items and
+  any floor item that is not on an ordinary floor field (no wall, no exit), in
+  both per-intention and saved-state validation. Pickup at capacity returns an
+  error before any change, and the hint reads `inventory full`.
+- `Dungeon.Equipment.DropItem` and `TurnAction.Drop` implement the drop as a
+  normal turn (opponents act afterwards, defeat is handled as for equipping).
+  `ClientMessage.DropItem` (`drop_item`) stays within protocol version 13; the
+  server answers rejections with `drop_rejected`. The client binds `D` in the
+  inventory overlay; `Network.fpas` classifies the drop as state- and
+  defeat-capable like equipping.
+- Tests: `item_drop_test` (capacity at 63/64/65, worn items counting, drop and
+  pickup, freeing one place, all rejections, equal turn cost and defeat as a
+  wait), `dropped_item_savegame_test` (save/load of a dropped item without
+  duplication, floor item on the exit rejected), protocol round trips and
+  negatives, the `D` key in `equipment_ui_test`, the drop flow in
+  `equipment_network_test`, and a contract test that the protocol bound equals
+  the game bound.
+- Not yet covered: dropping and carrying an item between two real generated
+  dungeons; `multi_area_validation_test` covers transferred items with fixture
+  maps, and step 6 adds the real two-dungeon session.
+
+Step 3 is complete: changed sources pass `fpas fmt --check`, `fpas check
+dungeon.fpasworkspace` passed, and the full suite passed 47/47. The remaining migration of
+legacy tests from `Dungeon.Test.InitialAreas` to independent fixtures happens in
+step 5, when `InitialDungeon` is deleted. The world/server supplier still
+exposes the one playable initial dungeon; multiple stored dungeons are connected
+in step 5.
 
 ## Ground rules
 

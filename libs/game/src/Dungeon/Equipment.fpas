@@ -1,7 +1,9 @@
-// Derived character values from base values plus worn items, and the rules for wearing items.
+// Derived character values from base values plus worn items, and the rules for wearing and dropping items.
 unit Dungeon.Equipment;
 
-uses Dungeon.GameState, Dungeon.Items, Std.Arrays, Std.Conv, Std.Options, Std.Results, Std.Str;
+uses
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Items, Std.Arrays, Std.Conv,
+  Std.Options, Std.Results, Std.Str;
 
 public const
   // Lowest d20 roll with which the player hits before any modifier.
@@ -30,7 +32,7 @@ public type
     // What the value comes from, such as `Base` or the name of a worn item.
     public Source: string;
   end;
-  // Accepted equipment change and its turn log message.
+  // Accepted item change (wearing, removing, or dropping) and its turn log message.
   EquipmentChange = record
     public State: GameState;
     public Message: string;
@@ -238,4 +240,59 @@ begin
       return Error('this item is not worn')
     end
   end
+end;
+
+// Lays a carried item on the occupied ordinary floor field of the current dungeon.
+// Errors name items that are unknown, worn, or not carried, and fields that are the exit or hold an item.
+public function DropItem(View: AreaView; State: GameState; ItemId: string): result of EquipmentChange, string;
+begin
+  var Index: integer := try ItemIndex(State, ItemId);
+  var Item: GameItem := State.Items[Index];
+  case Item.Location of
+    ItemLocation.CarriedByPlayer:
+    begin
+    end;
+    ItemLocation.EquippedByPlayer(Worn):
+    begin
+      return Error('take the item off before dropping it')
+    end;
+    ItemLocation.InInterior(AreaId, Position):
+    begin
+      return Error('you do not carry this item')
+    end
+  end;
+
+  if State.Area <> AreaKind.Dungeon then
+  begin
+    return Error('items can only be dropped inside a dungeon')
+  end;
+  var Map: InteriorMap := try CurrentInterior(View, State);
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
+  if try InteriorCellAt(Map, Pose.Position) <> InteriorCellKind.Floor then
+  begin
+    return Error('items cannot be dropped on the exit')
+  end;
+
+  for Other: GameItem in State.Items do
+  begin
+    case Other.Location of
+      ItemLocation.InInterior(AreaId, Position):
+      begin
+        if (AreaId = State.AreaId) and SamePosition(Position, Pose.Position) then
+        begin
+          return Error('there is already an item here')
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+  mutable var Items: array of GameItem := State.Items;
+  Items[Index] := Item with Location := ItemLocation.InInterior(State.AreaId, Pose.Position); end;
+
+  return Ok(record
+    State := State with Items := Items; end;
+    Message := ('You drop the ' + Std.Str.ToLower(ItemDisplayName(Item.Kind))) + '.';
+  end)
 end;

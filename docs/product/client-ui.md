@@ -285,9 +285,10 @@ so the player can load the last explicit save or start again.
 
 `I` opens the inventory overlay. It lists every carried and worn item with its
 slot or `cannot be worn`; W/S or Up/Down select, `Enter` asks the server to wear
-or remove the selection, and `Escape` or `I` closes it. The overlay stays open
+or remove the selection, `D` asks the server to drop it on the occupied dungeon
+floor field, and `Escape` or `I` closes it. The overlay stays open
 while the change is resolved, so the new state is visible at once. Changing gear
-takes a turn, so an adjacent opponent may strike in between.
+or dropping takes a turn, so an adjacent opponent may strike in between.
 
 `C` opens the character sheet: health, then each server-formatted derived value
 with its source, such as `Damage d6+1 · Rusty short sword`, then the worn

@@ -186,6 +186,9 @@ begin
   AssertTrue(Unwrap(Std.Fs.CreateDirAll(WorldsRoot)));
   var Config: ServerConfig := TestConfig(WorldsRoot);
   var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
+  // Placement order of the initial dungeon: coin, sword, jerkin.
+  var CoinId: string := ItemPlacementId(Metadata.DungeonAreaId, 0);
+  var SwordId: string := ItemPlacementId(Metadata.DungeonAreaId, 1);
   var Source: CancellationSource := CreateCancellationSource();
   var Token: CancellationToken := GetCancellationToken(Source);
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
@@ -204,7 +207,7 @@ begin
   AssertEquals('d3', LineValue(Outdoor.Character, 'Damage'));
   AssertEquals('0', LineValue(Outdoor.Character, 'Armor'));
   // Nothing is carried yet, so nothing can be worn.
-  Response := Exchange(Client, Reader, ClientMessage.Equip(RustyShortSwordId), Token);
+  Response := Exchange(Client, Reader, ClientMessage.Equip(SwordId), Token);
   Reader := Response.Reader;
   AssertRejected(Response.Message, 'equip_rejected');
   mutable var CurrentX: integer := Outdoor.WorldX;
@@ -253,23 +256,47 @@ begin
   Reader := Response.Reader;
   var Carrying: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
   AssertEquals(1, Std.Arrays.Length(Carrying.Inventory));
-  AssertEquals(RustyShortSwordId, Carrying.Inventory[0].Id);
+  AssertEquals(SwordId, Carrying.Inventory[0].Id);
   AssertTrue(Carrying.Inventory[0].Slot = VisibleItemSlot.Weapon);
   AssertFalse(Carrying.Inventory[0].Equipped);
   // Wearing it takes a turn, is logged, and changes the projected damage.
-  Response := Exchange(Client, Reader, ClientMessage.Equip(RustyShortSwordId), Token);
+  Response := Exchange(Client, Reader, ClientMessage.Equip(SwordId), Token);
   Reader := Response.Reader;
   var Armed: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
   AssertTrue(Armed.Inventory[0].Equipped);
   AssertTrue(LogContains(Armed.CombatLog, 'You wield the rusty short sword.'));
   AssertEquals('d6+1', LineValue(Armed.Character, 'Damage'));
   AssertEquals(RustyShortSwordName, LineSource(Armed.Character, 'Damage'));
-  Response := Exchange(Client, Reader, ClientMessage.Equip(RustyShortSwordId), Token);
+  Response := Exchange(Client, Reader, ClientMessage.Equip(SwordId), Token);
   Reader := Response.Reader;
   AssertRejected(Response.Message, 'equip_rejected');
-  Response := Exchange(Client, Reader, ClientMessage.Equip(InitialDungeonItemId), Token);
+  Response := Exchange(Client, Reader, ClientMessage.Equip(CoinId), Token);
   Reader := Response.Reader;
   AssertRejected(Response.Message, 'equip_rejected');
+  // A worn item cannot be dropped; once carried it lies on the occupied field and can be picked up again.
+  Response := Exchange(Client, Reader, ClientMessage.DropItem(SwordId), Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'drop_rejected');
+  Response := Exchange(Client, Reader, ClientMessage.Unequip(SwordId), Token);
+  Reader := Response.Reader;
+  Response := Exchange(Client, Reader, ClientMessage.DropItem(SwordId), Token);
+  Reader := Response.Reader;
+  var Dropped: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(0, Std.Arrays.Length(Dropped.Inventory));
+  AssertTrue(LogContains(Dropped.CombatLog, 'You drop the rusty short sword.'));
+  AssertTrue(Std.Str.Contains(Dropped.Status, 'Pick up'));
+  Response := Exchange(Client, Reader, ClientMessage.DropItem(SwordId), Token);
+  Reader := Response.Reader;
+  AssertRejected(Response.Message, 'drop_rejected');
+  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Response.Reader;
+  var Retrieved: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(1, Std.Arrays.Length(Retrieved.Inventory));
+  AssertEquals(SwordId, Retrieved.Inventory[0].Id);
+  AssertFalse(Retrieved.Inventory[0].Equipped);
+  Response := Exchange(Client, Reader, ClientMessage.Equip(SwordId), Token);
+  Reader := Response.Reader;
+  AssertTrue(RequireFirstPerson(Response.Message).Inventory[0].Equipped);
   // On through the inner passage: south, west, north up to (5, 3), then face west.
   Response := Walk(Client, Reader, [0, 2, 0, 0, 2, 0, 0, 1], Token);
   Reader := Response.Reader;

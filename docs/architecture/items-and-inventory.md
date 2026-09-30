@@ -10,10 +10,11 @@ persisted without adding a general loot, equipment, or scripting system.
 location. The Ancient coin starts at field `8,1` in the initial dungeon.
 Full validation permits its current location on a traversable field in any
 visited dungeon or in the player's inventory, while requiring its original
-placement identity and kind. The current interaction loop supports pickup;
-the drop intention follows in step 3a. Validation requires
-exactly one coin after the first dungeon visit and rejects missing, duplicate,
-unknown, or invalid floor-item state.
+placement identity and kind. The interaction loop supports pickup; the
+drop intention lays a carried item back on the floor (see below). Validation
+requires exactly one coin after the first dungeon visit and rejects missing,
+duplicate, unknown, or invalid floor-item state. A floor item must lie on an
+ordinary floor field, never on a wall or the exit.
 
 Starting a new game creates no dungeon items. First entry materializes the
 coin at its initial dungeon field. Further transitions and movement preserve
@@ -34,6 +35,23 @@ directly ahead:
 No action menu or scripting layer is required for this fixed rule. Future
 interactions may introduce a more general mechanism only when their concrete
 requirements justify it.
+
+## Capacity and dropping
+
+Carried and worn items together fill at most `MaximumInventoryItems` (64)
+entries, the same bound as the protocol's visible inventory. A full inventory
+rejects pickup without changing state or time, and the hint reads
+`At your feet: <item> — inventory full`. State validation rejects more than 64
+carried or worn items.
+
+The `drop_item` intention (inventory overlay, `D`) lays the selected carried item
+on the player's occupied ordinary dungeon floor field. It is a turn action like
+wearing gear: an adjacent opponent acts afterwards, and a successful drop logs
+`You drop the <item>.` The server rejects unknown items, worn items, items lying
+on the floor, dropping outdoors or on the exit, and a field that already holds
+an item; a rejection changes neither state nor time. The item keeps its identity
+and kind, so the existing floor-item projection, inspection, pickup, and save
+format apply unchanged. See [generated dungeons](generated-dungeons.md).
 
 ## Protocol and presentation
 
@@ -79,7 +97,7 @@ existing save until the next explicit save.
 
 ## Deferred scope
 
-Dropping, using, stacking, capacity limits, random loot, containers, shops, and
-an economy remain outside Phase 10. Stage 13a adds further item kinds, several
+Using, stacking, random loot, containers, shops, and an economy remain outside
+Phase 10; dropping and the capacity limit follow the section above. Stage 13a adds further item kinds, several
 item placements per interior, and wearing items; see
 [equipment and character values](equipment.md).

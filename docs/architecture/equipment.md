@@ -66,6 +66,10 @@ therefore cannot be swapped for free during a fight.
 The turn log reports the change, for example `You wield the rusty short sword.`
 or `You take off the leather jerkin.`
 
+**Dropping** a carried item (`drop_item`, stage 14a) is also a turn action. Worn
+items must be unequipped first; see
+[items and inventory](items-and-inventory.md).
+
 ## Protocol version 12
 
 - Client intentions `equip` and `unequip`, each with an `item_id`.
