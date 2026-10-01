@@ -1,7 +1,7 @@
 # Combat
 
-The first combat slice adds one server-authoritative fight against one opponent
-in the initial dungeon. It keeps the grid-based first-person presentation of
+Combat is a server-authoritative fight against the restless skeletons of
+generated dungeons. It keeps the grid-based first-person presentation of
 classic dungeon crawlers such as *Eye of the Beholder* and *Legend of
 Grimrock*: the opponent stands visibly in the corridor, attacks target the
 field directly ahead, and stepping away or around it matters. Time, however,
@@ -12,12 +12,10 @@ push unsolicited updates, and every fight is reproducible in tests.
 
 ## Opponent
 
-The **restless skeleton** rests in the inner passages of the initial dungeon at
-field `(3, 3)`. Those passages form the second route to the exit; walls hide
-them from the upper corridor, the long eastern corridor, and the lower
-hall. Exploring the side route therefore means meeting the skeleton, while the
-main route stays calm, as side passages in classic crawlers tend to be more
-dangerous.
+Each generated dungeon places one or two **restless skeletons** at the centers
+of the rooms farthest from the start by walking distance, never in the exit
+room. Generation guarantees that no skeleton can see the start, so a visit
+begins calmly and exploring the far rooms means meeting them.
 
 - It blocks its field while it stands.
 - It is dormant until it can see the player: the player's field lies within six
@@ -87,10 +85,12 @@ Introduced with protocol version 11 and extended in version 12:
 
 ## Persistence
 
-Since savegame format 5 the save holds the player's health, the random generator state, and
-the complete opponent record with identity, kind, area, position, health, and
-alert status. Validation requires exactly the known opponent, a floor field
-that overlaps no standing player, and consistent health. Saving
+The save (format 7) holds the player's health, the random generator state, and
+the complete record of every opponent of the visited dungeons with identity,
+kind, area, position, health, and alert status. Validation requires exactly one
+record per stored opponent placement, a traversable field in its own area that
+overlaps no standing player or opponent, and consistent health. Destroyed
+opponents stay recorded, so re-entering never restores them. Saving
 is allowed during a fight.
 
 ## Ownership

@@ -32,14 +32,14 @@ paths, and an entrance. Darker and hidden areas visualize the Fog of War.
 
 > **Development note:** This is a staged preview of the outdoor renderer, not
 > the current playable world. During this early development phase, the outdoor
-> world primarily leads to a single dungeon entrance.
+> world leads to rare dungeon entrances, each opening a generated dungeon.
 
 **Dungeon encounter**
 
 ![First-person dungeon encounter with a restless skeleton](docs/images/dungeon-skeleton.png)
 
 Interiors use a grid-based first-person view rather than free movement. Here,
-the player faces the restless skeleton in the initial dungeon.
+the player faces a restless skeleton in a generated dungeon.
 
 ```powershell
 fpas run apps/server/server.fpasprj

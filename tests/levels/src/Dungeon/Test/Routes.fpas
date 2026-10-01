@@ -3,8 +3,8 @@ unit Dungeon.Test.Routes;
 
 uses
   Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.Interior, Dungeon.Interior.Generation,
-  Dungeon.Protocol, Dungeon.Terrain, Dungeon.Terrain.Entrances, Dungeon.Test.Fixtures, Std.Arrays,
-  Std.Results, Std.Str;
+  Dungeon.Protocol, Dungeon.Terrain, Dungeon.Terrain.Chunks, Dungeon.Terrain.Entrances,
+  Dungeon.Test.Fixtures, Std.Arrays, Std.Math, Std.Results, Std.Str;
 
 // The spawn dungeon a server generates and stores for this world on first entry.
 public function SpawnDungeonMap(Metadata: WorldMetadata): InteriorMap;
@@ -74,9 +74,110 @@ begin
   end
 end;
 
+// Returns every field on which a projection shows a standing opponent.
+public function VisibleHostiles(View: FirstPersonVisibleState): array of InteriorPosition;
+begin
+  mutable var Fields: array of InteriorPosition := [];
+  for Y: integer := 0 to Std.Arrays.Length(View.Rows) - 1 do
+  begin
+    for X: integer := 0 to Std.Str.Length(View.Rows[Y]) - 1 do
+    begin
+      if Std.Str.CharAt(View.Rows[Y], X) = InteriorHostileCode then
+      begin
+        Std.Arrays.Push(Fields, record
+          X := X;
+          Y := Y;
+        end)
+      end
+    end
+  end;
+
+  return Fields
+end;
+
 // Returns whether a visible opponent stands on the field directly ahead.
 public function HostileAhead(View: FirstPersonVisibleState): boolean;
 begin
   var Ahead: InteriorPosition := FieldAhead(View);
   return Std.Str.CharAt(View.Rows[Ahead.Y], Ahead.X) = InteriorHostileCode
+end;
+
+// Returns the walkable outdoor fields from From (exclusive) to Target along a shortest cardinal
+// path inside the bounding box of both fields grown by Margin; empty when none exists there.
+public function OutdoorRoute(
+  Metadata: WorldMetadata;
+  From: WorldPosition;
+  Target: WorldPosition;
+  Margin: integer
+): array of WorldPosition;
+begin
+  var Left: integer := Std.Math.Min(From.X, Target.X) - Margin;
+  var Top: integer := Std.Math.Min(From.Y, Target.Y) - Margin;
+  var Width: integer := ((Std.Math.Max(From.X, Target.X) + Margin) - Left) + 1;
+  var Height: integer := ((Std.Math.Max(From.Y, Target.Y) + Margin) - Top) + 1;
+  mutable var Previous: array of integer := Std.Arrays.Fill(-1, Width * Height);
+  var StartIndex: integer := ((From.Y - Top) * Width) + (From.X - Left);
+  Previous[StartIndex] := StartIndex;
+  mutable var Queue: array of WorldPosition := [From];
+  mutable var ReadIndex: integer := 0;
+  var TargetIndex: integer := ((Target.Y - Top) * Width) + (Target.X - Left);
+  while (ReadIndex < Std.Arrays.Length(Queue)) and (Previous[TargetIndex] < 0) do
+  begin
+    var Current: WorldPosition := Queue[ReadIndex];
+    ReadIndex := ReadIndex + 1;
+    for Offset: WorldPosition in [record
+      X := 1;
+      Y := 0;
+    end, record
+      X := -1;
+      Y := 0;
+    end, record
+      X := 0;
+      Y := 1;
+    end, record
+      X := 0;
+      Y := -1;
+    end] do
+    begin
+      var Next: WorldPosition := record
+        X := Current.X + Offset.X;
+        Y := Current.Y + Offset.Y;
+      end;
+
+      if ((Next.X >= Left) and (Next.X < Left + Width)) and
+         ((Next.Y >= Top) and (Next.Y < Top + Height)) then
+      begin
+        var Index: integer := ((Next.Y - Top) * Width) + (Next.X - Left);
+        if Previous[Index] < 0 then
+        begin
+          if IsWalkable(GenerateWorldCell(Metadata, Next.X, Next.Y)) then
+          begin
+            Previous[Index] := ((Current.Y - Top) * Width) + (Current.X - Left);
+            Std.Arrays.Push(Queue, Next)
+          end
+        end
+      end
+    end
+  end;
+  mutable var Reversed: array of WorldPosition := [];
+  if Previous[TargetIndex] < 0 then
+  begin
+    return Reversed
+  end;
+  mutable var Index: integer := TargetIndex;
+  while Index <> StartIndex do
+  begin
+    Std.Arrays.Push(Reversed, record
+      X := Left + (Index mod Width);
+      Y := Top + (Index div Width);
+    end);
+    Index := Previous[Index]
+  end;
+  mutable var Path: array of WorldPosition := [];
+  for Step: integer := Std.Arrays.Length(Reversed) - 1 downto 0 do
+  begin
+    Std.Arrays.Push(Path, Reversed[Step])
+  end;
+
+  return Path
 end;

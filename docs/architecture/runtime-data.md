@@ -56,10 +56,16 @@ host = "127.0.0.1"
 port = 4040
 world_id = "main"
 world_seed = 12345
+dungeon_region_chunks = 4
 chunk_cache_limit = 64
 max_view_width = 240
 max_view_height = 120
 ```
+
+`dungeon_region_chunks` (1 through 16) sets the side length of entrance regions
+in chunks and therefore how rare dungeon entrances are. Like `world_seed`, it
+applies only when a world is created; an existing world keeps the value stored
+in its metadata. A file without it is obsolete and is rejected.
 
 Command-line `HOST` and `PORT` values override the loaded file for that run.
 The server's `--world ID` selects another world without changing the stored
@@ -81,7 +87,8 @@ compatibility fallback is provided.
   visibility changes are written atomically; command-line host and port
   overrides are not written back.
 - `worlds` contains versioned authoritative world metadata, generated chunk
-  files, and one atomic `saves/default.json` savegame per world. That snapshot
+  files, immutable dungeon level files, and one atomic `saves/default.json`
+  savegame per world. Level files are never removed with an invalid save. That snapshot
   includes discovery, item ownership, health, and opponents. It is owned by the server.
 - `logs` contains diagnostic output and is not part of a saved world.
 - `cache` contains disposable data that the application can rebuild.

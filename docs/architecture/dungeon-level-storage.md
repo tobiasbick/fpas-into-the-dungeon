@@ -1,9 +1,12 @@
 # Dungeon level storage contract
 
-This is the decided 14a implementation contract supplementing
-[generated dungeons](generated-dungeons.md) and its
-[implementation plan](../plans/14a-generated-dungeons.md). It specifies planned
-behavior, not an already implemented feature. Later multi-level support changes
+This is the 14a level storage contract supplementing
+[generated dungeons](generated-dungeons.md). It is implemented by
+`Dungeon.World.Interiors` and its `.Encoding` and `.Errors` units, the
+three-phase savegame loading in `Dungeon.World.Savegame`, and the transition
+handling in `Dungeon.Server.Handling` and `Dungeon.Server.Replies`. The
+structural rules shared by the generator and stored levels live in
+`Dungeon.Interior.Generation.Validation`. Later multi-level support changes
 the format deliberately; 14a stores only level 0.
 
 ## Immutable level file

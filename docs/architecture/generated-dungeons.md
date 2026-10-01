@@ -175,6 +175,15 @@ generation and storage separately. Report results before deciding on any
 further caching or another optimization. These are
 measurement scenarios, not a limit on the number of visited dungeons.
 
+Measured in 14a with `tools/persistence-bench` (three rounds each, monotonic
+millisecond clock, peak working set of the `fpas run` process tree including
+compilation): complete save and load each take about 6 and 2 ms with one
+visited dungeon, 21 and 17 ms with 10, and 260 ms with 100 (save 144 KB). Work
+grows linearly with the visited dungeons, about 2.6 ms each per operation; peak
+memory stays between 18 and 46 MB. First entry, generation plus round-trip
+check plus atomic storage, takes about 7 to 8 ms per dungeon. No caching or
+other optimization was added.
+
 ## Protocol and client
 
 Protocol version 13 removes the dialogue messages and the NPC and tablet field

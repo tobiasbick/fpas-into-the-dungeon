@@ -64,28 +64,32 @@ these projects.
   `Dungeon.Server` runs the handshake, message loop, and listener; its subunits
   own the policy (`Config`), per-connection session rules (`Session`),
   enumeration conversions (`Mapping`), client-safe projections (`Projection`),
-  replies and turn commits (`Replies`), and message handling (`Handling`).
-  `Session` retains the current interior map and builds area views from it.
-  `InitialAreas` temporarily supplies target geometry on dungeon entry until
-  dungeon level storage is connected. Loading installs the already validated
-  view returned by the world layer.
+  replies, turn and transition commits (`Replies`), message handling
+  (`Handling`), and the mapping of typed storage failures to stable rejection
+  codes (`Failures`). `Session` retains the current interior map and builds area
+  views from it. Entry opens the target level through the world layer; loading
+  installs the already validated view returned by the world layer.
 - `libs/game` owns the authoritative world model, rules, and simulation,
   including the deterministic outdoor terrain generator. It has one unit per
   concern, layered without cycles:
   - `Dungeon.Coordinates`: positions, facing, relative steps, chunk arithmetic.
-  - `Dungeon.Terrain` with `.Noise`, `.Generation`, and `.Placement`: cells,
-    chunks, and world metadata; noise; chunk generation; spawn and entrance.
+  - `Dungeon.Terrain` with `.Noise`, `.Generation`, `.Entrances`, `.Chunks`, and
+    `.Placement`: cells, chunks, and world metadata; noise; natural terrain;
+    entrance regions and sites; complete chunks with entrances; spawn and spawn
+    entrance.
   - `Dungeon.Items`, `Dungeon.Hostiles`: kinds, identities,
     and per-kind texts and values.
-  - `Dungeon.Interior` and `Dungeon.Interior.InitialDungeon`: interior
-    geometry and its validation; the hand-authored initial dungeon.
+  - `Dungeon.Interior` with `.Generation` and `.Generation.Validation`:
+    interior geometry and its validation; the deterministic dungeon generator;
+    the structural rules shared by the generator and stored levels.
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
     read-only queries; the `AreaView` type pairs world metadata with a supplied
     current interior map.
   - `Dungeon.Areas`: pure construction of an area view, requiring no interior
     outdoors and a matching map in a dungeon; first-visit entity materialization;
-    `.Validation` owns full saved-state checks against all supplied visited
-    maps and placements, without loading or generating geometry.
+    `.Identities` owns canonical dungeon area identities; `.Validation` owns the
+    map-free save shape check and full saved-state checks against all supplied
+    visited maps and placements, without loading or generating geometry.
   - `Dungeon.Movement`, `Dungeon.Interaction`,
     `Dungeon.Equipment`, `Dungeon.Combat`: the rules that change the state.
   - `Dungeon.Exploration` with `.Model` and `.Sight`: discovery masks,
@@ -94,9 +98,13 @@ these projects.
   creation of missing chunks through the `libs/game` generator, visible-window
   composition, prefetching, and bounded caching. `Dungeon.World` owns world
   sessions, the chunk cache, and visible windows; `Dungeon.World.Encoding` owns
-  the exact JSON formats of world metadata and chunks. `Dungeon.World.Savegame` owns the
-  savegame file and its format version; its subunits `Player`, `Entities`, and
-  `Discovery` encode and strictly decode the parts of the saved state.
+  the exact JSON formats of world metadata and chunks. `Dungeon.World.Interiors`
+  owns immutable level files (read, first-visit creation, visited-level reads)
+  with `.Encoding` (level format) and `.Errors` (`LevelFailure`).
+  `Dungeon.World.Names` holds the persisted kind and facing names shared by saves
+  and levels. `Dungeon.World.Savegame` owns the savegame file, its format version,
+  and three-phase loading; its subunits `Player`, `Entities`, `Discovery`, and
+  `Errors` (`PersistenceFailure`) encode, decode, and classify its parts.
 - `libs/protocol` owns commands and visible-state messages shared by client and
   server, including the one-character cell and knowledge code alphabet of
   visible rows. It contains no game rules; a server contract test verifies that
@@ -108,16 +116,19 @@ these projects.
 - `libs/persistence` currently owns the shared runtime path and configuration
   interface. Authoritative world files are owned by `libs/world`.
 - `tools/world-preview` samples final terrain or one normalized generator field
-  without loading a persistent world.
+  without loading a persistent world. `tools/persistence-bench` measures
+  first-entry level creation and complete save and load for a chosen number of
+  visited dungeons.
 - `tests` follows the production modules so each module is exercised through
   its interface. `tests/fixtures` is a test-only library exporting
   `Dungeon.Test.Fixtures`: independent authored dungeon geometry, metadata with
   an area identity, initial entities at a requested pose, and area-view helpers.
-  Game and client tests consume it; production projects do not depend on it.
-  Fixture geometry and placement identities remain independent of the temporary
-  initial dungeon and of generated output. A separate temporary unit
-  `Dungeon.Test.InitialAreas` supplies initial geometry for legacy tests during
-  their migration; it does not change the independent fixture builders.
+  It also lends its layout to any world's spawn dungeon for pure rule tests and
+  turns maps into first-person routes (`RouteTo`). Production projects do not
+  depend on it; fixture geometry stays independent of generated output.
+  `tests/levels` exports `Dungeon.Test.Levels` (entering and validating against
+  stored generated levels), `Dungeon.Test.Routes` (routes as client intentions,
+  outdoor paths), and `Dungeon.Test.Wire` (whole TCP play sessions).
   `tests/server/internal` compiles production server units directly in a
   separate test project to test session and projection internals without
   expanding the server library's public exports.

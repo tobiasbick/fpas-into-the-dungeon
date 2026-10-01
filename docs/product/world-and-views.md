@@ -31,8 +31,21 @@ define quests, experience, or levels.
   entrance.
 - **Entrance** is a location in one source area that names a valid transition
   target. Standing on an entrance and activating it are separate events.
+- **Entrance region** is a square part of the outdoor region, a whole number of
+  chunks wide (`dungeon_region_chunks`), that holds at most one dungeon
+  entrance. Its signed region coordinate names its dungeon.
+- **Entrance site** is the one outdoor field of an entrance region that leads
+  to its dungeon. A region whose seeded candidate field is not clear land has
+  no site and no dungeon.
+- **Spawn entrance** is the entrance site of the spawn's region, three steps
+  from the spawn. It belongs to the spawn region even when it lies across a
+  region border.
+- **Generated dungeon** is a dungeon whose geometry and original placements
+  are generated from the world seed and its entrance region when it is first
+  entered, then stored as an immutable **level file**.
 - **Return location** is the exact source area identity and coordinate retained
-  by the server while the player occupies an entered area.
+  by the server while the player occupies an entered area. For a dungeon it is
+  the entrance site of its region.
 - **Terrain** is the generated ground material, vegetation, or water that gives
   an outdoor location its physical character.
 - **Tree** is an individual vegetation feature on otherwise open terrain.
@@ -59,16 +72,15 @@ define quests, experience, or levels.
   one authoritative location.
 - **Inventory** is the set of items whose authoritative location is the player.
   The visible inventory is only a client-safe projection of that set.
-- **Ancient coin** is the first fixed collectible item in the initial dungeon.
+- **Ancient coin** is a collectible item placed in every generated dungeon.
   It proves inspection, pickup, projection, and persistence without defining a
   broader loot system.
 - **Equipment** is the set of items the player wears. A worn item is still part
   of the inventory; its location records the slot it occupies.
 - **Slot** is the body location for one worn item: **weapon** or **body**. An
   item kind fits at most one slot, and each slot holds at most one item.
-- **Rusty short sword** is the first weapon; it lies in the initial dungeon's
-  middle passage. **Leather jerkin** is the first armor; it lies in the nook
-  north of the exit.
+- **Rusty short sword** is the first weapon and **Leather jerkin** the first
+  armor; every generated dungeon places both on room corners.
 - **Derived values** are the character's values as the rules read them: hit
   threshold, damage, armor, and maximum health. They follow from base values
   plus equipment and are never stored.
@@ -76,8 +88,8 @@ define quests, experience, or levels.
 - **Opponent** is a hostile actor with stable server-owned identity, kind,
   area, position, health, and alert status. A standing opponent blocks its
   field; a destroyed one stays recorded but is never projected.
-- **Restless skeleton** is the first opponent. It rests in the inner passages
-  of the initial dungeon.
+- **Restless skeleton** is the first opponent. Every generated dungeon places one
+  or two in the rooms farthest from its start.
 - **Health** is the player's current and full hit points. Reaching zero means
   defeat.
 - **Turn** is one time-consuming player action (step, attack, wait, or a change
@@ -179,26 +191,27 @@ presentation concerns and never expand the discovered area.
 
 ## Current implementation
 
-The first world contains a deterministic, chunked outdoor region and one
-initial dungeon. A distinct entrance is generated exactly three traversable
-cardinal steps from the spawn. Walking onto it remains ordinary outdoor
-movement; `Enter` requests a server-authoritative interaction, which activates
-the transition on that field. The dungeon is
-an 11 by 9 bounded area with a fixed start pose, walls, floor, corridors, and
-one visible exit field. A fixed Ancient coin can first be
-inspected from the adjacent start field and then picked up with `Enter` while
-standing on its field. The server removes it from the area, exposes it in the
-visible inventory, and persists its carried state. The server accepts the exit
-interaction only on the exit field and then returns the player to the exact
-outdoor entrance coordinate.
+The world contains a deterministic, chunked outdoor region divided into
+entrance regions. The spawn entrance lies three traversable cardinal steps
+from the spawn; further entrances are rare, at most one per region. Walking onto
+an entrance remains ordinary outdoor movement; `Enter` requests a
+server-authoritative interaction, which activates the transition on that field.
+
+Each entrance leads to a **Forgotten dungeon**: a generated 31 by 21 area of
+rooms and corridors with a start beside one visible exit field, one or two
+restless skeletons, and an Ancient coin, a Rusty short sword, and a Leather
+jerkin. Its level is generated and stored on the first visit and read back
+afterwards. Items can be inspected from the field before them, picked up with
+`Enter`, worn, dropped with `D`, and carried into other dungeons. The server
+accepts the exit interaction only on the exit field and then returns the player
+to the dungeon's entrance site.
 
 Accepted outdoor steps restore one health point, up to the player's maximum.
 
-The restless skeleton rests at field `(3, 3)` in the inner passages that form
-the second route to the exit. It notices the player through line of sight,
-chases, and fights turn by turn; see [combat](../architecture/combat.md).
+Skeletons notice the player through line of sight, chase, and fight turn by
+turn; see [combat](../architecture/combat.md).
 
-Settlements, further entrances, navigable interiors, mutable terrain, broader
+Settlements, building interiors, multi-level dungeons, mutable terrain, broader
 world simulation, isometric rendering, LLM integration, and broader mutable RPG
 systems remain outside this slice. Their intended order is tracked in the
 [roadmap](../roadmap.md).

@@ -368,55 +368,55 @@ server-owned. The stage is split so each slice stays reviewable: 14a builds the
 infrastructure, 14s adds world management and the server console, 14b adds
 contents, then 13b adds progression before 14c adds deeper levels.
 
-### 14a. Generated dungeons — NEXT
+### 14a. Generated dungeons — IN REVIEW
 
-- [ ] Design entrance sites, the area view, the dungeon generator, and
+- [x] Design entrance sites, the area view, the dungeon generator, and
   persistence before implementation in
   [generated dungeons](architecture/generated-dungeons.md), with a step-by-step
   [implementation plan](plans/14a-generated-dungeons.md).
   The [level storage contract](architecture/dungeon-level-storage.md) fixes
   file schema, final interfaces, error classes, and transition ordering.
-- [ ] Place at most one ordinary deterministic entrance per entrance region on
+- [x] Place at most one ordinary deterministic entrance per entrance region on
   walkable land, replacing the spawn region's candidate with its guaranteed
   entrance three steps from spawn. This special entrance may cross a region
   border and remains assigned to the spawn region. Entrances appear on the map
   once revealed. Raise the world generator version to 6.
-- [ ] Make the entrance region size a world parameter: default from
+- [x] Make the entrance region size a world parameter: default from
   `server.toml` (4 chunks), stored in the world metadata at creation.
-- [ ] Remove the hand-authored initial dungeon, its tablet, Mara, and the
+- [x] Remove the hand-authored initial dungeon, its tablet, Mara, and the
   complete dialogue feature until stage 15; heal one health point per outdoor
   step instead. Raise the protocol version to 13.
-- [ ] Resolve interior maps by area identity; pass an area view with the
+- [x] Resolve interior maps by area identity; pass an area view with the
   resolved map to the rules and keep the current area's map in the server
   session.
-- [ ] Generate a 31 by 21 rooms-and-corridors dungeon from the world seed and
+- [x] Generate a 31 by 21 rooms-and-corridors dungeon from the world seed and
   the entrance region, with one or two restless skeletons far from the start
   and the coin, sword, and jerkin in room corners.
-- [ ] Validate generated maps (connectivity, exit, room count, floor share, no
+- [x] Validate generated maps (connectivity, exit, room count, floor share, no
   opponent in sight of the start); retry with derived seeds; pin a fingerprint
   of fixed regions; measure the generation time.
-- [ ] Generate each dungeon's level on first entry and atomically store its
+- [x] Generate each dungeon's level on first entry and atomically store its
   immutable geometry and original placements as versioned world data. Load
   that file on revisits; keep the current map in memory. Invalid files fail
   without replacement; missing files referenced by a save fail without deleting
   the save. Do not regenerate levels during save/load validation.
-- [ ] Materialize opponents and items on entry in the current game and persist
+- [x] Materialize opponents and items on entry in the current game and persist
   mutable state and visited areas only through explicit saving. Validate item
   origins separately from current locations in savegame format 7. Starting
   over or loading an earlier save keeps the immutable level files.
-- [ ] Limit carried and equipped items together to 64; reject pickup when full
+- [x] Limit carried and equipped items together to 64; reject pickup when full
   without changing state. Allow dropping carried items on an empty ordinary
   dungeon floor field and picking them up again, including in another dungeon.
   Persist their locations without duplicating their original placements.
-- [ ] Return the player to the entrance they used when leaving a generated
+- [x] Return the player to the entrance they used when leaving a generated
   dungeon.
-- [ ] Cover entrance placement, generator determinism and validation,
+- [x] Cover entrance placement, generator determinism and validation,
   materialization, persistence, and a complete TCP visit to a generated
   dungeon.
-- [ ] Measure complete save and load operations with 1, 10, and 100 visited
+- [x] Measure complete save and load operations with 1, 10, and 100 visited
   dungeons, including reading and validating stored levels; report timings and
   peak memory. Measure first-time generation and storage separately.
-- [ ] Synchronize architecture, product terminology, persistence, and roadmap
+- [x] Synchronize architecture, product terminology, persistence, and roadmap
   documentation.
 - [ ] Review the generated-dungeon slice with the user and obtain explicit
   acceptance.

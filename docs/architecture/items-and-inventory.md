@@ -7,17 +7,18 @@ persisted without adding a general loot, equipment, or scripting system.
 ## Authoritative model
 
 `libs/game` owns every item. An item has a stable ID, a kind, and exactly one
-location. The Ancient coin starts at field `8,1` in the initial dungeon.
-Full validation permits its current location on a traversable field in any
-visited dungeon or in the player's inventory, while requiring its original
-placement identity and kind. The interaction loop supports pickup; the
+location. Every generated dungeon places an Ancient coin, a Rusty short sword,
+and a Leather jerkin on room corners, named `<area>:item:0` to `:2`.
+Full validation permits an item's current location on an ordinary floor field
+of any visited dungeon or in the player's inventory, while requiring its
+original placement identity and kind. The interaction loop supports pickup; the
 drop intention lays a carried item back on the floor (see below). Validation
-requires exactly one coin after the first dungeon visit and rejects missing,
-duplicate, unknown, or invalid floor-item state. A floor item must lie on an
+requires exactly one item per placement of every visited dungeon and rejects
+missing, duplicate, unknown, or invalid floor-item state. A floor item must lie on an
 ordinary floor field, never on a wall or the exit.
 
-Starting a new game creates no dungeon items. First entry materializes the
-coin at its initial dungeon field. Further transitions and movement preserve
+Starting a new game creates no dungeon items. First entry materializes a
+dungeon's items at their placements. Further transitions and movement preserve
 its state, including after save/load. The client never creates, moves, or owns
 items.
 

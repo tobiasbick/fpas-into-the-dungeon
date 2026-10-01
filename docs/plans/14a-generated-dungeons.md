@@ -20,7 +20,7 @@ It is part of this plan, not a deferred design task.
 - [x] Step 4: dungeon generator, not yet reachable in play. The full suite
   passed 48/48.
 - [x] Step 5: entrances, world metadata, and generated dungeons in play.
-- [ ] Step 6: complete TCP visit and documentation.
+- [x] Step 6: complete TCP visit and documentation. Awaiting user review.
 
 Verification after step 2: changed sources formatted, all affected projects
 passed `fpas check`, game tests passed 10/10, world tests passed 2/2, and
@@ -320,6 +320,30 @@ dictionary insertion order. Fixed with the user's agreement in FPas `ee04e71c`
 (serde_json `preserve_order`, tests, docs); the README requires it. Level files
 now use the contract's key order; protocol tests that pinned the old sorted
 order were updated, the wire format is otherwise unchanged.
+
+Step 6 is implemented:
+
+- `dungeon_visit_test` plays a full TCP visit: enter the spawn entrance, take
+  and wield the sword, destroy a skeleton, take the coin, leave, save, reconnect,
+  load, re-enter, and check in the stored save that the skeleton stays destroyed
+  and the items stay taken.
+- `two_dungeon_test` (entrance regions of one chunk) carries the coin from the
+  spawn dungeon to the nearest reachable second dungeon, drops it, saves,
+  restarts the server, and loads. A deliberately edited, still valid stored
+  level of the second dungeon shows up after loading, proving that revisits
+  read the stored level instead of the generator. The coin lies once at the
+  drop field, is picked up again, and the spawn dungeon is revisited; the final
+  save holds both visits and the coin exactly once. Older-save reuse of a later
+  level file and a failed first-visit store are covered by step 5's tests.
+- Test helpers: `Dungeon.Test.Wire` (TCP sessions, fights, robust re-planning
+  walks around visible opponents) and `OutdoorRoute` in `Dungeon.Test.Routes`.
+- `tools/persistence-bench` measures save and load; results are recorded in
+  [generated dungeons](../architecture/generated-dungeons.md). Save/load read
+  each visited level once (`ReadVisitedLevels`); the savegame unit cannot
+  generate levels, and missing levels fail instead of being regenerated.
+- Documentation synchronized: overview, area transitions, first-person
+  interior, items, combat, persistent game state, runtime data, unbounded
+  world, level storage, product terminology, client UI, README, and roadmap.
 
 ## Ground rules
 

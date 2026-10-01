@@ -214,13 +214,13 @@ retains the existing save until overwrite is confirmed.
 
 ## First-person view
 
-Entered interiors and dungeons use a first-person view. The initial dungeon is
+Entered interiors and dungeons use a first-person view. Generated dungeons are
 rendered with terminal raycasting inside the same framed screen shell. Its
 server state supplies validated bounded field rows, dimensions, the area-local
 player coordinate, cardinal facing, title, and status. The client derives a
 cardinal camera and fills the primary view with colored ceiling, floor, and
 distance-shaded walls. The exit is a gold floor field, projected at its actual
-location. The fixed Ancient coin uses a gold marker in the first-person view
+location. The Ancient coin uses a gold marker in the first-person view
 and exploration map until it is picked up.
 In first person it is a small disc in the field center. The Environment panel
 identifies the available action: examine while facing the adjacent coin, or

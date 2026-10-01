@@ -1,12 +1,13 @@
 # First-person interior
 
-The first-person interior slice adds one fixed dungeon that proves discrete
-navigation and terminal raycasting without adding general dungeon generation or
-gameplay systems.
+Dungeons are bounded first-person interiors with discrete navigation and
+terminal raycasting. Their geometry comes from [generated dungeons](generated-dungeons.md)
+and is stored as immutable [level files](dungeon-level-storage.md).
 
 ## Ownership
 
-`libs/game` owns the bounded 11 by 9 interior map, its field meanings, the
+`libs/game` owns the bounded interior map (31 by 21 fields for generated
+dungeons; rules accept any validated size), its field meanings, the
 player's area-local coordinate and cardinal facing, collision, and entry and
 exit rules. The map contains walls, traversable floor, one start field, one
 visible exit field and fixed item fields.
@@ -16,26 +17,25 @@ exit, traversable item fields, and connectivity between all traversable fields.
 Item placements carry their identity, kind, and initial position. Opponent
 placements form an array with the same information; an empty array is valid.
 Placement identities are unique across items and opponents. Opponents occupy
-distinct floor fields away from items, the start, and the exit. The fixed initial
-dungeon still supplies one restless skeleton. New game state derives item kinds
-and opponents from these placements; opponents start dormant at full health.
+distinct floor fields away from items, the start, and the exit. Generated
+dungeons place one or two restless skeletons and the coin, sword, and jerkin.
+First entry materializes item kinds and opponents from these placements;
+opponents start dormant at full health.
 
 `InteriorMap.AreaId` identifies the area whose geometry the map contains;
-validation rejects an empty identity. `InitialDungeonMap(Metadata)` assigns
-the selected world's dungeon identity while preserving the authored geometry.
-`AreaView` pairs world metadata with an optional current map. The pure
+validation rejects an empty identity. `AreaView` pairs world metadata with an optional current map. The pure
 `Dungeon.Areas.AreaViewFor` constructor accepts `None` outdoors and requires a
 map matching the state's current area in a dungeon. Its caller supplies
 validated geometry; the constructor retains it without loading or generating
 a replacement. State validation, first-person movement and turning,
 interaction, turn resolution, and discovery updates receive this view and
 use its map. `CurrentInterior` rejects missing or mismatched current geometry.
-These rules do not resolve the initial map. `ServerSession.Interior` retains
+These rules never load or generate a map. `ServerSession.Interior` retains
 the current geometry. Actions, viewport changes, first-person projections,
 and exploration-map projections reuse it. Entry installs the view returned
 by the transition; exit and defeat clear the current map. Loading installs
-the validated view returned with the saved state. A temporary server helper
-supplies initial geometry only on entry until dungeon level storage is connected.
+the validated view returned with the saved state. Entry reads or creates the
+level through `Dungeon.World.Interiors.OpenLevelForEntry`.
 
 The player's retained outdoor return location remains separate from the
 interior pose. Entering establishes the fixed start pose. Leaving is accepted
@@ -104,8 +104,8 @@ view.
 
 ## Persistence and lifecycle
 
-The fixed interior remains current program data, so world format `2`, chunk
-format `2`, and generator version `5` remain unchanged. The current savegame format `7`
+Dungeon geometry is world data: world and chunk format `3`, generator version
+`6`, and level-file format `1`. The current savegame format `7`
 persists the active interior area ID, local field, cardinal facing, and exact
 outdoor return location, together with accumulated discovery and item state.
 Reconnecting does not restore it implicitly: the

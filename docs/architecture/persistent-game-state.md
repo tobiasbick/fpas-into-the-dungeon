@@ -24,20 +24,18 @@ The running rules use `ValidateGameState(View, State)` for local state,
 equipment, identity uniqueness, and geometry checks against the supplied
 current map. Full placement checks belong to
 `Dungeon.Areas.ValidateSavedGame(Metadata, State, Maps)`, which loads no maps.
-The save layer supplies no maps before a first visit and the initial map after
-it for the current single-dungeon model. Both decoding and writing use this
-full check: an unvisited game has no dungeon entities; a visited dungeon has
+The save layer reads the stored level of every visited dungeon and supplies
+those maps. Both loading and writing use this full check: an unvisited game has no dungeon entities; a visited dungeon has
 exactly its original entity identities and kinds, with their mutable state.
 Missing or unknown entities remain invalid even while the player is outdoors.
-The pure validator already supports multiple supplied visited maps, in any
-order, with exactly one map per visit. `Dungeon.Areas.Validation` checks
+The pure validator accepts the supplied visited maps in any order, with exactly
+one map per visit. `Dungeon.Areas.Validation` checks
 placement identity and kind, opponent origin areas, floor-item destinations,
 and discovery dimensions against the appropriate map, including areas that
 the player currently does not occupy. Items may move between visited areas;
 opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
-the supplied current map. Connecting multiple areas to world storage remains
-part of the [14a implementation plan](../plans/14a-generated-dungeons.md).
+the supplied current map.
 
 The post-`hello` welcome reports whether a loadable save exists and whether an
 invalid save was removed while establishing the session. In the latter case,
@@ -54,10 +52,11 @@ the return location, `visited_areas`, persistent discovered-area state, the comp
 server-owned item state, the player's health, every opponent, and the
 dice generator state. Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
-their return location contains the exact outdoor area and coordinate.
+their return location contains the outdoor area and the exact entrance site of
+the dungeon's region.
 
-`visited_areas` is a strictly sorted array of nonempty dungeon identities with
-no duplicates. A new game starts with an empty list, no items, and no opponents.
+`visited_areas` is a strictly sorted array of canonical dungeon identities
+(`<world>:dungeon:<rx>:<ry>`) with no duplicates. A new game starts with an empty list, no items, and no opponents.
 First entry materializes the map's placements and records the visit. Loading
 restores the list and entities together; revisiting never recreates taken items
 or defeated opponents. Interior discovery and dungeon entities may reference
@@ -74,9 +73,9 @@ means discovered but not currently visible.
 
 Every item record contains its stable ID, kind, and location. The current item
 location is either a validated field in a visited dungeon or the player's
-inventory. After the first visit, the fixed Ancient coin must occur exactly once, so malformed,
-missing, duplicate, unknown, or misplaced item state rejects the complete
-savegame. There is no separate client inventory file.
+inventory. Every item placement of every visited dungeon must occur exactly
+once, so malformed, missing, duplicate, unknown, or misplaced item state
+rejects the complete savegame. There is no separate client inventory file.
 
 Each opponent record contains its stable ID, kind, area, field, health, and
 alert status. A destroyed opponent stays recorded with zero health. Health
@@ -86,7 +85,8 @@ during a fight is allowed; the combat log and a defeat are never saved.
 
 Rendered rows, visible windows, status and message text, pending requests,
 overlays, chunk caches, and generated chunk contents are deliberately absent.
-The generated world remains in `world.json` and the chunk files.
+The generated world remains in `world.json`, the chunk files, and the immutable
+dungeon level files.
 
 The single save path is:
 
@@ -94,17 +94,24 @@ The single save path is:
 worlds/<world-id>/saves/default.json
 ```
 
-Writes validate the complete state, including discovery ordering, dimensions,
-known interior identities, and non-empty masks, then atomically replace
-`default.json`. A failed validation or replacement leaves the previous valid
+Loading runs three phases: decode the save's self-contained fields
+(`DecodeSaveGameState`), read every visited level once (`ReadVisitedLevels`),
+and validate the state against those maps (`ValidateSavedGame`). Save and load
+never generate a level. Writes run the same validation, including discovery
+ordering, dimensions, known interior identities, and non-empty masks, then
+atomically replace `default.json`. Failures are typed (`PersistenceFailure`):
+invalid state, a level failure, or I/O. A failed validation or replacement leaves the previous valid
 save intact. No backup slot, migration, legacy reader, or stale fallback is
 kept.
 
 During development, malformed, incompatible, wrong-world, or otherwise invalid
 saves are deleted and then treated as missing. Only `default.json` may be
-removed; world metadata, chunks, configuration, and unrelated files remain
-untouched. I/O failures remain errors and are not treated as missing or invalid
-data.
+removed; world metadata, chunks, level files, configuration, and unrelated files
+remain untouched. A missing, invalid, or unreadable referenced level is a
+world-data or storage error: the save is kept and the server rejects the session
+or operation (`world_data_error`, `storage_error`). I/O failures remain errors
+and are not treated as missing or invalid data. The complete failure matrix is
+part of the [level storage contract](dungeon-level-storage.md).
 
 ## Client preferences
 
