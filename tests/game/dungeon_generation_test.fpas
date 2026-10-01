@@ -1,0 +1,138 @@
+// Covers generated dungeons: determinism, region variety, acceptance rules over a region block, and pinned output.
+program DungeonGenerationTest;
+
+uses
+  Dungeon.Coordinates, Dungeon.Exploration.Sight, Dungeon.Hostiles, Dungeon.Interior,
+  Dungeon.Interior.Generation, Dungeon.Items, Std.Arrays, Std.Conv, Std.Math, Std.Results, Std.Test;
+
+function PositionText(Position: InteriorPosition): string;
+begin
+  return ((IntToStr(Position.X) + ',') + IntToStr(Position.Y))
+end;
+
+function ItemKindText(Kind: ItemKind): string;
+begin
+  case Kind of
+    ItemKind.AncientCoin:
+    begin
+      return 'coin'
+    end;
+    ItemKind.RustyShortSword:
+    begin
+      return 'sword'
+    end;
+    ItemKind.LeatherJerkin:
+    begin
+      return 'jerkin'
+    end
+  end
+end;
+
+// Renders rows, endpoints, and placements so any generated difference changes the text.
+function MapText(Map: InteriorMap): string;
+begin
+  mutable var Text: string := '';
+  for Y: integer := 0 to Map.Height - 1 do
+  begin
+    for X: integer := 0 to Map.Width - 1 do
+    begin
+      Text := Text + InteriorCellCode(Map.Cells[(Y * Map.Width) + X])
+    end;
+
+    Text := Text + '/'
+  end;
+
+  Text := ((Text + 'start=') + PositionText(Map.Start)) + (' exit=' + PositionText(Map.Exit));
+  for Hostile: HostilePlacement in Map.Hostiles do
+  begin
+    Text := ((Text + ' ') + Hostile.Id) + ('@' + PositionText(Hostile.Position))
+  end;
+
+  for Item: ItemPlacement in Map.Items do
+  begin
+    Text := (((Text + ' ') + Item.ItemId) + ('=' + ItemKindText(Item.Kind))) +
+            ('@' + PositionText(Item.Position))
+  end;
+
+  return Text
+end;
+
+function Generated(Seed: integer; RegionX: integer; RegionY: integer): InteriorMap;
+begin
+  var AreaId: string := (('gen:dungeon:' + IntToStr(RegionX)) + ':') + IntToStr(RegionY);
+  return Unwrap(GenerateDungeon(Seed, RegionX, RegionY, AreaId))
+end;
+
+// Re-checks every acceptance rule that is observable on the finished map.
+procedure AssertAccepted(Map: InteriorMap);
+begin
+  AssertTrue(IsOk(ValidateInteriorMap(Map)));
+  AssertEquals(GeneratedDungeonWidth, Map.Width);
+  AssertEquals(GeneratedDungeonHeight, Map.Height);
+  AssertTrue(Map.StartFacing = FacingDirection.East);
+  AssertEquals(Map.Exit.X + 1, Map.Start.X);
+  AssertEquals(Map.Exit.Y, Map.Start.Y);
+  AssertTrue((Std.Arrays.Length(Map.Hostiles) >= 1) and (Std.Arrays.Length(Map.Hostiles) <= 2));
+  for Index: integer := 0 to Std.Arrays.Length(Map.Hostiles) - 1 do
+  begin
+    var Hostile: HostilePlacement := Map.Hostiles[Index];
+    AssertEquals(HostilePlacementId(Map.AreaId, Index), Hostile.Id);
+    var DeltaX: integer := Std.Math.Abs(Hostile.Position.X - Map.Start.X);
+    var DeltaY: integer := Std.Math.Abs(Hostile.Position.Y - Map.Start.Y);
+    if Std.Math.Max(DeltaX, DeltaY) <= HostileSightRange then
+    begin
+      AssertFalse(HasLineOfSight(Map, Hostile.Position, Map.Start));
+      AssertFalse(HasLineOfSight(Map, Map.Start, Hostile.Position))
+    end
+  end;
+
+  AssertEquals(3, Std.Arrays.Length(Map.Items));
+  AssertTrue(Map.Items[0].Kind = ItemKind.AncientCoin);
+  AssertTrue(Map.Items[1].Kind = ItemKind.RustyShortSword);
+  AssertTrue(Map.Items[2].Kind = ItemKind.LeatherJerkin);
+  for Index: integer := 0 to 2 do
+  begin
+    AssertEquals(ItemPlacementId(Map.AreaId, Index), Map.Items[Index].ItemId)
+  end;
+  mutable var Open: integer := 0;
+  for Cell: InteriorCellKind in Map.Cells do
+  begin
+    if Cell <> InteriorCellKind.Wall then
+    begin
+      Open := Open + 1
+    end
+  end;
+
+  AssertTrue(Open * 100 >= Std.Arrays.Length(Map.Cells) * 25);
+  AssertTrue(Open * 100 <= Std.Arrays.Length(Map.Cells) * 60)
+end;
+
+begin
+  // Equal input yields an identical map; the area identity only names the placements.
+  AssertEquals(MapText(Generated(12345, 2, -3)), MapText(Generated(12345, 2, -3)));
+  AssertEquals('custom:item:0', Unwrap(GenerateDungeon(12345, 2, -3, 'custom')).Items[0].ItemId);
+  AssertTrue(IsError(GenerateDungeon(12345, 2, -3, '')));
+  // Neighboring regions and other seeds produce other layouts.
+  var Origin: string := MapText(Generated(12345, 0, 0));
+  AssertTrue(Origin <> MapText(Generated(12345, 1, 0)));
+  AssertTrue(Origin <> MapText(Generated(12345, 0, 1)));
+  AssertTrue(Origin <> MapText(Generated(12345, -1, -1)));
+  AssertTrue(Origin <> MapText(Generated(777, 0, 0)));
+  // Every region of a 20 by 20 block around the origin generates an accepted map for three seeds,
+  // including a seed whose derived attempt seed wraps around the integer range.
+  for Seed: integer in [12345, -987654321, 9223372036854775807] do
+  begin
+    for RegionY: integer := -10 to 9 do
+    begin
+      for RegionX: integer := -10 to 9 do
+      begin
+        AssertAccepted(Generated(Seed, RegionX, RegionY))
+      end
+    end
+  end;
+
+  // Pinned output: changing any of these requires raising the world generator version.
+  AssertEquals('###############################/###############################/###############################/###############################/######....################....#/######....################....#/###...........................#/###.####.#################....#/###.###......##.....###########/###.###......##.....####.....##/###.###......................##/###.###......##..............##/###.###########.....####.....##/###.#############.######.....##/###.######........########.####/#..........................####/#.....####........#############/#.....###########.##x....######/#################........######/####################.....######/###############################/start=21,17 exit=20,17 gen:dungeon:0:0:hostile:0@28,6 gen:dungeon:0:0:item:0=coin@15,8 gen:dungeon:0:0:item:1=sword@19,8 gen:dungeon:0:0:item:2=jerkin@15,12', MapText(Generated(12345, 0, 0)));
+  AssertEquals('###############################/#######################....####/######......###########....####/######......######...........##/######......######.####....#.##/######......###.......######.##/####..................######.##/####.####.#####.......######.##/####.####.########.#########.##/###...###.########.#########.##/###.......########.#########.##/###...###.########.#######....#/#########.########.#######....#/#########.########............#/##.....##.#x.....##.....##....#/##.....##........##.....####.##/##...........................##/##.....############.....#######/##.....########################/###############################/###############################/start=12,14 exit=11,14 gen:dungeon:-7:4:hostile:0@25,3 gen:dungeon:-7:4:item:0=coin@6,2 gen:dungeon:-7:4:item:1=sword@11,2 gen:dungeon:-7:4:item:2=jerkin@6,5', MapText(Generated(12345, -7, 4)));
+  AssertEquals('###############################/#######.....###################/#######.....###################/#######..............##########/#######.....########.##########/#########.##########.#....#####/#########.##########.#....#####/#####x....................#####/#####....#######.....#....#####/#####.......................###/#####....#######.....######.###/#######.########.....######.###/#######.###...####.#.######.###/#######.###...####.#.#####...##/#######.###..........#####...##/#######.###...######.#####...##/######...########.......##...##/######...########.......#######/######...########.......#######/######...########.......#######/###############################/start=6,7 exit=5,7 gen:dungeon:3:-9:hostile:0@27,15 gen:dungeon:3:-9:item:0=coin@16,7 gen:dungeon:3:-9:item:1=sword@20,7 gen:dungeon:3:-9:item:2=jerkin@16,11', MapText(Generated(-987654321, 3, -9)))
+end.

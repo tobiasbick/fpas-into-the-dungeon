@@ -17,7 +17,8 @@ It is part of this plan, not a deferred design task.
   no references in `libs`, `apps`, or `tests`.
 - [x] Step 3: area view, visited areas, materialization, and step 3a (inventory
   capacity and dropping). The full suite passed 47/47.
-- [ ] Step 4: dungeon generator.
+- [x] Step 4: dungeon generator, not yet reachable in play. The full suite
+  passed 48/48.
 - [ ] Step 5: entrances, world metadata, and generated dungeons in play.
 - [ ] Step 6: complete TCP visit and documentation.
 
@@ -25,8 +26,7 @@ Verification after step 2: changed sources formatted, all affected projects
 passed `fpas check`, game tests passed 10/10, world tests passed 2/2, and
 `fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 37/37.
 The five removed tests covered only the removed conversation feature.
-The fixed initial dungeon remains until step 5. Steps 3–6 and user acceptance
-of the complete 14a feature are still pending.
+The fixed initial dungeon remains until step 5.
 
 Review of steps 1–2 found no gameplay or specification defects. The cleanup
 required before starting step 3 is complete:
@@ -220,7 +220,10 @@ Verification: changed sources pass `fpas fmt --check`, `fpas check
 dungeon.fpasworkspace` passed, and the full suite passed 45/45. One earlier
 full run failed once in `full_session_test` with a 120 s channel timeout while
 waiting for the first state after starting a game; it passed alone five times
-and in the next full run. The cause is not yet found and predates this slice.
+and in the next full run. The cause was a Functional Pascal scheduler defect:
+the main task ran queued tasks inline while waiting, so the in-process server
+could block the test thread. It is fixed in Functional Pascal `6f7667ff`; the
+tests now report stalled client sessions through `Dungeon.Test.ClientSession`.
 
 Step 3a (bounded inventory and dropping) is implemented:
 
@@ -252,6 +255,25 @@ legacy tests from `Dungeon.Test.InitialAreas` to independent fixtures happens in
 step 5, when `InitialDungeon` is deleted. The world/server supplier still
 exposes the one playable initial dungeon; multiple stored dungeons are connected
 in step 5.
+
+Step 4 is implemented in `Dungeon.Interior.Generation` (exported by the game
+library) and follows the five generator rules and the acceptance conditions
+without additions. Room positions draw `X` and `Y` after the size so that the
+room fits inside the outer wall; corridors run from the earlier room's center to
+the later one's, and every carved corridor draws its orientation once. Combat's
+perception rule (Chebyshev distance and line of sight in either direction)
+defines whether a skeleton could see the start. World seeds near the integer
+limit wrap deterministically in the attempt-seed formula.
+`dungeon_generation_test` covers determinism, region and seed variety, an
+empty area identity, every region of a 20 by 20 block for three seeds
+(including the largest integer seed) with all observable acceptance rules, and
+the pinned rows and placements of three regions. Mean generation time measured
+with `Std.Time.MonotonicMillis` over 2,000 regions in three runs: about 0.9 ms
+per dungeon. Verification: changed sources pass `fpas fmt --check`,
+`fpas check dungeon.fpasworkspace` passed, and
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 48/48. No
+protocol, persisted schema, or existing generated output changed; the world
+generator version rises in step 5, when generated dungeons enter the world.
 
 ## Ground rules
 
