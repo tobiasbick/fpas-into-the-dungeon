@@ -1,0 +1,73 @@
+// Test helpers that enter and validate against stored generated dungeon levels of a real world.
+unit Dungeon.Test.Levels;
+
+uses
+  Dungeon.Areas, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Movement,
+  Dungeon.Terrain, Dungeon.Test.Fixtures, Dungeon.World, Dungeon.World.Interiors,
+  Dungeon.World.Interiors.Errors, Dungeon.World.Savegame, Std.Results;
+
+// Returns the stored spawn dungeon level, generating and storing it on first use; panics on failure.
+public function SpawnLevel(World: WorldSession): InteriorMap;
+begin
+  var AtEntrance: GameState := NewGame(World.Metadata) with Player := PlayerPosition.Outdoor(World.Metadata.SpawnEntrance); end;
+
+  case OpenLevelForEntry(World, AtEntrance, SpawnDungeonAreaId(World.Metadata)) of
+    Ok(Map):
+    begin
+      return Map
+    end
+    else
+    begin
+      panic('the spawn dungeon level must be available')
+    end
+  end
+end;
+
+// Builds the area view of a state with the given stored level as its dungeon map, or none outdoors.
+public function LevelView(World: WorldSession; State: GameState; Map: InteriorMap): AreaView;
+begin
+  if State.Area = AreaKind.Dungeon then
+  begin
+    return record
+      Metadata := World.Metadata;
+      Interior := Some(Map);
+    end
+  end;
+
+  return record
+    Metadata := World.Metadata;
+    Interior := None;
+  end
+end;
+
+// Enters the spawn dungeon through the spawn entrance; the state's player is moved onto the entrance.
+public function EnterSpawnLevel(World: WorldSession; State: GameState): result of GameState, string;
+begin
+  var AtEntrance: GameState := State with Player := PlayerPosition.Outdoor(World.Metadata.SpawnEntrance); end;
+  var Map: InteriorMap := SpawnLevel(World);
+  var Transition: AreaTransition := try ActivateAreaTransition(LevelView(World, AtEntrance, Map), AtEntrance, Some(Map));
+  return Ok(Transition.State)
+end;
+
+// Leaves a dungeon whose stored level is Map; the player must stand on its exit.
+public function LeaveLevel(World: WorldSession; State: GameState; Map: InteriorMap): result of GameState, string;
+begin
+  var Transition: AreaTransition := try ActivateAreaTransition(LevelView(World, State, Map), State, None);
+  return Ok(Transition.State)
+end;
+
+// Fully validates save text against the world's stored levels without touching the save file.
+public function DecodeStoredSave(World: WorldSession; Text: string): result of GameState, string;
+begin
+  var State: GameState := try DecodeSaveGameState(Text, World.Metadata);
+  case ReadVisitedLevels(World, State) of
+    Ok(Maps):
+    begin
+      return ValidateSavedGame(World.Metadata, State, Maps)
+    end
+    else
+    begin
+      return Error('a visited level of the save is not readable')
+    end
+  end
+end;

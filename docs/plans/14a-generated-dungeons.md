@@ -19,7 +19,7 @@ It is part of this plan, not a deferred design task.
   capacity and dropping). The full suite passed 47/47.
 - [x] Step 4: dungeon generator, not yet reachable in play. The full suite
   passed 48/48.
-- [ ] Step 5: entrances, world metadata, and generated dungeons in play.
+- [x] Step 5: entrances, world metadata, and generated dungeons in play.
 - [ ] Step 6: complete TCP visit and documentation.
 
 Verification after step 2: changed sources formatted, all affected projects
@@ -274,6 +274,52 @@ per dungeon. Verification: changed sources pass `fpas fmt --check`,
 `fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 48/48. No
 protocol, persisted schema, or existing generated output changed; the world
 generator version rises in step 5, when generated dungeons enter the world.
+
+Step 5 is implemented in four slices:
+
+- Entrances and world metadata: `Dungeon.Terrain.Entrances` owns regions,
+  candidates, sites, `EntranceRegionAt`, and chunk entrance fields. World format
+  3 and generator version 6 store `spawn_entrance_x`, `spawn_entrance_y`, and
+  `dungeon_region_chunks`; `server.toml` requires `dungeon_region_chunks`.
+  `GenerateChunk` and `GenerateWorldCell` moved to `Dungeon.Terrain.Chunks`
+  because entrances need natural cells from `Dungeon.Terrain.Generation`
+  (otherwise the units would import each other). Area identities live in
+  `Dungeon.Areas.Identities`, because `Dungeon.GameState` validates the exact
+  return location. The terrain fingerprint now also pins two chunks with
+  ordinary entrance sites.
+- Level storage: `Dungeon.World.Interiors` with `.Encoding` and `.Errors`;
+  shared JSON names in `Dungeon.World.Names`. Generated-dungeon rules are
+  shared by generator and decoder in `Dungeon.Interior.Generation.Validation`,
+  which therefore also holds `GeneratedDungeonWidth`/`Height`.
+- Play: saves load in three phases (`DecodeSaveGameState`, `ReadVisitedLevels`,
+  `ValidateSavedGame`) with `PersistenceFailure`; transitions use
+  `OpenLevelForEntry` and prepare the candidate projection before sending.
+  Rejections use `world_data_error`, `storage_error`, and `generation_error`;
+  the client shows a `Rejected` before `Welcome` as a connection failure.
+  `Dungeon.Interior.InitialDungeon`, the server's initial-area supplier, and
+  `Dungeon.Test.InitialAreas` are deleted. Game tests use the fixture layout
+  (`FixtureDungeonMapFor`); world and server tests use stored generated levels
+  through the test library `tests/levels` (`Dungeon.Test.Levels`,
+  `Dungeon.Test.Routes`) and the fixture route helper `RouteTo`.
+
+- Failure regressions: `persistence_failure_test` covers the load table and
+  write failures (missing, invalid, and unreadable levels keep the save; only
+  invalid save content removes it; I/O failures are typed) and an older save
+  that has not visited an existing level. `transition_checkpoints_test`
+  (internal) covers no storage on an invalid interaction, read and atomic-write
+  failures, a published level followed by a candidate failure, success with
+  one stored file across two visits, a send failure, and the failure-to-code
+  mapping. `handshake_failure_test` covers the rejection before `Welcome` over
+  raw TCP, the client network adapter, and the headless UI, with the save kept.
+  Not covered by a regression: a failing deletion of an invalid save (no
+  portable way to make a file undeletable) and a real generator failure (the
+  generator cannot fail for a valid region; the class mapping is tested).
+
+Functional Pascal finding: `Std.Json` sorted object members instead of keeping
+dictionary insertion order. Fixed with the user's agreement in FPas `ee04e71c`
+(serde_json `preserve_order`, tests, docs); the README requires it. Level files
+now use the contract's key order; protocol tests that pinned the old sorted
+order were updated, the wire format is otherwise unchanged.
 
 ## Ground rules
 

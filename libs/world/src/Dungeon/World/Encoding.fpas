@@ -2,8 +2,9 @@
 unit Dungeon.World.Encoding;
 
 uses
-  Dungeon.Coordinates, Dungeon.Terrain, Dungeon.Terrain.Generation, Dungeon.Terrain.Placement,
-  Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Json.Fields, Std.Str;
+  Dungeon.Coordinates, Dungeon.Terrain, Dungeon.Terrain.Entrances, Dungeon.Terrain.Generation,
+  Dungeon.Terrain.Placement, Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Json.Fields,
+  Std.Str;
 
 const
   AllowedWorldIdCharacters: string := 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_';
@@ -39,13 +40,13 @@ end;
 // Encodes world metadata in the current world file format.
 public function EncodeMetadata(Metadata: WorldMetadata): string;
 begin
-  return Std.Json.Stringify(JsonValue.Object(['version': JsonValue.Number(IntToReal(Metadata.FormatVersion)), 'id': JsonValue.String(Metadata.Id), 'seed': JsonValue.Number(IntToReal(Metadata.Seed)), 'generator_version': JsonValue.Number(IntToReal(Metadata.GeneratorVersion)), 'chunk_size': JsonValue.Number(IntToReal(Metadata.ChunkSize)), 'spawn_x': JsonValue.Number(IntToReal(Metadata.Spawn.X)), 'spawn_y': JsonValue.Number(IntToReal(Metadata.Spawn.Y)), 'outdoor_area_id': JsonValue.String(Metadata.OutdoorAreaId), 'outdoor_area_label': JsonValue.String(Metadata.OutdoorAreaLabel), 'dungeon_area_id': JsonValue.String(Metadata.DungeonAreaId), 'dungeon_area_label': JsonValue.String(Metadata.DungeonAreaLabel), 'entrance_id': JsonValue.String(Metadata.EntranceId), 'entrance_x': JsonValue.Number(IntToReal(Metadata.Entrance.X)), 'entrance_y': JsonValue.Number(IntToReal(Metadata.Entrance.Y)), 'entrance_target_area_id': JsonValue.String(Metadata.EntranceTargetAreaId)]))
+  return Std.Json.Stringify(JsonValue.Object(['version': JsonValue.Number(IntToReal(Metadata.FormatVersion)), 'id': JsonValue.String(Metadata.Id), 'seed': JsonValue.Number(IntToReal(Metadata.Seed)), 'generator_version': JsonValue.Number(IntToReal(Metadata.GeneratorVersion)), 'chunk_size': JsonValue.Number(IntToReal(Metadata.ChunkSize)), 'spawn_x': JsonValue.Number(IntToReal(Metadata.Spawn.X)), 'spawn_y': JsonValue.Number(IntToReal(Metadata.Spawn.Y)), 'outdoor_area_id': JsonValue.String(Metadata.OutdoorAreaId), 'outdoor_area_label': JsonValue.String(Metadata.OutdoorAreaLabel), 'spawn_entrance_x': JsonValue.Number(IntToReal(Metadata.SpawnEntrance.X)), 'spawn_entrance_y': JsonValue.Number(IntToReal(Metadata.SpawnEntrance.Y)), 'dungeon_region_chunks': JsonValue.Number(IntToReal(Metadata.DungeonRegionChunks))]))
 end;
 
 function DecodeMetadataFields(Text: string; ExpectedId: string): result of WorldMetadata, string;
 begin
   var Fields: dict of string to JsonValue := try ParseObject(Text);
-  if Std.Dictionaries.Length(Fields) <> 15 then
+  if Std.Dictionaries.Length(Fields) <> 12 then
   begin
     return Error('world metadata must contain exactly the current schema fields')
   end;
@@ -61,14 +62,11 @@ begin
     end;
     OutdoorAreaId := try StringField(Fields, 'outdoor_area_id');
     OutdoorAreaLabel := try StringField(Fields, 'outdoor_area_label');
-    DungeonAreaId := try StringField(Fields, 'dungeon_area_id');
-    DungeonAreaLabel := try StringField(Fields, 'dungeon_area_label');
-    EntranceId := try StringField(Fields, 'entrance_id');
-    Entrance := record
-      X := try IntegerField(Fields, 'entrance_x');
-      Y := try IntegerField(Fields, 'entrance_y');
+    SpawnEntrance := record
+      X := try IntegerField(Fields, 'spawn_entrance_x');
+      Y := try IntegerField(Fields, 'spawn_entrance_y');
     end;
-    EntranceTargetAreaId := try StringField(Fields, 'entrance_target_area_id');
+    DungeonRegionChunks := try IntegerField(Fields, 'dungeon_region_chunks');
   end;
 
   if Metadata.FormatVersion <> WorldFormatVersion then
@@ -365,20 +363,23 @@ begin
     Coordinate := ExpectedCoordinate;
     Cells := Cells;
   end);
-  for LocalY: integer := 0 to WorldChunkSize - 1 do
+  // Entrances lie exactly on the chunk's entrance fields whose stored cell is clear walkable land.
+  mutable var ExpectedEntrances: array of boolean := Std.Arrays.Fill(false, WorldChunkSize *
+                                                                            WorldChunkSize);
+  for Field: WorldPosition in EntranceFieldsInChunk(Metadata, ExpectedCoordinate) do
   begin
-    for LocalX: integer := 0 to WorldChunkSize - 1 do
+    var Index: integer := (LocalForCoordinate(Field.Y) * WorldChunkSize) +
+                          LocalForCoordinate(Field.X);
+    var Stored: WorldCell := Chunk.Cells[Index];
+    ExpectedEntrances[Index] := ((Stored.Feature = TerrainFeatureKind.Entrance) or (Stored.Feature = TerrainFeatureKind.NoFeature)) and
+                                CellIsClearEntrance(Stored with Feature := TerrainFeatureKind.NoFeature; end)
+  end;
+
+  for Index: integer := 0 to Std.Arrays.Length(Chunk.Cells) - 1 do
+  begin
+    if ExpectedEntrances[Index] <> (Chunk.Cells[Index].Feature = TerrainFeatureKind.Entrance) then
     begin
-      var WorldX: integer := (ExpectedCoordinate.X * WorldChunkSize) + LocalX;
-      var WorldY: integer := (ExpectedCoordinate.Y * WorldChunkSize) + LocalY;
-      var IsExpectedEntrance: boolean := (WorldX = Metadata.Entrance.X) and
-                                         (WorldY = Metadata.Entrance.Y);
-      var HasEntrance: boolean := ChunkCell(Chunk, LocalX, LocalY).Feature =
-                                  TerrainFeatureKind.Entrance;
-      if IsExpectedEntrance <> HasEntrance then
-      begin
-        return Error('chunk entrance feature does not match world metadata')
-      end
+      return Error('chunk entrance feature does not match world metadata')
     end
   end;
 

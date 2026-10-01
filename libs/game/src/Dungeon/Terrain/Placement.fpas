@@ -1,9 +1,14 @@
-// World metadata creation and validation: natural spawn search and the dungeon entrance near it.
+// World metadata creation and validation: natural spawn search and the spawn entrance near it.
 unit Dungeon.Terrain.Placement;
 
 uses
-  Dungeon.Coordinates, Dungeon.Terrain, Dungeon.Terrain.Generation, Dungeon.Terrain.Noise, Std.Math,
-  Std.Results;
+  Dungeon.Coordinates, Dungeon.Terrain, Dungeon.Terrain.Entrances, Dungeon.Terrain.Generation,
+  Dungeon.Terrain.Noise, Std.Math, Std.Results;
+
+public const
+  // Inclusive bounds of the entrance region side length in chunks.
+  MinimumDungeonRegionChunks: integer := 1;
+  MaximumDungeonRegionChunks: integer := 16;
 
 const
   NaturalSpawnRadius: integer := 8;
@@ -152,9 +157,7 @@ end;
 
 function IsClearEntranceCell(Seed: integer; Position: WorldPosition): boolean;
 begin
-  var Cell: WorldCell := NaturalCell(Seed, Position.X, Position.Y);
-  return (CellIsWalkable(Cell) and (Cell.Feature = TerrainFeatureKind.NoFeature)) and
-         (Cell.Water = WaterKind.NoWater)
+  return CellIsClearEntrance(NaturalCell(Seed, Position.X, Position.Y))
 end;
 
 function HasTraversableCardinalRoute(Seed: integer; Spawn: WorldPosition; Target: WorldPosition): boolean;
@@ -269,13 +272,16 @@ begin
   return Error('unable to find a natural spawn site with a valid entrance for world seed')
 end;
 
-// Creates current metadata with deterministic area identities, spawn, and initial entrance.
-public function NewWorldMetadata(Id: string; Seed: integer): result of WorldMetadata, string;
+// Creates current metadata with the deterministic spawn, spawn entrance, and region size.
+// Rejects region sizes outside MinimumDungeonRegionChunks through MaximumDungeonRegionChunks.
+public function NewWorldMetadata(Id: string; Seed: integer; DungeonRegionChunks: integer): result of WorldMetadata, string;
 begin
+  if (DungeonRegionChunks < MinimumDungeonRegionChunks) or
+     (DungeonRegionChunks > MaximumDungeonRegionChunks) then
+  begin
+    return Error('dungeon region size must be 1 through 16 chunks')
+  end;
   var Spawn: WorldPosition := try FindNaturalSpawn(Seed);
-  var Entrance: WorldPosition := try FindEntrance(Seed, Spawn);
-  var OutdoorAreaId: string := Id + ':outdoor';
-  var DungeonAreaId: string := Id + ':dungeon:initial';
   return Ok(record
     Id := Id;
     Seed := Seed;
@@ -283,13 +289,10 @@ begin
     GeneratorVersion := WorldGeneratorVersion;
     ChunkSize := WorldChunkSize;
     Spawn := Spawn;
-    OutdoorAreaId := OutdoorAreaId;
+    OutdoorAreaId := Id + ':outdoor';
     OutdoorAreaLabel := 'Outdoor region';
-    DungeonAreaId := DungeonAreaId;
-    DungeonAreaLabel := 'Initial dungeon';
-    EntranceId := Id + ':entrance:initial-dungeon';
-    Entrance := Entrance;
-    EntranceTargetAreaId := DungeonAreaId;
+    SpawnEntrance := try FindEntrance(Seed, Spawn);
+    DungeonRegionChunks := DungeonRegionChunks;
   end)
 end;
 
@@ -310,7 +313,7 @@ begin
   begin
     return Error('world chunk size must be 128')
   end;
-  var Expected: WorldMetadata := try NewWorldMetadata(Metadata.Id, Metadata.Seed);
+  var Expected: WorldMetadata := try NewWorldMetadata(Metadata.Id, Metadata.Seed, Metadata.DungeonRegionChunks);
   if (Metadata.Spawn.X <> Expected.Spawn.X) or (Metadata.Spawn.Y <> Expected.Spawn.Y) then
   begin
     return Error('world spawn position is invalid for this generator version')
@@ -321,60 +324,32 @@ begin
     return Error('outdoor area identity is invalid')
   end;
 
-  if Metadata.DungeonAreaId <> Expected.DungeonAreaId then
-  begin
-    return Error('dungeon area identity is invalid')
-  end;
-
-  if Metadata.OutdoorAreaId = Metadata.DungeonAreaId then
-  begin
-    return Error('area identities must be unique')
-  end;
-
   if Metadata.OutdoorAreaLabel = '' then
   begin
     return Error('outdoor area label must not be empty')
   end;
 
-  if Metadata.DungeonAreaLabel = '' then
+  if (Metadata.SpawnEntrance.X <> Expected.SpawnEntrance.X) or
+     (Metadata.SpawnEntrance.Y <> Expected.SpawnEntrance.Y) then
   begin
-    return Error('dungeon area label must not be empty')
+    return Error('spawn entrance coordinate is invalid for this generator version')
   end;
 
-  if Metadata.EntranceId <> Expected.EntranceId then
+  if Abs(Metadata.SpawnEntrance.X - Metadata.Spawn.X) + Abs(Metadata.SpawnEntrance.Y -
+                                                            Metadata.Spawn.Y) <>
+     3 then
   begin
-    return Error('entrance identity is invalid')
+    return Error('spawn entrance must be exactly three cardinal steps from spawn')
   end;
 
-  if (Metadata.EntranceId = Metadata.OutdoorAreaId) or
-     (Metadata.EntranceId = Metadata.DungeonAreaId) then
+  if not IsClearEntranceCell(Metadata.Seed, Metadata.SpawnEntrance) then
   begin
-    return Error('entrance identity must be unique')
+    return Error('spawn entrance conflicts with generated terrain')
   end;
 
-  if Metadata.EntranceTargetAreaId <> Metadata.DungeonAreaId then
+  if not HasTraversableCardinalRoute(Metadata.Seed, Metadata.Spawn, Metadata.SpawnEntrance) then
   begin
-    return Error('entrance target must name the initial dungeon')
-  end;
-
-  if (Metadata.Entrance.X <> Expected.Entrance.X) or (Metadata.Entrance.Y <> Expected.Entrance.Y) then
-  begin
-    return Error('entrance coordinate is invalid for this generator version')
-  end;
-
-  if Abs(Metadata.Entrance.X - Metadata.Spawn.X) + Abs(Metadata.Entrance.Y - Metadata.Spawn.Y) <> 3 then
-  begin
-    return Error('entrance must be exactly three cardinal steps from spawn')
-  end;
-
-  if not IsClearEntranceCell(Metadata.Seed, Metadata.Entrance) then
-  begin
-    return Error('entrance conflicts with generated terrain')
-  end;
-
-  if not HasTraversableCardinalRoute(Metadata.Seed, Metadata.Spawn, Metadata.Entrance) then
-  begin
-    return Error('entrance has no traversable three-step route from spawn')
+    return Error('spawn entrance has no traversable three-step route from spawn')
   end;
 
   return Ok(Metadata)

@@ -2,10 +2,63 @@
 unit Dungeon.Server.Handling;
 
 uses
-  Dungeon.Server.InitialAreas, Dungeon.Server.Config, Dungeon.Server.Mapping,
-  Dungeon.Server.Projection, Dungeon.Server.Replies, Dungeon.Server.Session, Dungeon.Combat,
-  Dungeon.GameState, Dungeon.Interaction, Dungeon.Movement, Dungeon.Protocol, Dungeon.World,
-  Dungeon.World.Savegame, Std.Net, Std.Options, Std.Tasks;
+  Dungeon.Server.Config, Dungeon.Server.Failures, Dungeon.Server.Mapping, Dungeon.Server.Projection,
+  Dungeon.Server.Replies, Dungeon.Server.Session, Dungeon.Combat, Dungeon.Coordinates,
+  Dungeon.GameState, Dungeon.Interaction, Dungeon.Interior, Dungeon.Movement, Dungeon.Protocol,
+  Dungeon.World, Dungeon.World.Interiors, Dungeon.World.Savegame, Std.Console, Std.Net, Std.Options,
+  Std.Tasks;
+
+// Sends a classified rejection for a typed failure and logs its detailed reason on the server.
+function RejectFailure(
+  ConnectionValue: Connection;
+  Rejection: FailureRejection;
+  Detail: string;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  WriteLn((Rejection.Code + ': ') + Detail);
+  return Reject(ConnectionValue, Rejection.Code, Rejection.Message, Token)
+end;
+
+// Opens the target level of an entry (or none for an exit) and applies the pure transition.
+// Storage failures are rejected with their class; the session stays unchanged.
+function HandleTransition(
+  Session: ServerSession;
+  View: AreaView;
+  State: GameState;
+  TargetAreaId: string;
+  ConnectionValue: Connection;
+  Token: CancellationToken
+): result of ServerSession, string;
+begin
+  mutable var TargetMap: option of InteriorMap := None;
+  if State.Area = AreaKind.OutdoorRegion then
+  begin
+    case OpenLevelForEntry(Session.World, State, TargetAreaId) of
+      Ok(Map):
+      begin
+        TargetMap := Some(Map)
+      end;
+      Error(Failure):
+      begin
+        var Sent: boolean := try RejectFailure(ConnectionValue, LevelRejection(Session.World.Metadata.Id, Failure), LevelFailureReason(Failure), Token);
+        return Ok(Session)
+      end
+    end
+  end;
+
+  case ActivateAreaTransition(View, State, TargetMap) of
+    Ok(Transition):
+    begin
+      return CommitTransition(Session, Transition, ConnectionValue, Token)
+    end;
+    Error(Reason):
+    begin
+      var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+      return Ok(Session)
+    end
+  end
+end;
 
 // Applies one decoded client message after the handshake; Finished requests connection close.
 public function HandleSessionMessage(
@@ -54,9 +107,9 @@ begin
       else
       begin
         case LoadSaveGame(Session.World) of
-          Error(Reason):
+          Error(Failure):
           begin
-            var Sent: boolean := try Reject(ConnectionValue, 'load_failed', Reason, Token)
+            var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'load_failed', Failure), PersistenceFailureReason(Failure), Token)
           end;
           Ok(LoadedSave):
           begin
@@ -86,9 +139,9 @@ begin
         begin
           var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.SaveCompleted, Token)
         end;
-        Error(Reason):
+        Error(Failure):
         begin
-          var Sent: boolean := try Reject(ConnectionValue, 'save_failed', Reason, Token)
+          var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'save_failed', Failure), PersistenceFailureReason(Failure), Token)
         end
       end
     end;
@@ -182,9 +235,7 @@ begin
           case Outcome of
             InteractionOutcome.TransitionRequested(TargetAreaId):
             begin
-              var Transition: AreaTransition := try ActivateInitialTransition(View, State);
-              Next.Interior := Transition.View.Interior;
-              return CommitState(Next, Transition.State, ConnectionValue, Token)
+              return HandleTransition(Session, View, State, TargetAreaId, ConnectionValue, Token)
             end;
             InteractionOutcome.StateChanged(Changed):
             begin

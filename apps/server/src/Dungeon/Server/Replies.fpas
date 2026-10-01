@@ -3,8 +3,8 @@ unit Dungeon.Server.Replies;
 
 uses
   Dungeon.Server.Projection, Dungeon.Server.Session, Dungeon.Combat, Dungeon.Exploration,
-  Dungeon.GameState, Dungeon.Protocol, Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport,
-  Dungeon.World, Std.Net, Std.Str, Std.Tasks;
+  Dungeon.GameState, Dungeon.Movement, Dungeon.Protocol, Dungeon.Protocol.ServerMessages,
+  Dungeon.Protocol.Transport, Dungeon.World, Std.Net, Std.Str, Std.Tasks;
 
 // Encodes and sends one server message.
 public function SendMessage(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
@@ -65,6 +65,51 @@ public function CommitState(
 ): result of ServerSession, string;
 begin
   return CommitTurn(Session, Changed, NoTurnReport(), ConnectionValue, Token)
+end;
+
+type
+  // Revealed candidate state and its projection, both built before anything is sent.
+  PreparedTransition = record
+    State: GameState;
+    Projection: SessionProjection;
+  end;
+
+function PrepareTransition(Session: ServerSession; Transition: AreaTransition): result of PreparedTransition, string;
+begin
+  var Revealed: GameState := try RevealCurrentArea(Transition.View, Transition.State);
+  var Valid: GameState := try ValidateGameState(Transition.View, Revealed);
+  return Ok(record
+    State := Valid;
+    Projection := try ProjectSession(Session.World, Transition.View, Valid, Session.Viewport, NoTurnReport());
+  end)
+end;
+
+// Installs an applied area transition: reveals and validates the candidate and builds its
+// projection with the candidate's own map before anything is sent. A failure before sending
+// rejects the intention and returns the original session unchanged; state and map change together.
+public function CommitTransition(
+  Session: ServerSession;
+  Transition: AreaTransition;
+  ConnectionValue: Connection;
+  Token: CancellationToken
+): result of ServerSession, string;
+begin
+  case PrepareTransition(Session, Transition) of
+    Ok(Prepared):
+    begin
+      var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Prepared.Projection.State), Token);
+      mutable var Next: ServerSession := Session;
+      Next.State := Some(Prepared.State);
+      Next.Interior := Transition.View.Interior;
+      Next.World := Prepared.Projection.World;
+      return Ok(Next)
+    end;
+    Error(Reason):
+    begin
+      var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+      return Ok(Session)
+    end
+  end
 end;
 
 // Joins one turn's messages into the bounded defeat summary.

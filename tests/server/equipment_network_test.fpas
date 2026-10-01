@@ -2,7 +2,8 @@
 program DungeonEquipmentNetworkTest;
 
 uses
-  Dungeon.Items, Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
+  Dungeon.Coordinates, Dungeon.Interior, Dungeon.Test.Fixtures, Dungeon.Test.Routes, Dungeon.Items,
+  Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
   Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config, Dungeon.Terrain,
   Dungeon.Terrain.Placement, Std.Arrays, Std.Conv, Std.Fs, Std.Net, Std.Results, Std.Str, Std.Tasks,
   Std.Test, Std.Time;
@@ -19,6 +20,7 @@ begin
     WorldsRoot := WorldsRoot;
     WorldId := 'equipment-network';
     WorldSeed := 9462;
+    DungeonRegionChunks := 4;
     ChunkCacheLimit := 32;
     MaximumViewWidth := 240;
     MaximumViewHeight := 120;
@@ -150,10 +152,11 @@ begin
 end;
 
 // Sends forward steps (0), left turns (1), and right turns (2) and returns the last response.
+// Sends a route's intentions in order and returns the last response.
 function Walk(
   Client: Connection;
   Reader: LineReader;
-  Moves: array of integer;
+  Moves: array of RouteMove;
   Token: CancellationToken
 ): ExchangeResult;
 begin
@@ -162,20 +165,9 @@ begin
     Message := ServerMessage.SaveCompleted;
   end;
 
-  for Move: integer in Moves do
+  for Move: RouteMove in Moves do
   begin
-    if Move = 0 then
-    begin
-      Response := Exchange(Client, Response.Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token)
-    end
-    else if Move = 1 then
-    begin
-      Response := Exchange(Client, Response.Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token)
-    end
-    else
-    begin
-      Response := Exchange(Client, Response.Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token)
-    end
+    Response := Exchange(Client, Response.Reader, RouteMessage(Move), Token)
   end;
 
   return Response
@@ -185,10 +177,12 @@ begin
   var WorldsRoot: string := '.temp-data/equipment-network-' + IntToStr(TimestampMillis());
   AssertTrue(Unwrap(Std.Fs.CreateDirAll(WorldsRoot)));
   var Config: ServerConfig := TestConfig(WorldsRoot);
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
-  // Placement order of the initial dungeon: coin, sword, jerkin.
-  var CoinId: string := ItemPlacementId(Metadata.DungeonAreaId, 0);
-  var SwordId: string := ItemPlacementId(Metadata.DungeonAreaId, 1);
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed, 4));
+  // Placement order of generated dungeons: coin, sword, jerkin.
+  var Map: InteriorMap := SpawnDungeonMap(Metadata);
+  var Skeleton: InteriorPosition := Map.Hostiles[0].Position;
+  var CoinId: string := ItemPlacementId(SpawnDungeonAreaId(Metadata), 0);
+  var SwordId: string := ItemPlacementId(SpawnDungeonAreaId(Metadata), 1);
   var Source: CancellationSource := CreateCancellationSource();
   var Token: CancellationToken := GetCancellationToken(Source);
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
@@ -216,19 +210,19 @@ begin
   begin
     mutable var DeltaX: integer := 0;
     mutable var DeltaY: integer := 0;
-    if CurrentX < Metadata.Entrance.X then
+    if CurrentX < Metadata.SpawnEntrance.X then
     begin
       DeltaX := 1
     end
-    else if CurrentX > Metadata.Entrance.X then
+    else if CurrentX > Metadata.SpawnEntrance.X then
     begin
       DeltaX := -1
     end
-    else if CurrentY < Metadata.Entrance.Y then
+    else if CurrentY < Metadata.SpawnEntrance.Y then
     begin
       DeltaY := 1
     end
-    else if CurrentY > Metadata.Entrance.Y then
+    else if CurrentY > Metadata.SpawnEntrance.Y then
     begin
       DeltaY := -1
     end;
@@ -244,13 +238,15 @@ begin
 
   Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
   Reader := Response.Reader;
-  AssertEquals(9, RequireFirstPerson(Response.Message).PlayerX);
-  // The sword lies in the middle passage: two steps west, then south.
-  Response := Walk(Client, Reader, [0, 0, 1, 0, 0, 0], Token);
+  var Entered: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  AssertEquals(Map.Start.X, Entered.PlayerX);
+  // Walk to the sword's corner, around the resting skeleton.
+  var SwordField: InteriorPosition := Map.Items[1].Position;
+  Response := Walk(Client, Reader, RouteTo(Map, VisiblePose(Entered), SwordField, [Skeleton]), Token);
   Reader := Response.Reader;
   var OnSword: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-  AssertEquals(7, OnSword.PlayerX);
-  AssertEquals(4, OnSword.PlayerY);
+  AssertEquals(SwordField.X, OnSword.PlayerX);
+  AssertEquals(SwordField.Y, OnSword.PlayerY);
   AssertTrue(Std.Str.Contains(OnSword.Status, 'Rusty short sword'));
   Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
   Reader := Response.Reader;
@@ -297,14 +293,22 @@ begin
   Response := Exchange(Client, Reader, ClientMessage.Equip(SwordId), Token);
   Reader := Response.Reader;
   AssertTrue(RequireFirstPerson(Response.Message).Inventory[0].Equipped);
-  // On through the inner passage: south, west, north up to (5, 3), then face west.
-  Response := Walk(Client, Reader, [0, 2, 0, 0, 2, 0, 0, 1], Token);
-  Reader := Response.Reader;
+  // On to the skeleton until it stands ahead; waiting lets an alerted skeleton close in.
   mutable var View: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-  AssertEquals(5, View.PlayerX);
-  AssertEquals(3, View.PlayerY);
+  for Move: RouteMove in RouteTo(Map, VisiblePose(View), Skeleton, []) do
+  begin
+    if not HostileAhead(View) then
+    begin
+      if not ((Move = RouteMove.RouteForward) and SamePosition(FieldAhead(View), Skeleton)) then
+      begin
+        Response := Exchange(Client, Reader, RouteMessage(Move), Token);
+        Reader := Response.Reader;
+        View := RequireFirstPerson(Response.Message)
+      end
+    end
+  end;
   mutable var Waited: integer := 0;
-  while (Std.Str.CharAt(View.Rows[3], 4) <> InteriorHostileCode) and (Waited < 6) do
+  while (not HostileAhead(View)) and (Waited < 8) do
   begin
     Response := Exchange(Client, Reader, ClientMessage.Wait, Token);
     Reader := Response.Reader;
@@ -312,7 +316,7 @@ begin
     Waited := Waited + 1
   end;
 
-  AssertEquals(InteriorHostileCode, Std.Str.CharAt(View.Rows[3], 4));
+  AssertTrue(HostileAhead(View));
   // Every blow reports a structured event; armed hits deal 2 to 7.
   mutable var Finished: boolean := false;
   mutable var Blows: integer := 0;

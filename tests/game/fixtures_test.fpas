@@ -1,17 +1,43 @@
-// Verifies fixture identities, state ownership, poses, and area-view construction.
+// Verifies fixture identities, state ownership, poses, area-view construction, and routes.
 program FixturesTest;
 
 uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Items,
-  Dungeon.Terrain, Dungeon.Test.Fixtures, Std.Arrays, Std.Options, Std.Results, Std.Test;
+  Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Movement,
+  Dungeon.Hostiles, Dungeon.Interior, Dungeon.Items, Dungeon.Terrain, Dungeon.Terrain.Entrances,
+  Dungeon.Test.Fixtures, Std.Arrays, Std.Options, Std.Results, Std.Test;
+
+// Plays a route with the real movement rules and returns the reached pose.
+function Follow(State: GameState; Moves: array of RouteMove): FirstPersonPose;
+begin
+  mutable var Current: GameState := State;
+  for Move: RouteMove in Moves do
+  begin
+    case Move of
+      RouteMove.RouteTurnLeft:
+      begin
+        Current := Std.Results.Unwrap(TurnFirstPerson(FixtureAreaView(Current), Current, RelativeTurn.TurnLeft))
+      end;
+      RouteMove.RouteTurnRight:
+      begin
+        Current := Std.Results.Unwrap(TurnFirstPerson(FixtureAreaView(Current), Current, RelativeTurn.TurnRight))
+      end;
+      RouteMove.RouteForward:
+      begin
+        Current := Std.Results.Unwrap(StepFirstPerson(FixtureAreaView(Current), Current, RelativeStep.Forward))
+      end
+    end
+  end;
+
+  return Std.Results.Unwrap(FirstPersonPlayerPose(Current))
+end;
 
 begin
   var Metadata: WorldMetadata := FixtureMetadata();
   var Map: InteriorMap := FixtureDungeonMap();
   AssertTrue(IsOk(ValidateInteriorMap(Map)));
-  AssertEquals('fixture-world:dungeon:0:0', Map.AreaId);
-  AssertEquals(Map.AreaId, Metadata.DungeonAreaId);
-  AssertEquals(Map.AreaId, Metadata.EntranceTargetAreaId);
+  // The fixture map stands in for the spawn entrance's dungeon of the fixture world.
+  AssertEquals(FixtureAreaId(), Map.AreaId);
+  AssertTrue(ParseDungeonAreaId(Metadata, Map.AreaId).Unwrap() = RegionOf(Metadata, Metadata.Spawn));
   AssertEquals(11, Map.Width);
   AssertEquals(9, Map.Height);
   AssertEquals(3, Std.Arrays.Length(Map.Items));
@@ -28,7 +54,7 @@ begin
     Facing := Map.StartFacing;
   end));
   AssertTrue(State.ReturnLocation =
-             ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance));
+             ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.SpawnEntrance));
   AssertEquals(PlayerMaximumHealth, State.Health);
   AssertEquals(InitialRandomState(Metadata.Seed), State.RandomState);
   AssertEquals(0, Std.Arrays.Length(State.Exploration.InteriorAreas));
@@ -61,5 +87,25 @@ begin
              PlayerPosition.FirstPerson(record
     Position := Map.Exit;
     Facing := FacingDirection.North;
-  end))
+  end));
+  // Routes reach their target with legal moves, around the standing skeleton when asked to.
+  var StartPose: FirstPersonPose := record
+    Position := Map.Start;
+    Facing := Map.StartFacing;
+  end;
+
+  AssertEquals(0, Std.Arrays.Length(RouteTo(Map, StartPose, Map.Start, [])));
+  AssertTrue(Follow(State, RouteTo(Map, StartPose, Map.Exit, [Map.Hostiles[0].Position])).Position =
+             Map.Exit);
+  AssertTrue(Follow(State, RouteTo(Map, StartPose, Map.Items[2].Position, [Map.Hostiles[0].Position])).Position =
+             Map.Items[2].Position);
+  // A single field behind the player needs two turns and one step: from west of the start back onto it.
+  var Behind: array of RouteMove := RouteTo(Map, record
+    Position := record
+      X := Map.Start.X - 1;
+      Y := Map.Start.Y;
+    end;
+    Facing := FacingDirection.West;
+  end, Map.Start, []);
+  AssertEquals(3, Std.Arrays.Length(Behind))
 end.

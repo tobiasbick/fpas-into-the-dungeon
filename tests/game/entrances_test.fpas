@@ -1,0 +1,220 @@
+// Covers entrance regions and sites, the spawn entrance across region borders, and dungeon area identities.
+program EntrancesTest;
+
+uses
+  Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior,
+  Dungeon.Interior.Generation, Dungeon.Movement, Dungeon.Terrain, Dungeon.Terrain.Chunks,
+  Dungeon.Terrain.Entrances, Dungeon.Terrain.Generation, Dungeon.Terrain.Placement, Std.Arrays,
+  Std.Conv, Std.Options, Std.Results, Std.Test;
+
+function Region(X: integer; Y: integer): RegionCoordinate;
+begin
+  return record
+    X := X;
+    Y := Y;
+  end
+end;
+
+function Position(X: integer; Y: integer): WorldPosition;
+begin
+  return record
+    X := X;
+    Y := Y;
+  end
+end;
+
+function SameField(Left: WorldPosition; Right: WorldPosition): boolean;
+begin
+  return (Left.X = Right.X) and (Left.Y = Right.Y)
+end;
+
+function SameSite(Left: option of WorldPosition; Right: option of WorldPosition): boolean;
+begin
+  if IsNone(Left) or IsNone(Right) then
+  begin
+    return IsNone(Left) and IsNone(Right)
+  end;
+
+  return SameField(Std.Options.Unwrap(Left), Std.Options.Unwrap(Right))
+end;
+
+// Writes a region coordinate with a superfluous leading zero, which identities must reject.
+function PaddedCoordinate(Value: integer): string;
+begin
+  if Value < 0 then
+  begin
+    return '-0' + IntToStr(- Value)
+  end;
+
+  return '0' + IntToStr(Value)
+end;
+
+// Enters through the spawn entrance with a generated target map and returns the transition.
+function EnterSpawnEntrance(Metadata: WorldMetadata): AreaTransition;
+begin
+  var Outside: GameState := NewGame(Metadata) with Player := PlayerPosition.Outdoor(Metadata.SpawnEntrance); end;
+  var View: AreaView := record
+    Metadata := Metadata;
+    Interior := None;
+  end;
+  var Target: string := Std.Results.Unwrap(AreaTransitionTarget(View, Outside));
+  var TargetRegion: RegionCoordinate := Std.Results.Unwrap(ParseDungeonAreaId(Metadata, Target));
+  var Map: InteriorMap := Std.Results.Unwrap(GenerateDungeon(Metadata.Seed, TargetRegion.X, TargetRegion.Y, Target));
+  return Std.Results.Unwrap(ActivateAreaTransition(View, Outside, Some(Map)))
+end;
+
+// The spawn entrance belongs to the spawn region even when it lies in a neighboring region;
+// the neighbor keeps its own ordinary entrance.
+procedure AssertSpawnEntranceAcrossBorder(
+  Base: WorldMetadata;
+  Spawn: WorldPosition;
+  Entrance: WorldPosition
+);
+begin
+  var Metadata: WorldMetadata := Base with Spawn := Spawn; SpawnEntrance := Entrance; end;
+  var SpawnRegion: RegionCoordinate := RegionOf(Metadata, Spawn);
+  var Receiving: RegionCoordinate := RegionOf(Metadata, Entrance);
+  AssertTrue(SpawnRegion <> Receiving);
+  AssertTrue(Std.Options.Unwrap(EntranceRegionAt(Metadata, Entrance)) = SpawnRegion);
+  AssertTrue(SameField(Std.Options.Unwrap(EntranceSite(Metadata, SpawnRegion)), Entrance));
+  var Entered: AreaTransition := EnterSpawnEntrance(Metadata);
+  AssertEquals(DungeonAreaId(Metadata, SpawnRegion), Entered.State.AreaId);
+  AssertTrue(Entered.State.ReturnLocation =
+             ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Entrance));
+  // The receiving region's ordinary site, if any, is still an entrance of that region.
+  var ReceivingCandidate: WorldPosition := EntranceCandidate(Metadata, Receiving);
+  case EntranceSite(Metadata, Receiving) of
+    Some(Site):
+    begin
+      AssertTrue(SameField(Site, ReceivingCandidate));
+      AssertTrue(Std.Options.Unwrap(EntranceRegionAt(Metadata, Site)) = Receiving)
+    end;
+    None:
+    begin
+      AssertTrue(IsNone(EntranceRegionAt(Metadata, ReceivingCandidate)))
+    end
+  end;
+  var Chunk: ChunkCoordinate := record
+    X := ChunkForCoordinate(Entrance.X);
+    Y := ChunkForCoordinate(Entrance.Y);
+  end;
+  var Fields: array of WorldPosition := EntranceFieldsInChunk(Metadata, Chunk);
+  AssertTrue(SameField(Fields[0], Entrance));
+  for Field: WorldPosition in Fields do
+  begin
+    AssertTrue(SameField(Field, Entrance) or SameField(Field, ReceivingCandidate))
+  end
+end;
+
+begin
+  var Metadata: WorldMetadata := Std.Results.Unwrap(NewWorldMetadata('entrances', 12345, 4));
+  var Again: WorldMetadata := Std.Results.Unwrap(NewWorldMetadata('entrances', 12345, 4));
+  // Region size bounds.
+  AssertTrue(IsError(NewWorldMetadata('entrances', 12345, 0)));
+  AssertTrue(IsError(NewWorldMetadata('entrances', 12345, 17)));
+  AssertEquals(1, Std.Results.Unwrap(NewWorldMetadata('entrances', 12345, 1)).DungeonRegionChunks);
+  AssertEquals(16, Std.Results.Unwrap(NewWorldMetadata('entrances', 12345, 16)).DungeonRegionChunks);
+  // Region coordinates use floor division of world fields by the region size in fields.
+  AssertTrue(RegionOf(Metadata, Position(0, 0)) = Region(0, 0));
+  AssertTrue(RegionOf(Metadata, Position(511, 511)) = Region(0, 0));
+  AssertTrue(RegionOf(Metadata, Position(512, -1)) = Region(1, -1));
+  AssertTrue(RegionOf(Metadata, Position(-512, -513)) = Region(-1, -2));
+  // The spawn entrance is three steps from the spawn, an entrance in generated terrain, and leads to the spawn region.
+  var SpawnRegion: RegionCoordinate := RegionOf(Metadata, Metadata.Spawn);
+  AssertTrue(Std.Options.Unwrap(EntranceRegionAt(Metadata, Metadata.SpawnEntrance)) = SpawnRegion);
+  AssertTrue(GenerateWorldCell(Metadata, Metadata.SpawnEntrance.X, Metadata.SpawnEntrance.Y).Feature =
+             TerrainFeatureKind.Entrance);
+  // Ordinary sites: deterministic, inside their region at least 16 fields from the border, on clear land.
+  mutable var SiteCount: integer := 0;
+  mutable var EmptyRegion: option of RegionCoordinate := None;
+  mutable var FirstSite: option of WorldPosition := None;
+  for RegionY: integer := -6 to 5 do
+  begin
+    for RegionX: integer := -6 to 5 do
+    begin
+      var Current: RegionCoordinate := Region(RegionX, RegionY);
+      var Site: option of WorldPosition := EntranceSite(Metadata, Current);
+      AssertTrue(SameSite(Site, EntranceSite(Again, Current)));
+      var Candidate: WorldPosition := EntranceCandidate(Metadata, Current);
+      AssertTrue(RegionOf(Metadata, Candidate) = Current);
+      AssertTrue((Candidate.X - (RegionX * 512) >= 16) and
+                 (Candidate.X - (RegionX * 512) < 512 - 16));
+      AssertTrue((Candidate.Y - (RegionY * 512) >= 16) and
+                 (Candidate.Y - (RegionY * 512) < 512 - 16));
+      case Site of
+        Some(Field):
+        begin
+          if Current <> SpawnRegion then
+          begin
+            SiteCount := SiteCount + 1;
+            if IsNone(FirstSite) then
+            begin
+              FirstSite := Some(Field)
+            end;
+
+            AssertTrue(SameField(Field, Candidate));
+            var Natural: WorldCell := NaturalCell(Metadata.Seed, Field.X, Field.Y);
+            AssertTrue(Natural.Water = WaterKind.NoWater);
+            AssertTrue(CellIsClearEntrance(Natural));
+            AssertTrue(Std.Options.Unwrap(EntranceRegionAt(Metadata, Field)) = Current);
+            AssertTrue(GenerateWorldCell(Metadata, Field.X, Field.Y).Feature =
+                       TerrainFeatureKind.Entrance)
+          end
+        end;
+        None:
+        begin
+          EmptyRegion := Some(Current);
+          AssertFalse(CellIsClearEntrance(NaturalCell(Metadata.Seed, Candidate.X, Candidate.Y)));
+          AssertTrue(IsNone(EntranceRegionAt(Metadata, Candidate)))
+        end
+      end
+    end
+  end;
+
+  AssertTrue(SiteCount > 0);
+  AssertTrue(IsSome(EmptyRegion));
+  // Fields next to a site are not entrances, and the spawn region has no ordinary candidate.
+  var SomeSite: WorldPosition := Std.Options.Unwrap(FirstSite);
+  AssertTrue(IsNone(EntranceRegionAt(Metadata, Position(SomeSite.X + 1, SomeSite.Y))));
+  AssertTrue(IsNone(EntranceRegionAt(Metadata, EntranceCandidate(Metadata, SpawnRegion))) or
+             SameField(EntranceCandidate(Metadata, SpawnRegion), Metadata.SpawnEntrance));
+  // A region contributes at most one ordinary entrance field to all its chunks together.
+  mutable var RegionFieldCount: integer := 0;
+  for ChunkY: integer := 8 to 11 do
+  begin
+    for ChunkX: integer := 8 to 11 do
+    begin
+      RegionFieldCount := RegionFieldCount +
+                          Std.Arrays.Length(EntranceFieldsInChunk(Metadata, record
+        X := ChunkX;
+        Y := ChunkY;
+      end))
+    end
+  end;
+
+  AssertEquals(1, RegionFieldCount);
+  // Area identities round-trip canonically and reject everything else.
+  var Site: RegionCoordinate := RegionOf(Metadata, SomeSite);
+  var AreaId: string := DungeonAreaId(Metadata, Site);
+  AssertTrue(Std.Results.Unwrap(ParseDungeonAreaId(Metadata, AreaId)) = Site);
+  AssertEquals('entrances:dungeon:-1:-12', DungeonAreaId(Metadata, Region(-1, -12)));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, DungeonAreaId(Metadata, Std.Options.Unwrap(EmptyRegion)))));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, 'other:dungeon:0:0')));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, 'entrances:dungeon:0')));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, 'entrances:dungeon:0:0:0')));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, 'entrances:dungeon:x:0')));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, 'entrances:dungeon:')));
+  var SpawnAreaId: string := DungeonAreaId(Metadata, SpawnRegion);
+  AssertTrue(Std.Results.Unwrap(ParseDungeonAreaId(Metadata, SpawnAreaId)) = SpawnRegion);
+  var SpawnY: string := IntToStr(SpawnRegion.Y);
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, (('entrances:dungeon:' + PaddedCoordinate(SpawnRegion.X)) + ':') +
+                                                  SpawnY)));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, (('entrances:dungeon:+' + IntToStr(SpawnRegion.X)) + ':') +
+                                                  SpawnY)));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, (('entrances:dungeon: ' + IntToStr(SpawnRegion.X)) + ':') +
+                                                  SpawnY)));
+  AssertTrue(IsError(ParseDungeonAreaId(Metadata, 'entrances:dungeon:-0:0')));
+  // The spawn entrance crosses a positive and a negative region border.
+  AssertSpawnEntranceAcrossBorder(Metadata, Position(511, 40), Position(512, 42));
+  AssertSpawnEntranceAcrossBorder(Metadata, Position(40, 0), Position(41, -2))
+end.

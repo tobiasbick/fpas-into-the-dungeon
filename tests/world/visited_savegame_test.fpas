@@ -2,20 +2,20 @@
 program VisitedSavegameTest;
 
 uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Interior.InitialDungeon,
-  Dungeon.Items, Dungeon.Movement, Dungeon.Test.InitialAreas, Dungeon.World, Dungeon.World.Savegame,
-  Dungeon.Terrain, Std.Arrays, Std.Conv, Std.Fs, Std.Results, Std.Str, Std.Test, Std.Time;
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Items, Dungeon.Movement,
+  Dungeon.Test.Fixtures, Dungeon.Test.Levels, Dungeon.World, Dungeon.World.Savegame, Dungeon.Terrain,
+  Std.Arrays, Std.Conv, Std.Fs, Std.Results, Std.Str, Std.Test, Std.Time;
 
 begin
   var Root: string := '.temp-data/visited-save-test-' + IntToStr(TimestampMillis());
-  var World: WorldSession := Unwrap(OpenWorld(Root, 'visited', 12345, 16));
+  var World: WorldSession := Unwrap(OpenWorld(Root, 'visited', 12345, 4, 16));
   var Metadata: WorldMetadata := World.Metadata;
-  var Map: InteriorMap := Unwrap(InitialDungeonMap(Metadata));
+  var Map: InteriorMap := SpawnLevel(World);
   var Fresh: GameState := NewGame(Metadata);
   AssertTrue(Unwrap(WriteSaveGame(World, Fresh)));
-  AssertEquals(0, Std.Arrays.Length(Unwrap(DecodeSaveGame(EncodeSaveGame(Metadata.Id, Fresh), Metadata))
+  AssertEquals(0, Std.Arrays.Length(Unwrap(DecodeStoredSave(World, EncodeSaveGame(Metadata.Id, Fresh)))
                                       .VisitedAreas));
-  var Entered: GameState := Unwrap(ActivateInitialTransition(Metadata, Fresh with Player := PlayerPosition.Outdoor(Metadata.Entrance); end));
+  var Entered: GameState := Unwrap(EnterSpawnLevel(World, Fresh));
   mutable var Changed: GameState := Entered;
   Changed.Items[0] := Changed.Items[0] with Location := ItemLocation.CarriedByPlayer; end;
 
@@ -25,7 +25,7 @@ begin
     Position := Map.Exit;
     Facing := Map.StartFacing;
   end);
-  var Outside: GameState := Unwrap(ActivateInitialTransition(Metadata, Changed));
+  var Outside: GameState := Unwrap(LeaveLevel(World, Changed, Map));
   AssertTrue(Unwrap(WriteSaveGame(World, Outside)));
   var Saved: string := Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
   AssertTrue(Std.Str.Contains(Saved, '"visited_areas"'));
@@ -34,9 +34,9 @@ begin
     begin
       AssertTrue(IsOk(ValidateGameState(View, State)));
       AssertTrue(HasVisitedArea(State, Map.AreaId));
-      var Again: GameState := Unwrap(ActivateInitialTransition(Metadata, State));
+      var Again: GameState := Unwrap(EnterSpawnLevel(World, State));
       AssertEquals(3, Std.Arrays.Length(Again.Items));
-      AssertEquals(1, Std.Arrays.Length(Again.Hostiles));
+      AssertEquals(Std.Arrays.Length(Map.Hostiles), Std.Arrays.Length(Again.Hostiles));
       AssertTrue(Again.Items[0] = Changed.Items[0]);
       AssertTrue(Again.Hostiles[0] = Changed.Hostiles[0]);
       AssertTrue(Unwrap(WriteSaveGame(World, Again)));
@@ -59,12 +59,12 @@ begin
     end
   end;
   var VisitJson: string := ('"visited_areas":["' + Map.AreaId) + '"]';
-  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, '"visited_areas":[]'), Metadata)));
-  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, '"visited_areas":["wrong"]'), Metadata)));
-  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, ((('"visited_areas":["' + Map.AreaId) + '","') + Map.AreaId) +
-                                                                      '"]'), Metadata)));
-  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson, '"visited_areas":[42]'), Metadata)));
-  AssertTrue(IsError(DecodeSaveGame(Std.Str.Replace(Saved, VisitJson + ',', ''), Metadata)));
+  AssertTrue(IsError(DecodeStoredSave(World, Std.Str.Replace(Saved, VisitJson, '"visited_areas":[]'))));
+  AssertTrue(IsError(DecodeStoredSave(World, Std.Str.Replace(Saved, VisitJson, '"visited_areas":["wrong"]'))));
+  var Duplicate: string := ((('"visited_areas":["' + Map.AreaId) + '","') + Map.AreaId) + '"]';
+  AssertTrue(IsError(DecodeStoredSave(World, Std.Str.Replace(Saved, VisitJson, Duplicate))));
+  AssertTrue(IsError(DecodeStoredSave(World, Std.Str.Replace(Saved, VisitJson, '"visited_areas":[42]'))));
+  AssertTrue(IsError(DecodeStoredSave(World, Std.Str.Replace(Saved, VisitJson + ',', ''))));
   var Before: string := Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
   AssertTrue(IsError(WriteSaveGame(World, Outside with VisitedAreas := []; end)));
   AssertEquals(Before, Unwrap(Std.Fs.ReadText(SaveGamePath(World))));

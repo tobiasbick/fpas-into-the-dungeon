@@ -1,0 +1,236 @@
+// Exact JSON format of immutable dungeon level files: geometry, endpoints, and original placements.
+unit Dungeon.World.Interiors.Encoding;
+
+uses
+  Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Interior.Generation.Validation,
+  Dungeon.Items, Dungeon.Terrain, Dungeon.World.Names, Std.Arrays, Std.Conv, Std.Dictionaries,
+  Std.Json, Std.Json.Fields, Std.Str;
+
+public const
+  // Current-only schema version of level files; other versions are rejected, never migrated.
+  LevelFormatVersion: integer := 1;
+  // Longest accepted level text, checked before parsing.
+  MaximumLevelTextLength: integer := 65536;
+
+const
+  LevelFields: array of string := [
+                                    'format_version',
+                                    'world_id',
+                                    'generator_version',
+                                    'area_id',
+                                    'level',
+                                    'width',
+                                    'height',
+                                    'rows',
+                                    'start',
+                                    'exit',
+                                    'items',
+                                    'hostiles'
+                                  ];
+
+function Number(Value: integer): JsonValue;
+begin
+  return JsonValue.Number(IntToReal(Value))
+end;
+
+function EncodeRows(Map: InteriorMap): array of JsonValue;
+begin
+  mutable var Rows: array of JsonValue := [];
+  for Y: integer := 0 to Map.Height - 1 do
+  begin
+    mutable var Row: string := '';
+    for X: integer := 0 to Map.Width - 1 do
+    begin
+      Row := Row + InteriorCellCode(Map.Cells[(Y * Map.Width) + X])
+    end;
+
+    Std.Arrays.Push(Rows, JsonValue.String(Row))
+  end;
+
+  return Rows
+end;
+
+function EncodePlacement(Id: string; Kind: string; Position: InteriorPosition): JsonValue;
+begin
+  return JsonValue.Object(['id': JsonValue.String(Id), 'kind': JsonValue.String(Kind), 'x': Number(Position.X), 'y': Number(Position.Y)])
+end;
+
+// Encodes a validated generated map as level 0 of its area in the current level format.
+public function EncodeLevel(Metadata: WorldMetadata; Map: InteriorMap): string;
+begin
+  mutable var Items: array of JsonValue := [];
+  for Item: ItemPlacement in Map.Items do
+  begin
+    Std.Arrays.Push(Items, EncodePlacement(Item.ItemId, ItemKindName(Item.Kind), Item.Position))
+  end;
+  mutable var Hostiles: array of JsonValue := [];
+  for Hostile: HostilePlacement in Map.Hostiles do
+  begin
+    Std.Arrays.Push(Hostiles, EncodePlacement(Hostile.Id, HostileKindName(Hostile.Kind), Hostile.Position))
+  end;
+  var Start: JsonValue := JsonValue.Object(['x': Number(Map.Start.X), 'y': Number(Map.Start.Y), 'facing': JsonValue.String(FacingName(Map.StartFacing))]);
+  var Exit: JsonValue := JsonValue.Object(['x': Number(Map.Exit.X), 'y': Number(Map.Exit.Y)]);
+  return Std.Json.Stringify(JsonValue.Object(['format_version': Number(LevelFormatVersion), 'world_id': JsonValue.String(Metadata.Id), 'generator_version': Number(Metadata.GeneratorVersion), 'area_id': JsonValue.String(Map.AreaId), 'level': Number(0), 'width': Number(Map.Width), 'height': Number(Map.Height), 'rows': JsonValue.ArrayValue(EncodeRows(Map)), 'start': Start, 'exit': Exit, 'items': JsonValue.ArrayValue(Items), 'hostiles': JsonValue.ArrayValue(Hostiles)]))
+end;
+
+// Requires exactly the named fields; unknown and missing fields are both errors.
+function ExactFields(Fields: dict of string to JsonValue; Names: array of string; Source: string): result of boolean, string;
+begin
+  var Known: boolean := try RequireOnlyFields(Fields, Names);
+  if Std.Dictionaries.Length(Fields) <> Std.Arrays.Length(Names) then
+  begin
+    return Error(Source + ' has an unexpected field set')
+  end;
+
+  return Ok(true)
+end;
+
+function DecodePosition(Fields: dict of string to JsonValue): result of InteriorPosition, string;
+begin
+  return Ok(record
+    X := try IntegerField(Fields, 'x');
+    Y := try IntegerField(Fields, 'y');
+  end)
+end;
+
+function DecodeCells(Rows: array of string): result of array of InteriorCellKind, string;
+begin
+  if Std.Arrays.Length(Rows) <> GeneratedDungeonHeight then
+  begin
+    return Error('level must contain exactly 21 rows')
+  end;
+  mutable var Cells: array of InteriorCellKind := [];
+  for Row: string in Rows do
+  begin
+    if Std.Str.Length(Row) <> GeneratedDungeonWidth then
+    begin
+      return Error('level rows must contain exactly 31 fields')
+    end;
+
+    for X: integer := 0 to GeneratedDungeonWidth - 1 do
+    begin
+      Std.Arrays.Push(Cells, try InteriorCellFromCode(Std.Str.CharAt(Row, X)))
+    end
+  end;
+
+  return Ok(Cells)
+end;
+
+function PlacementFields(Value: JsonValue): result of dict of string to JsonValue, string;
+begin
+  case Value of
+    JsonValue.Object(Fields):
+    begin
+      var Exact: boolean := try ExactFields(Fields, ['id', 'kind', 'x', 'y'], 'level placement');
+      return Ok(Fields)
+    end
+    else
+    begin
+      return Error('level placements must be objects')
+    end
+  end
+end;
+
+function DecodeItemPlacements(Values: array of JsonValue): result of array of ItemPlacement, string;
+begin
+  mutable var Items: array of ItemPlacement := [];
+  for Value: JsonValue in Values do
+  begin
+    var Fields: dict of string to JsonValue := try PlacementFields(Value);
+    Std.Arrays.Push(Items, record
+      ItemId := try StringField(Fields, 'id');
+      Kind := try DecodeItemKind(try StringField(Fields, 'kind'));
+      Position := try DecodePosition(Fields);
+    end)
+  end;
+
+  return Ok(Items)
+end;
+
+function DecodeHostilePlacements(Values: array of JsonValue): result of array of HostilePlacement, string;
+begin
+  mutable var Hostiles: array of HostilePlacement := [];
+  for Value: JsonValue in Values do
+  begin
+    var Fields: dict of string to JsonValue := try PlacementFields(Value);
+    Std.Arrays.Push(Hostiles, record
+      Id := try StringField(Fields, 'id');
+      Kind := try DecodeHostileKind(try StringField(Fields, 'kind'));
+      Position := try DecodePosition(Fields);
+    end)
+  end;
+
+  return Ok(Hostiles)
+end;
+
+function DecodeLevelFields(Text: string; Metadata: WorldMetadata; AreaId: string): result of InteriorMap, string;
+begin
+  if Std.Str.Length(Text) > MaximumLevelTextLength then
+  begin
+    return Error('level text is too long')
+  end;
+  var Fields: dict of string to JsonValue := try ParseObject(Text);
+  var Exact: boolean := try ExactFields(Fields, LevelFields, 'level');
+  if try IntegerField(Fields, 'format_version') <> LevelFormatVersion then
+  begin
+    return Error('unsupported level format version')
+  end;
+
+  if try StringField(Fields, 'world_id') <> Metadata.Id then
+  begin
+    return Error('level world id does not match selected world')
+  end;
+
+  if try IntegerField(Fields, 'generator_version') <> Metadata.GeneratorVersion then
+  begin
+    return Error('unsupported level generator version')
+  end;
+
+  if try StringField(Fields, 'area_id') <> AreaId then
+  begin
+    return Error('level area id does not match the requested area')
+  end;
+
+  if try IntegerField(Fields, 'level') <> 0 then
+  begin
+    return Error('level index must be 0')
+  end;
+
+  if (try IntegerField(Fields, 'width') <> GeneratedDungeonWidth) or
+     (try IntegerField(Fields, 'height') <> GeneratedDungeonHeight) then
+  begin
+    return Error('level must be 31 by 21 fields')
+  end;
+  var StartFields: dict of string to JsonValue := try ObjectField(Fields, 'start');
+  var StartExact: boolean := try ExactFields(StartFields, ['x', 'y', 'facing'], 'level start');
+  var ExitFields: dict of string to JsonValue := try ObjectField(Fields, 'exit');
+  var ExitExact: boolean := try ExactFields(ExitFields, ['x', 'y'], 'level exit');
+  // Structural validation reuses the generator's rules without rerunning the generator.
+  return ValidateGeneratedDungeon(record
+    AreaId := AreaId;
+    Width := GeneratedDungeonWidth;
+    Height := GeneratedDungeonHeight;
+    Cells := try DecodeCells(try StringArrayField(Fields, 'rows'));
+    Start := try DecodePosition(StartFields);
+    StartFacing := try DecodeFacing(try StringField(StartFields, 'facing'));
+    Exit := try DecodePosition(ExitFields);
+    Items := try DecodeItemPlacements(try ArrayField(Fields, 'items'));
+    Hostiles := try DecodeHostilePlacements(try ArrayField(Fields, 'hostiles'));
+  end)
+end;
+
+// Strictly decodes and structurally validates level 0 of one requested area of the selected world.
+// Never regenerates the map; every error is prefixed with `invalid level file:`.
+public function DecodeLevel(Text: string; Metadata: WorldMetadata; AreaId: string): result of InteriorMap, string;
+begin
+  case DecodeLevelFields(Text, Metadata, AreaId) of
+    Ok(Map):
+    begin
+      return Ok(Map)
+    end;
+    Error(Message):
+    begin
+      return Error('invalid level file: ' + Message)
+    end
+  end
+end;

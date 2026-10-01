@@ -2,9 +2,48 @@
 program MultiAreaValidationTest;
 
 uses
-  Dungeon.Areas, Dungeon.Coordinates, Dungeon.Exploration.Model, Dungeon.GameState, Dungeon.Interior,
-  Dungeon.Items, Dungeon.Terrain, Dungeon.Test.Fixtures, Std.Arrays, Std.Conv, Std.Results,
-  Std.Test;
+  Dungeon.Areas, Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.Exploration.Model,
+  Dungeon.GameState, Dungeon.Interior, Dungeon.Items, Dungeon.Terrain, Dungeon.Terrain.Entrances,
+  Dungeon.Test.Fixtures, Std.Arrays, Std.Conv, Std.Results, Std.Test;
+
+// Returns the first ordinary region east of the spawn region that has an entrance site.
+function SecondRegion(Metadata: WorldMetadata): RegionCoordinate;
+begin
+  var Spawn: RegionCoordinate := RegionOf(Metadata, Metadata.Spawn);
+  for Offset: integer := 1 to 64 do
+  begin
+    var Candidate: RegionCoordinate := record
+      X := Spawn.X + Offset;
+      Y := Spawn.Y;
+    end;
+
+    case EntranceSite(Metadata, Candidate) of
+      Some(Site):
+      begin
+        return Candidate
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  panic('fixture world has no second entrance region')
+end;
+
+function SecondSite(Metadata: WorldMetadata): WorldPosition;
+begin
+  case EntranceSite(Metadata, SecondRegion(Metadata)) of
+    Some(Site):
+    begin
+      return Site
+    end
+    else
+    begin
+      panic('second region lost its entrance site')
+    end
+  end
+end;
 
 // A wider second area has its own identities and fields absent from the first map.
 function SecondMap(First: InteriorMap): InteriorMap;
@@ -28,7 +67,7 @@ begin
       Std.Arrays.Push(Cells, Cell)
     end
   end;
-  mutable var Map: InteriorMap := First with AreaId := 'fixture-world:dungeon:1:0'; Width := 13; Cells := Cells; end;
+  mutable var Map: InteriorMap := First with AreaId := DungeonAreaId(FixtureMetadata(), SecondRegion(FixtureMetadata())); Width := 13; Cells := Cells; end;
 
   for Index: integer := 0 to Std.Arrays.Length(Map.Items) - 1 do
   begin
@@ -57,9 +96,10 @@ begin
   AssertTrue(IsError(ValidateSavedGame(Metadata, Both, [First, First])));
   AssertTrue(IsError(ValidateSavedGame(Metadata, One, [First, Second])));
   AssertTrue(IsError(ValidateSavedGame(Metadata, Both, [First, Second with Cells := []; end])));
+  // Visited areas must stay in canonical order.
   AssertTrue(IsError(ValidateSavedGame(Metadata, Both with VisitedAreas := [
-                                                                             Second.AreaId,
-                                                                             First.AreaId
+                                                                             Both.VisitedAreas[1],
+                                                                             Both.VisitedAreas[0]
                                                                            ]; end, [First, Second])));
   AssertTrue(IsError(ValidateSavedGame(Metadata, Both with VisitedAreas := [
                                                                              First.AreaId,
@@ -77,8 +117,13 @@ begin
   var InSecond: GameState := Transfer with AreaId := Second.AreaId; Player := PlayerPosition.FirstPerson(record
     Position := Second.Start;
     Facing := Second.StartFacing;
-  end); end;
+  end); ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, SecondSite(Metadata)); end;
 
+  // The return location must be the entrance site of the current dungeon's region.
+  AssertTrue(IsError(ValidateSavedGame(Metadata, InSecond with ReturnLocation := Transfer.ReturnLocation; end, [
+                                                                                                                 Second,
+                                                                                                                 First
+                                                                                                               ])));
   AssertTrue(IsOk(ValidateSavedGame(Metadata, InSecond, [Second, First])));
   AssertTrue(IsError(ValidateSavedGame(Metadata, Transfer with Items := []; end, [First, Second])));
   mutable var Wrong: GameState := Transfer;
@@ -152,7 +197,7 @@ begin
   Wrong.Exploration.InteriorAreas[0] := Discovery with AreaId := 'unvisited'; end;
 
   AssertTrue(IsError(ValidateSavedGame(Metadata, Wrong, [First, Second])));
-  var Outdoor: GameState := Both with Area := AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := PlayerPosition.Outdoor(Metadata.Entrance); ReturnLocation := ReturnLocation.NoReturnLocation; end;
+  var Outdoor: GameState := Both with Area := AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := PlayerPosition.Outdoor(Metadata.SpawnEntrance); ReturnLocation := ReturnLocation.NoReturnLocation; end;
 
   AssertTrue(IsOk(ValidateSavedGame(Metadata, Outdoor, [Second, First])));
   var Foreign: InteriorMap := First with AreaId := 'another-world:dungeon:0:0'; end;

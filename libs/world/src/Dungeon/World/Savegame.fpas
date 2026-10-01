@@ -2,10 +2,11 @@
 unit Dungeon.World.Savegame;
 
 uses
-  Dungeon.Areas, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior,
-  Dungeon.Interior.InitialDungeon, Dungeon.Terrain, Dungeon.World, Dungeon.World.Savegame.Discovery,
-  Dungeon.World.Savegame.Entities, Dungeon.World.Savegame.Player, Std.Arrays, Std.Conv,
-  Std.Dictionaries, Std.Fs, Std.Json, Std.Json.Fields, Std.Path;
+  Dungeon.Areas, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Terrain,
+  Dungeon.World, Dungeon.World.Interiors, Dungeon.World.Interiors.Errors,
+  Dungeon.World.Savegame.Discovery, Dungeon.World.Savegame.Errors, Dungeon.World.Savegame.Entities,
+  Dungeon.World.Savegame.Player, Std.Arrays, Std.Conv, Std.Dictionaries, Std.Fs, Std.Json,
+  Std.Json.Fields, Std.Path;
 
 public const
   // Current-only savegame schema written below each selected world.
@@ -60,18 +61,7 @@ begin
   return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation), 'exploration': EncodeExploration(State.Exploration), 'visited_areas': JsonValue.ArrayValue(Visited), 'items': JsonValue.ArrayValue(EncodeItems(State.Items)), 'health': JsonValue.Number(IntToReal(State.Health)), 'hostiles': JsonValue.ArrayValue(EncodeHostiles(State.Hostiles)), 'random_state': JsonValue.Number(IntToReal(State.RandomState))]))
 end;
 
-// Temporary map supplier until saved visited levels are read from level storage.
-function ValidateInitialSave(Metadata: WorldMetadata; State: GameState): result of GameState, string;
-begin
-  if Std.Arrays.Length(State.VisitedAreas) = 0 then
-  begin
-    return ValidateSavedGame(Metadata, State, [])
-  end;
-
-  return ValidateSavedGame(Metadata, State, [try InitialDungeonMap(Metadata)])
-end;
-
-function DecodeSaveGameFields(Text: string; Metadata: WorldMetadata; Map: InteriorMap): result of GameState, string;
+function DecodeSaveGameFields(Text: string; Metadata: WorldMetadata): result of GameState, string;
 begin
   var Fields: dict of string to JsonValue := try ParseObject(Text);
   if Std.Dictionaries.Length(Fields) <> 12 then
@@ -101,17 +91,15 @@ begin
     RandomState := try IntegerField(Fields, 'random_state');
   end;
 
-  if Std.Arrays.Length(State.VisitedAreas) = 0 then
-  begin
-    return ValidateSavedGame(Metadata, State, [])
-  end;
-
-  return ValidateSavedGame(Metadata, State, [Map])
+  return ValidateSaveShape(Metadata, State)
 end;
 
-function DecodeSaveGameWithMap(Text: string; Metadata: WorldMetadata; Map: InteriorMap): result of GameState, string;
+// First load phase: decodes an exact current-version save and checks its self-contained fields
+// without reading levels. Not a full validation; only states that also pass ValidateSavedGame
+// against their visited levels may become active. Every error is prefixed with `invalid savegame:`.
+public function DecodeSaveGameState(Text: string; Metadata: WorldMetadata): result of GameState, string;
 begin
-  case DecodeSaveGameFields(Text, Metadata, Map) of
+  case DecodeSaveGameFields(Text, Metadata) of
     Ok(Value):
     begin
       return Ok(Value)
@@ -123,24 +111,48 @@ begin
   end
 end;
 
-// Decodes an exact current-version save and validates it against selected-world invariants.
-// Every error is prefixed with `invalid savegame:`.
-public function DecodeSaveGame(Text: string; Metadata: WorldMetadata): result of GameState, string;
+function CurrentMap(State: GameState; Maps: array of InteriorMap): option of InteriorMap;
 begin
-  case InitialDungeonMap(Metadata) of
-    Ok(Map):
+  if State.Area = AreaKind.Dungeon then
+  begin
+    for Map: InteriorMap in Maps do
     begin
-      return DecodeSaveGameWithMap(Text, Metadata, Map)
+      if Map.AreaId = State.AreaId then
+      begin
+        return Some(Map)
+      end
+    end
+  end;
+
+  return None
+end;
+
+// Removes an invalid save and reports the removal; a failed removal is an I/O failure.
+function RemoveInvalidSave(World: WorldSession; Reason: string): result of SaveGameLoad, PersistenceFailure;
+begin
+  case DeleteSaveGame(World) of
+    Ok(Deleted):
+    begin
+      if not Deleted then
+      begin
+        return Error(PersistenceFailure.Io('invalid savegame disappeared before it could be removed: ' +
+                                           Reason))
+      end;
+
+      return Ok(SaveGameLoad.InvalidRemoved(Reason))
     end;
-    Error(Message):
+    Error(DeleteMessage):
     begin
-      return Error('invalid savegame: ' + Message)
+      return Error(PersistenceFailure.Io((('invalid savegame could not be removed: ' + DeleteMessage) + '; validation failed: ') +
+                                         Reason))
     end
   end
 end;
 
-// Loads the selected world's save, distinguishing a missing file from invalid or failed I/O.
-public function LoadSaveGame(World: WorldSession): result of SaveGameLoad, string;
+// Loads the selected world's save in three phases: decode its self-contained fields, read every
+// visited level once, then validate the state against those maps. A missing or invalid level is a
+// world-data failure that preserves the save; only invalid save content removes it. Never generates.
+public function LoadSaveGame(World: WorldSession): result of SaveGameLoad, PersistenceFailure;
 begin
   var Path: string := SaveGamePath(World);
   if not Std.Fs.Exists(Path) then
@@ -150,47 +162,116 @@ begin
 
   if not Std.Fs.IsFile(Path) then
   begin
-    return Error('savegame path exists but is not a file: ' + Path)
+    return Error(PersistenceFailure.Io('savegame path exists but is not a file'))
   end;
-  var Text: string := try Std.Fs.ReadText(Path);
-  var Map: InteriorMap := try InitialDungeonMap(World.Metadata);
-  case DecodeSaveGameWithMap(Text, World.Metadata, Map) of
-    Ok(State):
+  mutable var Text: string := '';
+  case Std.Fs.ReadText(Path) of
+    Ok(Value):
     begin
-      mutable var Current: option of InteriorMap := None;
-      if State.Area = AreaKind.Dungeon then
-      begin
-        Current := Some(Map)
-      end;
-      var View: AreaView := try AreaViewFor(World.Metadata, State, Current);
-      return Ok(SaveGameLoad.Loaded(State, View))
+      Text := Value
     end;
     Error(Message):
     begin
-      case DeleteSaveGame(World) of
-        Ok(Deleted):
-        begin
-          if not Deleted then
-          begin
-            return Error('invalid savegame disappeared before it could be removed: ' + Message)
-          end;
+      return Error(PersistenceFailure.Io('cannot read savegame: ' + Message))
+    end
+  end;
+  mutable var Decoded: GameState := NewGame(World.Metadata);
+  case DecodeSaveGameState(Text, World.Metadata) of
+    Ok(Value):
+    begin
+      Decoded := Value
+    end;
+    Error(Message):
+    begin
+      return RemoveInvalidSave(World, Message)
+    end
+  end;
+  mutable var Maps: array of InteriorMap := [];
+  case ReadVisitedLevels(World, Decoded) of
+    Ok(Value):
+    begin
+      Maps := Value
+    end;
+    Error(Failure):
+    begin
+      return Error(PersistenceFailure.Level(Failure))
+    end
+  end;
 
-          return Ok(SaveGameLoad.InvalidRemoved(Message))
-        end;
-        Error(DeleteMessage):
+  case ValidateSavedGame(World.Metadata, Decoded, Maps) of
+    Ok(State):
+    begin
+      case AreaViewFor(World.Metadata, State, CurrentMap(State, Maps)) of
+        Ok(View):
         begin
-          return Error((('invalid savegame could not be removed: ' + DeleteMessage) + '; validation failed: ') +
-                       Message)
+          return Ok(SaveGameLoad.Loaded(State, View))
+        end;
+        Error(Message):
+        begin
+          return RemoveInvalidSave(World, 'invalid savegame: ' + Message)
         end
       end
+    end;
+    Error(Message):
+    begin
+      return RemoveInvalidSave(World, 'invalid savegame: ' + Message)
     end
   end
 end;
 
-// Atomically replaces the selected world's single save after validating the state.
-public function WriteSaveGame(World: WorldSession; State: GameState): result of boolean, string;
+// Validates the state against its visited levels and atomically replaces the selected world's
+// single save. Failures never delete anything and leave the previous save intact.
+public function WriteSaveGame(World: WorldSession; State: GameState): result of boolean, PersistenceFailure;
 begin
-  var Valid: GameState := try ValidateInitialSave(World.Metadata, State);
-  var DirectoryReady: boolean := try Std.Fs.CreateDirAll(SaveGameDirectory(World));
-  return Std.Fs.WriteTextAtomic(SaveGamePath(World), EncodeSaveGame(World.Metadata.Id, Valid))
+  case ValidateSaveShape(World.Metadata, State) of
+    Error(Message):
+    begin
+      return Error(PersistenceFailure.InvalidState(Message))
+    end
+    else
+    begin
+    end
+  end;
+  mutable var Maps: array of InteriorMap := [];
+  case ReadVisitedLevels(World, State) of
+    Ok(Value):
+    begin
+      Maps := Value
+    end;
+    Error(Failure):
+    begin
+      return Error(PersistenceFailure.Level(Failure))
+    end
+  end;
+
+  case ValidateSavedGame(World.Metadata, State, Maps) of
+    Error(Message):
+    begin
+      return Error(PersistenceFailure.InvalidState(Message))
+    end
+    else
+    begin
+    end
+  end;
+
+  case Std.Fs.CreateDirAll(SaveGameDirectory(World)) of
+    Error(Message):
+    begin
+      return Error(PersistenceFailure.Io('cannot create savegame directory: ' + Message))
+    end
+    else
+    begin
+    end
+  end;
+
+  case Std.Fs.WriteTextAtomic(SaveGamePath(World), EncodeSaveGame(World.Metadata.Id, State)) of
+    Ok(Written):
+    begin
+      return Ok(true)
+    end;
+    Error(Message):
+    begin
+      return Error(PersistenceFailure.Io('cannot write savegame: ' + Message))
+    end
+  end
 end;

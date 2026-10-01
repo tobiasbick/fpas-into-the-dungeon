@@ -2,19 +2,19 @@
 program CombatTest;
 
 uses
-  Dungeon.Test.InitialAreas, Dungeon.Combat, Dungeon.Coordinates, Dungeon.GameState,
-  Dungeon.Hostiles, Dungeon.Interaction, Dungeon.Interior, Dungeon.Interior.InitialDungeon,
-  Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays, Std.Results, Std.Str, Std.Test;
+  Dungeon.Test.Fixtures, Dungeon.Combat, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Hostiles,
+  Dungeon.Interaction, Dungeon.Interior, Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays,
+  Std.Results, Std.Str, Std.Test;
 
 function InDungeon(Metadata: WorldMetadata; X: integer; Y: integer; Facing: FacingDirection): GameState;
 begin
-  return MaterializedInitialState(Metadata) with Area := AreaKind.Dungeon; AreaId := Metadata.DungeonAreaId; Player := PlayerPosition.FirstPerson(record
+  return MaterializedFixtureState(Metadata) with Area := AreaKind.Dungeon; AreaId := SpawnDungeonAreaId(Metadata); Player := PlayerPosition.FirstPerson(record
     Position := record
       X := X;
       Y := Y;
     end;
     Facing := Facing;
-  end); ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance); end
+  end); ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.SpawnEntrance); end
 end;
 
 function Continued(Outcome: TurnOutcome): GameState;
@@ -64,11 +64,11 @@ begin
 end;
 
 begin
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('combat', 12345));
-  var Fresh: GameState := MaterializedInitialState(Metadata);
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('combat', 12345, 4));
+  var Fresh: GameState := MaterializedFixtureState(Metadata);
   AssertEquals(PlayerMaximumHealth, Fresh.Health);
   AssertEquals(1, Std.Arrays.Length(Fresh.Hostiles));
-  AssertEquals(InitialSkeletonId(Metadata), Skeleton(Fresh).Id);
+  AssertEquals(FixtureSkeletonId(Metadata), Skeleton(Fresh).Id);
   AssertEquals(RestlessSkeletonMaximumHealth, Skeleton(Fresh).Health);
   AssertFalse(Skeleton(Fresh).Alerted);
   AssertEquals(3, Skeleton(Fresh).Position.X);
@@ -88,28 +88,28 @@ begin
     begin
       Hidden := InDungeon(Metadata, 2, 1, FacingDirection.West)
     end;
-    var Quiet: TurnOutcome := Unwrap(ResolveTurn(InitialAreaView(Metadata, Hidden), Hidden, TurnAction.Wait));
+    var Quiet: TurnOutcome := Unwrap(ResolveTurn(FixtureViewFor(Metadata, Hidden), Hidden, TurnAction.Wait));
     AssertFalse(Skeleton(Continued(Quiet)).Alerted);
     AssertTrue(LogContains(LogOf(Quiet), 'You wait.'))
   end;
   // In the inner passages it notices the player, then approaches one field per turn.
   var InPassage: GameState := InDungeon(Metadata, 5, 3, FacingDirection.West);
-  var Noticed: TurnOutcome := Unwrap(ResolveTurn(InitialAreaView(Metadata, InPassage), InPassage, TurnAction.Wait));
+  var Noticed: TurnOutcome := Unwrap(ResolveTurn(FixtureViewFor(Metadata, InPassage), InPassage, TurnAction.Wait));
   AssertTrue(Skeleton(Continued(Noticed)).Alerted);
   AssertTrue(LogContains(LogOf(Noticed), 'notices you'));
   AssertEquals(3, Skeleton(Continued(Noticed)).Position.X);
   // Now it stands directly ahead: it blocks movement and the hint offers an attack.
-  var Blocked: GameState := Continued(Unwrap(ResolveTurn(InitialAreaView(Metadata, Continued(Noticed)), Continued(Noticed), TurnAction.Wait)));
+  var Blocked: GameState := Continued(Unwrap(ResolveTurn(FixtureViewFor(Metadata, Continued(Noticed)), Continued(Noticed), TurnAction.Wait)));
   AssertEquals(4, Skeleton(Blocked).Position.X);
   AssertEquals(3, Skeleton(Blocked).Position.Y);
-  AssertTrue(IsError(ResolveTurn(InitialAreaView(Metadata, Blocked), Blocked, TurnAction.Step(RelativeStep.Forward))));
+  AssertTrue(IsError(ResolveTurn(FixtureViewFor(Metadata, Blocked), Blocked, TurnAction.Step(RelativeStep.Forward))));
   AssertTrue(Std.Str.Contains(HostileInteractionHint(Blocked), 'Restless skeleton'));
   AssertTrue(Std.Str.Contains(HostileInteractionHint(Blocked), 'Space: Attack'));
   AssertEquals(HostileInteractionHint(Blocked), InteractionHint(Blocked));
   // Rejected actions consume neither time nor dice.
   var NothingAhead: GameState := InDungeon(Metadata, 9, 1, FacingDirection.West);
-  AssertTrue(IsError(ResolveTurn(InitialAreaView(Metadata, NothingAhead), NothingAhead, TurnAction.Attack)));
-  AssertTrue(IsError(ResolveTurn(InitialAreaView(Metadata, MaterializedInitialState(Metadata)), MaterializedInitialState(Metadata), TurnAction.Attack)));
+  AssertTrue(IsError(ResolveTurn(FixtureViewFor(Metadata, NothingAhead), NothingAhead, TurnAction.Attack)));
+  AssertTrue(IsError(ResolveTurn(FixtureViewFor(Metadata, MaterializedFixtureState(Metadata)), MaterializedFixtureState(Metadata), TurnAction.Attack)));
   // Fighting is deterministic: the same actions from the same state produce the same fight.
   mutable var Fight: GameState := Blocked;
   mutable var Replay: GameState := Blocked;
@@ -121,8 +121,8 @@ begin
     Fight := Fight with Health := PlayerMaximumHealth; end;
 
     Replay := Replay with Health := PlayerMaximumHealth; end;
-    var Blow: TurnOutcome := Unwrap(ResolveTurn(InitialAreaView(Metadata, Fight), Fight, TurnAction.Attack));
-    var Again: TurnOutcome := Unwrap(ResolveTurn(InitialAreaView(Metadata, Replay), Replay, TurnAction.Attack));
+    var Blow: TurnOutcome := Unwrap(ResolveTurn(FixtureViewFor(Metadata, Fight), Fight, TurnAction.Attack));
+    var Again: TurnOutcome := Unwrap(ResolveTurn(FixtureViewFor(Metadata, Replay), Replay, TurnAction.Attack));
     AssertEquals(Std.Arrays.Length(LogOf(Blow)), Std.Arrays.Length(LogOf(Again)));
     for Index: integer := 0 to Std.Arrays.Length(LogOf(Blow)) - 1 do
     begin
@@ -139,13 +139,13 @@ begin
   AssertTrue(SawHit);
   AssertEquals(0, Skeleton(Fight).Health);
   // A destroyed skeleton leaves no figure, blocks nothing, and stays recorded.
-  AssertEquals(-1, StandingHostileAt(Fight, Metadata.DungeonAreaId, Skeleton(Fight).Position));
+  AssertEquals(-1, StandingHostileAt(Fight, SpawnDungeonAreaId(Metadata), Skeleton(Fight).Position));
   AssertEquals('', HostileInteractionHint(Fight));
-  var Map: InteriorMap := Unwrap(InitialDungeonMap(Metadata));
+  var Map: InteriorMap := FixtureDungeonMapFor(SpawnDungeonAreaId(Metadata));
   AssertTrue(Unwrap(InteriorVisibleCodeForState(Map, Fight, Skeleton(Fight).Position)) <> 'h');
-  var Walked: GameState := Continued(Unwrap(ResolveTurn(InitialAreaView(Metadata, Fight), Fight, TurnAction.Step(RelativeStep.Forward))));
+  var Walked: GameState := Continued(Unwrap(ResolveTurn(FixtureViewFor(Metadata, Fight), Fight, TurnAction.Step(RelativeStep.Forward))));
   AssertEquals(4, Unwrap(FirstPersonPlayerPose(Walked)).Position.X);
-  AssertTrue(IsError(ResolveTurn(InitialAreaView(Metadata, Walked), Walked, TurnAction.Attack)));
+  AssertTrue(IsError(ResolveTurn(FixtureViewFor(Metadata, Walked), Walked, TurnAction.Attack)));
   // A wounded player adjacent to an alerted skeleton eventually falls.
   mutable var Doomed: GameState := Blocked with Health := 1; end;
   mutable var Fallen: boolean := false;
@@ -153,7 +153,7 @@ begin
   begin
     if not Fallen then
     begin
-      case Unwrap(ResolveTurn(InitialAreaView(Metadata, Doomed), Doomed, TurnAction.Wait)) of
+      case Unwrap(ResolveTurn(FixtureViewFor(Metadata, Doomed), Doomed, TurnAction.Wait)) of
         TurnOutcome.Continued(State, Log, Events):
         begin
           Doomed := State
@@ -169,16 +169,16 @@ begin
 
   AssertTrue(Fallen);
   // Validation rejects impossible combat state.
-  AssertTrue(IsError(ValidateInitialSave(Metadata, Fresh with Health := 0; end)));
-  AssertTrue(IsError(ValidateInitialSave(Metadata, Fresh with Health := PlayerMaximumHealth + 1; end)));
-  AssertTrue(IsError(ValidateInitialSave(Metadata, Fresh with RandomState := -1; end)));
-  AssertTrue(IsError(ValidateInitialSave(Metadata, Fresh with Hostiles := []; end)));
+  AssertTrue(IsError(ValidateFixtureSave(Metadata, Fresh with Health := 0; end)));
+  AssertTrue(IsError(ValidateFixtureSave(Metadata, Fresh with Health := PlayerMaximumHealth + 1; end)));
+  AssertTrue(IsError(ValidateFixtureSave(Metadata, Fresh with RandomState := -1; end)));
+  AssertTrue(IsError(ValidateFixtureSave(Metadata, Fresh with Hostiles := []; end)));
   mutable var Unknown: GameHostile := Skeleton(Fresh);
   Unknown.Id := 'unknown:hostile';
-  AssertTrue(IsError(ValidateInitialSave(Metadata, Fresh with Hostiles := [Unknown]; end)));
+  AssertTrue(IsError(ValidateFixtureSave(Metadata, Fresh with Hostiles := [Unknown]; end)));
   mutable var TooHealthy: GameHostile := Skeleton(Fresh);
   TooHealthy.Health := RestlessSkeletonMaximumHealth + 1;
-  AssertTrue(IsError(ValidateInitialSave(Metadata, Fresh with Hostiles := [TooHealthy]; end)));
+  AssertTrue(IsError(ValidateFixtureSave(Metadata, Fresh with Hostiles := [TooHealthy]; end)));
   var StandingOnPlayer: GameState := InDungeon(Metadata, 3, 3, FacingDirection.West);
-  AssertTrue(IsError(ValidateInitialSave(Metadata, StandingOnPlayer)))
+  AssertTrue(IsError(ValidateFixtureSave(Metadata, StandingOnPlayer)))
 end.

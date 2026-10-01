@@ -2,10 +2,11 @@
 program DungeonFullSessionTest;
 
 uses
-  Dungeon.Client, Dungeon.Interaction, Dungeon.Protocol, Dungeon.RuntimeData, Dungeon.Server,
-  Dungeon.Server.Config, Dungeon.Terrain, Dungeon.Test.ClientSession, Dungeon.Terrain.Placement,
-  Std.Conv, Std.Fs, Std.Net, Std.Options, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time,
-  Std.Tui;
+  Dungeon.Areas.Identities, Dungeon.Client, Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Interior,
+  Dungeon.Interior.Generation.Validation, Dungeon.Test.Fixtures, Dungeon.Test.Routes,
+  Dungeon.Interaction, Dungeon.Protocol, Dungeon.RuntimeData, Dungeon.Server, Dungeon.Server.Config,
+  Dungeon.Terrain, Dungeon.Test.ClientSession, Dungeon.Terrain.Placement, Std.Conv, Std.Fs, Std.Net,
+  Std.Options, Std.Arrays, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time, Std.Tui;
 
 function TestConfig(WorldsRoot: string): ServerConfig;
 begin
@@ -13,6 +14,7 @@ begin
     WorldsRoot := WorldsRoot;
     WorldId := 'fresh-world';
     WorldSeed := 12345;
+    DungeonRegionChunks := 4;
     ChunkCacheLimit := 32;
     MaximumViewWidth := 240;
     MaximumViewHeight := 120;
@@ -66,11 +68,48 @@ begin
   return Outcome
 end;
 
+function RequireFirstPersonEvent(Received: ClientEvent): FirstPersonVisibleState;
+begin
+  case Received of
+    ClientEvent.State(VisibleValue):
+    begin
+      case VisibleValue of
+        VisibleState.FirstPersonState(FirstPersonValue):
+        begin
+          return FirstPersonValue
+        end
+        else
+        begin
+          panic('expected a first-person state')
+        end
+      end
+    end
+    else
+    begin
+      panic('expected a state event')
+    end
+  end
+end;
+
+function AheadOf(Pose: FirstPersonPose): InteriorPosition;
+begin
+  var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+  return record
+    X := Pose.Position.X + Offset.X;
+    Y := Pose.Position.Y + Offset.Y;
+  end
+end;
+
 begin
   var WorldsRoot: string := '.temp-data/full-session-' + IntToStr(TimestampMillis());
   EnsureWorldRoot(WorldsRoot);
   var Config: ServerConfig := TestConfig(WorldsRoot);
-  var ExpectedMetadata: WorldMetadata := Std.Results.Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
+  var ExpectedMetadata: WorldMetadata := Std.Results.Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed, 4));
+  var Map: InteriorMap := SpawnDungeonMap(ExpectedMetadata);
+  mutable var Pose: FirstPersonPose := record
+    Position := Map.Start;
+    Facing := Map.StartFacing;
+  end;
   var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
   var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
   var Source: CancellationSource := CreateCancellationSource();
@@ -158,15 +197,15 @@ begin
   begin
     mutable var DeltaX: integer := 0;
     mutable var DeltaY: integer := 0;
-    if CurrentX < ExpectedMetadata.Entrance.X then
+    if CurrentX < ExpectedMetadata.SpawnEntrance.X then
     begin
       DeltaX := 1
     end
-    else if CurrentX > ExpectedMetadata.Entrance.X then
+    else if CurrentX > ExpectedMetadata.SpawnEntrance.X then
     begin
       DeltaX := -1
     end
-    else if CurrentY < ExpectedMetadata.Entrance.Y then
+    else if CurrentY < ExpectedMetadata.SpawnEntrance.Y then
     begin
       DeltaY := 1
     end
@@ -216,12 +255,13 @@ begin
       case VisibleValue of
         VisibleState.FirstPersonState(FirstPersonValue):
         begin
-          AssertEquals(ExpectedMetadata.DungeonAreaLabel, FirstPersonValue.Title);
-          AssertEquals(11, FirstPersonValue.Width);
-          AssertEquals(9, FirstPersonValue.Height);
-          AssertEquals(9, FirstPersonValue.PlayerX);
-          AssertEquals(1, FirstPersonValue.PlayerY);
-          AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West);
+          AssertEquals(GeneratedDungeonLabel, FirstPersonValue.Title);
+          AssertEquals(GeneratedDungeonWidth, FirstPersonValue.Width);
+          AssertEquals(GeneratedDungeonHeight, FirstPersonValue.Height);
+          AssertEquals(Map.Start.X, FirstPersonValue.PlayerX);
+          AssertEquals(Map.Start.Y, FirstPersonValue.PlayerY);
+          AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.East);
+          Pose := VisiblePose(FirstPersonValue);
           Model := UpdateClientEvent(Model, ClientEvent.State(VisibleValue), Cmd)
         end
         else
@@ -240,28 +280,17 @@ begin
   AssertTrue(Std.Options.Unwrap(FirstPersonApp.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle).Background.Kind =
              TuiColorKind.Rgb);
   FirstPersonApp.Close();
-  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), 1000)));
-  case NextClientEvent(Events, Outcomes, 120000) of
-    ClientEvent.State(VisibleValue):
-    begin
-      case VisibleValue of
-        VisibleState.FirstPersonState(FirstPersonValue):
-        begin
-          AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.North);
-          AssertEquals('#', Std.Str.CharAt(FirstPersonValue.Rows[0], 9))
-        end
-        else
-        begin
-          panic('expected north-facing state before wall interaction')
-        end
-      end
-    end
-    else
-    begin
-      panic('expected turn event before wall interaction')
-    end
+  // Turn right until a wall stands ahead; turning is free and an ordinary wall offers nothing.
+  mutable var Turns: integer := 0;
+  while (Std.Results.Unwrap(InteriorCellAt(Map, AheadOf(Pose))) <> InteriorCellKind.Wall) and
+        (Turns < 4) do
+  begin
+    AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), 1000)));
+    Pose := VisiblePose(RequireFirstPersonEvent(NextClientEvent(Events, Outcomes, 120000)));
+    Turns := Turns + 1
   end;
 
+  AssertTrue(Std.Results.Unwrap(InteriorCellAt(Map, AheadOf(Pose))) = InteriorCellKind.Wall);
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
   case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.Interaction(Title, Message):
@@ -274,27 +303,6 @@ begin
     else
     begin
       panic('expected ordinary wall interaction response')
-    end
-  end;
-
-  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), 1000)));
-  case NextClientEvent(Events, Outcomes, 120000) of
-    ClientEvent.State(VisibleValue):
-    begin
-      case VisibleValue of
-        VisibleState.FirstPersonState(FirstPersonValue):
-        begin
-          AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West)
-        end
-        else
-        begin
-          panic('expected west-facing state after wall interaction')
-        end
-      end
-    end
-    else
-    begin
-      panic('expected turn event after wall interaction')
     end
   end;
 
@@ -311,99 +319,20 @@ begin
       panic('expected client save-completed event')
     end
   end;
-
-  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), 1000)));
-  case NextClientEvent(Events, Outcomes, 120000) of
-    ClientEvent.State(VisibleValue):
-    begin
-      case VisibleValue of
-        VisibleState.FirstPersonState(FirstPersonValue):
-        begin
-          AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.South)
-        end
-        else
-        begin
-          panic('expected first-person turn state')
-        end
-      end
-    end
-    else
-    begin
-      panic('expected first-person turn event')
-    end
-  end;
-
-  for InteriorStep: integer := 1 to 6 do
+  // Walk back to the exit of the generated dungeon around any resting skeleton.
+  mutable var Avoid: array of InteriorPosition := [];
+  for Hostile: HostilePlacement in Map.Hostiles do
   begin
-    AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), 1000)));
-    case NextClientEvent(Events, Outcomes, 120000) of
-      ClientEvent.State(VisibleValue):
-      begin
-        case VisibleValue of
-          VisibleState.FirstPersonState(FirstPersonValue):
-          begin
-            AssertEquals(9, FirstPersonValue.PlayerX);
-            AssertEquals(1 + InteriorStep, FirstPersonValue.PlayerY)
-          end
-          else
-          begin
-            panic('expected first-person south-step state')
-          end
-        end
-      end
-      else
-      begin
-        panic('expected first-person south-step event')
-      end
-    end
+    Std.Arrays.Push(Avoid, Hostile.Position)
   end;
 
-  AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), 1000)));
-  case NextClientEvent(Events, Outcomes, 120000) of
-    ClientEvent.State(VisibleValue):
-    begin
-      case VisibleValue of
-        VisibleState.FirstPersonState(FirstPersonValue):
-        begin
-          AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West)
-        end
-        else
-        begin
-          panic('expected first-person exit-corridor turn state')
-        end
-      end
-    end
-    else
-    begin
-      panic('expected first-person exit-corridor turn event')
-    end
-  end;
-
-  for InteriorStep: integer := 1 to 8 do
+  for Move: RouteMove in RouteTo(Map, Pose, Map.Exit, Avoid) do
   begin
-    AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), 1000)));
-    case NextClientEvent(Events, Outcomes, 120000) of
-      ClientEvent.State(VisibleValue):
-      begin
-        case VisibleValue of
-          VisibleState.FirstPersonState(FirstPersonValue):
-          begin
-            AssertEquals(9 - InteriorStep, FirstPersonValue.PlayerX);
-            AssertEquals(7, FirstPersonValue.PlayerY)
-          end
-          else
-          begin
-            panic('expected first-person west-step state')
-          end
-        end
-      end
-      else
-      begin
-        panic('expected first-person west-step event')
-      end
-    end
+    AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, RouteMessage(Move), 1000)));
+    Pose := VisiblePose(RequireFirstPersonEvent(NextClientEvent(Events, Outcomes, 120000)))
   end;
 
+  AssertTrue(SamePosition(Pose.Position, Map.Exit));
   AssertTrue(Std.Results.Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
   case NextClientEvent(Events, Outcomes, 120000) of
     ClientEvent.State(VisibleValue):
@@ -411,8 +340,8 @@ begin
       case VisibleValue of
         VisibleState.MapState(MapValue):
         begin
-          AssertEquals(ExpectedMetadata.Entrance.X, MapValue.WorldX);
-          AssertEquals(ExpectedMetadata.Entrance.Y, MapValue.WorldY)
+          AssertEquals(ExpectedMetadata.SpawnEntrance.X, MapValue.WorldX);
+          AssertEquals(ExpectedMetadata.SpawnEntrance.Y, MapValue.WorldY)
         end
         else
         begin

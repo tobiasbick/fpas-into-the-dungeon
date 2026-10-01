@@ -2,10 +2,10 @@
 unit Dungeon.Server;
 
 uses
-  Dungeon.Server.Config, Dungeon.Server.Handling, Dungeon.Server.Replies, Dungeon.Server.Session,
-  Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.Transport, Dungeon.World,
-  Dungeon.World.Savegame, Std.Arrays, Std.Console, Std.Conv, Std.Net, Std.Server, Std.Tasks,
-  Std.Time;
+  Dungeon.Server.Config, Dungeon.Server.Failures, Dungeon.Server.Handling, Dungeon.Server.Replies,
+  Dungeon.Server.Session, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
+  Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Console,
+  Std.Conv, Std.Net, Std.Server, Std.Tasks, Std.Time;
 
 function FinishReadFailure(ConnectionValue: Connection; Message: string; Token: CancellationToken): result of boolean, string;
 begin
@@ -78,20 +78,34 @@ begin
       end
     end
   end;
-  var World: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit);
+  var World: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.DungeonRegionChunks, Config.ChunkCacheLimit);
   mutable var SaveAvailable: boolean := false;
   mutable var InvalidSaveRemoved: boolean := false;
-  case try LoadSaveGame(World) of
-    SaveGameLoad.Missing:
+  // Inspection reports availability only; an explicit load rereads and validates again.
+  case LoadSaveGame(World) of
+    Ok(Inspected):
     begin
+      case Inspected of
+        SaveGameLoad.Missing:
+        begin
+        end;
+        SaveGameLoad.InvalidRemoved(Reason):
+        begin
+          InvalidSaveRemoved := true
+        end;
+        SaveGameLoad.Loaded(SavedState, SavedView):
+        begin
+          SaveAvailable := true
+        end
+      end
     end;
-    SaveGameLoad.InvalidRemoved(Reason):
+    Error(Failure):
     begin
-      InvalidSaveRemoved := true
-    end;
-    SaveGameLoad.Loaded(SavedState, SavedView):
-    begin
-      SaveAvailable := true
+      // A missing level or storage failure preserves the save and closes before Welcome.
+      var Rejection: FailureRejection := PersistenceRejection(World.Metadata.Id, 'load_failed', Failure);
+      WriteLn((Rejection.Code + ': ') + PersistenceFailureReason(Failure));
+      var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Rejected(Rejection.Code, Rejection.Message), Token);
+      return Ok(true)
     end
   end;
   mutable var Session: ServerSession := record
@@ -146,7 +160,7 @@ begin
   begin
     return Error('server chunk cache is too small for the configured maximum viewport and prefetch margin')
   end;
-  var ValidatedWorld: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit);
+  var ValidatedWorld: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.DungeonRegionChunks, Config.ChunkCacheLimit);
   var ListenerValue: Listener := try Listen(Host, Port);
   var Life: ServerLifetime := try CreateLifetime(2000, false);
   var Owned: boolean := try OwnListener(Life, ListenerValue);

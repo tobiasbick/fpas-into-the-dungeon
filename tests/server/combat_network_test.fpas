@@ -2,7 +2,8 @@
 program DungeonCombatNetworkTest;
 
 uses
-  Dungeon.GameState, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Test.Fixtures,
+  Dungeon.Test.Routes, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
   Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config,
   Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays, Std.Conv, Std.Fs, Std.Net, Std.Results,
   Std.Str, Std.Tasks, Std.Test, Std.Time;
@@ -19,6 +20,7 @@ begin
     WorldsRoot := WorldsRoot;
     WorldId := 'combat-network';
     WorldSeed := 9462;
+    DungeonRegionChunks := 4;
     ChunkCacheLimit := 32;
     MaximumViewWidth := 240;
     MaximumViewHeight := 120;
@@ -127,7 +129,7 @@ begin
   var WorldsRoot: string := '.temp-data/combat-network-' + IntToStr(TimestampMillis());
   AssertTrue(Unwrap(Std.Fs.CreateDirAll(WorldsRoot)));
   var Config: ServerConfig := TestConfig(WorldsRoot);
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed, 4));
   var Source: CancellationSource := CreateCancellationSource();
   var Token: CancellationToken := GetCancellationToken(Source);
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
@@ -153,19 +155,19 @@ begin
   begin
     mutable var DeltaX: integer := 0;
     mutable var DeltaY: integer := 0;
-    if CurrentX < Metadata.Entrance.X then
+    if CurrentX < Metadata.SpawnEntrance.X then
     begin
       DeltaX := 1
     end
-    else if CurrentX > Metadata.Entrance.X then
+    else if CurrentX > Metadata.SpawnEntrance.X then
     begin
       DeltaX := -1
     end
-    else if CurrentY < Metadata.Entrance.Y then
+    else if CurrentY < Metadata.SpawnEntrance.Y then
     begin
       DeltaY := 1
     end
-    else if CurrentY > Metadata.Entrance.Y then
+    else if CurrentY > Metadata.SpawnEntrance.Y then
     begin
       DeltaY := -1
     end;
@@ -184,41 +186,32 @@ begin
   var Entered: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
   AssertEquals(PlayerMaximumHealth, Entered.Health);
   AssertEquals(0, Std.Arrays.Length(Entered.CombatLog));
-  // The coin lies ahead, not an opponent.
+  // No opponent stands ahead at the start; generated dungeons keep skeletons out of its sight.
   Response := Exchange(Client, Reader, ClientMessage.Attack, Token);
   Reader := Response.Reader;
   AssertRejected(Response.Message, 'attack_rejected');
   Response := Exchange(Client, Reader, ClientMessage.Wait, Token);
   Reader := Response.Reader;
   AssertTrue(LogContains(RequireFirstPerson(Response.Message).CombatLog, 'You wait.'));
-  // Into the inner passages: west, south, west, north up to (5, 3).
-  var Route: array of integer := [0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 2, 0, 0];
-  for Move: integer in Route do
-  begin
-    if Move = 0 then
-    begin
-      Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token)
-    end
-    else if Move = 1 then
-    begin
-      Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token)
-    end
-    else
-    begin
-      Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token)
-    end;
-
-    Reader := Response.Reader
-  end;
-  var InPassage: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-  AssertEquals(5, InPassage.PlayerX);
-  AssertEquals(3, InPassage.PlayerY);
-  // Face west; turning is free, so the skeleton does not move while the player turns.
-  Response := Exchange(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token);
-  Reader := Response.Reader;
+  // Walk towards the skeleton's room in the generated spawn dungeon until it stands ahead.
+  var Map: InteriorMap := SpawnDungeonMap(Metadata);
+  var Skeleton: InteriorPosition := Map.Hostiles[0].Position;
   mutable var View: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+  for Move: RouteMove in RouteTo(Map, VisiblePose(View), Skeleton, []) do
+  begin
+    if not HostileAhead(View) then
+    begin
+      if not ((Move = RouteMove.RouteForward) and SamePosition(FieldAhead(View), Skeleton)) then
+      begin
+        Response := Exchange(Client, Reader, RouteMessage(Move), Token);
+        Reader := Response.Reader;
+        View := RequireFirstPerson(Response.Message)
+      end
+    end
+  end;
+  // Turning is free; waiting lets an alerted skeleton close in until it stands ahead.
   mutable var Waited: integer := 0;
-  while (Std.Str.CharAt(View.Rows[3], 4) <> InteriorHostileCode) and (Waited < 6) do
+  while (not HostileAhead(View)) and (Waited < 8) do
   begin
     Response := Exchange(Client, Reader, ClientMessage.Wait, Token);
     Reader := Response.Reader;
@@ -226,8 +219,9 @@ begin
     Waited := Waited + 1
   end;
 
-  AssertEquals(InteriorHostileCode, Std.Str.CharAt(View.Rows[3], 4));
+  AssertTrue(HostileAhead(View));
   AssertTrue(Std.Str.Contains(View.Status, 'Space: Attack'));
+  var FightField: InteriorPosition := FieldAhead(View);
   Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
   Reader := Response.Reader;
   AssertRejected(Response.Message, 'movement_rejected');
@@ -253,7 +247,8 @@ begin
         AssertTrue((Fighting.Health >= 1) and (Fighting.Health <= Fighting.MaxHealth));
         if LogContains(Fighting.CombatLog, 'collapses') then
         begin
-          AssertTrue(Std.Str.CharAt(Fighting.Rows[3], 4) <> InteriorHostileCode);
+          AssertTrue(Std.Str.CharAt(Fighting.Rows[FightField.Y], FightField.X) <>
+                     InteriorHostileCode);
           Victory := true;
           Finished := true
         end
@@ -271,7 +266,8 @@ begin
     // With the skeleton gone the passage is open again.
     Response := Exchange(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
     Reader := Response.Reader;
-    AssertEquals(4, RequireFirstPerson(Response.Message).PlayerX)
+    AssertEquals(FightField.X, RequireFirstPerson(Response.Message).PlayerX);
+    AssertEquals(FightField.Y, RequireFirstPerson(Response.Message).PlayerY)
   end
   else
   begin

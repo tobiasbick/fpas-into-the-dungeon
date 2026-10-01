@@ -46,7 +46,7 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-The source currently requires Functional Pascal revision `3fe5a9e9` or newer;
+The source currently requires Functional Pascal revision `ee04e71c` or newer;
 it uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
 context-typed record updates such as `State with Hostiles := []; end`, and
 `Cmd.RequestTick` for combat animation, and imports the concurrency unit as

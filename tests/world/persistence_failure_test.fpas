@@ -1,0 +1,200 @@
+// Covers the savegame failure matrix: missing, invalid, and unreadable levels never remove a save.
+program PersistenceFailureTest;
+
+uses
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Items, Dungeon.Terrain,
+  Dungeon.Terrain.Entrances, Dungeon.Test.Fixtures, Dungeon.Test.Levels, Dungeon.World,
+  Dungeon.World.Interiors.Errors, Dungeon.World.Savegame, Dungeon.World.Savegame.Errors, Std.Arrays,
+  Std.Conv, Std.Fs, Std.Path, Std.Results, Std.Str, Std.Test, Std.Time;
+
+function LevelPath(World: WorldSession): string;
+begin
+  var Region: RegionCoordinate := RegionOf(World.Metadata, World.Metadata.Spawn);
+  return Std.Path.Join([
+                         World.Directory,
+                         'dungeons',
+                         (IntToStr(Region.X) + '_') + IntToStr(Region.Y),
+                         '0.json'
+                       ])
+end;
+
+// Names the class of a persistence failure without looking at any message text.
+function FailureClass(Failure: PersistenceFailure): string;
+begin
+  case Failure of
+    PersistenceFailure.InvalidState(Reason):
+    begin
+      return 'invalid-state'
+    end;
+    PersistenceFailure.Io(Reason):
+    begin
+      return 'io'
+    end;
+    PersistenceFailure.Level(Level):
+    begin
+      case Level of
+        LevelFailure.Missing(AreaId):
+        begin
+          return 'level-missing'
+        end;
+        LevelFailure.Invalid(AreaId, Reason):
+        begin
+          return 'level-invalid'
+        end;
+        LevelFailure.Io(Reason):
+        begin
+          return 'level-io'
+        end;
+        LevelFailure.Generation(AreaId, Reason):
+        begin
+          return 'level-generation'
+        end
+      end
+    end
+  end
+end;
+
+// Names the class of a load outcome without looking at any message text.
+function LoadClass(Value: result of SaveGameLoad, PersistenceFailure): string;
+begin
+  case Value of
+    Ok(Loaded):
+    begin
+      case Loaded of
+        SaveGameLoad.Missing:
+        begin
+          return 'missing'
+        end;
+        SaveGameLoad.InvalidRemoved(Reason):
+        begin
+          return 'removed'
+        end;
+        SaveGameLoad.Loaded(State, View):
+        begin
+          return 'loaded'
+        end
+      end
+    end;
+    Error(Failure):
+    begin
+      return FailureClass(Failure)
+    end
+  end
+end;
+
+function WriteClass(Value: result of boolean, PersistenceFailure): string;
+begin
+  case Value of
+    Ok(Written):
+    begin
+      return 'written'
+    end;
+    Error(Failure):
+    begin
+      return FailureClass(Failure)
+    end
+  end
+end;
+
+begin
+  var Root: string := '.temp-data/persistence-failure-test-' + IntToStr(TimestampMillis());
+  var World: WorldSession := Std.Results.Unwrap(OpenWorld(Root, 'failures', 24680, 4, 16));
+  var Dungeons: string := Std.Path.Join([World.Directory, 'dungeons']);
+  // No save: Missing, and no level is inspected or created.
+  AssertEquals('missing', LoadClass(LoadSaveGame(World)));
+  AssertFalse(Std.Fs.Exists(Dungeons));
+  // A valid save that visited the spawn dungeon, standing outside again.
+  var Map: InteriorMap := SpawnLevel(World);
+  var Entered: GameState := Std.Results.Unwrap(EnterSpawnLevel(World, NewGame(World.Metadata)));
+  var AtExit: GameState := Entered with Player := PlayerPosition.FirstPerson(record
+    Position := Map.Exit;
+    Facing := Map.StartFacing;
+  end); end;
+  var Outside: GameState := Std.Results.Unwrap(LeaveLevel(World, AtExit, Map));
+  AssertEquals('written', WriteClass(WriteSaveGame(World, Outside)));
+  var SaveText: string := Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
+  var LevelText: string := Std.Results.Unwrap(Std.Fs.ReadText(LevelPath(World)));
+  // Fully valid: loaded without any write.
+  AssertEquals('loaded', LoadClass(LoadSaveGame(World)));
+  AssertEquals(SaveText, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  AssertEquals(LevelText, Std.Results.Unwrap(Std.Fs.ReadText(LevelPath(World))));
+  // Missing referenced level: a world-data failure that keeps the save and never regenerates.
+  AssertTrue(Std.Results.Unwrap(Std.Fs.DeleteFile(LevelPath(World))));
+  AssertEquals('level-missing', LoadClass(LoadSaveGame(World)));
+  AssertEquals(SaveText, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  AssertFalse(Std.Fs.Exists(LevelPath(World)));
+  AssertEquals('level-missing', WriteClass(WriteSaveGame(World, Outside)));
+  AssertEquals(SaveText, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  // Invalid referenced level: reported, never repaired, and the save is kept.
+  var Broken: string := Std.Str.Replace(LevelText, '"level":0', '"level":1');
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(LevelPath(World), Broken)));
+  AssertEquals('level-invalid', LoadClass(LoadSaveGame(World)));
+  AssertEquals(SaveText, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  AssertEquals(Broken, Std.Results.Unwrap(Std.Fs.ReadText(LevelPath(World))));
+  // A level path that cannot be read is an I/O failure of the level.
+  AssertTrue(Std.Results.Unwrap(Std.Fs.DeleteFile(LevelPath(World))));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDirAll(LevelPath(World))));
+  AssertEquals('level-io', LoadClass(LoadSaveGame(World)));
+  AssertEquals('level-io', WriteClass(WriteSaveGame(World, Outside)));
+  AssertEquals(SaveText, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  // Restore the level; valid levels with a save that violates them remove only the save.
+  var RestoreRoot: string := Std.Path.Join([Root, 'restore']);
+  var Fresh: WorldSession := Std.Results.Unwrap(OpenWorld(RestoreRoot, 'failures', 24680, 4, 16));
+  var FreshMap: InteriorMap := SpawnLevel(Fresh);
+  var FreshOutside: GameState := Std.Results.Unwrap(LeaveLevel(Fresh, Std.Results.Unwrap(EnterSpawnLevel(Fresh, NewGame(Fresh.Metadata))) with Player := PlayerPosition.FirstPerson(record
+    Position := FreshMap.Exit;
+    Facing := FreshMap.StartFacing;
+  end); end, FreshMap));
+  mutable var OnWall: GameState := FreshOutside;
+  OnWall.Items[0] := OnWall.Items[0] with Location := ItemLocation.InInterior(FreshMap.AreaId, record
+    X := 0;
+    Y := 0;
+  end); end;
+
+  AssertEquals('invalid-state', WriteClass(WriteSaveGame(Fresh, OnWall)));
+  AssertFalse(Std.Fs.Exists(SaveGamePath(Fresh)));
+  AssertEquals('written', WriteClass(WriteSaveGame(Fresh, FreshOutside)));
+  var FreshSave: string := Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(Fresh)));
+  AssertEquals('invalid-state', WriteClass(WriteSaveGame(Fresh, OnWall)));
+  AssertEquals(FreshSave, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(Fresh))));
+  var FreshLevel: string := Std.Results.Unwrap(Std.Fs.ReadText(LevelPath(Fresh)));
+  var ItemField: InteriorPosition := FreshMap.Items[0].Position;
+  var ItemJson: string := (('"x":' + IntToStr(ItemField.X)) + ',"y":') + IntToStr(ItemField.Y);
+  AssertTrue(Std.Str.Contains(FreshSave, ItemJson));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(SaveGamePath(Fresh), Std.Str.Replace(FreshSave, ItemJson, '"x":0,"y":0'))));
+  AssertEquals('removed', LoadClass(LoadSaveGame(Fresh)));
+  AssertFalse(Std.Fs.Exists(SaveGamePath(Fresh)));
+  AssertEquals(FreshLevel, Std.Results.Unwrap(Std.Fs.ReadText(LevelPath(Fresh))));
+  // An unreadable save is an I/O failure; a blocked save directory makes writing fail the same way.
+  AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDirAll(SaveGamePath(Fresh))));
+  AssertEquals('io', LoadClass(LoadSaveGame(Fresh)));
+  AssertTrue(Std.Fs.Exists(SaveGamePath(Fresh)));
+  var Blocked: WorldSession := Std.Results.Unwrap(OpenWorld(Std.Path.Join([Root, 'blocked']), 'failures', 24680, 4, 16));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(Std.Path.Join([Blocked.Directory, 'saves']), 'not a directory')));
+  AssertEquals('io', WriteClass(WriteSaveGame(Blocked, NewGame(Blocked.Metadata))));
+  AssertEquals('not a directory', Std.Results.Unwrap(Std.Fs.ReadText(Std.Path.Join([
+                                                                                     Blocked.Directory,
+                                                                                     'saves'
+                                                                                   ]))));
+  // An older save that never visited an existing level loads unvisited and reuses the file on entry.
+  var Older: WorldSession := Std.Results.Unwrap(OpenWorld(Std.Path.Join([Root, 'older']), 'failures', 24680, 4, 16));
+  AssertEquals('written', WriteClass(WriteSaveGame(Older, NewGame(Older.Metadata))));
+  var OlderMap: InteriorMap := SpawnLevel(Older);
+  var OlderLevel: string := Std.Results.Unwrap(Std.Fs.ReadText(LevelPath(Older)));
+  case Std.Results.Unwrap(LoadSaveGame(Older)) of
+    SaveGameLoad.Loaded(State, View):
+    begin
+      AssertEquals(0, Std.Arrays.Length(State.VisitedAreas));
+      AssertEquals(0, Std.Arrays.Length(State.Items));
+      var Again: GameState := Std.Results.Unwrap(EnterSpawnLevel(Older, State));
+      AssertEquals(Std.Arrays.Length(OlderMap.Items), Std.Arrays.Length(Again.Items));
+      AssertEquals(Std.Arrays.Length(OlderMap.Hostiles), Std.Arrays.Length(Again.Hostiles))
+    end
+    else
+    begin
+      panic('expected the older save to load')
+    end
+  end;
+
+  AssertEquals(OlderLevel, Std.Results.Unwrap(Std.Fs.ReadText(LevelPath(Older))))
+end.

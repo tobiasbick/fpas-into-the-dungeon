@@ -2,8 +2,9 @@
 unit Dungeon.GameState;
 
 uses
-  Dungeon.Exploration.Model, Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Items,
-  Dungeon.Random, Dungeon.Terrain, Std.Arrays;
+  Dungeon.Areas.Identities, Dungeon.Exploration.Model, Dungeon.Coordinates, Dungeon.Hostiles,
+  Dungeon.Interior, Dungeon.Items, Dungeon.Random, Dungeon.Terrain, Dungeon.Terrain.Entrances,
+  Std.Arrays;
 
 public const
   // Full health of a new player character; health never exceeds it.
@@ -223,11 +224,11 @@ begin
   end
 end;
 
-// Performs per-intention state checks using only the supplied current geometry.
-// Placement completeness and non-current geometry are checked by ValidateSavedGame.
-public function ValidateGameState(View: AreaView; State: GameState): result of GameState, string;
+// Checks every self-contained state rule without any map: scalar ranges, visited areas, identities,
+// inventory and slots, area kinds, poses, and return locations. Not a full validation; geometry
+// of the current area is checked by ValidateGameState and placements by ValidateSavedGame.
+public function ValidateStateShape(Metadata: WorldMetadata; State: GameState): result of GameState, string;
 begin
-  var Metadata: WorldMetadata := View.Metadata;
   var ValidExploration: ExplorationState := try ValidateExploration(State.Exploration, WorldChunkSize);
   if (State.Health < 1) or (State.Health > PlayerMaximumHealth) then
   begin
@@ -283,15 +284,6 @@ begin
         if not HasVisitedArea(State, AreaId) then
         begin
           return Error('item names an unknown interior area')
-        end;
-
-        if (State.Area = AreaKind.Dungeon) and (AreaId = State.AreaId) then
-        begin
-          var Map: InteriorMap := try CurrentInterior(View, State);
-          if try InteriorCellAt(Map, Position) <> InteriorCellKind.Floor then
-          begin
-            return Error('interior item must occupy an ordinary floor field')
-          end
         end;
 
         for Other: integer := 0 to Index - 1 do
@@ -384,15 +376,6 @@ begin
       begin
         return Error('standing opponents must occupy distinct fields')
       end
-    end;
-
-    if (State.Area = AreaKind.Dungeon) and (Hostile.AreaId = State.AreaId) then
-    begin
-      var Map: InteriorMap := try CurrentInterior(View, State);
-      if try InteriorCellAt(Map, Hostile.Position) = InteriorCellKind.Wall then
-      begin
-        return Error('opponent must occupy a traversable field')
-      end
     end
   end;
 
@@ -401,15 +384,6 @@ begin
     if not HasVisitedArea(State, Area.AreaId) then
     begin
       return Error('game state contains discovery for an unknown interior area')
-    end;
-
-    if (State.Area = AreaKind.Dungeon) and (Area.AreaId = State.AreaId) then
-    begin
-      var Map: InteriorMap := try CurrentInterior(View, State);
-      if (Area.Width <> Map.Width) or (Area.Height <> Map.Height) then
-      begin
-        return Error('interior discovery dimensions do not match the authoritative area')
-      end
     end
   end;
 
@@ -418,16 +392,6 @@ begin
     if State.Area <> AreaKind.OutdoorRegion then
     begin
       return Error('outdoor area identity requires outdoor area kind')
-    end;
-
-    case View.Interior of
-      Some(Map):
-      begin
-        return Error('outdoor area view must not contain an interior map')
-      end;
-      None:
-      begin
-      end
     end;
     var Position: WorldPosition := try OutdoorPlayerPosition(State);
     case State.ReturnLocation of
@@ -448,13 +412,7 @@ begin
     begin
       return Error('current dungeon must be visited')
     end;
-    var Map: InteriorMap := try CurrentInterior(View, State);
     var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
-    if try InteriorCellAt(Map, Pose.Position) = InteriorCellKind.Wall then
-    begin
-      return Error('first-person player position must be traversable')
-    end;
-
     if StandingHostileAt(State, State.AreaId, Pose.Position) >= 0 then
     begin
       return Error('first-person player position must not overlap a standing opponent')
@@ -467,10 +425,19 @@ begin
         begin
           return Error('dungeon return location must name the outdoor area')
         end;
-
-        if (Position.X <> Metadata.Entrance.X) or (Position.Y <> Metadata.Entrance.Y) then
-        begin
-          return Error('dungeon return location must name the exact outdoor entrance')
+        var Region: RegionCoordinate := try ParseDungeonAreaId(Metadata, State.AreaId);
+        case EntranceSite(Metadata, Region) of
+          Some(Site):
+          begin
+            if (Position.X <> Site.X) or (Position.Y <> Site.Y) then
+            begin
+              return Error('dungeon return location must name the entrance site of its region')
+            end
+          end;
+          None:
+          begin
+            return Error('dungeon region has no entrance site')
+          end
         end;
 
         return Ok(State)
@@ -483,4 +450,73 @@ begin
   end;
 
   return Error('game state names an unknown area identity')
+end;
+
+// Performs per-intention state checks: the self-contained shape plus the current area's geometry
+// from the supplied view. Placement completeness and non-current geometry are checked by ValidateSavedGame.
+public function ValidateGameState(View: AreaView; State: GameState): result of GameState, string;
+begin
+  var Shaped: GameState := try ValidateStateShape(View.Metadata, State);
+  if State.Area <> AreaKind.Dungeon then
+  begin
+    case View.Interior of
+      Some(Map):
+      begin
+        return Error('outdoor area view must not contain an interior map')
+      end;
+      None:
+      begin
+        return Ok(State)
+      end
+    end
+  end;
+  var Map: InteriorMap := try CurrentInterior(View, State);
+  var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
+  if try InteriorCellAt(Map, Pose.Position) = InteriorCellKind.Wall then
+  begin
+    return Error('first-person player position must be traversable')
+  end;
+
+  for Item: GameItem in State.Items do
+  begin
+    case Item.Location of
+      ItemLocation.InInterior(AreaId, Position):
+      begin
+        if AreaId = State.AreaId then
+        begin
+          if try InteriorCellAt(Map, Position) <> InteriorCellKind.Floor then
+          begin
+            return Error('interior item must occupy an ordinary floor field')
+          end
+        end
+      end
+      else
+      begin
+      end
+    end
+  end;
+
+  for Hostile: GameHostile in State.Hostiles do
+  begin
+    if Hostile.AreaId = State.AreaId then
+    begin
+      if try InteriorCellAt(Map, Hostile.Position) = InteriorCellKind.Wall then
+      begin
+        return Error('opponent must occupy a traversable field')
+      end
+    end
+  end;
+
+  for Area: InteriorDiscoveryArea in State.Exploration.InteriorAreas do
+  begin
+    if Area.AreaId = State.AreaId then
+    begin
+      if (Area.Width <> Map.Width) or (Area.Height <> Map.Height) then
+      begin
+        return Error('interior discovery dimensions do not match the authoritative area')
+      end
+    end
+  end;
+
+  return Ok(State)
 end;

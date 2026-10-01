@@ -2,11 +2,12 @@
 program DungeonServerLoopbackTest;
 
 uses
-  Dungeon.Coordinates, Dungeon.Interaction, Dungeon.Items, Dungeon.Protocol,
-  Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport,
-  Dungeon.Server, Dungeon.Server.Config, Dungeon.Terrain, Dungeon.Terrain.Placement, Dungeon.World,
-  Dungeon.World.Savegame, Std.Arrays, Std.Conv, Std.Fs, Std.Net, Std.Path, Std.Results, Std.Str,
-  Std.Tasks, Std.Test, Std.Time;
+  Dungeon.Test.Fixtures, Dungeon.Test.Routes, Dungeon.Areas.Identities, Dungeon.Coordinates,
+  Dungeon.Hostiles, Dungeon.Interior, Dungeon.Interior.Generation.Validation, Dungeon.Interaction,
+  Dungeon.Items, Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
+  Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config, Dungeon.Terrain,
+  Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Conv, Std.Fs,
+  Std.Net, Std.Path, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time;
 
 function TestConfig(WorldsRoot: string): ServerConfig;
 begin
@@ -14,6 +15,7 @@ begin
     WorldsRoot := WorldsRoot;
     WorldId := 'loopback';
     WorldSeed := 56789;
+    DungeonRegionChunks := 4;
     ChunkCacheLimit := 32;
     MaximumViewWidth := 240;
     MaximumViewHeight := 20;
@@ -47,6 +49,56 @@ begin
     else
     begin
       panic('expected first-person visible state')
+    end
+  end
+end;
+
+type
+  // One response line and the reader positioned after it.
+  Exchanged = record
+    Reader: LineReader;
+    Message: ServerMessage;
+  end;
+
+// Sends one client message and decodes the single response.
+function Ask(
+  Client: Connection;
+  Reader: LineReader;
+  Message: ClientMessage;
+  Token: CancellationToken
+): Exchanged;
+begin
+  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(Message), Token)));
+  var LineValue: LineRead := Unwrap(ReadLine(Reader, Token));
+  return record
+    Reader := LineValue.Reader;
+    Message := Unwrap(DecodeServer(LineValue.Line));
+  end
+end;
+
+function RequireState(Message: ServerMessage): VisibleState;
+begin
+  case Message of
+    ServerMessage.State(Value):
+    begin
+      return Value
+    end
+    else
+    begin
+      panic('expected a state message')
+    end
+  end
+end;
+
+procedure RequireSaved(Message: ServerMessage);
+begin
+  case Message of
+    ServerMessage.SaveCompleted:
+    begin
+    end
+    else
+    begin
+      panic('expected save completion')
     end
   end
 end;
@@ -89,7 +141,7 @@ begin
   var WorldsRoot: string := '.temp-data/server-loopback-' + IntToStr(TimestampMillis());
   var Config: ServerConfig := TestConfig(WorldsRoot);
   EnsureWorldRoot(Config);
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
+  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed, 4));
   AssertEquals(0, LocalForCoordinate(Metadata.Spawn.X));
   var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
   var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
@@ -260,7 +312,7 @@ begin
       panic('expected undiscovered exploration-map window')
     end
   end;
-  var InspectionWorld: WorldSession := Unwrap(OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit));
+  var InspectionWorld: WorldSession := Unwrap(OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, 4, Config.ChunkCacheLimit));
   AssertFalse(Std.Fs.Exists(WorldChunkPath(InspectionWorld, record
     X := ChunkForCoordinate(FarOriginX);
     Y := ChunkForCoordinate(FarOriginY);
@@ -298,15 +350,15 @@ begin
   begin
     mutable var DeltaX: integer := 0;
     mutable var DeltaY: integer := 0;
-    if CurrentX < Metadata.Entrance.X then
+    if CurrentX < Metadata.SpawnEntrance.X then
     begin
       DeltaX := 1
     end
-    else if CurrentX > Metadata.Entrance.X then
+    else if CurrentX > Metadata.SpawnEntrance.X then
     begin
       DeltaX := -1
     end
-    else if CurrentY < Metadata.Entrance.Y then
+    else if CurrentY < Metadata.SpawnEntrance.Y then
     begin
       DeltaY := 1
     end
@@ -334,66 +386,77 @@ begin
     end
   end;
 
-  AssertEquals(Metadata.Entrance.X, CurrentX);
-  AssertEquals(Metadata.Entrance.Y, CurrentY);
+  AssertEquals(Metadata.SpawnEntrance.X, CurrentX);
+  AssertEquals(Metadata.SpawnEntrance.Y, CurrentY);
   AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token)));
   var EnteredRead: LineRead := Unwrap(ReadLine(Reader, Token));
   Reader := EnteredRead.Reader;
-  case Unwrap(DecodeServer(EnteredRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(Metadata.DungeonAreaLabel, FirstPersonValue.Title);
-      AssertEquals('Ancient coin — Enter: Examine', FirstPersonValue.Status);
-      AssertEquals(11, FirstPersonValue.Width);
-      AssertEquals(9, FirstPersonValue.Height);
-      AssertEquals(9, FirstPersonValue.PlayerX);
-      AssertEquals(1, FirstPersonValue.PlayerY);
-      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West);
-      AssertEquals(0, Std.Arrays.Length(FirstPersonValue.Inventory));
-      AssertEquals('i', Std.Str.CharAt(FirstPersonValue.Rows[1], 8));
-      AssertTrue(Std.Str.Contains(FirstPersonValue.Rows[0], '?'));
-      AssertEquals('v', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[1], 9));
-      // Entry faces west: both immediate lateral fields must reach the client,
-      // including the wall north of the player and the open southern branch.
-      AssertEquals('#', Std.Str.CharAt(FirstPersonValue.Rows[0], 9));
-      AssertEquals('.', Std.Str.CharAt(FirstPersonValue.Rows[2], 9));
-      AssertEquals('v', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[0], 9));
-      AssertEquals('v', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[2], 9));
-      AssertEquals('?', Std.Str.CharAt(FirstPersonValue.Rows[7], 1));
-      AssertEquals('u', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[7], 1))
-    end
-    else
-    begin
-      panic('expected first-person state after entry')
-    end
+  // Entry: the generated 31 by 21 spawn dungeon, at its start facing east with the exit behind.
+  var Map: InteriorMap := SpawnDungeonMap(Metadata);
+  mutable var Avoid: array of InteriorPosition := [];
+  for Hostile: HostilePlacement in Map.Hostiles do
+  begin
+    Std.Arrays.Push(Avoid, Hostile.Position)
+  end;
+  var Entered: FirstPersonVisibleState := RequireFirstPerson(RequireState(Unwrap(DecodeServer(EnteredRead.Line))));
+  AssertEquals(GeneratedDungeonLabel, Entered.Title);
+  AssertEquals(GeneratedDungeonWidth, Entered.Width);
+  AssertEquals(GeneratedDungeonHeight, Entered.Height);
+  AssertEquals(Map.Start.X, Entered.PlayerX);
+  AssertEquals(Map.Start.Y, Entered.PlayerY);
+  AssertTrue(Entered.Facing = FirstPersonFacing.East);
+  AssertEquals(0, Std.Arrays.Length(Entered.Inventory));
+  AssertEquals('v', Std.Str.CharAt(Entered.KnowledgeRows[Map.Start.Y], Map.Start.X));
+  // Both immediate lateral fields reach the client; the exit behind the player stays undiscovered.
+  for Side: integer in [-1, 1] do
+  begin
+    var Lateral: InteriorPosition := record
+      X := Map.Start.X;
+      Y := Map.Start.Y + Side;
+    end;
+
+    AssertEquals('v', Std.Str.CharAt(Entered.KnowledgeRows[Lateral.Y], Lateral.X));
+    AssertEquals(InteriorCellCode(Unwrap(InteriorCellAt(Map, Lateral))), Std.Str.CharAt(Entered.Rows[Lateral.Y], Lateral.X))
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.ExplorationMap(0, 0, 11, 9)), Token)));
-  var InteriorMapRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := InteriorMapRead.Reader;
-  case Unwrap(DecodeServer(InteriorMapRead.Line)) of
+  AssertEquals('?', Std.Str.CharAt(Entered.Rows[Map.Exit.Y], Map.Exit.X));
+  AssertEquals('u', Std.Str.CharAt(Entered.KnowledgeRows[Map.Exit.Y], Map.Exit.X));
+  // The test server caps windows at 20 rows; generated exits lie inside the outer wall.
+  mutable var Answer: Exchanged := Ask(Client, Reader, ClientMessage.ExplorationMap(0, 0, GeneratedDungeonWidth, 20), Token);
+  Reader := Answer.Reader;
+  case Answer.Message of
     ServerMessage.ExplorationMap(Value):
     begin
       AssertTrue(Value.View = ViewKind.FirstPerson);
-      AssertEquals(Metadata.DungeonAreaLabel, Value.LabelText);
+      AssertEquals(GeneratedDungeonLabel, Value.LabelText);
       AssertTrue(Value.PlayerInWindow);
-      AssertEquals(9, Value.PlayerWorldX);
-      AssertEquals(1, Value.PlayerWorldY);
-      AssertEquals('i', Std.Str.CharAt(Value.Rows[1], 8));
-      AssertEquals('?', Std.Str.CharAt(Value.Rows[7], 1));
-      AssertEquals('u', Std.Str.CharAt(Value.KnowledgeRows[7], 1))
+      AssertEquals(Map.Start.X, Value.PlayerWorldX);
+      AssertEquals(Map.Start.Y, Value.PlayerWorldY);
+      AssertEquals('?', Std.Str.CharAt(Value.Rows[Map.Exit.Y], Map.Exit.X));
+      AssertEquals('u', Std.Str.CharAt(Value.KnowledgeRows[Map.Exit.Y], Map.Exit.X))
     end
     else
     begin
       panic('expected current interior exploration map')
     end
   end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token)));
-  var InspectedItemRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := InspectedItemRead.Reader;
-  case Unwrap(DecodeServer(InspectedItemRead.Line)) of
+  // Walk up to the coin, inspect it from the field before, then step onto it and pick it up.
+  var CoinField: InteriorPosition := Map.Items[0].Position;
+  var CoinId: string := ItemPlacementId(SpawnDungeonAreaId(Metadata), 0);
+  var CoinRoute: array of RouteMove := RouteTo(Map, VisiblePose(Entered), CoinField, Avoid);
+  mutable var View: FirstPersonVisibleState := Entered;
+  for Index: integer := 0 to Std.Arrays.Length(CoinRoute) - 2 do
+  begin
+    Answer := Ask(Client, Reader, RouteMessage(CoinRoute[Index]), Token);
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message))
+  end;
+  var BeforeCoin: InteriorPosition := VisiblePose(View).Position;
+  AssertTrue(SamePosition(FieldAhead(View), CoinField));
+  AssertEquals('i', Std.Str.CharAt(View.Rows[CoinField.Y], CoinField.X));
+  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Answer.Reader;
+  case Answer.Message of
     ServerMessage.Interaction(Title, Message):
     begin
       AssertEquals(AncientCoinName, Title);
@@ -405,79 +468,31 @@ begin
     end
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
-  var ItemStepRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := ItemStepRead.Reader;
-  case Unwrap(DecodeServer(ItemStepRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals('At your feet: Ancient coin — Enter: Pick up', FirstPersonValue.Status);
-      AssertEquals(8, FirstPersonValue.PlayerX);
-      AssertEquals(1, FirstPersonValue.PlayerY);
-      AssertEquals(0, Std.Arrays.Length(FirstPersonValue.Inventory));
-      AssertEquals('i', Std.Str.CharAt(FirstPersonValue.Rows[1], 8))
-    end
-    else
-    begin
-      panic('expected movement onto the item field')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token)));
-  var PickedUpItemRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := PickedUpItemRead.Reader;
-  case Unwrap(DecodeServer(PickedUpItemRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(1, Std.Arrays.Length(FirstPersonValue.Inventory));
-      AssertEquals(ItemPlacementId(Metadata.DungeonAreaId, 0), FirstPersonValue.Inventory[0].Id);
-      AssertEquals(AncientCoinName, FirstPersonValue.Inventory[0].Name);
-      AssertEquals('.', Std.Str.CharAt(FirstPersonValue.Rows[1], 8))
-    end
-    else
-    begin
-      panic('expected state projection after item pickup')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token)));
-  var RepeatedPickupRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := RepeatedPickupRead.Reader;
-  case Unwrap(DecodeServer(RepeatedPickupRead.Line)) of
-    ServerMessage.Interaction(Title, Message):
-    begin
-      AssertEquals('', Title);
-      AssertEquals(NoInteractionMessage, Message)
-    end
-    else
-    begin
-      panic('expected repeated pickup to find no second item')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward)), Token)));
-  var RestoredStartRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := RestoredStartRead.Reader;
-  case Unwrap(DecodeServer(RestoredStartRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(9, FirstPersonValue.PlayerX);
-      AssertEquals(1, FirstPersonValue.PlayerY);
-      AssertEquals(1, Std.Arrays.Length(FirstPersonValue.Inventory))
-    end
-    else
-    begin
-      panic('expected return to the initial dungeon position after pickup')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token)));
-  var DungeonMoveRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := DungeonMoveRead.Reader;
-  case Unwrap(DecodeServer(DungeonMoveRead.Line)) of
+  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+  Reader := Answer.Reader;
+  View := RequireFirstPerson(RequireState(Answer.Message));
+  AssertEquals('At your feet: Ancient coin — Enter: Pick up', View.Status);
+  AssertEquals(CoinField.X, View.PlayerX);
+  AssertEquals(CoinField.Y, View.PlayerY);
+  AssertEquals(0, Std.Arrays.Length(View.Inventory));
+  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Answer.Reader;
+  View := RequireFirstPerson(RequireState(Answer.Message));
+  AssertEquals(1, Std.Arrays.Length(View.Inventory));
+  AssertEquals(CoinId, View.Inventory[0].Id);
+  AssertEquals(AncientCoinName, View.Inventory[0].Name);
+  AssertEquals('.', Std.Str.CharAt(View.Rows[CoinField.Y], CoinField.X));
+  // The coin is gone from the field: picking up again finds no second item at the player's feet.
+  AssertFalse(Std.Str.Contains(View.Status, 'Pick up'));
+  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward), Token);
+  Reader := Answer.Reader;
+  View := RequireFirstPerson(RequireState(Answer.Message));
+  AssertEquals(BeforeCoin.X, View.PlayerX);
+  AssertEquals(BeforeCoin.Y, View.PlayerY);
+  AssertEquals(1, Std.Arrays.Length(View.Inventory));
+  Answer := Ask(Client, Reader, ClientMessage.Move(1, 0), Token);
+  Reader := Answer.Reader;
+  case Answer.Message of
     ServerMessage.Rejected(Code, Message):
     begin
       AssertEquals('movement_rejected', Code);
@@ -489,77 +504,69 @@ begin
     end
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Viewport(1000, 1000)), Token)));
-  var DungeonViewportRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := DungeonViewportRead.Reader;
-  case Unwrap(DecodeServer(DungeonViewportRead.Line)) of
-    ServerMessage.State(Value):
+  Answer := Ask(Client, Reader, ClientMessage.Viewport(1000, 1000), Token);
+  Reader := Answer.Reader;
+  View := RequireFirstPerson(RequireState(Answer.Message));
+  AssertEquals(GeneratedDungeonLabel, View.Title);
+  AssertEquals(GeneratedDungeonWidth, View.Width);
+  AssertEquals(GeneratedDungeonHeight, View.Height);
+  AssertEquals(BeforeCoin.X, View.PlayerX);
+  AssertEquals(BeforeCoin.Y, View.PlayerY);
+  // Sideways steps move one field without turning, or are rejected by a wall.
+  for Direction: FirstPersonStepDirection in [
+                                               FirstPersonStepDirection.Left,
+                                               FirstPersonStepDirection.Right
+                                             ] do
+  begin
+    var Pose: FirstPersonPose := VisiblePose(View);
+    mutable var Relative: RelativeStep := RelativeStep.Left;
+    if Direction = FirstPersonStepDirection.Right then
     begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(Metadata.DungeonAreaLabel, FirstPersonValue.Title);
-      AssertEquals(11, FirstPersonValue.Width);
-      AssertEquals(9, FirstPersonValue.Height);
-      AssertEquals(9, FirstPersonValue.PlayerX);
-      AssertEquals(1, FirstPersonValue.PlayerY)
+      Relative := RelativeStep.Right
+    end;
+    var Offset: InteriorPosition := StepOffset(Pose.Facing, Relative);
+    var Side: InteriorPosition := record
+      X := Pose.Position.X + Offset.X;
+      Y := Pose.Position.Y + Offset.Y;
+    end;
+
+    Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(Direction), Token);
+    Reader := Answer.Reader;
+    if Unwrap(InteriorCellAt(Map, Side)) = InteriorCellKind.Wall then
+    begin
+      case Answer.Message of
+        ServerMessage.Rejected(Code, Message):
+        begin
+          AssertEquals('movement_rejected', Code)
+        end
+        else
+        begin
+          panic('expected a sideways step into a wall to be rejected')
+        end
+      end
     end
     else
     begin
-      panic('viewport must retain the first-person geometry')
+      View := RequireFirstPerson(RequireState(Answer.Message));
+      AssertEquals(Side.X, View.PlayerX);
+      AssertEquals(Side.Y, View.PlayerY);
+      AssertTrue(VisiblePose(View).Facing = Pose.Facing)
     end
   end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Left)), Token)));
-  var StrafeLeftRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := StrafeLeftRead.Reader;
-  case Unwrap(DecodeServer(StrafeLeftRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(9, FirstPersonValue.PlayerX);
-      AssertEquals(2, FirstPersonValue.PlayerY)
-    end
-    else
-    begin
-      panic('expected first-person state after left step')
-    end
+  // Turn until a wall stands ahead: it offers no interaction and blocks a step.
+  mutable var Turns: integer := 0;
+  while (Unwrap(InteriorCellAt(Map, FieldAhead(View))) <> InteriorCellKind.Wall) and (Turns < 4) do
+  begin
+    Answer := Ask(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token);
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    Turns := Turns + 1
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Right)), Token)));
-  var StrafeRightRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := StrafeRightRead.Reader;
-  case Unwrap(DecodeServer(StrafeRightRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(9, FirstPersonValue.PlayerX);
-      AssertEquals(1, FirstPersonValue.PlayerY)
-    end
-    else
-    begin
-      panic('expected first-person state after right step')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right)), Token)));
-  var TurnNorthRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := TurnNorthRead.Reader;
-  case Unwrap(DecodeServer(TurnNorthRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.North);
-      AssertEquals('#', Std.Str.CharAt(FirstPersonValue.Rows[0], 9))
-    end
-    else
-    begin
-      panic('expected first-person state after right turn')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token)));
-  var WallInteractionRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := WallInteractionRead.Reader;
-  case Unwrap(DecodeServer(WallInteractionRead.Line)) of
+  AssertTrue(Unwrap(InteriorCellAt(Map, FieldAhead(View))) = InteriorCellKind.Wall);
+  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Answer.Reader;
+  case Answer.Message of
     ServerMessage.Interaction(Title, Message):
     begin
       AssertEquals('', Title);
@@ -571,10 +578,9 @@ begin
     end
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
-  var WallRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := WallRead.Reader;
-  case Unwrap(DecodeServer(WallRead.Line)) of
+  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+  Reader := Answer.Reader;
+  case Answer.Message of
     ServerMessage.Rejected(Code, Message):
     begin
       AssertEquals('movement_rejected', Code);
@@ -585,182 +591,54 @@ begin
       panic('expected wall collision rejection')
     end
   end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left)), Token)));
-  var TurnWestRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := TurnWestRead.Reader;
-  case Unwrap(DecodeServer(TurnWestRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      AssertTrue(RequireFirstPerson(Value).Facing = FirstPersonFacing.West)
-    end
-    else
-    begin
-      panic('expected valid action after rejected wall step')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left)), Token)));
-  var TurnSouthRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := TurnSouthRead.Reader;
-  case Unwrap(DecodeServer(TurnSouthRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      AssertTrue(RequireFirstPerson(Value).Facing = FirstPersonFacing.South)
-    end
-    else
-    begin
-      panic('expected south-facing state')
-    end
-  end;
-
-  for InteriorStep: integer := 1 to 6 do
+  // Head for the exit: save halfway, take one more move, and replace that save.
+  var ExitRoute: array of RouteMove := RouteTo(Map, VisiblePose(View), Map.Exit, Avoid);
+  AssertTrue(Std.Arrays.Length(ExitRoute) >= 3);
+  var Halfway: integer := Std.Arrays.Length(ExitRoute) div 2;
+  for Index: integer := 0 to Halfway - 1 do
   begin
-    AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
-    var StepRead: LineRead := Unwrap(ReadLine(Reader, Token));
-    Reader := StepRead.Reader;
-    case Unwrap(DecodeServer(StepRead.Line)) of
-      ServerMessage.State(Value):
-      begin
-        var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-        AssertEquals(9, FirstPersonValue.PlayerX);
-        AssertEquals(1 + InteriorStep, FirstPersonValue.PlayerY)
-      end
-      else
-      begin
-        panic('expected first-person state while walking south')
-      end
-    end
+    Answer := Ask(Client, Reader, RouteMessage(ExitRoute[Index]), Token);
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message))
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.SaveGame), Token)));
-  var SavedRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := SavedRead.Reader;
-  case Unwrap(DecodeServer(SavedRead.Line)) of
-    ServerMessage.SaveCompleted:
-    begin
-    end
-    else
-    begin
-      panic('expected save completion after atomic persistence')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right)), Token)));
-  var ExitTurnRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := ExitTurnRead.Reader;
-  case Unwrap(DecodeServer(ExitTurnRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      AssertTrue(RequireFirstPerson(Value).Facing = FirstPersonFacing.West)
-    end
-    else
-    begin
-      panic('expected west-facing state before exit corridor')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
-  var BeforeReplacementSaveRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := BeforeReplacementSaveRead.Reader;
-  case Unwrap(DecodeServer(BeforeReplacementSaveRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(8, FirstPersonValue.PlayerX);
-      AssertEquals(7, FirstPersonValue.PlayerY);
-      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West);
-      AssertEquals('r', Std.Str.CharAt(FirstPersonValue.KnowledgeRows[1], 9));
-      AssertFalse(Std.Str.CharAt(FirstPersonValue.Rows[1], 9) = '?')
-    end
-    else
-    begin
-      panic('expected state before replacement save')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.SaveGame), Token)));
-  var ReplacementSavedRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := ReplacementSavedRead.Reader;
-  case Unwrap(DecodeServer(ReplacementSavedRead.Line)) of
-    ServerMessage.SaveCompleted:
-    begin
-    end
-    else
-    begin
-      panic('expected second save completion after atomic replacement')
-    end
-  end;
-
-  for InteriorStep: integer := 1 to 7 do
+  Answer := Ask(Client, Reader, ClientMessage.SaveGame, Token);
+  Reader := Answer.Reader;
+  RequireSaved(Answer.Message);
+  Answer := Ask(Client, Reader, RouteMessage(ExitRoute[Halfway]), Token);
+  Reader := Answer.Reader;
+  View := RequireFirstPerson(RequireState(Answer.Message));
+  var SavedPose: FirstPersonPose := VisiblePose(View);
+  // The entry field was seen before and stays discovered.
+  AssertFalse(Std.Str.CharAt(View.KnowledgeRows[Map.Start.Y], Map.Start.X) = 'u');
+  AssertFalse(Std.Str.CharAt(View.Rows[Map.Start.Y], Map.Start.X) = '?');
+  Answer := Ask(Client, Reader, ClientMessage.SaveGame, Token);
+  Reader := Answer.Reader;
+  RequireSaved(Answer.Message);
+  for Index: integer := Halfway + 1 to Std.Arrays.Length(ExitRoute) - 1 do
   begin
-    AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
-    var StepRead: LineRead := Unwrap(ReadLine(Reader, Token));
-    Reader := StepRead.Reader;
-    case Unwrap(DecodeServer(StepRead.Line)) of
-      ServerMessage.State(Value):
-      begin
-        var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-        AssertEquals(8 - InteriorStep, FirstPersonValue.PlayerX);
-        AssertEquals(7, FirstPersonValue.PlayerY)
-      end
-      else
-      begin
-        panic('expected first-person state while walking to exit')
-      end
-    end
+    Answer := Ask(Client, Reader, RouteMessage(ExitRoute[Index]), Token);
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message))
   end;
 
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward)), Token)));
-  var BackwardRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := BackwardRead.Reader;
-  case Unwrap(DecodeServer(BackwardRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(2, FirstPersonValue.PlayerX);
-      AssertEquals(7, FirstPersonValue.PlayerY);
-      AssertEquals('Nothing in reach', FirstPersonValue.Status)
-    end
-    else
-    begin
-      panic('expected one-field backward movement')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
-  var ReturnToExitRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := ReturnToExitRead.Reader;
-  case Unwrap(DecodeServer(ReturnToExitRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(1, FirstPersonValue.PlayerX);
-      AssertEquals(7, FirstPersonValue.PlayerY);
-      AssertEquals('Press Enter to return to the outdoor region.', FirstPersonValue.Status)
-    end
-    else
-    begin
-      panic('expected exit-field state')
-    end
-  end;
-
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token)));
-  var LeftRead: LineRead := Unwrap(ReadLine(Reader, Token));
-  Reader := LeftRead.Reader;
-  case Unwrap(DecodeServer(LeftRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(Metadata.Entrance.X, MapValue.WorldX);
-      AssertEquals(Metadata.Entrance.Y, MapValue.WorldY)
-    end
-    else
-    begin
-      panic('expected restored map after leaving dungeon')
-    end
-  end;
-
+  AssertTrue(SamePosition(VisiblePose(View).Position, Map.Exit));
+  // One step back and forward again shows the exit hint only on the exit field.
+  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward), Token);
+  Reader := Answer.Reader;
+  View := RequireFirstPerson(RequireState(Answer.Message));
+  AssertFalse(SamePosition(VisiblePose(View).Position, Map.Exit));
+  AssertFalse(View.Status = 'Press Enter to return to the outdoor region.');
+  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
+  Reader := Answer.Reader;
+  View := RequireFirstPerson(RequireState(Answer.Message));
+  AssertTrue(SamePosition(VisiblePose(View).Position, Map.Exit));
+  AssertEquals('Press Enter to return to the outdoor region.', View.Status);
+  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
+  Reader := Answer.Reader;
+  var LeftMap: MapVisibleState := RequireMap(RequireState(Answer.Message));
+  AssertEquals(Metadata.SpawnEntrance.X, LeftMap.WorldX);
+  AssertEquals(Metadata.SpawnEntrance.Y, LeftMap.WorldY);
   AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Viewport(1000, 1000)), Token)));
   var ResizedRead: LineRead := Unwrap(ReadLine(Reader, Token));
   Reader := ResizedRead.Reader;
@@ -770,7 +648,7 @@ begin
       var MapValue: MapVisibleState := RequireMap(Value);
       AssertEquals(240, MapValue.Width);
       AssertEquals(20, MapValue.Height);
-      AssertEquals(Metadata.Entrance.X, MapValue.WorldX)
+      AssertEquals(Metadata.SpawnEntrance.X, MapValue.WorldX)
     end
     else
     begin
@@ -832,59 +710,26 @@ begin
   AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.LoadGame), Token)));
   var RestartState: LineRead := Unwrap(ReadLine(RestartReader, Token));
   RestartReader := RestartState.Reader;
-  case Unwrap(DecodeServer(RestartState.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-      AssertEquals(8, FirstPersonValue.PlayerX);
-      AssertEquals(7, FirstPersonValue.PlayerY);
-      AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.West);
-      AssertEquals(1, Std.Arrays.Length(FirstPersonValue.Inventory));
-      AssertEquals(ItemPlacementId(Metadata.DungeonAreaId, 0), FirstPersonValue.Inventory[0].Id)
-    end
-    else
-    begin
-      panic('expected saved first-person state after server restart')
-    end
-  end;
-
-  for LoadedStep: integer := 1 to 7 do
+  mutable var RestartView: FirstPersonVisibleState := RequireFirstPerson(RequireState(Unwrap(DecodeServer(RestartState.Line))));
+  AssertTrue(SamePosition(VisiblePose(RestartView).Position, SavedPose.Position));
+  AssertTrue(VisiblePose(RestartView).Facing = SavedPose.Facing);
+  AssertEquals(1, Std.Arrays.Length(RestartView.Inventory));
+  AssertEquals(CoinId, RestartView.Inventory[0].Id);
+  // The loaded game continues in the stored level: walk to the exit and leave with the coin.
+  for Move: RouteMove in RouteTo(Map, SavedPose, Map.Exit, Avoid) do
   begin
-    AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward)), Token)));
-    var LoadedStepRead: LineRead := Unwrap(ReadLine(RestartReader, Token));
-    RestartReader := LoadedStepRead.Reader;
-    case Unwrap(DecodeServer(LoadedStepRead.Line)) of
-      ServerMessage.State(Value):
-      begin
-        var FirstPersonValue: FirstPersonVisibleState := RequireFirstPerson(Value);
-        AssertEquals(8 - LoadedStep, FirstPersonValue.PlayerX);
-        AssertEquals(7, FirstPersonValue.PlayerY)
-      end
-      else
-      begin
-        panic('expected loaded interior movement toward exit')
-      end
-    end
+    Answer := Ask(RestartClient, RestartReader, RouteMessage(Move), Token);
+    RestartReader := Answer.Reader;
+    RestartView := RequireFirstPerson(RequireState(Answer.Message))
   end;
 
-  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.Interact), Token)));
-  var LoadedExitRead: LineRead := Unwrap(ReadLine(RestartReader, Token));
-  RestartReader := LoadedExitRead.Reader;
-  case Unwrap(DecodeServer(LoadedExitRead.Line)) of
-    ServerMessage.State(Value):
-    begin
-      var MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(Metadata.Entrance.X, MapValue.WorldX);
-      AssertEquals(Metadata.Entrance.Y, MapValue.WorldY);
-      AssertEquals(1, Std.Arrays.Length(MapValue.Inventory));
-      AssertEquals(ItemPlacementId(Metadata.DungeonAreaId, 0), MapValue.Inventory[0].Id)
-    end
-    else
-    begin
-      panic('expected loaded interior to return to saved outdoor location')
-    end
-  end;
-
+  Answer := Ask(RestartClient, RestartReader, ClientMessage.Interact, Token);
+  RestartReader := Answer.Reader;
+  var LoadedExit: MapVisibleState := RequireMap(RequireState(Answer.Message));
+  AssertEquals(Metadata.SpawnEntrance.X, LoadedExit.WorldX);
+  AssertEquals(Metadata.SpawnEntrance.Y, LoadedExit.WorldY);
+  AssertEquals(1, Std.Arrays.Length(LoadedExit.Inventory));
+  AssertEquals(CoinId, LoadedExit.Inventory[0].Id);
   AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.SaveGame), Token)));
   var OutdoorSavedRead: LineRead := Unwrap(ReadLine(RestartReader, Token));
   RestartReader := OutdoorSavedRead.Reader;
@@ -931,10 +776,10 @@ begin
     ServerMessage.State(Value):
     begin
       var MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(Metadata.Entrance.X, MapValue.WorldX);
-      AssertEquals(Metadata.Entrance.Y, MapValue.WorldY);
+      AssertEquals(Metadata.SpawnEntrance.X, MapValue.WorldX);
+      AssertEquals(Metadata.SpawnEntrance.Y, MapValue.WorldY);
       AssertEquals(1, Std.Arrays.Length(MapValue.Inventory));
-      AssertEquals(ItemPlacementId(Metadata.DungeonAreaId, 0), MapValue.Inventory[0].Id)
+      AssertEquals(ItemPlacementId(SpawnDungeonAreaId(Metadata), 0), MapValue.Inventory[0].Id)
     end
     else
     begin
@@ -960,8 +805,8 @@ begin
       end;
 
       AssertTrue(HasRemembered);
-      AssertEquals(Metadata.Entrance.X, Value.PlayerWorldX);
-      AssertEquals(Metadata.Entrance.Y, Value.PlayerWorldY)
+      AssertEquals(Metadata.SpawnEntrance.X, Value.PlayerWorldX);
+      AssertEquals(Metadata.SpawnEntrance.Y, Value.PlayerWorldY)
     end
     else
     begin
@@ -973,7 +818,7 @@ begin
   AssertTrue(Unwrap(Close(OutdoorRestartClient)));
   AssertTrue(Unwrap(Std.Tasks.Wait(OutdoorRestartTask)));
   AssertTrue(Unwrap(CloseListener(OutdoorRestartListener)));
-  var SavedWorld: WorldSession := Unwrap(OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.ChunkCacheLimit));
+  var SavedWorld: WorldSession := Unwrap(OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, 4, Config.ChunkCacheLimit));
   var SavePath: string := SaveGamePath(SavedWorld);
   var SavedBeforeNewGame: string := Unwrap(Std.Fs.ReadText(SavePath));
   var NewGameListener: Listener := Unwrap(Listen('127.0.0.1', 0));

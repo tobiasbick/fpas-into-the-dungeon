@@ -2,8 +2,9 @@
 unit Dungeon.Areas.Validation;
 
 uses
-  Dungeon.Coordinates, Dungeon.Exploration.Model, Dungeon.GameState, Dungeon.Hostiles,
-  Dungeon.Interior, Dungeon.Items, Dungeon.Terrain, Std.Arrays, Std.Str;
+  Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.Exploration.Model, Dungeon.GameState,
+  Dungeon.Hostiles, Dungeon.Interior, Dungeon.Items, Dungeon.Terrain, Dungeon.Terrain.Entrances,
+  Std.Arrays, Std.Conv, Std.Parse, Std.Str;
 
 function MapIndex(Maps: array of InteriorMap; AreaId: string): result of integer, string;
 begin
@@ -18,10 +19,71 @@ begin
   return Error('saved state references an area without a supplied map')
 end;
 
+// Returns whether Id is Prefix followed by a canonical non-negative index.
+function IsIndexedId(Id: string; Prefix: string): boolean;
+begin
+  if not Std.Str.StartsWith(Id, Prefix) then
+  begin
+    return false
+  end;
+  var Suffix: string := Std.Str.Substring(Id, Std.Str.Length(Prefix), Std.Str.Length(Id) -
+                                                                      Std.Str.Length(Prefix));
+  case Std.Parse.TryInt(Suffix) of
+    Ok(Index):
+    begin
+      return (Index >= 0) and (IntToStr(Index) = Suffix)
+    end
+    else
+    begin
+      return false
+    end
+  end
+end;
+
+// Checks a decoded save without reading any level: the self-contained state shape, canonical
+// visited dungeon identities of the selected world, and canonical placement identities of
+// visited areas. Not a full validation; ValidateSavedAreas still requires the visited maps.
+public function ValidateSaveShape(Metadata: WorldMetadata; State: GameState): result of GameState, string;
+begin
+  var Shaped: GameState := try ValidateStateShape(Metadata, State);
+  for AreaId: string in State.VisitedAreas do
+  begin
+    var Region: RegionCoordinate := try ParseDungeonAreaId(Metadata, AreaId)
+  end;
+
+  for Item: GameItem in State.Items do
+  begin
+    mutable var Canonical: boolean := false;
+    for AreaId: string in State.VisitedAreas do
+    begin
+      if IsIndexedId(Item.Id, AreaId + ':item:') then
+      begin
+        Canonical := true
+      end
+    end;
+
+    if not Canonical then
+    begin
+      return Error('saved item identity must name a placement of a visited area')
+    end
+  end;
+
+  for Hostile: GameHostile in State.Hostiles do
+  begin
+    if not IsIndexedId(Hostile.Id, Hostile.AreaId + ':hostile:') then
+    begin
+      return Error('saved opponent identity must name a placement of its area')
+    end
+  end;
+
+  return Ok(State)
+end;
+
 // Requires exact placement identities/kinds and valid mutable positions in every visited area.
 // Geometry is validated once here; no map is generated or loaded, including the current map.
 public function ValidateSavedAreas(Metadata: WorldMetadata; State: GameState; Maps: array of InteriorMap): result of GameState, string;
 begin
+  var Shaped: GameState := try ValidateSaveShape(Metadata, State);
   if Std.Arrays.Length(Maps) <> Std.Arrays.Length(State.VisitedAreas) then
   begin
     return Error('saved game requires exactly one map per visited area')
