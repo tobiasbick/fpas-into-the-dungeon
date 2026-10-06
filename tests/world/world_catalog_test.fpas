@@ -1,0 +1,67 @@
+// Verifies non-destructive world listing, exclusive creation, parameters, and failures.
+program WorldCatalogTest;
+
+uses
+  Dungeon.GameState, Dungeon.World, Dungeon.World.Catalog, Dungeon.World.Savegame, Std.Arrays,
+  Std.Conv, Std.Fs, Std.Path, Std.Results, Std.Str, Std.Test, Std.Time;
+
+begin
+  var Root: string := Std.Path.Join(['.temp-data', 'catalog-' + IntToStr(TimestampMillis())]);
+  AssertTrue(Unwrap(Std.Fs.CreateDirAll(Root)));
+  AssertEquals(0, Std.Arrays.Length(Unwrap(ListWorlds(Root, 16))));
+  AssertTrue(IsError(OpenExistingWorld(Root, 'absent', 16)));
+  AssertFalse(Std.Fs.Exists(Std.Path.Join([Root, 'absent'])));
+  for Id: string in ['', '..', '../outside', 'a/b', 'a\b', Std.Str.RepeatStr('x', 65)] do
+    begin
+      AssertTrue(IsError(OpenExistingWorld(Root, Id, 16)));
+    end;
+  end for;
+
+  for Region: integer in [0, 17] do
+    begin
+      AssertTrue(IsError(CreateWorld(Root, 1, Region, 16)));
+    end;
+  end for;
+
+  for Seed: integer in [MinimumWorldSeed - 1, MaximumWorldSeed + 1] do
+    begin
+      AssertTrue(IsError(CreateWorld(Root, Seed, 4, 16)));
+    end;
+  end for;
+
+  AssertEquals(0, Std.Arrays.Length(Unwrap(ListWorlds(Root, 16))));
+  var First: WorldSession := Unwrap(CreateWorld(Root, 12345, 1, 16));
+  var Second: WorldSession := Unwrap(CreateWorld(Root, 12345, 16, 16));
+  AssertTrue(First.Metadata.Id <> Second.Metadata.Id);
+  AssertEquals(12345, Second.Metadata.Seed);
+  AssertEquals(16, Second.Metadata.DungeonRegionChunks);
+  var Before: string := Unwrap(Std.Fs.ReadText(WorldMetadataPath(First)));
+  var Again: WorldSession := Unwrap(OpenExistingWorld(Root, First.Metadata.Id, 16));
+  AssertTrue(First.Metadata = Again.Metadata);
+  AssertEquals('missing', InspectWorld(Root, First.Metadata.Id, 16).SaveStatus);
+  AssertTrue(Unwrap(WriteSaveGame(First, NewGame(First.Metadata))));
+  AssertEquals('available', InspectWorld(Root, First.Metadata.Id, 16).SaveStatus);
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(SaveGamePath(First), '{')));
+  AssertEquals('incompatible', InspectWorld(Root, First.Metadata.Id, 16).SaveStatus);
+  AssertEquals('{', Unwrap(Std.Fs.ReadText(SaveGamePath(First))));
+  AssertEquals(Before, Unwrap(Std.Fs.ReadText(WorldMetadataPath(First))));
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(WorldMetadataPath(Second), Std.Str.Replace(Unwrap(Std.Fs.ReadText(WorldMetadataPath(Second))), '"generator_version":6', '"generator_version":0'))));
+  AssertEquals('incompatible', InspectWorld(Root, Second.Metadata.Id, 16).Status);
+  AssertEquals(2, Std.Arrays.Length(Unwrap(ListWorlds(Root, 16))));
+  // Occupied identities, including non-world files, must never be reused.
+  AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(Std.Path.Join([Root, 'world-3']), 'keep')));
+  var Third: WorldSession := Unwrap(CreateWorld(Root, MinimumWorldSeed, 4, 16));
+  AssertEquals('world-4', Third.Metadata.Id);
+  AssertEquals(MinimumWorldSeed, Unwrap(OpenExistingWorld(Root, Third.Metadata.Id, 16))
+                                   .Metadata
+                                   .Seed);
+  var Maximum: WorldSession := Unwrap(CreateWorld(Root, MaximumWorldSeed, 4, 16));
+  AssertEquals(MaximumWorldSeed, Unwrap(OpenExistingWorld(Root, Maximum.Metadata.Id, 16))
+                                   .Metadata
+                                   .Seed);
+  var Broken: string := Std.Path.Join([Root, 'broken']);
+  AssertTrue(Unwrap(Std.Fs.CreateDirAll(Std.Path.Join([Broken, 'world.json']))));
+  AssertEquals('storage_error', InspectWorld(Root, 'broken', 16).Status);
+  AssertTrue(IsError(ListWorlds(Std.Path.Join([Root, 'world-3']), 16)));
+  AssertTrue(IsError(CreateWorld(Std.Path.Join([Root, 'world-3']), 1, 4, 16)));
+end.

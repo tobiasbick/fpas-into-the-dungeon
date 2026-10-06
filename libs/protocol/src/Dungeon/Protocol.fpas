@@ -5,7 +5,10 @@ uses Std.Arrays;
 
 public const
   // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 13;
+  ProtocolVersion: integer := 14;
+  // Catalog pages and text are bounded to fit one transport line.
+  MaximumWorldsPerPage: integer := 64;
+  MaximumWorldReasonLength: integer := 256;
   // Maximum UTF-8 payload before the terminating line feed.
   MaximumLineBytes: integer := 65536;
   // Largest exploration-map window that remains below the line-size limit with two row planes.
@@ -178,12 +181,43 @@ public type
     public PlayerWorldY: integer;
     public PlayerInWindow: boolean;
   end record;
+  // Client-safe world metadata and classified save availability; no geometry is exposed.
+  WorldSummary = record
+    public Id: string;
+    public Seed: integer;
+    public RegionChunks: integer;
+    public Status: string;
+    public SaveStatus: string;
+    public Reason: string;
+  end record;
+  // One stable page plus current defaults/ranges and server-selected identity.
+  WorldCatalog = record
+    public Worlds: array of WorldSummary;
+    public SelectedId: string;
+    public SelectionReason: string;
+    public Offset: integer;
+    public Total: integer;
+    public DefaultSeed: integer;
+    public MinimumSeed: integer;
+    public MaximumSeed: integer;
+    public DefaultRegionChunks: integer;
+    public MinimumRegionChunks: integer;
+    public MaximumRegionChunks: integer;
+  end record;
   // Session setup, player intentions, and lifecycle messages accepted by the server.
   ClientMessage = enum
     Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
     StartNewGame;
     LoadGame;
     SaveGame;
+    // Explicit permission to replace the selected world's existing save.
+    OverwriteSaveGame;
+    // Return to selection; Discard authorizes abandoning unsaved state.
+    ListWorlds(Offset: integer; DiscardProgress: boolean);
+    // Prepares an existing world before installing it; allowed only outside active play.
+    SelectWorld(Id: string);
+    // Server allocates the identity and starts fresh play using validated parameters.
+    CreateWorld(Seed: integer; RegionChunks: integer);
     Viewport(Width: integer; Height: integer);
     // Requests a read-only current-area map window; this never changes discovery or player state.
     ExplorationMap(OriginX: integer; OriginY: integer; Width: integer; Height: integer);
@@ -206,7 +240,8 @@ public type
   end enum;
   // Handshake, including save availability/removal, visible state, and structured outcomes.
   ServerMessage = enum
-    Welcome(Version: integer; SaveAvailable: boolean; InvalidSaveRemoved: boolean);
+    Welcome(Version: integer; Catalog: WorldCatalog);
+    Worlds(Catalog: WorldCatalog);
     State(Value: VisibleState);
     ExplorationMap(Value: ExplorationMapState);
     // Read-only result; nonempty title opens a description, empty title denotes status feedback.

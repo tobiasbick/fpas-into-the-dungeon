@@ -1,15 +1,15 @@
 # Persistent game state
 
 Each world owns exactly one server-side savegame. Connecting establishes a
-transport session only; the player then explicitly starts a new game or loads
-the existing save. Saving happens only through the active game's system menu.
+transport session only; the player then selects an existing world and chooses Continue or Start over,
+or creates a world with a server-allocated unique identity. Saving happens only through the active game's system menu.
 There is no autosave or implicit save on disconnect or quit.
 
 ## Ownership and lifecycle
 
 The server owns the authoritative `GameState`, the selected world, and the
 savegame. The client receives only view-specific projections and never stores
-gameplay state. A new session starts at the world's stable spawn without
+gameplay state. Start over starts at the world's stable spawn without
 deleting an existing save. Loading installs a saved state only after the whole
 document has been decoded and validated against the selected world's current
 metadata and game-state invariants.
@@ -37,12 +37,16 @@ opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
 the supplied current map.
 
-The post-`hello` welcome reports whether a loadable save exists and whether an
-invalid save was removed while establishing the session. In the latter case,
-the client explains the removal, offers only `New game`, and remains in the
-pre-game state. Until the client selects `New game` or `Load`, the server
-rejects movement, turning, transitions, viewport projection, and saving. A
-reconnect repeats this choice.
+The protocol-14 welcome supplies a bounded catalog with world identities,
+original parameters, compatibility, save classifications and creation defaults.
+Continue loads a valid explicit save or starts at spawn when no save exists.
+An incompatible or unreadable save rejects Continue and remains on disk. Start
+over keeps that save; `overwrite_save` is required to replace any existing save.
+An ordinary `save_game` against an existing path returns `overwrite_required`.
+Until a game begins, movement, transitions, viewport projection and saving are
+rejected. Returning to selection with unsaved progress requires `list_worlds`
+with an explicit discard flag. Catalog/storage preparation failures retain the
+installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
@@ -104,14 +108,13 @@ invalid state, a level failure, or I/O. A failed validation or replacement leave
 save intact. No backup slot, migration, legacy reader, or stale fallback is
 kept.
 
-During development, malformed, incompatible, wrong-world, or otherwise invalid
-saves are deleted and then treated as missing. Only `default.json` may be
-removed; world metadata, chunks, level files, configuration, and unrelated files
-remain untouched. A missing, invalid, or unreadable referenced level is a
-world-data or storage error: the save is kept and the server rejects the session
-or operation (`world_data_error`, `storage_error`). I/O failures remain errors
-and are not treated as missing or invalid data. The complete failure matrix is
-part of the [level storage contract](dungeon-level-storage.md).
+Malformed, incompatible, wrong-world or otherwise invalid saves return
+`Invalid(Reason)` without writes or deletion. A missing, invalid or unreadable
+referenced level is a world-data or storage error; the save is kept and Continue
+is rejected (`world_data_error`, `storage_error`). The catalog remains usable.
+A wrong path type is an I/O failure, including a file occupying the `saves`
+directory. Only explicit replacement or explicit local maintenance removes
+saved data. See the [level storage contract](dungeon-level-storage.md).
 
 ## Client preferences
 

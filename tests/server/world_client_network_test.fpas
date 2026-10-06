@@ -1,0 +1,148 @@
+// Real client adapter delivers world catalogs, creation states, confirmed saves and selection replies.
+program WorldClientNetworkTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.Protocol.Worlds, Dungeon.Server, Dungeon.Server.Config,
+  Dungeon.Test.ClientSession, Dungeon.World, Std.Conv, Std.Fs, Std.Net, Std.Results, Std.Tasks,
+  Std.Test, Std.Time;
+
+function ServeReported(
+  ListenerValue: Listener;
+  Config: ServerConfig;
+  Outcomes: channel of string;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
+  discard Close(Client);
+  ReportOutcome(Outcomes, 'server', Outcome);
+  return Outcome;
+end function;
+
+begin
+  var Root: string := '.temp-data/world-adapter-' + IntToStr(TimestampMillis());
+  AssertTrue(Unwrap(Std.Fs.CreateDirAll(Root)));
+  var Config: ServerConfig := record
+    ConfigPath := '';
+    Logs := None;
+    WorldsRoot := Root;
+    WorldId := 'missing';
+    WorldSeed := 12345;
+    DungeonRegionChunks := 4;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 80;
+    MaximumViewHeight := 24;
+  end;
+  var Token: CancellationToken := GetCancellationToken(CreateCancellationSource());
+  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var Outcomes: channel of string := CreateChannel(4);
+  var Requests: channel of ClientMessage := CreateChannel(8);
+  var Events: channel of ClientEvent := CreateChannel(8);
+  var ServerWorker: task := go ServeReported(ListenerValue, Config, Outcomes, Token);
+  var ClientWorker: task := go RunReportedClient('127.0.0.1', Address.Port, 9, 5, Requests, Events, Outcomes, Token);
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.Connected(Catalog):
+      begin
+        AssertEquals(0, Catalog.Total);
+      end;
+    else
+      begin
+        panic('expected initial catalog');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.CreateWorld(12345, 4))));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.State(Value):
+      begin
+        null;
+      end;
+    else
+      begin
+        panic('expected creation state');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.SaveGame)));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.SaveCompleted:
+      begin
+        null;
+      end;
+    else
+      begin
+        panic('expected first save');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.SaveGame)));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.Rejected(Code, Message):
+      begin
+        AssertEquals('overwrite_required', Code);
+      end;
+    else
+      begin
+        panic('expected overwrite guard');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.OverwriteSaveGame)));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.SaveCompleted:
+      begin
+        null;
+      end;
+    else
+      begin
+        panic('expected confirmed save');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.ListWorlds(0, false))));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.Worlds(Catalog):
+      begin
+        AssertEquals(1, Catalog.Total);
+        AssertEquals('world-1', Catalog.SelectedId);
+      end;
+    else
+      begin
+        panic('expected connected menu');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.SelectWorld('world-1'))));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.Worlds(Catalog):
+      begin
+        AssertTrue(CanContinueWorld(Catalog));
+      end;
+    else
+      begin
+        panic('expected selection catalog');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.LoadGame)));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.State(Value):
+      begin
+        null;
+      end;
+    else
+      begin
+        panic('expected continued state');
+      end;
+  end case;
+
+  AssertTrue(Unwrap(Send(Requests, ClientMessage.Disconnect)));
+  AssertTrue(Unwrap(Std.Tasks.Wait(ClientWorker)));
+  AssertTrue(Unwrap(Std.Tasks.Wait(ServerWorker)));
+  AssertTrue(Unwrap(CloseListener(ListenerValue)));
+  discard CloseChannel(Requests);
+  discard CloseChannel(Events);
+  discard CloseChannel(Outcomes);
+end.

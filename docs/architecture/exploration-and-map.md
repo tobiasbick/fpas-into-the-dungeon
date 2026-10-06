@@ -119,7 +119,7 @@ snapshot together with item state. Outdoor masks are records containing signed
 field row. Missing, extra, duplicate, unordered, empty, malformed, unknown, or
 wrong-sized records invalidate the complete save.
 
-There is no legacy reader or migration. An obsolete or invalid development
-save follows the existing removal path and only the selected world's
-`saves/default.json` is deleted. Explicit atomic saving is the only operation
-that persists newly discovered fields.
+There is no legacy reader or migration. An obsolete or invalid save is reported
+and preserved unchanged. Replacing an existing save requires explicit overwrite
+confirmation. Explicit atomic saving is the only operation that persists newly
+discovered fields.

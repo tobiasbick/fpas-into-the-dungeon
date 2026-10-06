@@ -52,7 +52,8 @@ these projects.
   `Dungeon.Client.Ui` holds the TUI update and view entry points; its subunits
   own one concern each: `Backdrop` (responsive pre-game ASCII scenery),
   `Controls` (control and action identities), `Layout` (docking and viewports),
-  `Session` (connection and session lifecycle),
+  `Session` (connection and session lifecycle), `Worlds` (catalog, creation
+  editor and discard confirmation),
   `Intentions` (queued player requests), `Input` (keys and actions), `Events`
   (network events), `Playback` (combat animation clock), `MapCells`,
   `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`, and
@@ -60,14 +61,19 @@ these projects.
   character sheet. The raycaster's subunits own ray casting (`Rays`), pixels and
   lighting (`Pixels`), wall and floor textures (`Textures`), pixel art (`Art`),
   and sprites with animation effects (`Sprites`).
+  The client facade prepares size-dependent start artwork after framework and
+  network updates. `Backdrop` owns its generation and reuse; `Model` retains one
+  immutable cell grid so focus navigation does not regenerate it.
 - `apps/server` owns the server program entry point and server lifetime.
   `Dungeon.Server` runs the handshake, message loop, and listener; its subunits
   own the policy (`Config`), per-connection session rules (`Session`),
   enumeration conversions (`Mapping`), client-safe projections (`Projection`),
   replies, turn and transition commits (`Replies`), message handling
   (`Handling`), and the mapping of typed storage failures to stable rejection
-  codes (`Failures`). `Session` retains the current interior map and builds area
-  views from it. Entry opens the target level through the world layer; loading
+  codes (`Failures`), world lifecycle (`Worlds`), bounded diagnostics (`Logging`)
+  and optional console/settings (`Console`, `Console.Model`). `Session` retains
+  the current interior map and builds area views from it. Entry opens the target
+  level through the world layer; loading
   installs the already validated view returned by the world layer.
 - `libs/game` owns the authoritative world model, rules, and simulation,
   including the deterministic outdoor terrain generator. It has one unit per
@@ -101,6 +107,8 @@ these projects.
   the exact JSON formats of world metadata and chunks. `Dungeon.World.Interiors`
   owns immutable level files (read, first-visit creation, visited-level reads)
   with `.Encoding` (level format) and `.Errors` (`LevelFailure`).
+  `Dungeon.World.Catalog` opens existing worlds without creating them, lists
+  non-destructively, and allocates exclusive new identities using `Std.Fs.ReadDir`.
   `Dungeon.World.Names` holds the persisted kind and facing names shared by saves
   and levels. `Dungeon.World.Savegame` owns the savegame file, its format version,
   and three-phase loading; its subunits `Player`, `Entities`, `Discovery`, and
@@ -112,7 +120,8 @@ these projects.
   `Dungeon.Protocol` holds the contract itself: limits, codes, and message
   types. `Names`, `Validation`, and `Fields` encode and check nested values;
   `ClientMessages` and `ServerMessages` encode and strictly decode whole
-  messages; `Transport` frames them as bounded lines.
+  messages; `Worlds` validates bounded world catalogs and selection predicates;
+  `Transport` frames them as bounded lines.
 - `libs/persistence` currently owns the shared runtime path and configuration
   interface. Authoritative world files are owned by `libs/world`.
 - `tools/world-preview` samples final terrain or one normalized generator field
@@ -121,8 +130,9 @@ these projects.
   visited dungeons.
 - `tests` follows the production modules so each module is exercised through
   its interface. `tests/fixtures` is a test-only library exporting
-  `Dungeon.Test.Fixtures`: independent authored dungeon geometry, metadata with
-  an area identity, initial entities at a requested pose, and area-view helpers.
+  `Dungeon.Test.Fixtures` and `Dungeon.Test.Catalog`: protocol catalog fixtures,
+  independent authored dungeon geometry, metadata with an area identity, initial
+  entities at a requested pose, and area-view helpers.
   It also lends its layout to any world's spawn dungeon for pure rule tests and
   turns maps into first-person routes (`RouteTo`). Production projects do not
   depend on it; fixture geometry stays independent of generated output.

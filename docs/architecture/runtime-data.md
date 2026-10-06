@@ -48,7 +48,7 @@ context_panel_visible = true
 message_panel_visible = false
 ```
 
-The server file additionally selects its authoritative world and bounds client
+The server file additionally preselects an existing world and bounds client
 viewport requests:
 
 ```toml
@@ -62,24 +62,35 @@ max_view_width = 240
 max_view_height = 120
 ```
 
-`dungeon_region_chunks` (1 through 16) sets the side length of entrance regions
+`world_seed` is a signed 32-bit creation default (-2147483648 through
+2147483647). `dungeon_region_chunks` (1 through 16) sets the side length of entrance regions
 in chunks and therefore how rare dungeon entrances are. Like `world_seed`, it
 applies only when a world is created; an existing world keeps the value stored
 in its metadata. A file without it is obsolete and is rejected.
 
 Command-line `HOST` and `PORT` values override the loaded file for that run.
-The server's `--world ID` selects another world without changing the stored
-default. Use `--data-dir PATH` to select a different data root before
+The server's `--world ID` preselects an existing world without changing the
+stored default. Neither this option nor `world_id` creates a world. A missing or
+incompatible selection leaves the connected world catalog available. Use `--data-dir PATH` to select a different data root before
 configuration is loaded.
 
 Runtime configuration, world, chunk, and savegame formats support only their
 current schema and generator version. After an incompatible development change,
 select a new world id or delete the obsolete configuration or world data as
 instructed by the reported error. Configuration is never deleted automatically.
-Invalid or incompatible savegames are an exception during development: the
-server removes only the selected world's `saves/default.json`, reports the
-removal, and then advertises no loadable save. No schema migration or
-compatibility fallback is provided.
+Invalid or incompatible worlds and saves remain visible and are preserved.
+Storage errors remain distinct from missing or incompatible data. Recreate a
+world through the client or start over in a compatible world; replacing an
+existing save requires explicit confirmation. No migration is provided.
+
+`dungeon-server --console` opens a live terminal log/status view and a settings
+editor for `world_seed` and `dungeon_region_chunks`. It validates both fields
+before atomically replacing `server.toml`, preserving all other current fields.
+An error keeps the previous published defaults and leaves the editor open.
+Existing world metadata never changes. Settings are read again for catalog
+requests, so connected clients receive updated defaults when they refresh the
+world list. Stop closes the listener and joins the active session. Without the
+option, the server stays headless.
 
 ## Ownership
 

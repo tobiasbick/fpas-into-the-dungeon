@@ -186,8 +186,10 @@ other optimization was added.
 
 ## Protocol and client
 
-Protocol version 13 removes the dialogue messages and the NPC and tablet field
-codes and adds the drop-item intention. Generated dungeons are titled
+The 14a slice introduced protocol version 13, removing the dialogue messages
+and the NPC and tablet field codes and adding the drop-item intention. The
+current protocol version 14 adds world management without changing these
+dungeon messages. Generated dungeons are titled
 `Forgotten dungeon` until stage 14b adds names. The raycaster, the exploration
 map, and the context panel already work
 with any interior size; tests cover a 31 by 21 dungeon.

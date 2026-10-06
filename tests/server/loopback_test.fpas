@@ -2,16 +2,18 @@
 program DungeonServerLoopbackTest;
 
 uses
-  Dungeon.Test.Fixtures, Dungeon.Test.Routes, Dungeon.Areas.Identities, Dungeon.Coordinates,
-  Dungeon.Hostiles, Dungeon.Interior, Dungeon.Interior.Generation.Validation, Dungeon.Interaction,
-  Dungeon.Items, Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
-  Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config, Dungeon.Terrain,
-  Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Conv, Std.Fs,
-  Std.Net, Std.Path, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time;
+  Dungeon.Test.Catalog, Dungeon.Test.Fixtures, Dungeon.Test.Routes, Dungeon.Areas.Identities,
+  Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Interior.Generation.Validation,
+  Dungeon.Interaction, Dungeon.Items, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
+  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config,
+  Dungeon.Terrain, Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Savegame, Std.Arrays,
+  Std.Conv, Std.Fs, Std.Net, Std.Path, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time;
 
 function TestConfig(WorldsRoot: string): ServerConfig;
 begin
   return record
+    ConfigPath := '';
+    Logs := None;
     WorldsRoot := WorldsRoot;
     WorldId := 'loopback';
     WorldSeed := 56789;
@@ -128,6 +130,7 @@ procedure EnsureWorldRoot(Config: ServerConfig);
 begin
   AssertTrue(EnsureDirectory('.temp-data'));
   AssertTrue(EnsureDirectory(Config.WorldsRoot));
+  var Fixture: WorldSession := Unwrap(OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.DungeonRegionChunks, Config.ChunkCacheLimit));
 end procedure;
 
 function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
@@ -160,11 +163,11 @@ begin
     when Ok(WelcomeMessage):
       begin
         case WelcomeMessage of
-          when ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+          when ServerMessage.Welcome(Version, Catalog):
             begin
               AssertEquals(ProtocolVersion, Version);
-              AssertFalse(SaveAvailable);
-              AssertFalse(InvalidSaveRemoved);
+              AssertFalse(FixtureSaveAvailable(Catalog));
+              AssertFalse(FixtureInvalidSave(Catalog));
             end;
           else
             begin
@@ -628,7 +631,7 @@ begin
   // The entry field was seen before and stays discovered.
   AssertFalse(Std.Str.CharAt(View.KnowledgeRows[Map.Start.Y], Map.Start.X) = 'u');
   AssertFalse(Std.Str.CharAt(View.Rows[Map.Start.Y], Map.Start.X) = '?');
-  Answer := Ask(Client, Reader, ClientMessage.SaveGame, Token);
+  Answer := Ask(Client, Reader, ClientMessage.OverwriteSaveGame, Token);
   Reader := Answer.Reader;
   RequireSaved(Answer.Message);
   for Index: integer := Halfway + 1 to Std.Arrays.Length(ExitRoute) - 1 do
@@ -712,11 +715,11 @@ begin
   var RestartWelcome: LineRead := Unwrap(ReadLine(RestartReader, Token));
   RestartReader := RestartWelcome.Reader;
   case Unwrap(DecodeServer(RestartWelcome.Line)) of
-    when ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    when ServerMessage.Welcome(Version, Catalog):
       begin
         AssertEquals(ProtocolVersion, Version);
-        AssertTrue(SaveAvailable);
-        AssertFalse(InvalidSaveRemoved);
+        AssertTrue(FixtureSaveAvailable(Catalog));
+        AssertFalse(FixtureInvalidSave(Catalog));
       end;
     else
       begin
@@ -748,7 +751,7 @@ begin
   AssertEquals(Metadata.SpawnEntrance.Y, LoadedExit.WorldY);
   AssertEquals(1, Std.Arrays.Length(LoadedExit.Inventory));
   AssertEquals(CoinId, LoadedExit.Inventory[0].Id);
-  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.SaveGame), Token)));
+  AssertTrue(Unwrap(WriteLine(RestartClient, EncodeClient(ClientMessage.OverwriteSaveGame), Token)));
   var OutdoorSavedRead: LineRead := Unwrap(ReadLine(RestartReader, Token));
   RestartReader := OutdoorSavedRead.Reader;
   case Unwrap(DecodeServer(OutdoorSavedRead.Line)) of
@@ -776,11 +779,11 @@ begin
   var OutdoorRestartWelcome: LineRead := Unwrap(ReadLine(OutdoorRestartReader, Token));
   OutdoorRestartReader := OutdoorRestartWelcome.Reader;
   case Unwrap(DecodeServer(OutdoorRestartWelcome.Line)) of
-    when ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    when ServerMessage.Welcome(Version, Catalog):
       begin
         AssertEquals(ProtocolVersion, Version);
-        AssertTrue(SaveAvailable);
-        AssertFalse(InvalidSaveRemoved);
+        AssertTrue(FixtureSaveAvailable(Catalog));
+        AssertFalse(FixtureInvalidSave(Catalog));
       end;
     else
       begin
@@ -852,11 +855,11 @@ begin
   var NewGameWelcome: LineRead := Unwrap(ReadLine(NewGameReader, Token));
   NewGameReader := NewGameWelcome.Reader;
   case Unwrap(DecodeServer(NewGameWelcome.Line)) of
-    when ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    when ServerMessage.Welcome(Version, Catalog):
       begin
         AssertEquals(ProtocolVersion, Version);
-        AssertTrue(SaveAvailable);
-        AssertFalse(InvalidSaveRemoved);
+        AssertTrue(FixtureSaveAvailable(Catalog));
+        AssertFalse(FixtureInvalidSave(Catalog));
       end;
     else
       begin
@@ -888,6 +891,7 @@ begin
   var KeepPath: string := Std.Path.Join([SavedWorld.Directory, 'saves', 'keep.txt']);
   AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(KeepPath, 'keep')));
   AssertTrue(Unwrap(Std.Fs.WriteTextAtomic(SavePath, '{"format_version":2,"world_id":"loopback","area_kind":"outdoor_region","area_id":"loopback:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"},"exploration":{"outdoor_chunks":[{"chunk_x":0,"chunk_y":0,"rows":["1"]}],"interior_areas":[]}}')));
+  var InvalidSaveText: string := Unwrap(Std.Fs.ReadText(SavePath));
   var InvalidListener: Listener := Unwrap(Listen('127.0.0.1', 0));
   var InvalidAddress: NetworkAddress := Unwrap(ListenerLocalAddress(InvalidListener));
   var InvalidTask: task := go ServeOne(InvalidListener, Config, Token);
@@ -898,19 +902,19 @@ begin
   var InvalidWelcome: LineRead := Unwrap(ReadLine(InvalidReader, Token));
   InvalidReader := InvalidWelcome.Reader;
   case Unwrap(DecodeServer(InvalidWelcome.Line)) of
-    when ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    when ServerMessage.Welcome(Version, Catalog):
       begin
         AssertEquals(ProtocolVersion, Version);
-        AssertFalse(SaveAvailable);
-        AssertTrue(InvalidSaveRemoved);
+        AssertFalse(FixtureSaveAvailable(Catalog));
+        AssertTrue(FixtureInvalidSave(Catalog));
       end;
     else
       begin
-        panic('expected invalid-save removal in welcome');
+        panic('expected invalid-save preservation in welcome');
       end;
   end case;
 
-  AssertFalse(Std.Fs.Exists(SavePath));
+  AssertEquals(InvalidSaveText, Unwrap(Std.Fs.ReadText(SavePath)));
   AssertEquals(MetadataBefore, Unwrap(Std.Fs.ReadText(MetadataPath)));
   AssertEquals(ChunkBefore, Unwrap(Std.Fs.ReadText(ChunkPath)));
   AssertEquals('keep', Unwrap(Std.Fs.ReadText(KeepPath)));
@@ -920,11 +924,11 @@ begin
   case Unwrap(DecodeServer(MissingRead.Line)) of
     when ServerMessage.Rejected(Code, Message):
       begin
-        AssertEquals('save_unavailable', Code);
+        AssertEquals('save_incompatible', Code);
       end;
     else
       begin
-        panic('expected load to remain unavailable after removal');
+        panic('expected load to remain unavailable with an incompatible save');
       end;
   end case;
 
@@ -940,11 +944,11 @@ begin
       end;
     else
       begin
-        panic('expected a fresh outdoor state after invalid-save removal');
+        panic('expected a fresh outdoor state after invalid-save preservation');
       end;
   end case;
 
-  AssertTrue(Unwrap(WriteLine(InvalidClient, EncodeClient(ClientMessage.SaveGame), Token)));
+  AssertTrue(Unwrap(WriteLine(InvalidClient, EncodeClient(ClientMessage.OverwriteSaveGame), Token)));
   var FreshSavedRead: LineRead := Unwrap(ReadLine(InvalidReader, Token));
   InvalidReader := FreshSavedRead.Reader;
   case Unwrap(DecodeServer(FreshSavedRead.Line)) of
@@ -954,7 +958,7 @@ begin
       end;
     else
       begin
-        panic('expected a fresh save after invalid-save removal');
+        panic('expected a fresh save after invalid-save preservation');
       end;
   end case;
 
@@ -972,11 +976,11 @@ begin
   var FreshRestartWelcome: LineRead := Unwrap(ReadLine(FreshRestartReader, Token));
   FreshRestartReader := FreshRestartWelcome.Reader;
   case Unwrap(DecodeServer(FreshRestartWelcome.Line)) of
-    when ServerMessage.Welcome(Version, SaveAvailable, InvalidSaveRemoved):
+    when ServerMessage.Welcome(Version, Catalog):
       begin
         AssertEquals(ProtocolVersion, Version);
-        AssertTrue(SaveAvailable);
-        AssertFalse(InvalidSaveRemoved);
+        AssertTrue(FixtureSaveAvailable(Catalog));
+        AssertFalse(FixtureInvalidSave(Catalog));
       end;
     else
       begin

@@ -8,6 +8,17 @@ define quests, experience, or levels.
 
 - **World** is the complete authoritative game state owned by the server. It
   contains all known areas, locations, actors, and their relationships.
+- **World catalog** is the server-provided list of existing world identities,
+  original parameters, compatibility and save status. Listing does not create
+  worlds, generate levels or modify saves.
+- **Continue** restores the selected world's explicit save, or starts at spawn
+  when no save exists. **Start over** resets mutable game state in the same world
+  while retaining immutable geometry and the previous save.
+- **Creation defaults** are server settings used by the new-world editor. They
+  never replace original parameters of an existing world.
+- **Unsaved progress** is authoritative game state changed since the last
+  successful explicit save or load. Returning to world selection requires
+  explicit discard confirmation while such progress exists.
 - **Area** is one navigable spatial environment. The player occupies one area
   at a time.
 - **Area identity** is the stable server-owned identifier of one area. It is

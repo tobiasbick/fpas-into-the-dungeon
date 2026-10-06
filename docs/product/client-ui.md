@@ -35,16 +35,22 @@ Before a session, the client shows a framed menu centered in the terminal:
 ```
 
 The frame remains centered as the terminal changes size. Initially the menu
-contains connect, information, and quit. A successful connection keeps this
-screen visible and enables `New game`; `Load` appears only when the server
-reports a valid savegame. Choosing either action shows its pending status until
-the first complete visible state arrives. While the session choice is pending,
-the menu is replaced by the status, `Please wait.`, and a single `Cancel`
-button. Cancel requires confirmation because it closes the connection and
-returns to the initial start menu; it does not roll back server work that may
-already have completed. A rejected load restores the session menu with the
-server's explanation. If the server removes an invalid save during connection,
-the status explains the removal and only `New game` is offered.
+contains connect, information, and quit. A successful connection shows the server's world catalog with original seed,
+entrance-region size, compatibility and save status. Previous/next controls page
+through the list. `Create world` opens controlled seed and region inputs with
+server-provided defaults and ranges. `Continue` loads the selected world's
+explicit save or starts at spawn if absent. `Start over` starts fresh in the
+same world and keeps its earlier save. Incompatible worlds and saves show a
+reason; they are never deleted automatically.
+
+While a selection or start request is pending, further requests are gated.
+Cancel confirms disconnecting; it does not roll back server work that may
+already have completed. A rejection keeps the existing selection or editor and
+shows the server's explanation. Missing startup preselection still allows
+creation and selection. The system menu's `Choose world` returns to the same
+connected catalog. Unsaved progress requires discard confirmation; cancellation
+keeps the active game. Saving over an existing save requires a separate explicit
+overwrite confirmation.
 
 Behind the menu, the client draws a colored ASCII view of an overgrown dungeon
 entrance at dusk. The geometry is generated from the current terminal size:
@@ -52,7 +58,12 @@ small terminals retain the gate and path, while larger terminals add mountains,
 trees, stars, and torches. The menu remains an opaque, focused overlay inside
 the entrance, so decoration never competes with labels or controls. Connection,
 session-selection, pending, information, confirmation, and defeat states share
-the same backdrop.
+the same backdrop. The client prepares its immutable cell grid once for the
+current terminal size and retains it in the presentation model. Focus changes,
+menu navigation and editor input reuse that grid. A changed size rebuilds it
+while a start screen is visible; resizing during gameplay defers that work until
+the client returns to a start screen. Rendering a standalone unprepared model
+still builds the correctly sized artwork without changing the supplied model.
 
 ## Game screen
 
@@ -117,10 +128,9 @@ client is connected, and controls appropriate to the current view are enabled.
 
 ### Connected without a game session
 
-The framed start screen offers `New game`, optional `Load`, disconnect,
-information, and quit. Movement, turning, transitions, viewport projection, and
-saving remain disabled until the server accepts a session choice and returns
-the initial visible state.
+The framed start screen offers the catalog, Create world, Continue and Start
+over when applicable, disconnect, information and quit. Game intentions remain
+disabled until the server accepts a session choice and supplies visible state.
 
 ### Request pending
 

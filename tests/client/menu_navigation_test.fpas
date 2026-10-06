@@ -1,0 +1,81 @@
+// Replays connected-menu keyboard navigation without network activity at large terminal sizes.
+program MenuNavigationTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Dungeon.Test.Catalog, Std.Conv, Std.Console,
+  Std.Tasks, Std.Test, Std.Time, Std.Tui;
+
+begin
+  var Requests: channel of ClientMessage := CreateChannel(16);
+  var Events: channel of ClientEvent := CreateChannel(4);
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  Model := UpdateClient(Model, TuiMsg.Resize(TuiSize.Create(144, 41)), Cmd);
+  Model := UpdateClientEvent(Model, ClientEvent.Connected(FixtureCatalog(false, false)), Cmd);
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(144, 41));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  for Index: integer := 0 to 6 do
+    App.InjectKeyForTest(record
+      kind := TuiKeyKind.Tab;
+      ch := '';
+      shift := false;
+      ctrl := false;
+      alt := false;
+      meta := false;
+    end);
+  end for;
+  var Before: integer := Model.FocusedControl;
+  var Started: integer := MonotonicMillis();
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 7, 0);
+  var Elapsed: integer := ElapsedMillis(Started);
+  WriteLn(('Seven menu focus changes: ' + IntToStr(Elapsed)) + ' ms');
+  AssertTrue(Model.FocusedControl <> Before);
+  AssertTrue(Elapsed < 700);
+  App.Close();
+  // Mark one cached cell: focus, network menus and editor updates must retain and paint it.
+  AssertEquals(144, Model.StartBackdrop.Width);
+  AssertEquals(41, Model.StartBackdrop.Height);
+  var Original: TuiCell := Model.StartBackdrop.Cells[0];
+  AssertEquals('*', Original.Glyph);
+  Model.StartBackdrop.Cells[0] := Original with Glyph := '@'; end with;
+
+  Model := UpdateClient(Model, TuiMsg.FocusChanged(None, Some(TuiControlId.Create(4))), Cmd);
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(FixtureCatalog(false, false)), Cmd);
+  Model := UpdateClient(Model, TuiMsg.Action(TuiControlId.Create(41), TuiAction.Create(140)), Cmd);
+  AssertEquals('@', Model.StartBackdrop.Cells[0].Glyph);
+  var SameSize: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(144, 41));
+  Model := SameSize.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  AssertEquals('@', SameSize.SurfaceSnapshot().CellAt(0, 0).Glyph);
+  SameSize.Close();
+  Model := UpdateClient(Model, TuiMsg.Action(TuiControlId.Create(8), TuiAction.Create(120)), Cmd);
+  Model := UpdateClient(Model, TuiMsg.Resize(TuiSize.Create(80, 24)), Cmd);
+  AssertEquals(80, Model.StartBackdrop.Width);
+  AssertEquals(24, Model.StartBackdrop.Height);
+  AssertEquals('*', Model.StartBackdrop.Cells[0].Glyph);
+  Model.StartBackdrop.Cells[0] := Original with Glyph := '@'; end with;
+
+  Model := UpdateClient(Model, TuiMsg.Resize(TuiSize.Create(80, 24)), Cmd);
+  AssertEquals('@', Model.StartBackdrop.Cells[0].Glyph);
+  // Gameplay resize defers artwork generation; returning through a network event prepares it.
+  Model.Screen := ClientScreen.GameScreen;
+  Model := UpdateClient(Model, TuiMsg.Resize(TuiSize.Create(100, 28)), Cmd);
+  AssertEquals(80, Model.StartBackdrop.Width);
+  AssertEquals('@', Model.StartBackdrop.Cells[0].Glyph);
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(FixtureCatalog(false, false)), Cmd);
+  AssertEquals(100, Model.StartBackdrop.Width);
+  AssertEquals(28, Model.StartBackdrop.Height);
+  AssertEquals('*', Model.StartBackdrop.Cells[0].Glyph);
+  // Zero-sized and raw standalone models keep the existing safe rendering contract.
+  Model := UpdateClient(Model, TuiMsg.Resize(TuiSize.Create(0, 0)), Cmd);
+  AssertEquals(0, Model.StartBackdrop.Width);
+  AssertEquals(0, Model.StartBackdrop.Height);
+  var EmptyTree: TuiElement := ViewClient(Model);
+  var Raw: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events) with ViewportWidth := 40; ViewportHeight := 14; end with;
+  var RawApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(40, 14));
+  var RawRendered: ClientModel := RawApp.RunIterations(Raw, UpdateClient, ViewClient, 0, 0);
+  AssertEquals('*', RawApp.SurfaceSnapshot().CellAt(0, 0).Glyph);
+  AssertEquals(0, RawRendered.StartBackdrop.Width);
+  RawApp.Close();
+  discard CloseChannel(Requests);
+  discard CloseChannel(Events);
+end.

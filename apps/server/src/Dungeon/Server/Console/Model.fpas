@@ -1,0 +1,122 @@
+// Pure console presentation state plus explicit atomic server-default settings updates.
+unit Dungeon.Server.Console.Model;
+
+uses
+  Dungeon.Protocol.Worlds, Dungeon.RuntimeData, Dungeon.Server.Logging, Std.Arrays, Std.Conv,
+  Std.Str;
+
+public const
+  // Retain a bounded history independent of incoming event frequency.
+  MaximumConsoleLines: integer := 128;
+
+public type
+  // The console edits creation defaults, never metadata of an existing world.
+  ConsoleModel = record
+    public ConfigPath: string;
+    public Lines: array of string;
+    public Status: string;
+    public Connected: boolean;
+    public SettingsOpen: boolean;
+    public FocusedControl: integer;
+    public Seed: integer;
+    public RegionChunks: integer;
+    public SeedText: string;
+    public SeedCaret: integer;
+    public RegionText: string;
+    public RegionCaret: integer;
+    public SettingsError: string;
+  end record;
+
+// Starts with validated settings from the current server configuration.
+public function NewConsoleModel(ConfigPath: string; Settings: ServerWorldConfig): ConsoleModel;
+begin
+  var Seed: string := IntToStr(Settings.Seed);
+  var Region: string := IntToStr(Settings.DungeonRegionChunks);
+  return record
+    ConfigPath := ConfigPath;
+    Lines := [];
+    Status := 'Starting server';
+    Connected := false;
+    FocusedControl := 1;
+    SettingsOpen := false;
+    Seed := Settings.Seed;
+    RegionChunks := Settings.DungeonRegionChunks;
+    SeedText := Seed;
+    SeedCaret := Seed.Length();
+    RegionText := Region;
+    RegionCaret := Region.Length();
+    SettingsError := '';
+  end;
+end function;
+
+// Appends bounded live log text and tracks the last reported connection/world status.
+public function ApplyConsoleLog(State: ConsoleModel; Value: ServerLogEvent): ConsoleModel;
+begin
+  mutable var Next: ConsoleModel := State;
+  mutable var Lines: array of string := Std.Arrays.Concat(State.Lines, [
+                                                                         (Value.Kind + ': ') + Value.Text
+                                                                       ]);
+  if Std.Arrays.Length(Lines) > MaximumConsoleLines then
+    Lines := Std.Arrays.Slice(Lines, Std.Arrays.Length(Lines) - MaximumConsoleLines, MaximumConsoleLines);
+  end if;
+
+  Next.Lines := Lines;
+  if Value.Kind = 'connected' then
+    Next.Connected := true;
+    Next.Status := Value.Text;
+  end if;
+
+  if Value.Kind = 'world' then
+    Next.Connected := true;
+    Next.Status := Value.Text;
+  end if;
+
+  if Value.Kind = 'disconnected' then
+    Next.Connected := false;
+    Next.Status := 'Listening; no player connected';
+  end if;
+
+  if Value.Kind = 'status' then
+    Next.Status := Value.Text;
+  end if;
+
+  return Next;
+end function;
+
+// Publishes changed defaults only after validation and successful atomic TOML storage.
+public function StoreConsoleSettings(State: ConsoleModel): ConsoleModel;
+begin
+  if not State.SettingsOpen then
+    return State;
+  end if;
+
+  case ParseWorldInteger(State.SeedText) of
+    when Error(Reason):
+      begin
+        return State with SettingsError := 'Enter a valid whole-number seed.'; end with;
+      end;
+    when Ok(Seed):
+      begin
+        case ParseWorldInteger(State.RegionText) of
+          when Error(Reason):
+            begin
+              return State with SettingsError := 'Enter a valid whole-number region size.'; end with;
+            end;
+          when Ok(RegionChunks):
+            begin
+              case SaveServerDefaults(State.ConfigPath, Seed, RegionChunks) of
+                when Error(Reason):
+                  begin
+                    return State with SettingsError := Reason; end with;
+                  end;
+                when Ok(Written):
+                  begin
+                    return State with Seed := Seed; RegionChunks := RegionChunks; SettingsError := ''; SettingsOpen := false; FocusedControl := 1; end with;
+                  end;
+              end case;
+            end;
+        end case;
+      end;
+  end case;
+end function;
+end unit;

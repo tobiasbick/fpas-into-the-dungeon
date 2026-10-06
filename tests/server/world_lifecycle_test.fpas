@@ -1,0 +1,217 @@
+// Real TCP world creation/selection, explicit save/discard guards and reconnect persistence.
+program WorldLifecycleTest;
+
+uses
+  Dungeon.GameState, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
+  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.Protocol.Worlds,
+  Dungeon.RuntimeData, Dungeon.Server, Dungeon.Server.Config, Dungeon.World, Dungeon.World.Catalog,
+  Dungeon.World.Savegame, Std.Arrays, Std.Conv, Std.Fs, Std.Net, Std.Options, Std.Path, Std.Results,
+  Std.Tasks, Std.Test, Std.Time;
+
+type
+  Exchange = record
+    Reader: LineReader;
+    Message: ServerMessage;
+  end record;
+
+function Ask(
+  Client: Connection;
+  Reader: LineReader;
+  Request: ClientMessage;
+  Token: CancellationToken
+): Exchange;
+begin
+  AssertTrue(Std.Results.Unwrap(WriteLine(Client, EncodeClient(Request), Token)));
+  var Response: LineRead := Std.Results.Unwrap(ReadLine(Reader, Token));
+  return record
+    Reader := Response.Reader;
+    Message := Std.Results.Unwrap(DecodeServer(Response.Line));
+  end;
+end function;
+
+function RequireCatalog(Message: ServerMessage): WorldCatalog;
+begin
+  case Message of
+    when ServerMessage.Welcome(Version, Catalog):
+      begin
+        AssertEquals(ProtocolVersion, Version);
+        return Catalog;
+      end;
+    when ServerMessage.Worlds(Catalog):
+      begin
+        return Catalog;
+      end;
+    else
+      begin
+        panic('expected catalog');
+      end;
+  end case;
+end function;
+
+function RequireMap(Message: ServerMessage): MapVisibleState;
+begin
+  case Message of
+    when ServerMessage.State(Visible):
+      begin
+        case Visible of
+          when VisibleState.MapState(Value):
+            begin
+              return Value;
+            end;
+          else
+            begin
+              panic('expected map projection');
+            end;
+        end case;
+      end;
+    else
+      begin
+        panic('expected map state');
+      end;
+  end case;
+end function;
+
+procedure RequireRejected(Message: ServerMessage; Expected: string);
+begin
+  case Message of
+    when ServerMessage.Rejected(Code, Reason):
+      begin
+        AssertEquals(Expected, Code);
+      end;
+    else
+      begin
+        panic('expected rejection ' + Expected);
+      end;
+  end case;
+end procedure;
+
+procedure RequireSaved(Message: ServerMessage);
+begin
+  case Message of
+    when ServerMessage.SaveCompleted:
+      begin
+        null;
+      end;
+    else
+      begin
+        panic('expected save completion');
+      end;
+  end case;
+end procedure;
+
+function ServeOnce(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
+begin
+  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
+  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
+  discard Close(Client);
+  return Outcome;
+end function;
+
+begin
+  var Root: string := '.temp-data/lifecycle-' + IntToStr(TimestampMillis());
+  AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDirAll(Root)));
+  var Runtime: RuntimeSettings := Std.Results.Unwrap(LoadServerRuntime(Some(Root + '-settings')));
+  var Config: ServerConfig := record
+    ConfigPath := Runtime.Paths.ServerConfig;
+    Logs := None;
+    WorldsRoot := Root;
+    WorldId := 'missing';
+    WorldSeed := 12345;
+    DungeonRegionChunks := 4;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 80;
+    MaximumViewHeight := 24;
+  end;
+  var Source: CancellationSource := CreateCancellationSource();
+  var Token: CancellationToken := GetCancellationToken(Source);
+  var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
+  var Worker: task := go ServeOnce(ListenerValue, Config, Token);
+  var Client: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Std.Results.Unwrap(SetTimeout(Client, 30000)));
+  mutable var Response: Exchange := Ask(Client, NewLineReader(Client), ClientMessage.Hello(ProtocolVersion, 9, 5), Token);
+  AssertEquals(0, RequireCatalog(Response.Message).Total);
+  AssertFalse(Std.Fs.Exists(Std.Path.Join([Root, 'missing'])));
+  Response := Ask(Client, Response.Reader, ClientMessage.SelectWorld('missing'), Token);
+  RequireRejected(Response.Message, 'world_missing');
+  Response := Ask(Client, Response.Reader, ClientMessage.LoadGame, Token);
+  RequireRejected(Response.Message, 'world_unavailable');
+  Response := Ask(Client, Response.Reader, ClientMessage.CreateWorld(12345, 4), Token);
+  AssertEquals(20, RequireMap(Response.Message).Health);
+  var First: WorldSession := Std.Results.Unwrap(OpenExistingWorld(Root, 'world-1', 32));
+  Response := Ask(Client, Response.Reader, ClientMessage.SelectWorld('world-1'), Token);
+  RequireRejected(Response.Message, 'session_already_started');
+  Response := Ask(Client, Response.Reader, ClientMessage.ListWorlds(0, false), Token);
+  RequireRejected(Response.Message, 'discard_required');
+  Response := Ask(Client, Response.Reader, ClientMessage.SaveGame, Token);
+  RequireSaved(Response.Message);
+  Response := Ask(Client, Response.Reader, ClientMessage.ListWorlds(0, false), Token);
+  AssertEquals('world-1', RequireCatalog(Response.Message).SelectedId);
+  // A distinct explicit save demonstrates Continue versus Start over.
+  AssertTrue(Std.Results.Unwrap(WriteSaveGame(First, NewGame(First.Metadata) with Health := 7; end with)));
+  var OldSave: string := Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(First)));
+  Response := Ask(Client, Response.Reader, ClientMessage.LoadGame, Token);
+  AssertEquals(7, RequireMap(Response.Message).Health);
+  Response := Ask(Client, Response.Reader, ClientMessage.ListWorlds(0, false), Token);
+  discard RequireCatalog(Response.Message);
+  Response := Ask(Client, Response.Reader, ClientMessage.StartNewGame, Token);
+  AssertEquals(20, RequireMap(Response.Message).Health);
+  AssertEquals(OldSave, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(First))));
+  Response := Ask(Client, Response.Reader, ClientMessage.SaveGame, Token);
+  RequireRejected(Response.Message, 'overwrite_required');
+  AssertEquals(OldSave, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(First))));
+  Response := Ask(Client, Response.Reader, ClientMessage.OverwriteSaveGame, Token);
+  RequireSaved(Response.Message);
+  AssertTrue(OldSave <> Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(First))));
+  Response := Ask(Client, Response.Reader, ClientMessage.ListWorlds(0, false), Token);
+  discard RequireCatalog(Response.Message);
+  Response := Ask(Client, Response.Reader, ClientMessage.CreateWorld(12345, 4), Token);
+  discard RequireMap(Response.Message);
+  var Second: WorldSession := Std.Results.Unwrap(OpenExistingWorld(Root, 'world-2', 32));
+  AssertEquals(First.Metadata.Seed, Second.Metadata.Seed);
+  AssertTrue(First.Metadata.Id <> Second.Metadata.Id);
+  Response := Ask(Client, Response.Reader, ClientMessage.ListWorlds(0, true), Token);
+  AssertEquals(2, RequireCatalog(Response.Message).Total);
+  Response := Ask(Client, Response.Reader, ClientMessage.SelectWorld('world-1'), Token);
+  AssertEquals('world-1', RequireCatalog(Response.Message).SelectedId);
+  // Storage failure must not discard the installed game, even with explicit discard permission.
+  Response := Ask(Client, Response.Reader, ClientMessage.LoadGame, Token);
+  discard RequireMap(Response.Message);
+  var DefaultsBefore: string := Std.Results.Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(Runtime.Paths.ServerConfig, '{')));
+  Response := Ask(Client, Response.Reader, ClientMessage.ListWorlds(0, true), Token);
+  RequireRejected(Response.Message, 'storage_error');
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(Runtime.Paths.ServerConfig, DefaultsBefore)));
+  // Rejected selection leaves the existing world installed; a viewport request proves it remains playable.
+  Response := Ask(Client, Response.Reader, ClientMessage.SelectWorld('missing'), Token);
+  RequireRejected(Response.Message, 'session_already_started');
+  Response := Ask(Client, Response.Reader, ClientMessage.Viewport(9, 5), Token);
+  AssertEquals(20, RequireMap(Response.Message).Health);
+  AssertTrue(Std.Results.Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Std.Results.Unwrap(Close(Client)));
+  AssertTrue(Std.Results.Unwrap(Std.Tasks.Wait(Worker)));
+  // Reconnect: startup selection may be missing while saved worlds remain selectable.
+  var AgainWorker: task := go ServeOnce(ListenerValue, Config, Token);
+  var Again: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Std.Results.Unwrap(SetTimeout(Again, 30000)));
+  Response := Ask(Again, NewLineReader(Again), ClientMessage.Hello(ProtocolVersion, 9, 5), Token);
+  AssertEquals(2, RequireCatalog(Response.Message).Total);
+  Response := Ask(Again, Response.Reader, ClientMessage.SelectWorld('world-2'), Token);
+  AssertEquals('missing', Std.Options.Unwrap(SelectedWorld(RequireCatalog(Response.Message)))
+                            .SaveStatus);
+  Response := Ask(Again, Response.Reader, ClientMessage.LoadGame, Token);
+  AssertEquals(20, RequireMap(Response.Message).Health);
+  Response := Ask(Again, Response.Reader, ClientMessage.ListWorlds(0, true), Token);
+  discard RequireCatalog(Response.Message);
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(SaveGamePath(First), '{')));
+  Response := Ask(Again, Response.Reader, ClientMessage.SelectWorld('world-1'), Token);
+  AssertEquals('incompatible', Std.Options.Unwrap(SelectedWorld(RequireCatalog(Response.Message)))
+                                 .SaveStatus);
+  Response := Ask(Again, Response.Reader, ClientMessage.LoadGame, Token);
+  RequireRejected(Response.Message, 'save_incompatible');
+  AssertEquals('{', Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(First))));
+  AssertTrue(Std.Results.Unwrap(WriteLine(Again, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Std.Results.Unwrap(Close(Again)));
+  AssertTrue(Std.Results.Unwrap(Std.Tasks.Wait(AgainWorker)));
+  AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
+end.

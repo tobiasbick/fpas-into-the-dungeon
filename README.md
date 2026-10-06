@@ -52,6 +52,10 @@ Use the compiler and source standard library from the same checkout. The source
 uses the new statement terminators, named block endings, `when` case arms, and
 explicit result consumption. See the [migration plan](docs/plans/fpas-syntax-migration.md).
 
+This feature additionally requires `Std.Fs.ReadDir` (including its `go` call
+support) from the accompanying FPAS checkout; it is not part of the linked
+baseline revision.
+
 The game also uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
 context-typed record updates such as `State with Hostiles := []; end with`, and
 `Cmd.RequestTick` for combat animation, and imports the concurrency unit as
@@ -66,7 +70,20 @@ Run the server first. Both programs use `127.0.0.1:4040` by default and create
 their TOML configuration under `~/.fpas-into-the-dungeon/config/`. Optional
 host and port arguments override that address; `--data-dir PATH` selects a
 different runtime-data directory.
-The server also accepts `--world ID` to select or create another world.
+The server accepts `--world ID` to preselect an existing world. Startup never
+creates it. After connecting, choose **Create world**, **Continue**, or **Start
+over**. Creation assigns a new identity even for an existing seed. Invalid saves
+are kept; overwriting requires confirmation. **Choose world** in the system menu
+asks before discarding unsaved progress.
+
+```powershell
+fpas run apps/server/server.fpasprj -- --console
+```
+
+The optional server console shows live logs/status and edits creation defaults
+in `server.toml`. Seed values are signed 32-bit integers; entrance regions are
+1 through 16 chunks wide. Existing worlds retain their original parameters.
+The server admits one connected player at a time.
 
 Inspect terrain or an individual generator field without starting the server:
 

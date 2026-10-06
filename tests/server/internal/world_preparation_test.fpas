@@ -1,0 +1,108 @@
+// Failed catalog, world selection and initial projection preserve the installed session exactly.
+program WorldPreparationTest;
+
+uses
+  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Protocol, Dungeon.Protocol.ServerMessages,
+  Dungeon.Protocol.Transport, Dungeon.RuntimeData, Dungeon.Server.Config, Dungeon.Server.Handling,
+  Dungeon.Server.Session, Dungeon.Server.Worlds, Dungeon.World, Dungeon.World.Catalog, Std.Conv,
+  Std.Arrays, Std.Fs, Std.Net, Std.Options, Std.Path, Std.Results, Std.Tasks, Std.Test, Std.Time;
+
+procedure Rejected(Client: Connection; Token: CancellationToken; Expected: string);
+begin
+  var Reply: LineRead := Std.Results.Unwrap(ReadLine(NewLineReader(Client), Token));
+  case Std.Results.Unwrap(DecodeServer(Reply.Line)) of
+    when ServerMessage.Rejected(Code, Reason):
+      begin
+        AssertEquals(Expected, Code);
+      end;
+    else
+      begin
+        panic('expected rejection');
+      end;
+  end case;
+end procedure;
+
+begin
+  var Root: string := '.temp-data/preparation-' + IntToStr(TimestampMillis());
+  var Runtime: RuntimeSettings := Std.Results.Unwrap(LoadServerRuntime(Some(Root)));
+  var First: WorldSession := Std.Results.Unwrap(Dungeon.World.Catalog.CreateWorld(Runtime.Paths.Worlds, 12345, 4, 32));
+  var Second: WorldSession := Std.Results.Unwrap(Dungeon.World.Catalog.CreateWorld(Runtime.Paths.Worlds, 24680, 4, 32));
+  var Config: ServerConfig := record
+    ConfigPath := Runtime.Paths.ServerConfig;
+    Logs := None;
+    WorldsRoot := Runtime.Paths.Worlds;
+    WorldId := First.Metadata.Id;
+    WorldSeed := 12345;
+    DungeonRegionChunks := 4;
+    ChunkCacheLimit := 32;
+    MaximumViewWidth := 80;
+    MaximumViewHeight := 24;
+  end;
+
+  // Large catalogs retain unusable worlds and bound every page, including selection at its end.
+  for Index: integer := 0 to 64 do
+    AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDirAll(Std.Path.Join([
+                                                                      Runtime.Paths.Worlds,
+                                                                      'a-' + IntToStr(Index)
+                                                                    ]))));
+  end for;
+  var FirstPage: WorldCatalog := Std.Results.Unwrap(CatalogFor(Config, First.Metadata.Id, 0));
+  AssertEquals(67, FirstPage.Total);
+  AssertEquals(64, Std.Arrays.Length(FirstPage.Worlds));
+  AssertEquals('incompatible', FirstPage.Worlds[0].Status);
+  AssertEquals('unknown', FirstPage.Worlds[0].SaveStatus);
+  var SelectedPage: WorldCatalog := Std.Results.Unwrap(CatalogFor(Config, First.Metadata.Id, -1));
+  AssertEquals(65, SelectedPage.Offset);
+  AssertEquals(2, Std.Arrays.Length(SelectedPage.Worlds));
+  AssertEquals(First.Metadata.Id, SelectedPage.Worlds[0].Id);
+  var FinalPage: WorldCatalog := Std.Results.Unwrap(CatalogFor(Config, First.Metadata.Id, 1000000));
+  AssertEquals(64, FinalPage.Offset);
+  AssertEquals(3, Std.Arrays.Length(FinalPage.Worlds));
+  var Session: ServerSession := Std.Results.Unwrap(NewServerSession(Config, record
+    Width := 9;
+    Height := 5;
+  end));
+  var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
+  var Client: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  var Server: Connection := Std.Results.Unwrap(Accept(ListenerValue));
+  AssertTrue(Std.Results.Unwrap(SetTimeout(Client, 30000)));
+  var Token: CancellationToken := GetCancellationToken(CreateCancellationSource());
+  // Opening candidate metadata succeeds, but its catalog cannot be prepared.
+  var Defaults: string := Std.Results.Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(Runtime.Paths.ServerConfig, '{')));
+  var Unchanged: ServerSession := Std.Results.Unwrap(HandleSessionMessage(Session, ClientMessage.SelectWorld(Second.Metadata.Id), Server, Config, Token));
+  Rejected(Client, Token, 'storage_error');
+  AssertEquals(First.Metadata.Id, Unchanged.World.Metadata.Id);
+  AssertTrue(Std.Options.IsNone(Unchanged.State));
+  var Active: ServerSession := Session with State := Some(NewGame(First.Metadata) with Health := 7; end with); Dirty := true; end with;
+  var Kept: ServerSession := Std.Results.Unwrap(HandleSessionMessage(Active, ClientMessage.ListWorlds(0, true), Server, Config, Token));
+  Rejected(Client, Token, 'storage_error');
+  AssertTrue(Kept.Dirty);
+  AssertEquals(7, Std.Options.Unwrap(Kept.State).Health);
+  AssertEquals(First.Metadata.Id, Kept.World.Metadata.Id);
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(Runtime.Paths.ServerConfig, Defaults)));
+  var BadMetadata: string := Std.Results.Unwrap(Std.Fs.ReadText(WorldMetadataPath(Second)));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(WorldMetadataPath(Second), '{')));
+  var Wrong: ServerSession := Std.Results.Unwrap(HandleSessionMessage(Session, ClientMessage.SelectWorld(Second.Metadata.Id), Server, Config, Token));
+  Rejected(Client, Token, 'world_incompatible');
+  AssertEquals(First.Metadata.Id, Wrong.World.Metadata.Id);
+  AssertEquals('{', Std.Results.Unwrap(Std.Fs.ReadText(WorldMetadataPath(Second))));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.WriteTextAtomic(WorldMetadataPath(Second), BadMetadata)));
+  // A blocked spawn chunk makes projection fail before the candidate state is installed.
+  var Chunk: ChunkCoordinate := record
+    X := ChunkForCoordinate(First.Metadata.Spawn.X);
+    Y := ChunkForCoordinate(First.Metadata.Spawn.Y);
+  end;
+  var Blocked: string := WorldChunkPath(First, Chunk);
+  AssertTrue(Std.Results.Unwrap(Std.Fs.CreateDirAll(Blocked)));
+  var NotStarted: ServerSession := Std.Results.Unwrap(HandleSessionMessage(Session, ClientMessage.StartNewGame, Server, Config, Token));
+  Rejected(Client, Token, 'storage_error');
+  AssertTrue(Std.Options.IsNone(NotStarted.State));
+  AssertFalse(NotStarted.Dirty);
+  AssertEquals(First.Metadata.Id, NotStarted.World.Metadata.Id);
+  AssertTrue(Std.Fs.IsDir(Blocked));
+  AssertTrue(Std.Results.Unwrap(Close(Server)));
+  AssertTrue(Std.Results.Unwrap(Close(Client)));
+  AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
+end.

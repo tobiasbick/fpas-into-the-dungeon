@@ -13,10 +13,10 @@ public const
   SaveGameFormatVersion: integer := 7;
 
 public type
-  // Inspection result: absent, invalid and deleted with its reason, or fully validated state.
+  // Inspection result: absent, invalid and preserved with its reason, or fully validated state.
   SaveGameLoad = enum
     Missing;
-    InvalidRemoved(Reason: string);
+    Invalid(Reason: string);
     // Fully checked state and the exact current geometry used during validation.
     Loaded(State: GameState; View: AreaView);
   end enum;
@@ -136,35 +136,17 @@ begin
   return None;
 end function;
 
-// Removes an invalid save and reports the removal; a failed removal is an I/O failure.
-function RemoveInvalidSave(World: WorldSession; Reason: string): result of SaveGameLoad, PersistenceFailure;
-begin
-  case DeleteSaveGame(World) of
-    when Ok(Deleted):
-      begin
-        if not Deleted then
-          begin
-            return Error(PersistenceFailure.Io('invalid savegame disappeared before it could be removed: ' +
-                                               Reason));
-          end;
-        end if;
-
-        return Ok(SaveGameLoad.InvalidRemoved(Reason));
-      end;
-    when Error(DeleteMessage):
-      begin
-        return Error(PersistenceFailure.Io((('invalid savegame could not be removed: ' + DeleteMessage) + '; validation failed: ') +
-                                           Reason));
-      end;
-  end case;
-end function;
-
 // Loads the selected world's save in three phases: decode its self-contained fields, read every
 // visited level once, then validate the state against those maps. A missing or invalid level is a
-// world-data failure that preserves the save; only invalid save content removes it. Never generates.
+// world-data failure that preserves the save; invalid save content is also preserved. Never generates.
 public function LoadSaveGame(World: WorldSession): result of SaveGameLoad, PersistenceFailure;
 begin
   var Path: string := SaveGamePath(World);
+  var Parent: string := Std.Path.Join([World.Directory, 'saves']);
+  if Std.Fs.Exists(Parent) and not Std.Fs.IsDir(Parent) then
+    return Error(PersistenceFailure.Io('savegame directory exists but is not a directory'));
+  end if;
+
   if not Std.Fs.Exists(Path) then
     begin
       return Ok(SaveGameLoad.Missing);
@@ -195,7 +177,7 @@ begin
       end;
     when Error(Message):
       begin
-        return RemoveInvalidSave(World, Message);
+        return Ok(SaveGameLoad.Invalid(Message));
       end;
   end case;
   mutable var Maps: array of InteriorMap := [];
@@ -220,13 +202,13 @@ begin
             end;
           when Error(Message):
             begin
-              return RemoveInvalidSave(World, 'invalid savegame: ' + Message);
+              return Ok(SaveGameLoad.Invalid('invalid savegame: ' + Message));
             end;
         end case;
       end;
     when Error(Message):
       begin
-        return RemoveInvalidSave(World, 'invalid savegame: ' + Message);
+        return Ok(SaveGameLoad.Invalid('invalid savegame: ' + Message));
       end;
   end case;
 end function;

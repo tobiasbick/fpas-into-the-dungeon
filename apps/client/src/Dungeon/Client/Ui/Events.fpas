@@ -4,7 +4,8 @@ unit Dungeon.Client.Ui.Events;
 uses
   Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Intentions, Dungeon.Client.Ui.Playback,
   Dungeon.Client.Ui.Session, Dungeon.Client.Animation, Dungeon.Client.Character,
-  Dungeon.Client.Model, Dungeon.Protocol, Std.Arrays, Std.Tui;
+  Dungeon.Client.Model, Dungeon.Protocol, Dungeon.Protocol.Worlds, Dungeon.Client.Ui.Worlds,
+  Std.Arrays, Std.Tui;
 
 // Applies authoritative messages emitted by the network task.
 public function UpdateClientEvent(State: ClientModel; Value: ClientEvent; Cmd: TuiCmdOutput): ClientModel;
@@ -12,21 +13,14 @@ begin
   Cmd.Set(TuiCmd.NoCommand);
   mutable var Next: ClientModel := State;
   case Value of
-    when ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved):
+    when ClientEvent.Connected(Catalog), ClientEvent.Worlds(Catalog):
       begin
-        Next.Screen := ClientScreen.StartScreen;
-        Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
-        Next.SaveAvailable := SaveAvailable;
-        Next.FocusedControl := NewGameControlId;
-        if InvalidSaveRemoved then
-          begin
-            Next.Status := 'Invalid saved game was removed. Start a new game.';
-            return AppendMessage(Next, Next.Status);
-          end;
+        var Installed: ClientModel := InstallCatalog(State, Catalog, Cmd);
+        if State.Overlay = ClientOverlay.DefeatOverlay then
+          return Installed with Overlay := ClientOverlay.DefeatOverlay; FocusedControl := OverlayBackControlId; Status := 'You have fallen.'; end with;
         end if;
 
-        Next.Status := 'Connected. Choose a game session.';
-        return AppendMessage(Next, 'Connected');
+        return Installed;
       end;
     when ClientEvent.State(Value):
       begin
@@ -50,6 +44,14 @@ begin
         Next.ConnectionPhase := ClientConnectionPhase.Active;
         Next.FocusedControl := 0;
         Next.HasVisibleState := true;
+        Next.Dirty := State.Dirty or State.PendingChangesProgress;
+        if State.PendingCreatedWorld then
+          Next.SaveAvailable := false;
+          Next.Catalog := State.Catalog with SelectedId := ''; SelectionReason := ''; end with;
+        end if;
+
+        Next.PendingChangesProgress := false;
+        Next.PendingCreatedWorld := false;
         Next.View := ViewForVisibleState(Value);
         case Value of
           when VisibleState.MapState(MapValue):
@@ -225,6 +227,7 @@ begin
       begin
         Next.Pending := false;
         Next.SaveAvailable := true;
+        Next.Dirty := false;
         Next.Status := 'Game saved.';
         return AppendMessage(Next, Next.Status);
       end;
@@ -241,6 +244,8 @@ begin
         Next.HasVisibleState := false;
         Next.DamageTaken := false;
         Next.DefeatMessage := Message;
+        Next.Dirty := false;
+        Next := QueueWorldList(Next, 0, false);
         Next.Status := 'You have fallen.';
         return AppendMessage(Next, Message);
       end;
@@ -253,16 +258,28 @@ begin
     when ClientEvent.Rejected(Code, Message):
       begin
         Next.Pending := false;
+        Next.PendingChangesProgress := false;
+        Next.PendingCreatedWorld := false;
+        if State.PendingCreatedWorld then
+          Next.Overlay := ClientOverlay.NewWorldOverlay;
+          Next.FocusedControl := SubmitWorldControlId;
+        end if;
+
+        if Code = 'overwrite_required' then
+          Next.SaveAvailable := true;
+          Next.Overlay := ClientOverlay.SaveConfirmationOverlay;
+          Next.FocusedControl := CancelSaveControlId;
+        end if;
+
+        if Code = 'discard_required' then
+          Next.Dirty := true;
+          Next.Overlay := ClientOverlay.DiscardConfirmationOverlay;
+          Next.FocusedControl := OverlayBackControlId;
+        end if;
+
         if Next.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
           begin
             Next.Overlay := ClientOverlay.NoOverlay;
-            Next.FocusedControl := NewGameControlId;
-          end;
-        end if;
-
-        if Code = 'save_removed' then
-          begin
-            Next.SaveAvailable := false;
             Next.FocusedControl := NewGameControlId;
           end;
         end if;

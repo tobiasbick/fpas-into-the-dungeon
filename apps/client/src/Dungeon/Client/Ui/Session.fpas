@@ -3,8 +3,8 @@ unit Dungeon.Client.Ui.Session;
 
 uses
   Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Intentions, Dungeon.Client.Ui.Layout,
-  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Protocol, Dungeon.RuntimeData, Std.Arrays,
-  Std.Conv, Std.Str, Std.Tasks, Std.Tui;
+  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Protocol, Dungeon.Protocol.Worlds,
+  Dungeon.RuntimeData, Std.Arrays, Std.Conv, Std.Str, Std.Tasks, Std.Tui;
 
 // Appends one entry to the bounded message history, dropping the oldest.
 public function AppendMessage(State: ClientModel; Text: string): ClientModel;
@@ -42,7 +42,8 @@ begin
     end;
   end if;
 
-  if State.Overlay = ClientOverlay.SaveConfirmationOverlay then
+  if (State.Overlay = ClientOverlay.SaveConfirmationOverlay) or
+     (State.Overlay = ClientOverlay.DiscardConfirmationOverlay) then
     begin
       Next.Overlay := ClientOverlay.SystemMenuOverlay;
       Next.FocusedControl := SaveControlId;
@@ -172,6 +173,24 @@ begin
         end if;
         mutable var Next: ClientModel := State;
         Next.Pending := true;
+        Next.PendingCreatedWorld := false;
+        Next.PendingChangesProgress := Message = ClientMessage.StartNewGame;
+        case Message of
+          when ClientMessage.CreateWorld(Seed, RegionChunks):
+            begin
+              Next.PendingCreatedWorld := true;
+              Next.PendingChangesProgress := true;
+            end;
+          when ClientMessage.LoadGame:
+            begin
+              Next.PendingChangesProgress := not CatalogHasSave(State.Catalog);
+            end;
+          else
+            begin
+              null;
+            end;
+        end case;
+
         Next.FocusedControl := CancelSessionStartControlId;
         Next.Status := Status;
         return Next;
@@ -186,14 +205,18 @@ end function;
 // Sends a save request during an active game with nothing pending.
 public function QueueSave(State: ClientModel): ClientModel;
 begin
-  if ((State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending) or
+  if ((State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending or State.MapRequestPending) or
      not State.HasVisibleState then
     begin
       return State;
     end;
   end if;
+  mutable var Message: ClientMessage := ClientMessage.SaveGame;
+  if State.Overlay = ClientOverlay.SaveConfirmationOverlay then
+    Message := ClientMessage.OverwriteSaveGame;
+  end if;
 
-  case TrySend(State.Requests, ClientMessage.SaveGame) of
+  case TrySend(State.Requests, Message) of
     when Ok(Queued):
       begin
         if not Queued then

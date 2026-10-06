@@ -111,7 +111,7 @@ preferences.
 
 This stage is complete when outdoor and first-person state survive a server
 restart with exact position, facing, area identity, and return location;
-invalid development saves are removed without touching other world data; and
+invalid saves are classified and preserved without touching other world data; and
 unit, protocol, headless-TUI, restart, and real-process tests pass. A database
 is introduced only if concrete access or recovery requirements make the
 file-based approach insufficient.
@@ -435,34 +435,47 @@ The rendering correction passed `fpas check` and the complete workspace suite
 Dungeon names, further opponent kinds, loot tables, and consumables belong to
 14b; stairs and deeper levels to 14c.
 
-### 14s. World management and server console — LATER
+### 14s. World management and server console — IN REVIEW
 
-- The server supplies defaults and allowed ranges for world parameters (seed,
+- [x] The server supplies defaults and allowed ranges for world parameters (seed,
   entrance region size, later more); the client's new-world dialog shows them
   and may override them within the ranges. The server validates and creates a
   new world with its own identity; earlier worlds are kept.
-- Separate `Create world`, `Continue`, and `Start over` actions. Continue loads
+- [x] Separate `Create world`, `Continue`, and `Start over` actions. Continue loads
   the selected world's last explicit save when world format, generator, and
   savegame versions match the running server. A compatible world without a
   save can be started at its spawn. Start over begins a fresh game in the same
   world; its earlier save remains until an explicitly confirmed overwrite.
-- List existing worlds with parameters and save status. Incompatible worlds
+- [x] List existing worlds with parameters and save status. Incompatible worlds
   remain visible with an instruction to delete or recreate them; do not migrate
   or delete them automatically. Client-side deletion is deferred.
-- Returning to world selection with unsaved progress requires confirmation to
+- [x] Returning to world selection with unsaved progress requires confirmation to
   discard it or cancellation; never save implicitly. Prepare and validate the
   selected world before installing it as the active session world.
-- `world_id` in `server.toml` preselects a world at server start. A missing or
+- [x] `world_id` in `server.toml` preselects a world at server start. A missing or
   incompatible selection leaves world selection available and shows the
   reason; storage I/O failures are reported separately, never treated as a
   missing world. The server still admits only one player at a time.
-- `dungeon-server --console` shows a live log (connections, created and loaded
+- [x] `dungeon-server --console` shows a live log (connections, created and loaded
   worlds, rejected requests, errors), a status line, and a settings view. The
   settings view edits the server defaults such as the entrance region size and
   later the LLM connection; it validates each value and writes `server.toml`.
   World parameters changed there apply to new worlds only. Without `--console`
   the server stays headless.
-- Requires the next protocol version.
+- [x] Uses protocol 14; world format 3, generator 6 and save format 7 remain
+  unchanged.
+
+Implementation and verification are tracked in
+[the 14s plan](plans/14s-world-management.md). New worlds accept signed 32-bit
+seeds and entrance regions of 1 through 16 chunks. Catalogs are strict bounded
+pages with a transport byte budget; inspecting them never generates content.
+Formatting and workspace checking pass; the complete workspace suite passed
+65/65 test programs with positive, negative, and edge-case coverage on
+2026-10-06. The start-menu backdrop is retained for the current terminal size,
+so focus navigation no longer regenerates it; the regression covers resize and
+return from gameplay. The feature remains in review until accepted.
+The user's latest terminal test on 2026-10-06 still found unresolved behavior;
+reproduction and correction are the next steps recorded in the plan.
 
 ### 14b. Dungeon contents — LATER
 

@@ -1,0 +1,330 @@
+// Client-owned world selection, parameter editing and explicit progress-discard confirmation.
+unit Dungeon.Client.Ui.Worlds;
+
+uses
+  Dungeon.Client.Model, Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Session, Dungeon.Protocol,
+  Dungeon.Protocol.Worlds, Std.Arrays, Std.Conv, Std.Str, Std.Tasks, Std.Tui;
+
+public const
+  // Keep catalog pages readable even in a small terminal; server pages remain bounded separately.
+  VisibleWorldRows: integer := 6;
+
+function PageSize(State: ClientModel): integer;
+begin
+  var Available: integer := State.ViewportHeight - 15;
+  if Available < 1 then
+    return 1;
+  end if;
+
+  if Available > VisibleWorldRows then
+    return VisibleWorldRows;
+  end if;
+
+  return Available;
+end function;
+
+// Installs only a validated catalog after the server has completed a selection request.
+public function InstallCatalog(State: ClientModel; Catalog: WorldCatalog; Cmd: TuiCmdOutput): ClientModel;
+begin
+  case ValidateWorldCatalog(Catalog) of
+    when Error(Reason):
+      begin
+        return State with Pending := false; Status := 'Invalid server world catalog: ' + Reason; end with;
+      end;
+    when Ok(Valid):
+      begin
+        mutable var Focus: integer := CreateWorldControlId;
+        case SelectedWorld(Valid) of
+          when Some(World):
+            begin
+              if World.Status = 'ready' then
+                Focus := NewGameControlId;
+              end if;
+            end;
+          when None:
+            begin
+              null;
+            end;
+        end case;
+
+        return State with Catalog := Valid; WorldCursor := -1; Screen := ClientScreen.StartScreen; ConnectionPhase := ClientConnectionPhase.AwaitingSession; Overlay := ClientOverlay.NoOverlay; Pending := false; MapRequestPending := false; MapHasState := false; PendingChangesProgress := false; PendingCreatedWorld := false; Dirty := false; HasVisibleState := false; SaveAvailable := CatalogHasSave(Valid); FocusedControl := Focus; Status := 'Choose a world. ' +
+                                                                                                                                                                                                                                                                                                                                                                                                                                                         Valid.SelectionReason; end with;
+      end;
+  end case;
+end function;
+
+// Returns to the connected catalog only after a server response; errors retain the active game.
+public function QueueWorldList(State: ClientModel; Offset: integer; DiscardProgress: boolean): ClientModel;
+begin
+  if State.Pending or State.MapRequestPending or
+     ((State.ConnectionPhase <> ClientConnectionPhase.Active) and (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession)) then
+    return State;
+  end if;
+
+  case TrySend(State.Requests, ClientMessage.ListWorlds(Offset, DiscardProgress)) of
+    when Ok(Queued):
+      begin
+        if Queued then
+          return State with Pending := true; Status := 'Listing worlds...'; end with;
+        end if;
+      end;
+    else
+      begin
+        null;
+      end;
+  end case;
+
+  return State;
+end function;
+
+// Handles catalog list selection; pending requests and overlays cannot replace the choice.
+public function SelectWorldRow(
+  State: ClientModel;
+  Source: TuiControlId;
+  Action: TuiAction;
+  Selected: integer
+): ClientModel;
+begin
+  if (Source.Value <> WorldListControlId) or (Action.Value <> SelectWorldAction) or (State.Overlay <> ClientOverlay.NoOverlay) or (Selected < 0) or
+     (Selected >= PageSize(State)) then
+    return State;
+  end if;
+  var Index: integer := Selected;
+  if Index >= Std.Arrays.Length(State.Catalog.Worlds) then
+    return State;
+  end if;
+  var World: WorldSummary := State.Catalog.Worlds[Index];
+  var Next: ClientModel := State with WorldCursor := Selected; end with;
+
+  if World.Status <> 'ready' then
+    return Next with Status := (World.Id + ': ') + World.Reason; end with;
+  end if;
+
+  return QueueSessionChoice(Next, ClientMessage.SelectWorld(World.Id), ('Selecting ' + World.Id) +
+                                                                       '...');
+end function;
+
+// Retains controlled editor values without submitting invalid parameters to the server.
+public function ChangeWorldText(
+  State: ClientModel;
+  Source: TuiControlId;
+  Action: TuiAction;
+  Text: string;
+  Caret: integer
+): ClientModel;
+begin
+  if (State.Overlay <> ClientOverlay.NewWorldOverlay) or State.Pending or (Text.Length() > 32) then
+    return State;
+  end if;
+
+  if (Caret < 0) or (Caret > Text.Length()) then
+    return State;
+  end if;
+
+  if (Source.Value = SeedControlId) and (Action.Value = SeedChangedAction) then
+    return State with SeedText := Text; SeedCaret := Caret; end with;
+  end if;
+
+  if (Source.Value = RegionControlId) and (Action.Value = RegionChangedAction) then
+    return State with RegionText := Text; RegionCaret := Caret; end with;
+  end if;
+
+  return State;
+end function;
+
+// Parses and bounds both parameters before queuing creation; validation errors keep the editor open.
+public function SubmitWorld(State: ClientModel): ClientModel;
+begin
+  if (State.Overlay <> ClientOverlay.NewWorldOverlay) or State.Pending then
+    return State;
+  end if;
+
+  case ParseWorldInteger(State.SeedText) of
+    when Error(Reason):
+      begin
+        return State with Status := 'Enter a valid whole-number seed.'; end with;
+      end;
+    when Ok(Seed):
+      begin
+        case ParseWorldInteger(State.RegionText) of
+          when Error(Reason):
+            begin
+              return State with Status := 'Enter a valid whole-number region size.'; end with;
+            end;
+          when Ok(RegionChunks):
+            begin
+              if (Seed < State.Catalog.MinimumSeed) or (Seed > State.Catalog.MaximumSeed) or (RegionChunks < State.Catalog.MinimumRegionChunks) or
+                 (RegionChunks > State.Catalog.MaximumRegionChunks) then
+                return State with Status := 'Parameters are outside the displayed ranges.'; end with;
+              end if;
+              var Next: ClientModel := QueueSessionChoice(State, ClientMessage.CreateWorld(Seed, RegionChunks), 'Creating world...');
+              if Next.Pending then
+                return Next with Overlay := ClientOverlay.NoOverlay; end with;
+              end if;
+
+              return Next;
+            end;
+        end case;
+      end;
+  end case;
+end function;
+
+// Applies world-management actions independently of gameplay and connection controls.
+public function HandleWorldAction(State: ClientModel; Action: TuiAction): option of ClientModel;
+begin
+  if Action.Value = CreateWorldAction then
+    if State.Pending or (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession) then
+      return Some(State);
+    end if;
+    var Seed: string := IntToStr(State.Catalog.DefaultSeed);
+    var Region: string := IntToStr(State.Catalog.DefaultRegionChunks);
+    return Some(State with Overlay := ClientOverlay.NewWorldOverlay; SeedText := Seed; SeedCaret := Seed.Length(); RegionText := Region; RegionCaret := Region.Length(); FocusedControl := SeedControlId; end with);
+  end if;
+
+  if Action.Value = RefreshWorldsAction then
+    if (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession) or
+       (State.Overlay <> ClientOverlay.NoOverlay) then
+      return Some(State);
+    end if;
+
+    return Some(QueueWorldList(State, State.Catalog.Offset, false));
+  end if;
+
+  if Action.Value = SubmitWorldAction then
+    return Some(SubmitWorld(State));
+  end if;
+
+  if Action.Value = WorldSelectionAction then
+    if State.Pending or State.MapRequestPending or
+       (State.ConnectionPhase <> ClientConnectionPhase.Active) then
+      return Some(State);
+    end if;
+
+    if State.Dirty then
+      return Some(State with Overlay := ClientOverlay.DiscardConfirmationOverlay; FocusedControl := OverlayBackControlId; end with);
+    end if;
+
+    return Some(QueueWorldList(State, 0, false));
+  end if;
+
+  if Action.Value = ConfirmDiscardAction then
+    if State.Overlay <> ClientOverlay.DiscardConfirmationOverlay then
+      return Some(State);
+    end if;
+
+    return Some(QueueWorldList(State, 0, true));
+  end if;
+
+  if (Action.Value = PreviousWorldsAction) or (Action.Value = NextWorldsAction) then
+    if State.Pending or (State.Overlay <> ClientOverlay.NoOverlay) or
+       (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession) then
+      return Some(State);
+    end if;
+    mutable var Offset: integer := State.Catalog.Offset - PageSize(State);
+    if Action.Value = NextWorldsAction then
+      Offset := State.Catalog.Offset + PageSize(State);
+    else
+      if State.Catalog.Offset = 0 then
+        return Some(State);
+      end if;
+
+      if Offset < 0 then
+        Offset := 0;
+      end if;
+    end if;
+
+    if (Offset < 0) or (Offset >= State.Catalog.Total) then
+      return Some(State);
+    end if;
+
+    return Some(QueueWorldList(State, Offset, false));
+  end if;
+
+  return None;
+end function;
+
+// Shows identities, original parameters and save classification with a bounded visible list.
+public function ViewWorldChoices(State: ClientModel): array of TuiElement;
+begin
+  mutable var Items: array of TuiElement := [];
+  mutable var Labels: array of string := [];
+  mutable var Selected: integer := State.WorldCursor;
+  for Index: integer := 0 to Std.Arrays.Length(State.Catalog.Worlds) - 1 do
+    if Index < PageSize(State) then
+      var World: WorldSummary := State.Catalog.Worlds[Index];
+      if (State.WorldCursor < 0) and (World.Id = State.Catalog.SelectedId) then
+        Selected := Index;
+      end if;
+      mutable var Text: string := (((World.Id + ' | ') + World.Status) + ' | ') + World.Reason;
+      if World.Status = 'ready' then
+        Text := (((((World.Id + ' seed=') + IntToStr(World.Seed)) + ' region=') + IntToStr(World.RegionChunks)) + ' save=') +
+                World.SaveStatus;
+      end if;
+
+      Std.Arrays.Push(Labels, Text);
+    end if;
+  end for;
+
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeList(TuiControlId.Create(WorldListControlId), Labels, Selected, TuiAction.Create(SelectWorldAction)));
+  if State.Catalog.Offset > 0 then
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(PreviousWorldsControlId), 'Previous worlds', TuiAction.Create(PreviousWorldsAction)));
+  end if;
+
+  if State.Catalog.Offset + PageSize(State) < State.Catalog.Total then
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(NextWorldsControlId), 'Next worlds', TuiAction.Create(NextWorldsAction)));
+  end if;
+
+  case SelectedWorld(State.Catalog) of
+    when Some(World):
+      begin
+        Std.Arrays.Push(Items, TuiElementBuilders.MakeLabel((('Selected: ' + World.Id) + ' ') +
+                                                            World.Reason));
+        if World.Status = 'ready' then
+          Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(NewGameControlId), 'Start over', TuiAction.Create(NewGameAction)));
+        end if;
+      end;
+    when None:
+      begin
+        null;
+      end;
+  end case;
+
+  if CanContinueWorld(State.Catalog) then
+    Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(LoadGameControlId), 'Continue', TuiAction.Create(LoadGameAction)));
+  end if;
+
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(RefreshWorldsControlId), 'Refresh worlds', TuiAction.Create(RefreshWorldsAction)));
+  Std.Arrays.Push(Items, TuiElementBuilders.MakeButton(TuiControlId.Create(CreateWorldControlId), 'Create world', TuiAction.Create(CreateWorldAction)));
+  return Items;
+end function;
+
+// Displays server-supplied defaults/ranges and the model-owned creation editor.
+public function ViewNewWorld(State: ClientModel): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay('Create world', [
+                                                          TuiElementBuilders.MakeColumn([
+                                                                                          TuiElementBuilders.MakeLabel((('Seed: ' + IntToStr(State.Catalog.MinimumSeed)) + ' through ') +
+                                                                                                                       IntToStr(State.Catalog.MaximumSeed)),
+                                                                                          TuiElementBuilders.MakeInput(TuiControlId.Create(SeedControlId), State.SeedText, State.SeedCaret, TuiAction.Create(SeedChangedAction)),
+                                                                                          TuiElementBuilders.MakeLabel(((('Entrance region: ' + IntToStr(State.Catalog.MinimumRegionChunks)) + ' through ') + IntToStr(State.Catalog.MaximumRegionChunks)) +
+                                                                                                                       ' chunks'),
+                                                                                          TuiElementBuilders.MakeInput(TuiControlId.Create(RegionControlId), State.RegionText, State.RegionCaret, TuiAction.Create(RegionChangedAction)),
+                                                                                          TuiElementBuilders.MakeLabel(State.Status),
+                                                                                          TuiElementBuilders.MakeButton(TuiControlId.Create(SubmitWorldControlId), 'Create', TuiAction.Create(SubmitWorldAction)),
+                                                                                          TuiElementBuilders.MakeButton(TuiControlId.Create(OverlayBackControlId), 'Cancel', TuiAction.Create(BackAction))
+                                                                                        ])
+                                                        ]);
+end function;
+
+// Discard is explicit; cancellation returns to the still-installed game session.
+public function ViewDiscardConfirmation(): TuiElement;
+begin
+  return TuiElementBuilders.MakeOverlay('Discard unsaved progress?', [
+                                                                       TuiElementBuilders.MakeColumn([
+                                                                                                       TuiElementBuilders.MakeLabel('Unsaved progress will be lost. The last save is kept.'),
+                                                                                                       TuiElementBuilders.MakeButton(TuiControlId.Create(DiscardControlId), 'Discard and choose world', TuiAction.Create(ConfirmDiscardAction)),
+                                                                                                       TuiElementBuilders.MakeDefaultButton(TuiControlId.Create(OverlayBackControlId), 'Cancel', '', TuiAction.Create(BackAction))
+                                                                                                     ])
+                                                                     ]);
+end function;
+end unit;

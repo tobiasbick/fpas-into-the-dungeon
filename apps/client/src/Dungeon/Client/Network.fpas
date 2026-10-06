@@ -2,7 +2,7 @@
 unit Dungeon.Client.Network;
 
 uses
-  Dungeon.Client.Model, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
+  Dungeon.Client.Model, Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.Worlds,
   Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Std.Net, Std.Options, Std.Tasks;
 
 type
@@ -29,6 +29,10 @@ end function;
 function AcceptsState(Request: ClientMessage): boolean;
 begin
   case Request of
+    when ClientMessage.CreateWorld(Seed, RegionChunks):
+      begin
+        return true;
+      end;
     when ClientMessage.StartNewGame:
       begin
         return true;
@@ -124,6 +128,23 @@ end function;
 function ResponseEvent(Request: ClientMessage; Response: ServerMessage): option of ClientEvent;
 begin
   case Response of
+    when ServerMessage.Worlds(Catalog):
+      begin
+        case Request of
+          when ClientMessage.ListWorlds(Offset, DiscardProgress):
+            begin
+              return Some(ClientEvent.Worlds(Catalog));
+            end;
+          when ClientMessage.SelectWorld(Id):
+            begin
+              return Some(ClientEvent.Worlds(Catalog));
+            end;
+          else
+            begin
+              null;
+            end;
+        end case;
+      end;
     when ServerMessage.State(Value):
       begin
         if AcceptsState(Request) then
@@ -169,7 +190,7 @@ begin
     when ServerMessage.SaveCompleted:
       begin
         case Request of
-          when ClientMessage.SaveGame:
+          when ClientMessage.SaveGame, ClientMessage.OverwriteSaveGame:
             begin
               return Some(ClientEvent.SaveCompleted);
             end;
@@ -213,8 +234,7 @@ function RunNetworkSession(
 begin
   var ConnectionValue: Connection := try ConnectWithCancellation(Host, Port, 5000, Token);
   mutable var Reader: LineReader := NewLineReader(ConnectionValue);
-  mutable var SaveAvailable: boolean := false;
-  mutable var InvalidSaveRemoved: boolean := false;
+  mutable var Catalog: WorldCatalog := EmptyWorldCatalog(12345, 4);
   var HelloSent: boolean := try WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion, ViewWidth, ViewHeight)), Token);
   case ReadServer(Reader, Token) of
     when Error(Message):
@@ -226,7 +246,7 @@ begin
       begin
         Reader := ReadValue.Reader;
         case ReadValue.Message of
-          when ServerMessage.Welcome(Version, Available, Removed):
+          when ServerMessage.Welcome(Version, Available):
             begin
               if Version <> ProtocolVersion then
                 begin
@@ -235,8 +255,7 @@ begin
                 end;
               else
                 begin
-                  SaveAvailable := Available;
-                  InvalidSaveRemoved := Removed;
+                  Catalog := Available;
                 end;
               end if;
             end;
@@ -255,7 +274,7 @@ begin
         end case;
       end;
   end case;
-  var Published: boolean := try Publish(Events, ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved), Token);
+  var Published: boolean := try Publish(Events, ClientEvent.Connected(Catalog), Token);
   while not IsCancellationRequested(Token) do
     begin
       case ReceiveWithCancellation(Requests, Token) of

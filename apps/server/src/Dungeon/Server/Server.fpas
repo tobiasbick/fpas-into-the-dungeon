@@ -2,15 +2,21 @@
 unit Dungeon.Server;
 
 uses
-  Dungeon.Server.Config, Dungeon.Server.Failures, Dungeon.Server.Handling, Dungeon.Server.Replies,
-  Dungeon.Server.Session, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
-  Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame, Std.Arrays, Std.Console,
-  Std.Conv, Std.Net, Std.Server, Std.Tasks, Std.Time;
+  Dungeon.Server.Config, Dungeon.Server.Worlds, Dungeon.Server.Logging, Dungeon.Server.Failures,
+  Dungeon.Server.Handling, Dungeon.Server.Replies, Dungeon.Server.Session, Dungeon.Protocol,
+  Dungeon.Protocol.ClientMessages, Dungeon.Protocol.Transport, Dungeon.World, Dungeon.World.Savegame,
+  Std.Arrays, Std.Console, Std.Conv, Std.Fs, Std.Net, Std.Server, Std.Tasks, Std.Time;
 
-function FinishReadFailure(ConnectionValue: Connection; Message: string; Token: CancellationToken): result of boolean, string;
+function FinishReadFailure(
+  ConnectionValue: Connection;
+  Message: string;
+  Config: ServerConfig;
+  Token: CancellationToken
+): result of boolean, string;
 begin
   if Message = LineTooLongError then
     begin
+      LogServer(Config.Logs, 'rejected', Message);
       var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('line_too_long', Message), Token);
     end;
   end if;
@@ -34,7 +40,7 @@ begin
   case ReadLine(Reader, Token) of
     when Error(ReadMessage):
       begin
-        return FinishReadFailure(ConnectionValue, ReadMessage, Token);
+        return FinishReadFailure(ConnectionValue, ReadMessage, Config, Token);
       end;
     when Ok(FirstRead):
       begin
@@ -47,6 +53,7 @@ begin
                   begin
                     if Version <> ProtocolVersion then
                       begin
+                        LogServer(Config.Logs, 'rejected', 'Unsupported client protocol version');
                         var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('unsupported_version', ('Protocol version ' + IntToStr(ProtocolVersion)) +
                                                                                                                                 ' is required'), Token);
                         return Ok(true);
@@ -60,6 +67,7 @@ begin
                         end;
                       when Error(Message):
                         begin
+                          LogServer(Config.Logs, 'rejected', 'Invalid viewport');
                           var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('invalid_viewport', Message), Token);
                           return Ok(true);
                         end;
@@ -67,6 +75,7 @@ begin
                   end;
                 else
                   begin
+                    LogServer(Config.Logs, 'rejected', 'Expected hello');
                     var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('expected_hello', 'The first message must be hello'), Token);
                     return Ok(true);
                   end;
@@ -74,57 +83,33 @@ begin
             end;
           when Error(Message):
             begin
+              LogServer(Config.Logs, 'rejected', 'Invalid client message');
               var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('invalid_message', 'The client message is invalid'), Token);
               return Ok(true);
             end;
         end case;
       end;
   end case;
-  var World: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.DungeonRegionChunks, Config.ChunkCacheLimit);
-  mutable var SaveAvailable: boolean := false;
-  mutable var InvalidSaveRemoved: boolean := false;
-  // Inspection reports availability only; an explicit load rereads and validates again.
-  case LoadSaveGame(World) of
-    when Ok(Inspected):
+  mutable var Session: ServerSession := try NewServerSession(Config, Viewport);
+  case CatalogFor(Config, Config.WorldId, -1) of
+    when Error(Reason):
       begin
-        case Inspected of
-          when SaveGameLoad.Missing:
-            begin
-              null;
-            end;
-          when SaveGameLoad.InvalidRemoved(Reason):
-            begin
-              InvalidSaveRemoved := true;
-            end;
-          when SaveGameLoad.Loaded(SavedState, SavedView):
-            begin
-              SaveAvailable := true;
-            end;
-        end case;
-      end;
-    when Error(Failure):
-      begin
-        // A missing level or storage failure preserves the save and closes before Welcome.
-        var Rejection: FailureRejection := PersistenceRejection(World.Metadata.Id, 'load_failed', Failure);
-        WriteLn((Rejection.Code + ': ') + PersistenceFailureReason(Failure));
-        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Rejected(Rejection.Code, Rejection.Message), Token);
+        LogServer(Config.Logs, 'error', Reason);
+        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Rejected('storage_error', 'Cannot list worlds. Check storage and server settings.'), Token);
         return Ok(true);
       end;
+    when Ok(Catalog):
+      begin
+        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Welcome(ProtocolVersion, Catalog), Token);
+      end;
   end case;
-  mutable var Session: ServerSession := record
-    World := World;
-    State := None;
-    Interior := None;
-    Viewport := Viewport;
-    Finished := false;
-  end;
-  var WelcomeSent: boolean := try SendMessage(ConnectionValue, ServerMessage.Welcome(ProtocolVersion, SaveAvailable, InvalidSaveRemoved), Token);
+
   while not IsCancellationRequested(Token) do
     begin
       case ReadLine(Reader, Token) of
         when Error(ReadMessage):
           begin
-            return FinishReadFailure(ConnectionValue, ReadMessage, Token);
+            return FinishReadFailure(ConnectionValue, ReadMessage, Config, Token);
           end;
         when Ok(ReadValue):
           begin
@@ -132,6 +117,7 @@ begin
             case DecodeClient(ReadValue.Line) of
               when Error(DecodeMessage):
                 begin
+                  LogServer(Config.Logs, 'rejected', 'Invalid client message');
                   var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('invalid_message', 'The client message is invalid'), Token);
                   return Ok(true);
                 end;
@@ -153,8 +139,14 @@ begin
   return Ok(true);
 end function;
 
-// Runs the signal-aware server with validated world and viewport configuration.
-public function RunServer(Host: string; Port: integer; Config: ServerConfig): result of boolean, string;
+// Owns admission and workers; only a standalone headless server takes process signals.
+function RunListener(
+  Host: string;
+  Port: integer;
+  Config: ServerConfig;
+  StopToken: CancellationToken;
+  ProcessSignals: boolean
+): result of boolean, string;
 begin
   if (Config.MaximumViewWidth < 1) or (Config.MaximumViewHeight < 1) then
     begin
@@ -167,28 +159,51 @@ begin
       return Error('server chunk cache is too small for the configured maximum viewport and prefetch margin');
     end;
   end if;
-  var ValidatedWorld: WorldSession := try OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.DungeonRegionChunks, Config.ChunkCacheLimit);
+  var Defaults: WorldCatalog := try CreationDefaults(Config);
+  var RootReady: boolean := try Std.Fs.CreateDirAll(Config.WorldsRoot);
   var ListenerValue: Listener := try Listen(Host, Port);
   var Life: ServerLifetime := try CreateLifetime(2000, false);
   var Owned: boolean := try OwnListener(Life, ListenerValue);
-  var Observing: boolean := try ObserveSignals(Life);
+  if ProcessSignals then
+    var Observing: boolean := try ObserveSignals(Life);
+  end if;
   var Workers: TaskGroup := GetWorkGroup(Life);
+  var Admission: channel of boolean := CreateChannel(1);
+  discard Send(Admission, true);
   var AcceptTask: task of result of boolean, string := StartTaskInGroup(Workers, function(Token: CancellationToken): result of boolean, string begin
     while not IsCancellationRequested(Token) do
       begin
         case AcceptWithCancellation(ListenerValue, Token) of
           when Ok(Client):
             begin
-              var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
-              var Closed: boolean := try Close(Client);
-              case Outcome of
-                when Error(Message):
+              case try TryReceive(Admission) of
+                when None:
                   begin
-                    WriteLn('Client failed: ' + Message);
+                    LogServer(Config.Logs, 'rejected', 'Another player is connected.');
+                    discard SendMessage(Client, ServerMessage.Rejected('server_busy', 'Another player is connected.'), Token);
+                    discard Close(Client);
                   end;
-                else
+                when Some(Permit):
                   begin
-                    null;
+                    var SessionTask: task of result of boolean, string := StartTaskInGroup(Workers, function(SessionToken: CancellationToken): result of boolean, string begin
+                      LogServer(Config.Logs, 'connected', 'Player connected');
+                      var Outcome: result of boolean, string := ServeConnection(Client, Config, SessionToken);
+                      var Closed: result of boolean, string := Close(Client);
+                      discard TrySend(Admission, true);
+                      LogServer(Config.Logs, 'disconnected', 'Player disconnected');
+                      case Outcome of
+                        when Error(Message):
+                          begin
+                            LogServer(Config.Logs, 'error', 'Client failed: ' + Message);
+                          end;
+                        else
+                          begin
+                            null;
+                          end;
+                      end case;
+
+                      return Closed;
+                    end function);
                   end;
               end case;
             end;
@@ -200,6 +215,8 @@ begin
                 end;
               end if;
 
+              LogServer(Config.Logs, 'error', 'Listener failed: ' + Message);
+              discard RequestStop(Life);
               return Error(Message);
             end;
         end case;
@@ -208,9 +225,8 @@ begin
 
     return Ok(true);
   end function);
-  WriteLn((((('Dungeon server for world ' + Config.WorldId) + ' listening on ') + Host) + ':') +
-          Std.Conv.IntToStr(Port));
-  while IsReady(Life) do
+  LogServer(Config.Logs, 'status', 'Listening on port ' + Std.Conv.IntToStr(Port));
+  while IsReady(Life) and not IsCancellationRequested(StopToken) do
     begin
       Sleep(20);
     end;
@@ -220,7 +236,7 @@ begin
   var Failures: array of TaskFailure := try CloseTaskGroupWithTimeout(Workers, RemainingMillis(Life));
   for Failure: TaskFailure in Failures do
     begin
-      WriteLn(Failure.Message);
+      LogServer(Config.Logs, 'error', Failure.Message);
     end;
   end for;
   var Finished: boolean := try FinishShutdown(Life);
@@ -231,5 +247,23 @@ begin
   end if;
 
   return Ok(true);
+end function;
+
+// Runs an embedded listener under caller-owned cancellation without taking process signals.
+public function RunServerWithCancellation(
+  Host: string;
+  Port: integer;
+  Config: ServerConfig;
+  StopToken: CancellationToken
+): result of boolean, string;
+begin
+  return RunListener(Host, Port, Config, StopToken, false);
+end function;
+
+// Runs the headless signal-aware listener; console mode supplies its own cancellation token.
+public function RunServer(Host: string; Port: integer; Config: ServerConfig): result of boolean, string;
+begin
+  var Stop: CancellationSource := CreateCancellationSource();
+  return RunListener(Host, Port, Config, GetCancellationToken(Stop), true);
 end function;
 end unit;

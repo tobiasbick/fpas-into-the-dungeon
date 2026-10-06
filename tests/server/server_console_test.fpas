@@ -1,0 +1,107 @@
+// Console log/status bounds and validated, non-destructive atomic creation-default updates.
+program ServerConsoleTest;
+
+uses
+  Dungeon.RuntimeData, Dungeon.Server.Console, Dungeon.Server.Console.Model, Dungeon.Server.Logging,
+  Dungeon.World, Std.Arrays, Std.Conv, Std.Fs, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time,
+  Std.Tui;
+
+function StaticUpdate(State: ConsoleModel; Msg: TuiMsg; Cmd: TuiCmdOutput): ConsoleModel;
+begin
+  Cmd.Set(TuiCmd.NoCommand);
+  return State;
+end function;
+
+function ContainsScreen(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Snapshot.Height - 1 do
+    if Std.Str.Contains(Snapshot.LineAt(Row), Text) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+begin
+  var Root: string := '.temp-data/console-' + IntToStr(TimestampMillis());
+  var Runtime: RuntimeSettings := Unwrap(LoadServerRuntime(Some(Root)));
+  var World: WorldSession := Unwrap(OpenWorld(Runtime.Paths.Worlds, 'kept', 24680, 4, 16));
+  var MetadataBefore: string := Unwrap(Std.Fs.ReadText(WorldMetadataPath(World)));
+  var Before: string := Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig));
+  mutable var Model: ConsoleModel := NewConsoleModel(Runtime.Paths.ServerConfig, Runtime.World);
+  AssertFalse(Model.Connected);
+  Model := ApplyConsoleLog(Model, record
+    Kind := 'connected';
+    Text := 'Player connected';
+  end);
+  AssertTrue(Model.Connected);
+  Model := ApplyConsoleLog(Model, record
+    Kind := 'world';
+    Text := 'Playing world kept';
+  end);
+  AssertEquals('Playing world kept', Model.Status);
+  for Index: integer := 0 to 150 do
+    Model := ApplyConsoleLog(Model, record
+      Kind := 'rejected';
+      Text := IntToStr(Index);
+    end);
+  end for;
+
+  AssertEquals(MaximumConsoleLines, Std.Arrays.Length(Model.Lines));
+  AssertEquals('rejected: 150', Model.Lines[MaximumConsoleLines - 1]);
+  Model := ApplyConsoleLog(Model, record
+    Kind := 'disconnected';
+    Text := 'Player disconnected';
+  end);
+  AssertFalse(Model.Connected);
+  var Queue: channel of ServerLogEvent := CreateChannel(2);
+  for Index: integer := 0 to 3 do
+    LogServer(Some(Queue), 'world', IntToStr(Index));
+  end for;
+
+  AssertEquals('2', Unwrap(ReceiveWithTimeout(Queue, 0)).Text);
+  AssertEquals('3', Unwrap(ReceiveWithTimeout(Queue, 0)).Text);
+  discard CloseChannel(Queue);
+  // Invalid text, overflow and range errors preserve both published defaults and exact file bytes.
+  for Text: string in ['', 'abc', '9223372036854775808', '2147483648', '-2147483649'] do
+    Model := StoreConsoleSettings(Model with SettingsOpen := true; SeedText := Text; end with);
+    AssertTrue(Model.SettingsOpen);
+    AssertEquals(Runtime.World.Seed, Model.Seed);
+    AssertTrue(Model.SettingsError <> '');
+    AssertEquals(Before, Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig)));
+  end for;
+
+  for Text: string in ['0', '17', 'abc'] do
+    Model := StoreConsoleSettings(Model with SeedText := '0'; RegionText := Text; end with);
+    AssertTrue(Model.SettingsOpen);
+    AssertEquals(Before, Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig)));
+  end for;
+
+  Model := StoreConsoleSettings(Model with SeedText := '-2147483648'; RegionText := '16'; end with);
+  AssertFalse(Model.SettingsOpen);
+  AssertEquals(-2147483648, Model.Seed);
+  AssertEquals(16, Model.RegionChunks);
+  var Settings: ServerWorldConfig := Unwrap(ReadServerDefaults(Runtime.Paths.ServerConfig));
+  AssertEquals(Model.Seed, Settings.Seed);
+  AssertEquals(Model.RegionChunks, Settings.DungeonRegionChunks);
+  AssertEquals(Runtime.World.Id, Settings.Id);
+  AssertEquals(Runtime.World.ChunkCacheLimit, Settings.ChunkCacheLimit);
+  AssertEquals(Runtime.World.MaximumViewWidth, Settings.MaximumViewWidth);
+  AssertEquals(Runtime.World.MaximumViewHeight, Settings.MaximumViewHeight);
+  AssertEquals(MetadataBefore, Unwrap(Std.Fs.ReadText(WorldMetadataPath(World))));
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(100, 26));
+  Model := App.RunIterations(Model, StaticUpdate, ViewServerConsole, 0, 0);
+  AssertTrue(ContainsScreen(App.SurfaceSnapshot(), 'Dungeon server'));
+  Model.SettingsOpen := true;
+  Model := App.RunIterations(Model, StaticUpdate, ViewServerConsole, 0, 0);
+  AssertTrue(ContainsScreen(App.SurfaceSnapshot(), 'Defaults for new worlds'));
+  AssertTrue(ContainsScreen(App.SurfaceSnapshot(), '1 through 16'));
+  App.Close();
+  Model := StoreConsoleSettings(Model with ConfigPath := Runtime.Paths.Config; SeedText := '17'; RegionText := '4'; end with);
+  AssertTrue(Model.SettingsOpen);
+  AssertEquals(-2147483648, Model.Seed);
+  AssertEquals(16, Model.RegionChunks);
+  AssertTrue(Model.SettingsError <> '');
+  AssertEquals(-2147483648, Unwrap(ReadServerDefaults(Runtime.Paths.ServerConfig)).Seed);
+end.

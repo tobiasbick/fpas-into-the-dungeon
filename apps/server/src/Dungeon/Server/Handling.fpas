@@ -2,22 +2,35 @@
 unit Dungeon.Server.Handling;
 
 uses
-  Dungeon.Server.Config, Dungeon.Server.Failures, Dungeon.Server.Mapping, Dungeon.Server.Projection,
-  Dungeon.Server.Replies, Dungeon.Server.Session, Dungeon.Combat, Dungeon.Coordinates,
-  Dungeon.GameState, Dungeon.Interaction, Dungeon.Interior, Dungeon.Movement, Dungeon.Protocol,
-  Dungeon.World, Dungeon.World.Interiors, Dungeon.World.Savegame, Std.Console, Std.Net, Std.Options,
-  Std.Tasks;
+  Dungeon.Server.Config, Dungeon.Server.Worlds, Dungeon.Server.Logging, Dungeon.Server.Failures,
+  Dungeon.Server.Mapping, Dungeon.Server.Projection, Dungeon.Server.Replies, Dungeon.Server.Session,
+  Dungeon.Combat, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interaction, Dungeon.Interior,
+  Dungeon.Movement, Dungeon.Protocol, Dungeon.World, Dungeon.World.Interiors, Dungeon.World.Savegame,
+  Std.Console, Std.Net, Std.Options, Std.Tasks;
+
+function RejectLogged(
+  Config: ServerConfig;
+  ConnectionValue: Connection;
+  Code: string;
+  Reason: string;
+  Token: CancellationToken
+): result of boolean, string;
+begin
+  LogServer(Config.Logs, 'rejected', (Code + ': ') + Reason);
+  return Reject(ConnectionValue, Code, Reason, Token);
+end function;
 
 // Sends a classified rejection for a typed failure and logs its detailed reason on the server.
 function RejectFailure(
   ConnectionValue: Connection;
   Rejection: FailureRejection;
   Detail: string;
+  Config: ServerConfig;
   Token: CancellationToken
 ): result of boolean, string;
 begin
-  WriteLn((Rejection.Code + ': ') + Detail);
-  return Reject(ConnectionValue, Rejection.Code, Rejection.Message, Token);
+  LogServer(Config.Logs, 'error', (Rejection.Code + ': ') + Detail);
+  return RejectLogged(Config, ConnectionValue, Rejection.Code, Rejection.Message, Token);
 end function;
 
 // Opens the target level of an entry (or none for an exit) and applies the pure transition.
@@ -27,6 +40,7 @@ function HandleTransition(
   View: AreaView;
   State: GameState;
   TargetAreaId: string;
+  Config: ServerConfig;
   ConnectionValue: Connection;
   Token: CancellationToken
 ): result of ServerSession, string;
@@ -41,7 +55,7 @@ begin
           end;
         when Error(Failure):
           begin
-            var Sent: boolean := try RejectFailure(ConnectionValue, LevelRejection(Session.World.Metadata.Id, Failure), LevelFailureReason(Failure), Token);
+            var Sent: boolean := try RejectFailure(ConnectionValue, LevelRejection(Session.World.Metadata.Id, Failure), LevelFailureReason(Failure), Config, Token);
             return Ok(Session);
           end;
       end case;
@@ -55,7 +69,7 @@ begin
       end;
     when Error(Reason):
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+        var Sent: boolean := try RejectLogged(Config, ConnectionValue, 'interaction_rejected', Reason, Token);
         return Ok(Session);
       end;
   end case;
@@ -70,10 +84,20 @@ public function HandleSessionMessage(
   Token: CancellationToken
 ): result of ServerSession, string;
 begin
+  case try HandleWorldMessage(Session, Message, ConnectionValue, Config, Token) of
+    when Some(Handled):
+      begin
+        return Ok(Handled);
+      end;
+    when None:
+      begin
+        null;
+      end;
+  end case;
   var HasState: boolean := Std.Options.IsSome(Session.State);
   if not HasState and RequiresActiveSession(Message) then
     begin
-      var Sent: boolean := try Reject(ConnectionValue, 'session_not_started', 'Start or load a game first.', Token);
+      var Sent: boolean := try RejectLogged(Config, ConnectionValue, 'session_not_started', 'Start or load a game first.', Token);
       return Ok(Session);
     end;
   end if;
@@ -88,67 +112,6 @@ begin
         var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
         Next.Finished := true;
       end;
-    when ClientMessage.StartNewGame:
-      begin
-        if HasState then
-          begin
-            var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token);
-          end;
-        else
-          begin
-            Next.Interior := None;
-            return CommitState(Next, NewGame(Session.World.Metadata), ConnectionValue, Token);
-          end;
-        end if;
-      end;
-    when ClientMessage.LoadGame:
-      begin
-        if HasState then
-          begin
-            var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token);
-          end;
-        else
-          begin
-            case LoadSaveGame(Session.World) of
-              when Error(Failure):
-                begin
-                  var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'load_failed', Failure), PersistenceFailureReason(Failure), Token);
-                end;
-              when Ok(LoadedSave):
-                begin
-                  case LoadedSave of
-                    when SaveGameLoad.Missing:
-                      begin
-                        var Sent: boolean := try Reject(ConnectionValue, 'save_unavailable', 'No saved game is available for this world.', Token);
-                      end;
-                    when SaveGameLoad.InvalidRemoved(Reason):
-                      begin
-                        var Sent: boolean := try Reject(ConnectionValue, 'save_removed', 'Invalid saved game was removed. Start a new game.', Token);
-                      end;
-                    when SaveGameLoad.Loaded(SavedState, SavedView):
-                      begin
-                        Next.Interior := SavedView.Interior;
-                        return CommitState(Next, SavedState, ConnectionValue, Token);
-                      end;
-                  end case;
-                end;
-            end case;
-          end;
-        end if;
-      end;
-    when ClientMessage.SaveGame:
-      begin
-        case WriteSaveGame(Session.World, try RequireActiveState(Session.State)) of
-          when Ok(Written):
-            begin
-              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.SaveCompleted, Token);
-            end;
-          when Error(Failure):
-            begin
-              var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'save_failed', Failure), PersistenceFailureReason(Failure), Token);
-            end;
-        end case;
-      end;
     when ClientMessage.Viewport(Width, Height):
       begin
         case ResolveViewport(Width, Height, Config) of
@@ -160,7 +123,7 @@ begin
             end;
           when Error(Reason):
             begin
-              var Sent: boolean := try Reject(ConnectionValue, 'invalid_viewport', Reason, Token);
+              var Sent: boolean := try RejectLogged(Config, ConnectionValue, 'invalid_viewport', Reason, Token);
             end;
         end case;
       end;
@@ -168,7 +131,7 @@ begin
       begin
         if (Width > Config.MaximumViewWidth) or (Height > Config.MaximumViewHeight) then
           begin
-            var Sent: boolean := try Reject(ConnectionValue, 'invalid_map_window', 'Exploration map dimensions exceed server limits.', Token);
+            var Sent: boolean := try RejectLogged(Config, ConnectionValue, 'invalid_map_window', 'Exploration map dimensions exceed server limits.', Token);
           end;
         else
           begin
@@ -188,33 +151,33 @@ begin
             end;
           when Error(Reason):
             begin
-              var Sent: boolean := try Reject(ConnectionValue, 'movement_rejected', Reason, Token);
+              var Sent: boolean := try RejectLogged(Config, ConnectionValue, 'movement_rejected', Reason, Token);
             end;
         end case;
       end;
     when ClientMessage.StepFirstPerson(Direction):
       begin
-        return PlayTurn(Session, TurnAction.Step(GameStep(Direction)), 'movement_rejected', ConnectionValue, Token);
+        return PlayTurn(Session, TurnAction.Step(GameStep(Direction)), 'movement_rejected', ConnectionValue, Token, Config.Logs);
       end;
     when ClientMessage.Attack:
       begin
-        return PlayTurn(Session, TurnAction.Attack, 'attack_rejected', ConnectionValue, Token);
+        return PlayTurn(Session, TurnAction.Attack, 'attack_rejected', ConnectionValue, Token, Config.Logs);
       end;
     when ClientMessage.Wait:
       begin
-        return PlayTurn(Session, TurnAction.Wait, 'wait_rejected', ConnectionValue, Token);
+        return PlayTurn(Session, TurnAction.Wait, 'wait_rejected', ConnectionValue, Token, Config.Logs);
       end;
     when ClientMessage.Equip(ItemId):
       begin
-        return PlayTurn(Session, TurnAction.Equip(ItemId), 'equip_rejected', ConnectionValue, Token);
+        return PlayTurn(Session, TurnAction.Equip(ItemId), 'equip_rejected', ConnectionValue, Token, Config.Logs);
       end;
     when ClientMessage.Unequip(ItemId):
       begin
-        return PlayTurn(Session, TurnAction.Unequip(ItemId), 'equip_rejected', ConnectionValue, Token);
+        return PlayTurn(Session, TurnAction.Unequip(ItemId), 'equip_rejected', ConnectionValue, Token, Config.Logs);
       end;
     when ClientMessage.DropItem(ItemId):
       begin
-        return PlayTurn(Session, TurnAction.Drop(ItemId), 'drop_rejected', ConnectionValue, Token);
+        return PlayTurn(Session, TurnAction.Drop(ItemId), 'drop_rejected', ConnectionValue, Token, Config.Logs);
       end;
     when ClientMessage.TurnFirstPerson(Direction):
       begin
@@ -226,7 +189,7 @@ begin
             end;
           when Error(Reason):
             begin
-              var Sent: boolean := try Reject(ConnectionValue, 'turn_rejected', Reason, Token);
+              var Sent: boolean := try RejectLogged(Config, ConnectionValue, 'turn_rejected', Reason, Token);
             end;
         end case;
       end;
@@ -240,7 +203,7 @@ begin
               case Outcome of
                 when InteractionOutcome.TransitionRequested(TargetAreaId):
                   begin
-                    return HandleTransition(Session, View, State, TargetAreaId, ConnectionValue, Token);
+                    return HandleTransition(Session, View, State, TargetAreaId, Config, ConnectionValue, Token);
                   end;
                 when InteractionOutcome.StateChanged(Changed):
                   begin
@@ -254,9 +217,13 @@ begin
             end;
           when Error(Reason):
             begin
-              var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+              var Sent: boolean := try RejectLogged(Config, ConnectionValue, 'interaction_rejected', Reason, Token);
             end;
         end case;
+      end;
+    else
+      begin
+        null;
       end;
   end case;
 

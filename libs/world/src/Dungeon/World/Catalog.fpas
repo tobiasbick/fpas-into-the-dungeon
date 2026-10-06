@@ -1,0 +1,271 @@
+// Non-destructive inspection, existing-only opening, and exclusive creation of worlds.
+unit Dungeon.World.Catalog;
+
+uses
+  Dungeon.Terrain, Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Encoding,
+  Dungeon.World.Savegame, Dungeon.World.Savegame.Errors, Std.Arrays, Std.Conv, Std.Fs, Std.Path,
+  Std.Str;
+
+public const
+  // New-world parameter policy; the existing generator also supports wider stored seeds.
+  MinimumWorldSeed: integer := -2147483648;
+  MaximumWorldSeed: integer := 2147483647;
+
+public type
+  // Missing selection, incompatible metadata, and storage failures remain distinct.
+  WorldAccessFailure = enum
+    Missing;
+    Incompatible(Reason: string);
+    Io(Reason: string);
+  end enum;
+  // One existing world, including unusable entries; inspection never changes its files.
+  WorldEntry = record
+    public Id: string;
+    public Metadata: option of WorldMetadata;
+    // ready, incompatible, or storage_error.
+    public Status: string;
+    // missing, available, incompatible, storage_error, world_data_error, or unknown.
+    public SaveStatus: string;
+    public Reason: string;
+  end record;
+
+// Opens only current valid metadata. It never creates directories, chunks, levels, or saves.
+public function OpenExistingWorld(Root: string; Id: string; CacheLimit: integer): result of WorldSession, WorldAccessFailure;
+begin
+  case ValidateWorldId(Id) of
+    when Error(Reason):
+      begin
+        return Error(WorldAccessFailure.Incompatible(Reason));
+      end;
+    else
+      begin
+        null;
+      end;
+  end case;
+
+  if CacheLimit < 1 then
+    begin
+      return Error(WorldAccessFailure.Io('chunk cache must be positive'));
+    end;
+  end if;
+
+  if not Std.Fs.IsDir(Root) then
+    begin
+      return Error(WorldAccessFailure.Io('worlds root is not a directory'));
+    end;
+  end if;
+  var Directory: string := Std.Path.Join([Root, Id]);
+  if not Std.Fs.Exists(Directory) then
+    begin
+      return Error(WorldAccessFailure.Missing);
+    end;
+  end if;
+  var Path: string := Std.Path.Join([Directory, 'world.json']);
+  if not Std.Fs.IsDir(Directory) or (Std.Fs.Exists(Path) and not Std.Fs.IsFile(Path)) then
+    begin
+      return Error(WorldAccessFailure.Io('world storage path has the wrong type'));
+    end;
+  end if;
+
+  if not Std.Fs.Exists(Path) then
+    begin
+      return Error(WorldAccessFailure.Incompatible('world metadata is missing'));
+    end;
+  end if;
+
+  case Std.Fs.ReadText(Path) of
+    when Error(Reason):
+      begin
+        return Error(WorldAccessFailure.Io(Reason));
+      end;
+    when Ok(Text):
+      begin
+        case DecodeMetadata(Text, Id) of
+          when Error(Reason):
+            begin
+              return Error(WorldAccessFailure.Incompatible(Reason));
+            end;
+          when Ok(Metadata):
+            begin
+              return Ok(record
+                Directory := Directory;
+                Metadata := Metadata;
+                Cache := [];
+                Clock := 0;
+                CacheLimit := CacheLimit;
+              end);
+            end;
+        end case;
+      end;
+  end case;
+end function;
+
+// Inspects metadata and the complete save without deleting invalid content or generating levels.
+public function InspectWorld(Root: string; Id: string; CacheLimit: integer): WorldEntry;
+begin
+  mutable var Entry: WorldEntry := record
+    Id := Id;
+    Metadata := None;
+    Status := 'incompatible';
+    SaveStatus := 'unknown';
+    Reason := '';
+  end;
+
+  case OpenExistingWorld(Root, Id, CacheLimit) of
+    when Error(Failure):
+      begin
+        case Failure of
+          when WorldAccessFailure.Missing:
+            begin
+              Entry.Reason := 'World is missing. Create a new world.';
+            end;
+          when WorldAccessFailure.Incompatible(Reason):
+            begin
+              Entry.Reason := Reason + '. Delete or recreate this world.';
+            end;
+          when WorldAccessFailure.Io(Reason):
+            begin
+              Entry.Status := 'storage_error';
+              Entry.Reason := 'World storage access failed. Check storage access.';
+            end;
+        end case;
+      end;
+    when Ok(World):
+      begin
+        Entry.Metadata := Some(World.Metadata);
+        Entry.Status := 'ready';
+        case LoadSaveGame(World) of
+          when Error(Failure):
+            begin
+              Entry.SaveStatus := 'storage_error';
+              Entry.Reason := 'Saved game storage failed. Check storage access.';
+              case Failure of
+                when PersistenceFailure.Level(Level):
+                  begin
+                    Entry.SaveStatus := 'world_data_error';
+                    Entry.Reason := 'A referenced dungeon level is missing, invalid, or unreadable.';
+                  end;
+                else
+                  begin
+                    null;
+                  end;
+              end case;
+            end;
+          when Ok(Loaded):
+            begin
+              case Loaded of
+                when SaveGameLoad.Missing:
+                  begin
+                    Entry.SaveStatus := 'missing';
+                  end;
+                when SaveGameLoad.Invalid(Reason):
+                  begin
+                    Entry.SaveStatus := 'incompatible';
+                    Entry.Reason := Reason + '. Recreate the save or start over.';
+                  end;
+                when SaveGameLoad.Loaded(State, View):
+                  begin
+                    Entry.SaveStatus := 'available';
+                  end;
+              end case;
+            end;
+        end case;
+      end;
+  end case;
+
+  return Entry;
+end function;
+
+// Lists canonical world directories in stable order. A root I/O failure fails the listing.
+public function ListWorlds(Root: string; CacheLimit: integer): result of array of WorldEntry, string;
+begin
+  if not Std.Fs.IsDir(Root) then
+    begin
+      return Error('worlds root is missing or not a directory');
+    end;
+  end if;
+  var Paths: array of string := try Std.Fs.ReadDir(Root);
+  mutable var Entries: array of WorldEntry := [];
+  for Path: string in Paths do
+    begin
+      var Id: string := Std.Path.BaseName(Path);
+      if Std.Fs.IsDir(Path) then
+        begin
+          case ValidateWorldId(Id) of
+            when Ok(Valid):
+              begin
+                Std.Arrays.Push(Entries, InspectWorld(Root, Id, CacheLimit));
+              end;
+            else
+              begin
+                null;
+              end;
+          end case;
+        end;
+      end if;
+    end;
+  end for;
+
+  return Ok(Entries);
+end function;
+
+// Allocates a new ID with exclusive directory creation; an existing identity is never reused.
+public function CreateWorld(Root: string; Seed: integer; RegionChunks: integer; CacheLimit: integer): result of WorldSession, string;
+begin
+  if (Seed < MinimumWorldSeed) or (Seed > MaximumWorldSeed) then
+    begin
+      return Error('seed is outside the signed 32-bit range');
+    end;
+  end if;
+
+  if CacheLimit < 1 then
+    begin
+      return Error('chunk cache must be positive');
+    end;
+  end if;
+  // Validate all generation parameters before creating any storage.
+  var Prepared: WorldMetadata := try NewWorldMetadata('pending', Seed, RegionChunks);
+  var Ready: boolean := try Std.Fs.CreateDirAll(Root);
+  mutable var Number: integer := 1;
+  while Number < 1000000 do
+    begin
+      var Id: string := 'world-' + IntToStr(Number);
+      var Directory: string := Std.Path.Join([Root, Id]);
+      if not Std.Fs.Exists(Directory) then
+        begin
+          case Std.Fs.CreateDir(Directory) of
+            when Ok(Created):
+              begin
+                var Metadata: WorldMetadata := Prepared with Id := Id; OutdoorAreaId := Id +
+                                                                                        ':outdoor'; end with;
+                var Written: boolean := try Std.Fs.WriteTextAtomic(Std.Path.Join([
+                                                                                   Directory,
+                                                                                   'world.json'
+                                                                                 ]), EncodeMetadata(Metadata));
+                return Ok(record
+                  Directory := Directory;
+                  Metadata := Metadata;
+                  Cache := [];
+                  Clock := 0;
+                  CacheLimit := CacheLimit;
+                end);
+              end;
+            when Error(Reason):
+              begin
+                if not Std.Fs.Exists(Directory) then
+                  begin
+                    return Error(Reason);
+                  end;
+                end if;
+              end;
+          end case;
+        end;
+      end if;
+
+      Number := Number + 1;
+    end;
+  end while;
+
+  return Error('no free world identity is available');
+end function;
+end unit;

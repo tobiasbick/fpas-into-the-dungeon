@@ -1,17 +1,19 @@
-// Verifies that a missing level rejects the session before Welcome and never removes the save.
+// Verifies that missing level data remains visible in the catalog and rejects Continue without deleting saves.
 program HandshakeFailureTest;
 
 uses
   Dungeon.Client, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Protocol,
-  Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport,
-  Dungeon.RuntimeData, Dungeon.Server, Dungeon.Server.Config, Dungeon.Terrain,
-  Dungeon.Terrain.Entrances, Dungeon.Test.ClientSession, Dungeon.Test.Levels, Dungeon.World,
-  Dungeon.World.Savegame, Std.Conv, Std.Fs, Std.Net, Std.Path, Std.Results, Std.Str, Std.Tasks,
-  Std.Test, Std.Time, Std.Tui;
+  Dungeon.Protocol.Worlds, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
+  Dungeon.Protocol.Transport, Dungeon.RuntimeData, Dungeon.Server, Dungeon.Server.Config,
+  Dungeon.Terrain, Dungeon.Terrain.Entrances, Dungeon.Test.ClientSession, Dungeon.Test.Levels,
+  Dungeon.World, Dungeon.World.Savegame, Std.Conv, Std.Fs, Std.Net, Std.Path, Std.Options,
+  Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time, Std.Tui;
 
 function TestConfig(WorldsRoot: string): ServerConfig;
 begin
   return record
+    ConfigPath := '';
+    Logs := None;
     WorldsRoot := WorldsRoot;
     WorldId := 'handshake';
     WorldSeed := 24680;
@@ -46,12 +48,12 @@ end function;
 begin
   var WorldsRoot: string := '.temp-data/handshake-failure-' + IntToStr(TimestampMillis());
   var Config: ServerConfig := TestConfig(WorldsRoot);
-  var World: WorldSession := Unwrap(OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, 4, 32));
+  var World: WorldSession := Std.Results.Unwrap(OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, 4, 32));
   // A valid save that visited the spawn dungeon, whose level file then disappears.
   var Map: InteriorMap := SpawnLevel(World);
-  var Entered: GameState := Unwrap(EnterSpawnLevel(World, NewGame(World.Metadata)));
-  AssertTrue(Unwrap(WriteSaveGame(World, Entered)));
-  var SaveBytes: string := Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
+  var Entered: GameState := Std.Results.Unwrap(EnterSpawnLevel(World, NewGame(World.Metadata)));
+  AssertTrue(Std.Results.Unwrap(WriteSaveGame(World, Entered)));
+  var SaveBytes: string := Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World)));
   var Region: RegionCoordinate := RegionOf(World.Metadata, World.Metadata.Spawn);
   var LevelPath: string := Std.Path.Join([
                                            World.Directory,
@@ -59,19 +61,33 @@ begin
                                            (IntToStr(Region.X) + '_') + IntToStr(Region.Y),
                                            '0.json'
                                          ]);
-  AssertTrue(Unwrap(Std.Fs.DeleteFile(LevelPath)));
+  AssertTrue(Std.Results.Unwrap(Std.Fs.DeleteFile(LevelPath)));
   var Source: CancellationSource := CreateCancellationSource();
   var Token: CancellationToken := GetCancellationToken(Source);
   // Raw protocol: Rejected with a world-data code instead of Welcome, then the server closes.
-  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
-  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
+  var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
+  var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
   var ServerTask: task := go ServeOnce(ListenerValue, Config, Token);
-  var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(Client, 30000)));
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 20, 10)), Token)));
+  var Client: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Address.Port, 5000));
+  AssertTrue(Std.Results.Unwrap(SetTimeout(Client, 30000)));
+  AssertTrue(Std.Results.Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 20, 10)), Token)));
   var Reader: LineReader := NewLineReader(Client);
-  var Answer: LineRead := Unwrap(ReadLine(Reader, Token));
-  case Unwrap(DecodeServer(Answer.Line)) of
+  var Answer: LineRead := Std.Results.Unwrap(ReadLine(Reader, Token));
+  case Std.Results.Unwrap(DecodeServer(Answer.Line)) of
+    when ServerMessage.Welcome(Version, Catalog):
+      begin
+        var Selected: WorldSummary := Std.Options.Unwrap(SelectedWorld(Catalog));
+        AssertEquals('world_data_error', Selected.SaveStatus);
+      end;
+    else
+      begin
+        panic('expected welcome with damaged world data');
+      end;
+  end case;
+
+  AssertTrue(Std.Results.Unwrap(WriteLine(Client, EncodeClient(ClientMessage.LoadGame), Token)));
+  var Rejected: LineRead := Std.Results.Unwrap(ReadLine(Answer.Reader, Token));
+  case Std.Results.Unwrap(DecodeServer(Rejected.Line)) of
     when ServerMessage.Rejected(Code, Message):
       begin
         AssertEquals('world_data_error', Code);
@@ -80,20 +96,20 @@ begin
       end;
     else
       begin
-        panic('expected a rejection before Welcome');
+        panic('expected rejected Continue');
       end;
   end case;
 
-  AssertTrue(IsError(ReadLine(Answer.Reader, Token)));
-  AssertTrue(Unwrap(Std.Tasks.Wait(ServerTask)));
-  AssertTrue(Unwrap(Close(Client)));
-  AssertTrue(Unwrap(CloseListener(ListenerValue)));
+  AssertTrue(Std.Results.Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Std.Results.Unwrap(Std.Tasks.Wait(ServerTask)));
+  AssertTrue(Std.Results.Unwrap(Close(Client)));
+  AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
   // The save survives and the missing level is not regenerated by inspection.
-  AssertEquals(SaveBytes, Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  AssertEquals(SaveBytes, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
   AssertFalse(Std.Fs.Exists(LevelPath));
   // Real network adapter and headless client: the reason arrives as a connection failure.
-  var AdapterListener: Listener := Unwrap(Listen('127.0.0.1', 0));
-  var AdapterAddress: NetworkAddress := Unwrap(ListenerLocalAddress(AdapterListener));
+  var AdapterListener: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
+  var AdapterAddress: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(AdapterListener));
   var Outcomes: channel of string := CreateChannel(4);
   var Requests: channel of ClientMessage := CreateChannel(4);
   var Events: channel of ClientEvent := CreateChannel(4);
@@ -102,26 +118,40 @@ begin
   var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
   mutable var Model: ClientModel := NewClientModel('127.0.0.1', AdapterAddress.Port, '', DefaultClientPreferences(), Requests, Events);
   case NextClientEvent(Events, Outcomes, 30000) of
-    when ClientEvent.Failed(Message):
+    when ClientEvent.Connected(Catalog):
       begin
-        AssertTrue(Std.Str.Contains(Message, Map.AreaId));
-        Model := UpdateClientEvent(Model, ClientEvent.Failed(Message), Cmd);
+        Model := UpdateClientEvent(Model, ClientEvent.Connected(Catalog), Cmd);
       end;
     else
       begin
-        panic('expected the handshake rejection as a connection failure');
+        panic('expected usable world selection');
       end;
   end case;
 
-  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.Failed);
+  AssertTrue(Std.Results.Unwrap(Send(Requests, ClientMessage.LoadGame)));
+  case NextClientEvent(Events, Outcomes, 30000) of
+    when ClientEvent.Rejected(Code, Message):
+      begin
+        AssertEquals('world_data_error', Code);
+        AssertTrue(Std.Str.Contains(Message, Map.AreaId));
+        Model := UpdateClientEvent(Model, ClientEvent.Rejected(Code, Message), Cmd);
+      end;
+    else
+      begin
+        panic('expected Continue rejection');
+      end;
+  end case;
+
+  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.AwaitingSession);
   AssertTrue(Std.Str.Contains(Model.Status, Map.AreaId));
+  AssertTrue(Std.Results.Unwrap(Send(Requests, ClientMessage.Disconnect)));
   var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(100, 24));
   Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
   App.Close();
-  AssertTrue(Unwrap(Std.Tasks.Wait(AdapterClient)));
-  AssertTrue(Unwrap(Std.Tasks.Wait(AdapterServer)));
-  AssertTrue(Unwrap(CloseListener(AdapterListener)));
-  AssertEquals(SaveBytes, Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
+  AssertTrue(Std.Results.Unwrap(Std.Tasks.Wait(AdapterClient)));
+  AssertTrue(Std.Results.Unwrap(Std.Tasks.Wait(AdapterServer)));
+  AssertTrue(Std.Results.Unwrap(CloseListener(AdapterListener)));
+  AssertEquals(SaveBytes, Std.Results.Unwrap(Std.Fs.ReadText(SaveGamePath(World))));
   discard CloseChannel(Requests);
   discard CloseChannel(Events);
   discard CloseChannel(Outcomes);

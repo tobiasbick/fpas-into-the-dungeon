@@ -181,7 +181,7 @@ public type PersistenceFailure = enum
 end enum;
 ```
 
-`SaveGameLoad` retains `Missing` and `InvalidRemoved(Reason)` and changes its
+`SaveGameLoad` retains `Missing` and `Invalid(Reason)` and changes its
 success case to `Loaded(State: GameState; View: AreaView)`. The view retains the
 already read current map. Handshake inspection discards the returned state and
 view after reporting availability; an explicit load rereads and validates, so
@@ -190,31 +190,28 @@ inspection never silently resumes a game or substitutes a stale snapshot.
 | Condition | Load result and side effects |
 | --- | --- |
 | No save file | `Missing`; do not inspect or create level files. |
-| Bad save schema/version/world or invalid self-contained state | Delete only `default.json`, then `InvalidRemoved`, as before. |
+| Bad save schema/version/world or invalid self-contained state | `Invalid(Reason)`; preserve `default.json` unchanged. |
 | Referenced level missing, invalid, or incompatible | `Error(Level(...))`; preserve save and all world files. |
 | Save or level I/O failure | Typed `Io` failure; preserve data. |
-| Levels valid but saved items/pose violate their maps | Invalid save: delete only `default.json`, then `InvalidRemoved`. |
-| Deletion of an invalid save fails | `Error(Io(...))`; never report successful removal. |
+| Levels valid but saved items/pose violate their maps | `Invalid(Reason)`; preserve `default.json` unchanged. |
 | Fully valid | `Loaded(State, View)`; no writes. |
 
 On write, every validation failure returns an error without deleting anything;
 invalid state uses `InvalidState`, level failures use `Level`, filesystem
 failures use `Io`. Validate before atomically replacing the previous save.
-Do not classify failures by text prefixes. Test that a missing level can never
-fall into `InvalidRemoved`, including during the handshake.
+Do not classify failures by text prefixes. Test that a missing level remains a
+typed level failure and never deletes the save, including during catalog
+inspection.
 
-An inspection failure before `Welcome` uses the existing rejected-message
-channel, then closes the transport; the client displays the reason. Explicit
-load/save failures reject the operation and leave the existing session state
-unchanged. Use stable rejection codes `world_data_error` for missing/invalid
-levels, `storage_error` for I/O, `generation_error` for generation failure, and
-the existing invalid-intention path for rejected game rules. Client messages
-identify the affected world/area without displaying host filesystem paths.
-Keep this within protocol version 13; no new message variant is needed.
-Extend the client handshake branch to recognize `Rejected` before `Welcome`
-and publish its reason as the existing connection-failed event instead of an
-unexpected-message error. Test this through the network adapter and headless
-UI, including rejection followed immediately by connection close.
+Protocol 14 reports inspection failures in the world catalog delivered with
+`Welcome`; the connection and world selection remain usable. Explicit load/save
+failures reject the operation and leave the existing session state unchanged.
+Use stable rejection codes `world_data_error` for missing/invalid levels,
+`storage_error` for I/O, `generation_error` for generation failure, and the
+existing invalid-intention path for rejected game rules. Client messages identify
+the affected world/area without displaying host filesystem paths. Test catalog
+errors and rejected loads through the network adapter and headless UI. Transport
+or protocol rejection before `Welcome` still publishes a connection-failed event.
 
 ## Entry ordering and interruption behavior
 

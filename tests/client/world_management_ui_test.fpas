@@ -1,0 +1,199 @@
+// Positive, rejected and boundary tests for world selection, controlled input and confirmations.
+program WorldManagementUiTest;
+
+uses
+  Dungeon.Client, Dungeon.Protocol, Dungeon.Protocol.Worlds, Dungeon.RuntimeData,
+  Dungeon.Test.Catalog, Std.Arrays, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Tui;
+
+function Action(Id: integer): TuiMsg;
+begin
+  return TuiMsg.Action(TuiControlId.Create(1), TuiAction.Create(Id));
+end function;
+
+begin
+  var Requests: channel of ClientMessage := CreateChannel(16);
+  var Events: channel of ClientEvent := CreateChannel(4);
+  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  Model.ViewportHeight := 28;
+  var Good: WorldSummary := FixtureCatalog(false, false).Worlds[0];
+  var Bad: WorldSummary := Good with Id := 'broken'; Status := 'incompatible'; SaveStatus := 'unknown'; Reason := 'Recreate this world.'; end with;
+  var Mixed: WorldCatalog := EmptyWorldCatalog(0, 4) with Worlds := [Bad, Good]; Total := 2; end with;
+
+  Model := UpdateClientEvent(Model, ClientEvent.Connected(Mixed), Cmd);
+  Model := UpdateClient(Model, TuiMsg.SelectionChanged(TuiControlId.Create(40), TuiAction.Create(148), 0), Cmd);
+  AssertEquals(0, Model.WorldCursor);
+  AssertFalse(Model.Pending);
+  AssertEquals('', Model.Catalog.SelectedId);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, TuiMsg.SelectionChanged(TuiControlId.Create(40), TuiAction.Create(148), 1), Cmd);
+  AssertTrue(Model.Pending);
+  AssertTrue(Unwrap(ReceiveWithTimeout(Requests, 0)) = ClientMessage.SelectWorld(Good.Id));
+  // A preselected page may start less than one screen from the first world.
+  var LastPage: WorldCatalog := EmptyWorldCatalog(0, 4) with Worlds := [Good]; Offset := 1; Total := 2; SelectedId := Good.Id; end with;
+
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(LastPage), Cmd);
+  Model := UpdateClient(Model, Action(147), Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, Action(140), Cmd);
+  Model := UpdateClient(Model, Action(146), Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, Action(120), Cmd);
+  Model := UpdateClient(Model, Action(146), Cmd);
+  AssertTrue(Model.Pending);
+  AssertTrue(Unwrap(ReceiveWithTimeout(Requests, 0)) = ClientMessage.ListWorlds(0, false));
+  Model := UpdateClient(Model, Action(146), Cmd);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(Mixed), Cmd);
+  Model := UpdateClient(Model, Action(146), Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model.ViewportHeight := 0;
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(EmptyWorldCatalog(-17, 8)), Cmd);
+  Model := UpdateClient(Model, Action(149), Cmd);
+  AssertTrue(Model.Pending);
+  AssertTrue(Unwrap(ReceiveWithTimeout(Requests, 0)) = ClientMessage.ListWorlds(0, false));
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(EmptyWorldCatalog(-17, 8)), Cmd);
+  AssertFalse(Model.SaveAvailable);
+  Model := UpdateClient(Model, Action(104), Cmd);
+  Model := UpdateClient(Model, Action(105), Cmd);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, Action(140), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NewWorldOverlay);
+  AssertEquals('-17', Model.SeedText);
+  AssertEquals('8', Model.RegionText);
+  // Actual terminal routing edits the controlled seed field.
+  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(100, 28));
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
+  var Key: TuiKeyEvent := record
+    kind := TuiKeyKind.Character;
+    ch := '0';
+    shift := false;
+    ctrl := false;
+    alt := false;
+    meta := false;
+  end;
+
+  App.InjectKeyForTest(Key);
+  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
+  AssertEquals('-170', Model.SeedText);
+  App.Close();
+  Model := UpdateClient(Model, TuiMsg.TextChanged(TuiControlId.Create(42), TuiAction.Create(141), '2147483648', 10), Cmd);
+  Model := UpdateClient(Model, Action(143), Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(Model.Overlay = ClientOverlay.NewWorldOverlay);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  for Text: string in ['', 'abc', '9223372036854775808'] do
+    Model := UpdateClient(Model, TuiMsg.TextChanged(TuiControlId.Create(42), TuiAction.Create(141), Text, Std.Str.Length(Text)), Cmd);
+    Model := UpdateClient(Model, Action(143), Cmd);
+    AssertFalse(Model.Pending);
+  end for;
+
+  Model := UpdateClient(Model, TuiMsg.TextChanged(TuiControlId.Create(42), TuiAction.Create(141), '-2147483648', 11), Cmd);
+  Model := UpdateClient(Model, TuiMsg.TextChanged(TuiControlId.Create(43), TuiAction.Create(142), '16', 2), Cmd);
+  Model := UpdateClient(Model, Action(143), Cmd);
+  case Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    when ClientMessage.CreateWorld(Seed, Region):
+      begin
+        AssertEquals(-2147483648, Seed);
+        AssertEquals(16, Region);
+      end;
+    else
+      begin
+        panic('expected bounded create');
+      end;
+  end case;
+
+  AssertTrue(Model.Pending);
+  Model := UpdateClient(Model, Action(143), Cmd);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClientEvent(Model, ClientEvent.Rejected('create_failed', 'Storage blocked'), Cmd);
+  AssertFalse(Model.Pending);
+  AssertTrue(Model.Overlay = ClientOverlay.NewWorldOverlay);
+  Model := UpdateClient(Model, Action(120), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(FixtureCatalog(false, false)), Cmd);
+  Model := UpdateClient(Model, Action(105), Cmd);
+  AssertTrue(Unwrap(ReceiveWithTimeout(Requests, 0)) = ClientMessage.LoadGame);
+  var Visible: VisibleState := VisibleState.MapState(record
+    OriginX := 0;
+    OriginY := 0;
+    Width := 1;
+    Height := 1;
+    Rows := ['g'];
+    KnowledgeRows := ['v'];
+    PlayerX := 0;
+    PlayerY := 0;
+    WorldX := 0;
+    WorldY := 0;
+    Inventory := [];
+    Health := 20;
+    MaxHealth := 20;
+    Character := [];
+  end);
+  Model.RequestedWorldWidth := 1;
+  Model.RequestedWorldHeight := 1;
+  Model := UpdateClientEvent(Model, ClientEvent.State(Visible), Cmd);
+  AssertTrue(Model.Dirty);
+  Model := UpdateClient(Model, Action(144), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.DiscardConfirmationOverlay);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, Action(120), Cmd);
+  AssertTrue(Model.HasVisibleState);
+  AssertTrue(Model.Dirty);
+  AssertTrue(Model.Overlay = ClientOverlay.SystemMenuOverlay);
+  Model := UpdateClient(Model, Action(144), Cmd);
+  Model := UpdateClient(Model, Action(145), Cmd);
+  case Unwrap(ReceiveWithTimeout(Requests, 0)) of
+    when ClientMessage.ListWorlds(Offset, DiscardProgress):
+      begin
+        AssertTrue(DiscardProgress);
+      end;
+    else
+      begin
+        panic('expected explicit discard');
+      end;
+  end case;
+
+  AssertTrue(Model.HasVisibleState);
+  Model := UpdateClientEvent(Model, ClientEvent.Rejected('storage_error', 'Catalog blocked'), Cmd);
+  AssertTrue(Model.HasVisibleState);
+  AssertTrue(Model.Dirty);
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(FixtureCatalog(true, false)), Cmd);
+  AssertFalse(Model.HasVisibleState);
+  AssertFalse(Model.Dirty);
+  Model := UpdateClient(Model, Action(105), Cmd);
+  discard Unwrap(ReceiveWithTimeout(Requests, 0));
+  Model := UpdateClientEvent(Model, ClientEvent.State(Visible), Cmd);
+  AssertFalse(Model.Dirty);
+  Model := UpdateClient(Model, Action(112), Cmd);
+  AssertTrue(Model.Overlay = ClientOverlay.SaveConfirmationOverlay);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, Action(131), Cmd);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, Action(130), Cmd);
+  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := UpdateClient(Model, Action(112), Cmd);
+  Model := UpdateClient(Model, Action(130), Cmd);
+  AssertTrue(Unwrap(ReceiveWithTimeout(Requests, 0)) = ClientMessage.OverwriteSaveGame);
+  Model := UpdateClientEvent(Model, ClientEvent.SaveCompleted, Cmd);
+  AssertFalse(Model.Pending);
+  AssertFalse(Model.Dirty);
+  Model := UpdateClientEvent(Model, ClientEvent.Defeated('You have fallen.'), Cmd);
+  AssertTrue(Unwrap(ReceiveWithTimeout(Requests, 0)) = ClientMessage.ListWorlds(0, false));
+  var NewCatalog: WorldCatalog := FixtureCatalog(false, false) with SelectedId := 'new-world'; Worlds := [
+                                                                                                           FixtureCatalog(false, false).Worlds[0] with Id := 'new-world'; end with
+                                                                                                         ]; end with;
+
+  Model := UpdateClientEvent(Model, ClientEvent.Worlds(NewCatalog), Cmd);
+  AssertEquals('new-world', Model.Catalog.SelectedId);
+  AssertTrue(Model.Overlay = ClientOverlay.DefeatOverlay);
+  AssertFalse(Model.Pending);
+  Model := UpdateClient(Model, Action(120), Cmd);
+  Model := UpdateClient(Model, Action(105), Cmd);
+  AssertTrue(Unwrap(ReceiveWithTimeout(Requests, 0)) = ClientMessage.LoadGame);
+  discard CloseChannel(Requests);
+  discard CloseChannel(Events);
+end.

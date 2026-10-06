@@ -6,8 +6,8 @@ test seams without defining the wider game.
 ## Behavior
 
 - `dungeon-server` listens on `127.0.0.1:4040` by default.
-- `dungeon-server` opens the configured world, creating missing metadata and
-  deterministic chunks below the runtime-data root.
+- `dungeon-server` preselects the configured existing world and supplies a
+  non-destructive catalog. Worlds are created only through an explicit request.
 - `dungeon-client` connects to that address and requests a visible window that
   fits its current primary view.
 - After connecting, the client explicitly starts a new game at the stable spawn
@@ -26,19 +26,20 @@ LLM integration.
 
 The transport is TCP with one UTF-8 JSON object per LF-delimited line. Each
 line is limited to 64 KiB. The client starts with `hello`; the server answers
-with `welcome`, the availability of the selected world's save, and whether an
-invalid save was removed during inspection. A complete initial `state` follows
+with `welcome` and the world catalog, save classifications and creation
+defaults. Invalid data is preserved. A complete initial `state` follows
 only after `new_game` or `load_game`.
 
 ```text
-Client: hello, new_game, load_game, save_game, viewport, move,
+Client: hello, list_worlds, select_world, create_world, new_game, load_game,
+         save_game, overwrite_save, viewport, move,
          first_person_step, first_person_turn, interact, exploration_map,
          attack, wait, equip, unequip, disconnect
-Server: welcome, state, interaction, exploration_map,
+Server: welcome, worlds, state, interaction, exploration_map,
         save_completed, defeated, rejected, error
 ```
 
-The current protocol version `13` is included in the handshake. `hello` includes the initial
+The current protocol version `14` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.

@@ -1,0 +1,117 @@
+// Positive, malformed and boundary coverage for versioned world catalogs and lifecycle intentions.
+program WorldManagementProtocolTest;
+
+uses
+  Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
+  Dungeon.Protocol.Worlds, Dungeon.Test.Catalog, Std.Arrays, Std.Conv, Std.Results, Std.Str,
+  Std.Test;
+
+function CatalogRoundTrip(Value: WorldCatalog): WorldCatalog;
+begin
+  case Unwrap(DecodeServer(EncodeServer(ServerMessage.Worlds(Value)))) of
+    when ServerMessage.Worlds(Catalog):
+      begin
+        return Catalog;
+      end;
+    else
+      begin
+        panic('expected catalog');
+      end;
+  end case;
+end function;
+
+begin
+  for Message: ClientMessage in [
+                                  ClientMessage.ListWorlds(0, false),
+                                  ClientMessage.ListWorlds(1000000, true),
+                                  ClientMessage.SelectWorld('world-1'),
+                                  ClientMessage.CreateWorld(-2147483648, 1),
+                                  ClientMessage.CreateWorld(2147483647, 16),
+                                  ClientMessage.OverwriteSaveGame
+                                ] do
+    AssertTrue(Message = Unwrap(DecodeClient(EncodeClient(Message))));
+  end for;
+
+  for Text: string in [
+                        '{"type":"list_worlds","offset":-1,"discard":false}',
+                        '{"type":"list_worlds","offset":1000001,"discard":false}',
+                        '{"type":"list_worlds","offset":0,"discard":"yes"}',
+                        '{"type":"list_worlds","offset":0}',
+                        '{"type":"overwrite_save","extra":1}',
+                        '{"type":"select_world","id":"../outside"}',
+                        '{"type":"select_world","id":""}',
+                        '{"type":"create_world","seed":2147483648,"region_chunks":4}',
+                        '{"type":"create_world","seed":1,"region_chunks":0}',
+                        '{"type":"create_world","seed":1,"region_chunks":17}',
+                        '{"type":"create_world","seed":1.5,"region_chunks":4}',
+                        '{"type":"create_world","seed":"1","region_chunks":4}',
+                        '{"type":"create_world","seed":1,"seed":2,"region_chunks":4}'
+                      ] do
+    AssertTrue(IsError(DecodeClient(Text)));
+  end for;
+  var Empty: WorldCatalog := CatalogRoundTrip(EmptyWorldCatalog(0, 1));
+  AssertEquals(0, Empty.Total);
+  AssertFalse(CanContinueWorld(Empty));
+  AssertFalse(CatalogHasSave(Empty));
+  var Fixture: WorldCatalog := FixtureCatalog(false, false);
+  AssertTrue(CanContinueWorld(Fixture));
+  AssertFalse(CatalogHasSave(Fixture));
+  AssertFalse(CanContinueWorld(FixtureCatalog(false, true)));
+  AssertTrue(CatalogHasSave(FixtureCatalog(false, true)));
+  // Original worlds can retain all signed 64-bit seed values even though new seeds are bounded.
+  mutable var Worlds: array of WorldSummary := [];
+  for Index: integer := 0 to MaximumWorldsPerPage - 1 do
+    Std.Arrays.Push(Worlds, record
+      Id := 'world-' + IntToStr(Index);
+      Seed := 9223372036854775807;
+      RegionChunks := 16;
+      Status := 'ready';
+      SaveStatus := 'available';
+      Reason := Std.Str.RepeatStr('x', 256);
+    end);
+  end for;
+  var Full: WorldCatalog := EmptyWorldCatalog(-2147483648, 16) with Worlds := Worlds; Total := 64; SelectedId := 'world-0'; end with;
+  var Decoded: WorldCatalog := CatalogRoundTrip(Full);
+  AssertEquals(64, Std.Arrays.Length(Decoded.Worlds));
+  AssertEquals(9223372036854775807, Decoded.Worlds[0].Seed);
+  AssertEquals(256, Decoded.Worlds[63].Reason.Length());
+  Std.Arrays.Push(Worlds, Worlds[0] with Id := 'overflow'; end with);
+  AssertTrue(IsError(DecodeServer(EncodeServer(ServerMessage.Worlds(Full with Worlds := Worlds; Total := 65; end with)))));
+  for Invalid: WorldCatalog in [
+                                 Full with Offset := -1; end with,
+                                 Full with Total := 63; end with,
+                                 Full with DefaultSeed := 2147483648; end with,
+                                 Full with DefaultRegionChunks := 0; end with,
+                                 Full with SelectedId := '../invalid'; end with,
+                                 Full with SelectionReason := Std.Str.RepeatStr('x', 257); end with
+                               ] do
+    AssertTrue(IsError(DecodeServer(EncodeServer(ServerMessage.Worlds(Invalid)))));
+  end for;
+  var Wire: string := EncodeServer(ServerMessage.Worlds(Fixture));
+  for Bad: string in [
+                       Std.Str.Replace(Wire, '"seed":"12345"', '"seed":12345'),
+                       Std.Str.Replace(Wire, '"seed":"12345"', '"seed":"+12345"'),
+                       Std.Str.Replace(Wire, '"seed":"12345"', '"seed":"9223372036854775808"'),
+                       Std.Str.Replace(Wire, '"status":"ready"', '"status":"unknown"'),
+                       Std.Str.Replace(Wire, '"save_status":"missing"', '"save_status":"unknown"'),
+                       Std.Str.Replace(Wire, '"status":"ready"', '"status":"ready","extra":1'),
+                       Std.Str.Replace(Wire, '"status":"ready"', '"status":"ready","status":"ready"'),
+                       Std.Str.Replace(Wire, '"total":1', '"total":"1"'),
+                       Std.Str.Replace(Wire, '"total":1', '"total":1,"extra":1')
+                     ] do
+    AssertTrue(IsError(DecodeServer(Bad)));
+  end for;
+
+  AssertTrue(IsError(ValidateWorldCatalog(Fixture with Worlds := [
+                                                                   Fixture.Worlds[0],
+                                                                   Fixture.Worlds[0]
+                                                                 ]; Total := 2; end with)));
+  mutable var Escaped: array of WorldSummary := [];
+  for Entry: WorldSummary in Full.Worlds do
+    Std.Arrays.Push(Escaped, Entry with Reason := Std.Str.RepeatStr(Std.Str.Chr(1), 256); end with);
+  end for;
+
+  AssertTrue(IsError(ValidateWorldCatalog(Full with Worlds := Escaped; end with)));
+  AssertTrue(IsError(ParseWorldInteger('9223372036854775808')));
+  AssertTrue(IsError(ParseWorldInteger('abc')));
+end.

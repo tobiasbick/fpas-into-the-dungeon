@@ -2,9 +2,10 @@
 unit Dungeon.Server.Replies;
 
 uses
-  Dungeon.Server.Projection, Dungeon.Server.Session, Dungeon.Combat, Dungeon.Exploration,
-  Dungeon.GameState, Dungeon.Movement, Dungeon.Protocol, Dungeon.Protocol.ServerMessages,
-  Dungeon.Protocol.Transport, Dungeon.World, Std.Net, Std.Str, Std.Tasks;
+  Dungeon.Server.Projection, Dungeon.Server.Session, Dungeon.Server.Logging, Dungeon.Combat,
+  Dungeon.Exploration, Dungeon.GameState, Dungeon.Movement, Dungeon.Protocol,
+  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.World, Std.Net, Std.Str,
+  Std.Tasks;
 
 // Encodes and sends one server message.
 public function SendMessage(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
@@ -52,6 +53,7 @@ begin
   var Revealed: GameState := try RevealCurrentArea(View, Changed);
   mutable var Next: ServerSession := Session;
   Next.State := Some(Revealed);
+  Next.Dirty := true;
   Next.World := try SendProjection(ConnectionValue, Session.World, View, Revealed, Session.Viewport, Report, Token);
   return Ok(Next);
 end function;
@@ -100,6 +102,7 @@ begin
         var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Prepared.Projection.State), Token);
         mutable var Next: ServerSession := Session;
         Next.State := Some(Prepared.State);
+        Next.Dirty := true;
         Next.Interior := Transition.View.Interior;
         Next.World := Prepared.Projection.World;
         return Ok(Next);
@@ -151,7 +154,8 @@ public function PlayTurn(
   Action: TurnAction;
   RejectionCode: string;
   ConnectionValue: Connection;
-  Token: CancellationToken
+  Token: CancellationToken;
+  Logs: option of channel of ServerLogEvent
 ): result of ServerSession, string;
 begin
   var State: GameState := try RequireActiveState(Session.State);
@@ -171,6 +175,7 @@ begin
               var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
               mutable var Ended: ServerSession := Session;
               Ended.State := None;
+              Ended.Dirty := false;
               Ended.Interior := None;
               return Ok(Ended);
             end;
@@ -178,6 +183,7 @@ begin
       end;
     when Error(Reason):
       begin
+        LogServer(Logs, 'rejected', (RejectionCode + ': ') + Reason);
         var Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
         return Ok(Session);
       end;
