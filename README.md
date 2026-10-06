@@ -46,7 +46,19 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-The source currently requires Functional Pascal revision `1df58c9e` or newer;
+This `main` branch uses the legacy Functional Pascal syntax. Use a compiler
+revision from `1df58c9e` through
+[`9b66db9c`](https://github.com/tobiasbick/functional-pascal/commit/9b66db9c5e3ee2eb08529ce0bd156efc1ff40751)
+on the FPAS `main` history, together with the source standard library from the
+same checkout. The following revision, `3fe5a9e9`, reserves `task` and replaces
+`Std.Task` with `Std.Tasks`, making the unchanged game sources incompatible.
+
+Current FPAS `main` (`269d8013`) also requires the new statement and block
+syntax. The game migration and generated-dungeon development continue on
+[`feat/generated-dungeons`](https://github.com/tobiasbick/fpas-into-the-dungeon/tree/feat/generated-dungeons);
+follow that branch's README for its compiler requirement.
+
+The game requires at least Functional Pascal revision `1df58c9e` because
 it uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
 context-typed record updates such as `State with Hostiles := []; end`, and
 `Cmd.RequestTick` for combat animation, which are available from that revision.
@@ -67,7 +79,7 @@ fpas run tools/world-preview/world-preview.fpasprj -- continentalness
 See the [architecture overview](docs/architecture/overview.md) for the planned
 repository structure and the [roadmap](docs/roadmap.md) for the incremental
 development order. Functional Pascal's
-[language documentation](https://github.com/tobiasbick/functional-pascal/tree/main/docs/pascal)
+[language documentation](https://github.com/tobiasbick/functional-pascal/tree/9b66db9c5e3ee2eb08529ce0bd156efc1ff40751/docs/pascal)
 is the source of truth for the implementation.
 
 Contributions are described in [CONTRIBUTING.md](CONTRIBUTING.md).
