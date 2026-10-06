@@ -123,7 +123,7 @@ public type LevelFailure = enum
   Invalid(AreaId: string; Reason: string);
   Io(Reason: string);
   Generation(AreaId: string; Reason: string);
-end;
+end enum;
 ```
 
 `Dungeon.World.Interiors` owns filesystem operations and generation:
@@ -178,7 +178,7 @@ public type PersistenceFailure = enum
   InvalidState(Reason: string);
   Level(Failure: LevelFailure);
   Io(Reason: string);
-end;
+end enum;
 ```
 
 `SaveGameLoad` retains `Missing` and `InvalidRemoved(Reason)` and changes its

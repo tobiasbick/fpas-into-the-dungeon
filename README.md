@@ -46,13 +46,21 @@ fpas run apps/server/server.fpasprj
 fpas run apps/client/client.fpasprj
 ```
 
-The source currently requires Functional Pascal revision `ee04e71c` or newer;
-it uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
-context-typed record updates such as `State with Hostiles := []; end`, and
+This branch targets Functional Pascal revision
+[`269d8013`](https://github.com/tobiasbick/functional-pascal/commit/269d80132582ddcfb1f8615592e5229be42e9a19).
+Use the compiler and source standard library from the same checkout. The source
+uses the new statement terminators, named block endings, `when` case arms, and
+explicit result consumption. See the [migration plan](docs/plans/fpas-syntax-migration.md).
+
+The game also uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
+context-typed record updates such as `State with Hostiles := []; end with`, and
 `Cmd.RequestTick` for combat animation, and imports the concurrency unit as
 `Std.Tasks` now that `task` is a reserved word. It also stops the main task
 from running queued tasks while it waits, which the in-process client/server
 tests rely on to avoid sporadic deadlocks.
+
+The game's [`main` branch](https://github.com/tobiasbick/fpas-into-the-dungeon/tree/main)
+retains legacy FPAS sources and documents its older compiler requirement.
 
 Run the server first. Both programs use `127.0.0.1:4040` by default and create
 their TOML configuration under `~/.fpas-into-the-dungeon/config/`. Optional
@@ -70,7 +78,7 @@ fpas run tools/world-preview/world-preview.fpasprj -- continentalness
 See the [architecture overview](docs/architecture/overview.md) for the planned
 repository structure and the [roadmap](docs/roadmap.md) for the incremental
 development order. Functional Pascal's
-[language documentation](https://github.com/tobiasbick/functional-pascal/tree/main/docs/pascal)
+[language documentation](https://github.com/tobiasbick/functional-pascal/tree/269d80132582ddcfb1f8615592e5229be42e9a19/docs/pascal)
 is the source of truth for the implementation.
 
 Contributions are described in [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -367,7 +367,7 @@ identical.
 - New unit `libs/game/src/Dungeon/Random.fpas`, exported in `game.fpasprj`:
   - `public const RandomStateModulus: integer := 2147483648;` (moved from
     `Dungeon.GameState`; update its users).
-  - `public type RandomDraw = record public State: integer; public Value: integer; end;`
+  - `public type RandomDraw = record public State: integer; public Value: integer; end record;`
   - `public function DrawBelow(State: integer; Bound: integer): RandomDraw;`
     computes `Next := ((State * 1103515245) + 12345) mod RandomStateModulus`
     and returns `State := Next; Value := (Next div 65536) mod Bound`.
@@ -420,7 +420,7 @@ a private helper; game rules never resolve maps. Step 5 replaces only that
 helper with storage access and removes it.
 
 - `Dungeon.Hostiles`: add
-  `HostilePlacement = record public Id: string; public Kind: HostileKind; public Position: InteriorPosition; end;`
+  `HostilePlacement = record public Id: string; public Kind: HostileKind; public Position: InteriorPosition; end record;`
   and remove `RestlessSkeletonId`.
 - `Dungeon.Items`: add `public Kind: ItemKind` to `ItemPlacement`; remove the
   fixed item identities and `KnownItemKind`; rename the name and description
@@ -442,7 +442,7 @@ helper with storage access and removes it.
     opponents of the current area must lie on non-wall fields of that map.
   - `AreaView` is declared here, because `GameState` needs it and
     `Dungeon.Areas` imports `GameState`:
-    `AreaView = record public Metadata: WorldMetadata; public Interior: option of InteriorMap; end;`
+    `AreaView = record public Metadata: WorldMetadata; public Interior: option of InteriorMap; end record;`
 - New unit `libs/game/src/Dungeon/Areas.fpas`:
   - `InitialDungeonMap` takes the metadata, sets `AreaId`, and names its
     placements `<area>:item:<n>` and `<area>:hostile:<n>`; only callers outside
@@ -467,7 +467,7 @@ helper with storage access and removes it.
   `RevealCurrentArea`. They read the map from `View.Interior` and never
   resolve maps themselves.
 - Transitions: `ActivateAreaTransition(View, State, TargetMap): result of AreaTransition, string`
-  with `AreaTransition = record public State: GameState; public View: AreaView; end;`.
+  with `AreaTransition = record public State: GameState; public View: AreaView; end record;`.
   `TargetMap` is `option of InteriorMap`. `Interact` returns
   `InteractionOutcome.TransitionRequested(TargetAreaId: string)` without
   changing state. The server supplies the target map (or `None` for outdoors)
@@ -565,7 +565,7 @@ Goal: deterministic generated maps; not yet reachable in play.
 Goal: the world contains generated dungeons; the hand-authored dungeon is gone.
 
 - New unit `libs/game/src/Dungeon/Terrain/Entrances.fpas`:
-  - `RegionCoordinate = record public X: integer; public Y: integer; end;`
+  - `RegionCoordinate = record public X: integer; public Y: integer; end record;`
   - `RegionOf(Metadata, Position): RegionCoordinate` using `FloorDivide` by
     `Metadata.DungeonRegionChunks * WorldChunkSize`.
   - `EntranceCandidate(Metadata, Region): WorldPosition`: offset inside the

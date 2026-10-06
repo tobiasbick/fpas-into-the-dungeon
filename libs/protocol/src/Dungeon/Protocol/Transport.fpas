@@ -12,12 +12,12 @@ public type
   LineReader = record
     public ConnectionValue: Connection;
     public Buffer: array of integer;
-  end;
+  end record;
   // Couples a decoded line with the reader state required for the next read.
   LineRead = record
     public Line: string;
     public Reader: LineReader;
-  end;
+  end record;
 
 // Starts line framing with no retained bytes.
 public function NewLineReader(ConnectionValue: Connection): LineReader;
@@ -25,21 +25,23 @@ begin
   return record
     ConnectionValue := ConnectionValue;
     Buffer := [];
-  end
-end;
+  end;
+end function;
 
 function LineFeedIndex(Bytes: array of integer): integer;
 begin
   for Index: integer := 0 to Bytes.Length() - 1 do
-  begin
-    if Bytes[Index] = 10 then
     begin
-      return Index
-    end
-  end;
+      if Bytes[Index] = 10 then
+        begin
+          return Index;
+        end;
+      end if;
+    end;
+  end for;
 
-  return -1
-end;
+  return -1;
+end function;
 
 // Reads one complete line while retaining bytes belonging to the next line.
 public function ReadLine(Reader: LineReader; Token: CancellationToken): result of LineRead, string;
@@ -47,54 +49,62 @@ begin
   mutable var Next: LineReader := Reader;
   mutable var LineEnd: integer := LineFeedIndex(Next.Buffer);
   while LineEnd < 0 do
-  begin
-    if Next.Buffer.Length() > MaximumLineBytes then
     begin
-      return Error(LineTooLongError)
-    end;
-    var Part: array of integer := try ReceiveBytesWithCancellation(Next.ConnectionValue, 4096, Token);
-    if Part.Length() = 0 then
-    begin
-      return Error('connection closed')
-    end;
+      if Next.Buffer.Length() > MaximumLineBytes then
+        begin
+          return Error(LineTooLongError);
+        end;
+      end if;
+      var Part: array of integer := try ReceiveBytesWithCancellation(Next.ConnectionValue, 4096, Token);
+      if Part.Length() = 0 then
+        begin
+          return Error('connection closed');
+        end;
+      end if;
 
-    Next.Buffer := Next.Buffer.Concat(Part);
-    LineEnd := LineFeedIndex(Next.Buffer)
-  end;
+      Next.Buffer := Next.Buffer.Concat(Part);
+      LineEnd := LineFeedIndex(Next.Buffer);
+    end;
+  end while;
 
   if LineEnd > MaximumLineBytes then
-  begin
-    return Error(LineTooLongError)
-  end;
+    begin
+      return Error(LineTooLongError);
+    end;
+  end if;
   var LineBytes: array of integer := Next.Buffer.Slice(0, LineEnd);
   var RemainingStart: integer := LineEnd + 1;
   Next.Buffer := Next.Buffer.Slice(RemainingStart, Next.Buffer.Length() - RemainingStart);
   return Ok(record
     Line := try Std.Net.Utf8.Decode(LineBytes);
     Reader := Next;
-  end)
-end;
+  end);
+end function;
 
 // Writes one complete LF-delimited line, including partial-write handling.
 public function WriteLine(ConnectionValue: Connection; Text: string; Token: CancellationToken): result of boolean, string;
 begin
   var Bytes: array of integer := Std.Net.Utf8.Encode(Text + #10);
   if Bytes.Length() - 1 > MaximumLineBytes then
-  begin
-    return Error(LineTooLongError)
-  end;
+    begin
+      return Error(LineTooLongError);
+    end;
+  end if;
   mutable var Offset: integer := 0;
   while Offset < Bytes.Length() do
-  begin
-    var Remaining: array of integer := Bytes.Slice(Offset, Bytes.Length() - Offset);
-    var Written: integer := try SendBytesWithCancellation(ConnectionValue, Remaining, Token);
-    if Written <= 0 then
     begin
-      return Error('connection stopped while writing')
+      var Remaining: array of integer := Bytes.Slice(Offset, Bytes.Length() - Offset);
+      var Written: integer := try SendBytesWithCancellation(ConnectionValue, Remaining, Token);
+      if Written <= 0 then
+        begin
+          return Error('connection stopped while writing');
+        end;
+      end if;
+
+      Offset := Offset + Written;
     end;
+  end while;
 
-    Offset := Offset + Written
-  end;
-
-  return Ok(true)
-end;
+  return Ok(true);
+end function;
+end unit;

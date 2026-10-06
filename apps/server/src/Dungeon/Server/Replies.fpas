@@ -9,8 +9,8 @@ uses
 // Encodes and sends one server message.
 public function SendMessage(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
 begin
-  return WriteLine(ConnectionValue, EncodeServer(Message), Token)
-end;
+  return WriteLine(ConnectionValue, EncodeServer(Message), Token);
+end function;
 
 // Projects the state, sends it, and returns the world session with its possibly grown cache.
 public function SendProjection(
@@ -25,8 +25,8 @@ public function SendProjection(
 begin
   var Projection: SessionProjection := try ProjectSession(World, View, State, Viewport, Report);
   var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Projection.State), Token);
-  return Ok(Projection.World)
-end;
+  return Ok(Projection.World);
+end function;
 
 // Sends a rejection with a stable code and a player-facing message.
 public function Reject(
@@ -36,8 +36,8 @@ public function Reject(
   Token: CancellationToken
 ): result of boolean, string;
 begin
-  return SendMessage(ConnectionValue, ServerMessage.Rejected(Code, Message), Token)
-end;
+  return SendMessage(ConnectionValue, ServerMessage.Rejected(Code, Message), Token);
+end function;
 
 // Reveals the accepted state, makes it current, and sends its projection with the turn's report.
 function CommitTurn(
@@ -53,8 +53,8 @@ begin
   mutable var Next: ServerSession := Session;
   Next.State := Some(Revealed);
   Next.World := try SendProjection(ConnectionValue, Session.World, View, Revealed, Session.Viewport, Report, Token);
-  return Ok(Next)
-end;
+  return Ok(Next);
+end function;
 
 // Reveals the accepted state, makes it current, and sends its projection without combat messages.
 public function CommitState(
@@ -64,15 +64,15 @@ public function CommitState(
   Token: CancellationToken
 ): result of ServerSession, string;
 begin
-  return CommitTurn(Session, Changed, NoTurnReport(), ConnectionValue, Token)
-end;
+  return CommitTurn(Session, Changed, NoTurnReport(), ConnectionValue, Token);
+end function;
 
 type
   // Revealed candidate state and its projection, both built before anything is sent.
   PreparedTransition = record
     State: GameState;
     Projection: SessionProjection;
-  end;
+  end record;
 
 function PrepareTransition(Session: ServerSession; Transition: AreaTransition): result of PreparedTransition, string;
 begin
@@ -81,8 +81,8 @@ begin
   return Ok(record
     State := Valid;
     Projection := try ProjectSession(Session.World, Transition.View, Valid, Session.Viewport, NoTurnReport());
-  end)
-end;
+  end);
+end function;
 
 // Installs an applied area transition: reveals and validates the candidate and builds its
 // projection with the candidate's own map before anything is sent. A failure before sending
@@ -95,51 +95,55 @@ public function CommitTransition(
 ): result of ServerSession, string;
 begin
   case PrepareTransition(Session, Transition) of
-    Ok(Prepared):
-    begin
-      var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Prepared.Projection.State), Token);
-      mutable var Next: ServerSession := Session;
-      Next.State := Some(Prepared.State);
-      Next.Interior := Transition.View.Interior;
-      Next.World := Prepared.Projection.World;
-      return Ok(Next)
-    end;
-    Error(Reason):
-    begin
-      var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
-      return Ok(Session)
-    end
-  end
-end;
+    when Ok(Prepared):
+      begin
+        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Prepared.Projection.State), Token);
+        mutable var Next: ServerSession := Session;
+        Next.State := Some(Prepared.State);
+        Next.Interior := Transition.View.Interior;
+        Next.World := Prepared.Projection.World;
+        return Ok(Next);
+      end;
+    when Error(Reason):
+      begin
+        var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+        return Ok(Session);
+      end;
+  end case;
+end function;
 
 // Joins one turn's messages into the bounded defeat summary.
 function DefeatSummary(Log: array of string): string;
 begin
   mutable var Summary: string := '';
   for Entry: string in Log do
-  begin
-    if Summary = '' then
     begin
-      Summary := Entry
-    end
-    else
-    begin
-      Summary := (Summary + ' ') + Entry
-    end
-  end;
+      if Summary = '' then
+        begin
+          Summary := Entry;
+        end;
+      else
+        begin
+          Summary := (Summary + ' ') + Entry;
+        end;
+      end if;
+    end;
+  end for;
 
   if Summary = '' then
-  begin
-    Summary := 'You have fallen.'
-  end;
+    begin
+      Summary := 'You have fallen.';
+    end;
+  end if;
 
   if Std.Str.Length(Summary) > MaximumCombatLogTextLength then
-  begin
-    Summary := Std.Str.Substring(Summary, Std.Str.Length(Summary) - MaximumCombatLogTextLength, MaximumCombatLogTextLength)
-  end;
+    begin
+      Summary := Std.Str.Substring(Summary, Std.Str.Length(Summary) - MaximumCombatLogTextLength, MaximumCombatLogTextLength);
+    end;
+  end if;
 
-  return Summary
-end;
+  return Summary;
+end function;
 
 // Resolves one time-consuming intention; defeat ends the game session but keeps the connection.
 public function PlayTurn(
@@ -152,30 +156,31 @@ public function PlayTurn(
 begin
   var State: GameState := try RequireActiveState(Session.State);
   case ResolveTurn(try SessionAreaView(Session, State), State, Action) of
-    Ok(Outcome):
-    begin
-      case Outcome of
-        TurnOutcome.Continued(Changed, Log, Events):
-        begin
-          return CommitTurn(Session, Changed, record
-            Log := Log;
-            Events := Events;
-          end, ConnectionValue, Token)
-        end;
-        TurnOutcome.Defeated(Log):
-        begin
-          var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
-          mutable var Ended: ServerSession := Session;
-          Ended.State := None;
-          Ended.Interior := None;
-          return Ok(Ended)
-        end
-      end
-    end;
-    Error(Reason):
-    begin
-      var Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
-      return Ok(Session)
-    end
-  end
-end;
+    when Ok(Outcome):
+      begin
+        case Outcome of
+          when TurnOutcome.Continued(Changed, Log, Events):
+            begin
+              return CommitTurn(Session, Changed, record
+                Log := Log;
+                Events := Events;
+              end, ConnectionValue, Token);
+            end;
+          when TurnOutcome.Defeated(Log):
+            begin
+              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
+              mutable var Ended: ServerSession := Session;
+              Ended.State := None;
+              Ended.Interior := None;
+              return Ok(Ended);
+            end;
+        end case;
+      end;
+    when Error(Reason):
+      begin
+        var Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
+        return Ok(Session);
+      end;
+  end case;
+end function;
+end unit;

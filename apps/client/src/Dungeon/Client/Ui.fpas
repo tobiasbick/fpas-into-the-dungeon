@@ -12,123 +12,131 @@ public function UpdateClient(State: ClientModel; Msg: TuiMsg; Cmd: TuiCmdOutput)
 begin
   Cmd.Set(TuiCmd.NoCommand);
   case Msg of
-    TuiMsg.Started:
-    begin
-      mutable var Next: ClientModel := State;
-      Next.ViewportWidth := ScreenWidth();
-      Next.ViewportHeight := ScreenHeight();
-      return QueueViewport(Next)
-    end;
-    TuiMsg.Resize(Size):
-    begin
-      mutable var Next: ClientModel := State;
-      Next.ViewportWidth := Size.Width;
-      Next.ViewportHeight := Size.Height;
-      Next.DescriptionOffset := 0;
-      if (State.Overlay = ClientOverlay.ContextOverlay) and ContextCanDock(Next) then
+    when TuiMsg.Started:
       begin
+        mutable var Next: ClientModel := State;
+        Next.ViewportWidth := ScreenWidth();
+        Next.ViewportHeight := ScreenHeight();
+        return QueueViewport(Next);
+      end;
+    when TuiMsg.Resize(Size):
+      begin
+        mutable var Next: ClientModel := State;
+        Next.ViewportWidth := Size.Width;
+        Next.ViewportHeight := Size.Height;
+        Next.DescriptionOffset := 0;
+        if (State.Overlay = ClientOverlay.ContextOverlay) and ContextCanDock(Next) then
+          begin
+            Next.Overlay := ClientOverlay.NoOverlay;
+            Next.FocusedControl := 0;
+          end;
+        end if;
+
+        if (State.Overlay = ClientOverlay.MessageOverlay) and MessagesCanDock(Next) then
+          begin
+            Next.Overlay := ClientOverlay.NoOverlay;
+            Next.FocusedControl := 0;
+          end;
+        end if;
+
+        return QueueViewport(Next);
+      end;
+    when TuiMsg.FocusChanged(Previous, Current):
+      begin
+        case Current of
+          when Some(Id):
+            begin
+              mutable var Next: ClientModel := State;
+              Next.FocusedControl := Id.Value;
+              return Next;
+            end;
+          when None:
+            begin
+              mutable var Next: ClientModel := State;
+              Next.FocusedControl := 0;
+              return Next;
+            end;
+        end case;
+      end;
+    when TuiMsg.Action(Source, Action):
+      begin
+        return HandleAction(State, Action, Cmd);
+      end;
+    when TuiMsg.Key(Key):
+      begin
+        // A key press completes a running animation first, so fast play never waits for it.
+        return HandleKey(StopAnimation(State, Cmd), Key, Cmd);
+      end;
+    when TuiMsg.Tick(Elapsed):
+      begin
+        return AdvanceCombatAnimation(State, Elapsed, Cmd);
+      end;
+    when TuiMsg.BackgroundFailed(Id, Kind, Message, Code, Line, Column):
+      begin
+        mutable var Next: ClientModel := State;
+        Next.ConnectionPhase := ClientConnectionPhase.Failed;
         Next.Overlay := ClientOverlay.NoOverlay;
-        Next.FocusedControl := 0
+        Next.FocusedControl := ConnectControlId;
+        Next.Pending := false;
+        Next.Status := 'Connection failed: ' + Message;
+        return AppendMessage(Next, Next.Status);
       end;
-
-      if (State.Overlay = ClientOverlay.MessageOverlay) and MessagesCanDock(Next) then
+    when TuiMsg.QuitRequested:
       begin
-        Next.Overlay := ClientOverlay.NoOverlay;
-        Next.FocusedControl := 0
-      end;
+        if State.Overlay <> ClientOverlay.NoOverlay then
+          begin
+            return CloseOverlay(State);
+          end;
+        end if;
 
-      return QueueViewport(Next)
-    end;
-    TuiMsg.FocusChanged(Previous, Current):
-    begin
-      case Current of
-        Some(Id):
-        begin
-          mutable var Next: ClientModel := State;
-          Next.FocusedControl := Id.Value;
-          return Next
-        end;
-        None:
-        begin
-          mutable var Next: ClientModel := State;
-          Next.FocusedControl := 0;
-          return Next
-        end
-      end
-    end;
-    TuiMsg.Action(Source, Action):
-    begin
-      return HandleAction(State, Action, Cmd)
-    end;
-    TuiMsg.Key(Key):
-    begin
-      // A key press completes a running animation first, so fast play never waits for it.
-      return HandleKey(StopAnimation(State, Cmd), Key, Cmd)
-    end;
-    TuiMsg.Tick(Elapsed):
-    begin
-      return AdvanceCombatAnimation(State, Elapsed, Cmd)
-    end;
-    TuiMsg.BackgroundFailed(Id, Kind, Message, Code, Line, Column):
-    begin
-      mutable var Next: ClientModel := State;
-      Next.ConnectionPhase := ClientConnectionPhase.Failed;
-      Next.Overlay := ClientOverlay.NoOverlay;
-      Next.FocusedControl := ConnectControlId;
-      Next.Pending := false;
-      Next.Status := 'Connection failed: ' + Message;
-      return AppendMessage(Next, Next.Status)
-    end;
-    TuiMsg.QuitRequested:
-    begin
-      if State.Overlay <> ClientOverlay.NoOverlay then
-      begin
-        return CloseOverlay(State)
+        return State;
       end;
-
-      return State
-    end
     else
-    begin
-      return State
-    end
-  end
-end;
+      begin
+        return State;
+      end;
+  end case;
+end function;
 
 function Focus(State: ClientModel): option of TuiControlId;
 begin
   if State.FocusedControl > 0 then
-  begin
-    return Some(TuiControlId.Create(State.FocusedControl))
-  end;
+    begin
+      return Some(TuiControlId.Create(State.FocusedControl));
+    end;
+  end if;
 
-  return None
-end;
+  return None;
+end function;
 
 // Renders the start screen or game screen with any active modal overlay.
 public function ViewClient(State: ClientModel): TuiElement;
 begin
   if State.Screen = ClientScreen.StartScreen then
-  begin
-    var Backdrop: TuiElement := ViewStartBackdrop(State.ViewportWidth, State.ViewportHeight);
-    if State.Overlay = ClientOverlay.InformationOverlay then
     begin
-      return TuiElementBuilders.MakeDesktop(Focus(State), [Backdrop, ViewInformation()])
+      var Backdrop: TuiElement := ViewStartBackdrop(State.ViewportWidth, State.ViewportHeight);
+      if State.Overlay = ClientOverlay.InformationOverlay then
+        begin
+          return TuiElementBuilders.MakeDesktop(Focus(State), [Backdrop, ViewInformation()]);
+        end;
+      end if;
+
+      // Confirmations and the defeat report stay above the session choices they lead back to.
+      if (State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay) or
+         (State.Overlay = ClientOverlay.DefeatOverlay) then
+        begin
+          return TuiElementBuilders.MakeDesktop(Focus(State), [
+                                                                Backdrop,
+                                                                ViewStartScreen(State),
+                                                                ViewOverlay(State)
+                                                              ]);
+        end;
+      end if;
+
+      return TuiElementBuilders.MakeDesktop(Focus(State), [Backdrop, ViewStartScreen(State)]);
     end;
+  end if;
 
-    // Confirmations and the defeat report stay above the session choices they lead back to.
-    if (State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay) or
-       (State.Overlay = ClientOverlay.DefeatOverlay) then
-    begin
-      return TuiElementBuilders.MakeDesktop(Focus(State), [
-                                                            Backdrop,
-                                                            ViewStartScreen(State),
-                                                            ViewOverlay(State)
-                                                          ])
-    end;
-
-    return TuiElementBuilders.MakeDesktop(Focus(State), [Backdrop, ViewStartScreen(State)])
-  end;
-
-  return TuiElementBuilders.MakeDesktop(Focus(State), [ViewGameShell(State), ViewOverlay(State)])
-end;
+  return TuiElementBuilders.MakeDesktop(Focus(State), [ViewGameShell(State), ViewOverlay(State)]);
+end function;
+end unit;

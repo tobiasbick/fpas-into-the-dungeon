@@ -17,8 +17,8 @@ function RejectFailure(
 ): result of boolean, string;
 begin
   WriteLn((Rejection.Code + ': ') + Detail);
-  return Reject(ConnectionValue, Rejection.Code, Rejection.Message, Token)
-end;
+  return Reject(ConnectionValue, Rejection.Code, Rejection.Message, Token);
+end function;
 
 // Opens the target level of an entry (or none for an exit) and applies the pure transition.
 // Storage failures are rejected with their class; the session stays unchanged.
@@ -33,32 +33,33 @@ function HandleTransition(
 begin
   mutable var TargetMap: option of InteriorMap := None;
   if State.Area = AreaKind.OutdoorRegion then
-  begin
-    case OpenLevelForEntry(Session.World, State, TargetAreaId) of
-      Ok(Map):
-      begin
-        TargetMap := Some(Map)
-      end;
-      Error(Failure):
-      begin
-        var Sent: boolean := try RejectFailure(ConnectionValue, LevelRejection(Session.World.Metadata.Id, Failure), LevelFailureReason(Failure), Token);
-        return Ok(Session)
-      end
-    end
-  end;
+    begin
+      case OpenLevelForEntry(Session.World, State, TargetAreaId) of
+        when Ok(Map):
+          begin
+            TargetMap := Some(Map);
+          end;
+        when Error(Failure):
+          begin
+            var Sent: boolean := try RejectFailure(ConnectionValue, LevelRejection(Session.World.Metadata.Id, Failure), LevelFailureReason(Failure), Token);
+            return Ok(Session);
+          end;
+      end case;
+    end;
+  end if;
 
   case ActivateAreaTransition(View, State, TargetMap) of
-    Ok(Transition):
-    begin
-      return CommitTransition(Session, Transition, ConnectionValue, Token)
-    end;
-    Error(Reason):
-    begin
-      var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
-      return Ok(Session)
-    end
-  end
-end;
+    when Ok(Transition):
+      begin
+        return CommitTransition(Session, Transition, ConnectionValue, Token);
+      end;
+    when Error(Reason):
+      begin
+        var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+        return Ok(Session);
+      end;
+  end case;
+end function;
 
 // Applies one decoded client message after the handshake; Finished requests connection close.
 public function HandleSessionMessage(
@@ -71,189 +72,194 @@ public function HandleSessionMessage(
 begin
   var HasState: boolean := Std.Options.IsSome(Session.State);
   if not HasState and RequiresActiveSession(Message) then
-  begin
-    var Sent: boolean := try Reject(ConnectionValue, 'session_not_started', 'Start or load a game first.', Token);
-    return Ok(Session)
-  end;
+    begin
+      var Sent: boolean := try Reject(ConnectionValue, 'session_not_started', 'Start or load a game first.', Token);
+      return Ok(Session);
+    end;
+  end if;
   mutable var Next: ServerSession := Session;
   case Message of
-    ClientMessage.Disconnect:
-    begin
-      Next.Finished := true
-    end;
-    ClientMessage.Hello(Version, Width, Height):
-    begin
-      var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
-      Next.Finished := true
-    end;
-    ClientMessage.StartNewGame:
-    begin
-      if HasState then
+    when ClientMessage.Disconnect:
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token)
-      end
-      else
+        Next.Finished := true;
+      end;
+    when ClientMessage.Hello(Version, Width, Height):
       begin
-        Next.Interior := None;
-        return CommitState(Next, NewGame(Session.World.Metadata), ConnectionValue, Token)
-      end
-    end;
-    ClientMessage.LoadGame:
-    begin
-      if HasState then
+        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
+        Next.Finished := true;
+      end;
+    when ClientMessage.StartNewGame:
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token)
-      end
-      else
-      begin
-        case LoadSaveGame(Session.World) of
-          Error(Failure):
+        if HasState then
           begin
-            var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'load_failed', Failure), PersistenceFailureReason(Failure), Token)
+            var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token);
           end;
-          Ok(LoadedSave):
+        else
           begin
-            case LoadedSave of
-              SaveGameLoad.Missing:
-              begin
-                var Sent: boolean := try Reject(ConnectionValue, 'save_unavailable', 'No saved game is available for this world.', Token)
-              end;
-              SaveGameLoad.InvalidRemoved(Reason):
-              begin
-                var Sent: boolean := try Reject(ConnectionValue, 'save_removed', 'Invalid saved game was removed. Start a new game.', Token)
-              end;
-              SaveGameLoad.Loaded(SavedState, SavedView):
-              begin
-                Next.Interior := SavedView.Interior;
-                return CommitState(Next, SavedState, ConnectionValue, Token)
-              end
-            end
-          end
-        end
-      end
-    end;
-    ClientMessage.SaveGame:
-    begin
-      case WriteSaveGame(Session.World, try RequireActiveState(Session.State)) of
-        Ok(Written):
-        begin
-          var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.SaveCompleted, Token)
-        end;
-        Error(Failure):
-        begin
-          var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'save_failed', Failure), PersistenceFailureReason(Failure), Token)
-        end
-      end
-    end;
-    ClientMessage.Viewport(Width, Height):
-    begin
-      case ResolveViewport(Width, Height, Config) of
-        Ok(Value):
-        begin
-          Next.Viewport := Value;
-          var State: GameState := try RequireActiveState(Session.State);
-          Next.World := try SendProjection(ConnectionValue, Session.World, try SessionAreaView(Session, State), State, Value, NoTurnReport(), Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'invalid_viewport', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      if (Width > Config.MaximumViewWidth) or (Height > Config.MaximumViewHeight) then
+            Next.Interior := None;
+            return CommitState(Next, NewGame(Session.World.Metadata), ConnectionValue, Token);
+          end;
+        end if;
+      end;
+    when ClientMessage.LoadGame:
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'invalid_map_window', 'Exploration map dimensions exceed server limits.', Token)
-      end
-      else
+        if HasState then
+          begin
+            var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token);
+          end;
+        else
+          begin
+            case LoadSaveGame(Session.World) of
+              when Error(Failure):
+                begin
+                  var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'load_failed', Failure), PersistenceFailureReason(Failure), Token);
+                end;
+              when Ok(LoadedSave):
+                begin
+                  case LoadedSave of
+                    when SaveGameLoad.Missing:
+                      begin
+                        var Sent: boolean := try Reject(ConnectionValue, 'save_unavailable', 'No saved game is available for this world.', Token);
+                      end;
+                    when SaveGameLoad.InvalidRemoved(Reason):
+                      begin
+                        var Sent: boolean := try Reject(ConnectionValue, 'save_removed', 'Invalid saved game was removed. Start a new game.', Token);
+                      end;
+                    when SaveGameLoad.Loaded(SavedState, SavedView):
+                      begin
+                        Next.Interior := SavedView.Interior;
+                        return CommitState(Next, SavedState, ConnectionValue, Token);
+                      end;
+                  end case;
+                end;
+            end case;
+          end;
+        end if;
+      end;
+    when ClientMessage.SaveGame:
+      begin
+        case WriteSaveGame(Session.World, try RequireActiveState(Session.State)) of
+          when Ok(Written):
+            begin
+              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.SaveCompleted, Token);
+            end;
+          when Error(Failure):
+            begin
+              var Sent: boolean := try RejectFailure(ConnectionValue, PersistenceRejection(Session.World.Metadata.Id, 'save_failed', Failure), PersistenceFailureReason(Failure), Token);
+            end;
+        end case;
+      end;
+    when ClientMessage.Viewport(Width, Height):
+      begin
+        case ResolveViewport(Width, Height, Config) of
+          when Ok(Value):
+            begin
+              Next.Viewport := Value;
+              var State: GameState := try RequireActiveState(Session.State);
+              Next.World := try SendProjection(ConnectionValue, Session.World, try SessionAreaView(Session, State), State, Value, NoTurnReport(), Token);
+            end;
+          when Error(Reason):
+            begin
+              var Sent: boolean := try Reject(ConnectionValue, 'invalid_viewport', Reason, Token);
+            end;
+        end case;
+      end;
+    when ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
+      begin
+        if (Width > Config.MaximumViewWidth) or (Height > Config.MaximumViewHeight) then
+          begin
+            var Sent: boolean := try Reject(ConnectionValue, 'invalid_map_window', 'Exploration map dimensions exceed server limits.', Token);
+          end;
+        else
+          begin
+            var State: GameState := try RequireActiveState(Session.State);
+            var MapValue: ExplorationMapState := try ProjectExplorationMap(State, try SessionAreaView(Session, State), OriginX, OriginY, Width, Height);
+            var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ExplorationMap(MapValue), Token);
+          end;
+        end if;
+      end;
+    when ClientMessage.Move(DeltaX, DeltaY):
+      begin
+        case MoveInWorld(Session.World, try RequireActiveState(Session.State), DeltaX, DeltaY) of
+          when Ok(Moved):
+            begin
+              Next.World := Moved.World;
+              return CommitState(Next, Moved.State, ConnectionValue, Token);
+            end;
+          when Error(Reason):
+            begin
+              var Sent: boolean := try Reject(ConnectionValue, 'movement_rejected', Reason, Token);
+            end;
+        end case;
+      end;
+    when ClientMessage.StepFirstPerson(Direction):
+      begin
+        return PlayTurn(Session, TurnAction.Step(GameStep(Direction)), 'movement_rejected', ConnectionValue, Token);
+      end;
+    when ClientMessage.Attack:
+      begin
+        return PlayTurn(Session, TurnAction.Attack, 'attack_rejected', ConnectionValue, Token);
+      end;
+    when ClientMessage.Wait:
+      begin
+        return PlayTurn(Session, TurnAction.Wait, 'wait_rejected', ConnectionValue, Token);
+      end;
+    when ClientMessage.Equip(ItemId):
+      begin
+        return PlayTurn(Session, TurnAction.Equip(ItemId), 'equip_rejected', ConnectionValue, Token);
+      end;
+    when ClientMessage.Unequip(ItemId):
+      begin
+        return PlayTurn(Session, TurnAction.Unequip(ItemId), 'equip_rejected', ConnectionValue, Token);
+      end;
+    when ClientMessage.DropItem(ItemId):
+      begin
+        return PlayTurn(Session, TurnAction.Drop(ItemId), 'drop_rejected', ConnectionValue, Token);
+      end;
+    when ClientMessage.TurnFirstPerson(Direction):
       begin
         var State: GameState := try RequireActiveState(Session.State);
-        var MapValue: ExplorationMapState := try ProjectExplorationMap(State, try SessionAreaView(Session, State), OriginX, OriginY, Width, Height);
-        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ExplorationMap(MapValue), Token)
-      end
-    end;
-    ClientMessage.Move(DeltaX, DeltaY):
-    begin
-      case MoveInWorld(Session.World, try RequireActiveState(Session.State), DeltaX, DeltaY) of
-        Ok(Moved):
-        begin
-          Next.World := Moved.World;
-          return CommitState(Next, Moved.State, ConnectionValue, Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'movement_rejected', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.StepFirstPerson(Direction):
-    begin
-      return PlayTurn(Session, TurnAction.Step(GameStep(Direction)), 'movement_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Attack:
-    begin
-      return PlayTurn(Session, TurnAction.Attack, 'attack_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Wait:
-    begin
-      return PlayTurn(Session, TurnAction.Wait, 'wait_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Equip(ItemId):
-    begin
-      return PlayTurn(Session, TurnAction.Equip(ItemId), 'equip_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Unequip(ItemId):
-    begin
-      return PlayTurn(Session, TurnAction.Unequip(ItemId), 'equip_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.DropItem(ItemId):
-    begin
-      return PlayTurn(Session, TurnAction.Drop(ItemId), 'drop_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.TurnFirstPerson(Direction):
-    begin
-      var State: GameState := try RequireActiveState(Session.State);
-      case Dungeon.Movement.TurnFirstPerson(try SessionAreaView(Session, State), State, GameTurn(Direction)) of
-        Ok(Turned):
-        begin
-          return CommitState(Session, Turned, ConnectionValue, Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'turn_rejected', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.Interact:
-    begin
-      var State: GameState := try RequireActiveState(Session.State);
-      var View: AreaView := try SessionAreaView(Session, State);
-      case Dungeon.Interaction.Interact(View, State) of
-        Ok(Outcome):
-        begin
-          case Outcome of
-            InteractionOutcome.TransitionRequested(TargetAreaId):
+        case Dungeon.Movement.TurnFirstPerson(try SessionAreaView(Session, State), State, GameTurn(Direction)) of
+          when Ok(Turned):
             begin
-              return HandleTransition(Session, View, State, TargetAreaId, ConnectionValue, Token)
+              return CommitState(Session, Turned, ConnectionValue, Token);
             end;
-            InteractionOutcome.StateChanged(Changed):
+          when Error(Reason):
             begin
-              return CommitState(Session, Changed, ConnectionValue, Token)
+              var Sent: boolean := try Reject(ConnectionValue, 'turn_rejected', Reason, Token);
             end;
-            InteractionOutcome.Described(Title, Text):
+        end case;
+      end;
+    when ClientMessage.Interact:
+      begin
+        var State: GameState := try RequireActiveState(Session.State);
+        var View: AreaView := try SessionAreaView(Session, State);
+        case Dungeon.Interaction.Interact(View, State) of
+          when Ok(Outcome):
             begin
-              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Interaction(Title, Text), Token)
-            end
-          end
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token)
-        end
-      end
-    end
-  end;
+              case Outcome of
+                when InteractionOutcome.TransitionRequested(TargetAreaId):
+                  begin
+                    return HandleTransition(Session, View, State, TargetAreaId, ConnectionValue, Token);
+                  end;
+                when InteractionOutcome.StateChanged(Changed):
+                  begin
+                    return CommitState(Session, Changed, ConnectionValue, Token);
+                  end;
+                when InteractionOutcome.Described(Title, Text):
+                  begin
+                    var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Interaction(Title, Text), Token);
+                  end;
+              end case;
+            end;
+          when Error(Reason):
+            begin
+              var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+            end;
+        end case;
+      end;
+  end case;
 
-  return Ok(Next)
-end;
+  return Ok(Next);
+end function;
+end unit;

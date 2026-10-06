@@ -12,266 +12,284 @@ begin
   Cmd.Set(TuiCmd.NoCommand);
   mutable var Next: ClientModel := State;
   case Value of
-    ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved):
-    begin
-      Next.Screen := ClientScreen.StartScreen;
-      Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
-      Next.SaveAvailable := SaveAvailable;
-      Next.FocusedControl := NewGameControlId;
-      if InvalidSaveRemoved then
+    when ClientEvent.Connected(SaveAvailable, InvalidSaveRemoved):
       begin
-        Next.Status := 'Invalid saved game was removed. Start a new game.';
-        return AppendMessage(Next, Next.Status)
-      end;
-
-      Next.Status := 'Connected. Choose a game session.';
-      return AppendMessage(Next, 'Connected')
-    end;
-    ClientEvent.State(Value):
-    begin
-      Next.Screen := ClientScreen.GameScreen;
-      Next.Overlay := ClientOverlay.NoOverlay;
-      // A viewport response during reading must not dismiss the description.
-      if State.Overlay = ClientOverlay.DescriptionOverlay then
-      begin
-        Next.Overlay := ClientOverlay.DescriptionOverlay
-      end;
-
-      // Gear changes answer with a state; the overlays stay open to show the result.
-      if (State.Overlay = ClientOverlay.InventoryOverlay) or
-         (State.Overlay = ClientOverlay.CharacterSheetOverlay) then
-      begin
-        Next.Overlay := State.Overlay
-      end;
-
-      Next.ConnectionPhase := ClientConnectionPhase.Active;
-      Next.FocusedControl := 0;
-      Next.HasVisibleState := true;
-      Next.View := ViewForVisibleState(Value);
-      case Value of
-        VisibleState.MapState(MapValue):
-        begin
-          Next.OriginX := MapValue.OriginX;
-          Next.OriginY := MapValue.OriginY;
-          Next.Width := MapValue.Width;
-          Next.Height := MapValue.Height;
-          Next.Rows := MapValue.Rows;
-          Next.KnowledgeRows := MapValue.KnowledgeRows;
-          Next.PlayerX := MapValue.PlayerX;
-          Next.PlayerY := MapValue.PlayerY;
-          Next.WorldX := MapValue.WorldX;
-          Next.WorldY := MapValue.WorldY;
-          Next.Inventory := MapValue.Inventory;
-          Next.Character := MapValue.Character;
-          Next.PrimaryTitle := '';
-          Next.PrimaryStatus := ''
-        end;
-        VisibleState.FirstPersonState(FirstPersonValue):
-        begin
-          Next.OriginX := 0;
-          Next.OriginY := 0;
-          Next.Width := FirstPersonValue.Width;
-          Next.Height := FirstPersonValue.Height;
-          Next.Rows := FirstPersonValue.Rows;
-          Next.KnowledgeRows := FirstPersonValue.KnowledgeRows;
-          Next.PlayerX := FirstPersonValue.PlayerX;
-          Next.PlayerY := FirstPersonValue.PlayerY;
-          Next.WorldX := 0;
-          Next.WorldY := 0;
-          Next.FirstPersonFacing := FirstPersonValue.Facing;
-          Next.Inventory := FirstPersonValue.Inventory;
-          Next.Character := FirstPersonValue.Character;
-          Next.PrimaryTitle := FirstPersonValue.Title;
-          Next.PrimaryStatus := FirstPersonValue.Status
-        end
-      end;
-
-      Next.Pending := false;
-      mutable var Health: integer := 0;
-      mutable var MaxHealth: integer := 0;
-      mutable var CombatLog: array of string := [];
-      mutable var CombatEvents: array of VisibleCombatEvent := [];
-      case Value of
-        VisibleState.MapState(MapValue):
-        begin
-          Health := MapValue.Health;
-          MaxHealth := MapValue.MaxHealth
-        end;
-        VisibleState.FirstPersonState(FirstPersonValue):
-        begin
-          Health := FirstPersonValue.Health;
-          MaxHealth := FirstPersonValue.MaxHealth;
-          CombatLog := FirstPersonValue.CombatLog;
-          CombatEvents := FirstPersonValue.CombatEvents
-        end
-      end;
-
-      Next := MoveInventorySelection(Next, 0);
-      // Only a drop within one running game flashes; loading or starting never does.
-      Next.DamageTaken := (State.HasVisibleState and (State.Health > 0)) and (Health < State.Health);
-      Next.Health := Health;
-      Next.MaxHealth := MaxHealth;
-      for Entry: string in CombatLog do
-      begin
-        Next := AppendMessage(Next, Entry)
-      end;
-
-      if Next.View = ViewKind.FirstPerson then
-      begin
-        // A newly carried identity confirms pickup until the next authoritative update.
-        // Initial/load projections do not announce existing inventory as a new pickup.
-        if State.HasVisibleState then
-        begin
-          for Item: VisibleInventoryItem in Next.Inventory do
+        Next.Screen := ClientScreen.StartScreen;
+        Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
+        Next.SaveAvailable := SaveAvailable;
+        Next.FocusedControl := NewGameControlId;
+        if InvalidSaveRemoved then
           begin
-            mutable var Known: boolean := false;
-            for Previous: VisibleInventoryItem in State.Inventory do
-            begin
-              if Previous.Id = Item.Id then
-              begin
-                Known := true
-              end
-            end;
+            Next.Status := 'Invalid saved game was removed. Start a new game.';
+            return AppendMessage(Next, Next.Status);
+          end;
+        end if;
 
-            if not Known then
-            begin
-              Next.PrimaryStatus := 'Picked up: ' + Item.Name
-            end
-          end
-        end;
-
-        Next.Status := 'Connected'
-      end
-      else
-      begin
-        Next.Status := 'Connected'
+        Next.Status := 'Connected. Choose a game session.';
+        return AppendMessage(Next, 'Connected');
       end;
-
-      if Std.Arrays.Length(CombatLog) > 0 then
+    when ClientEvent.State(Value):
       begin
-        Next.Status := CombatLog[Std.Arrays.Length(CombatLog) - 1]
-      end;
-
-      if Next.View = ViewKind.FirstPerson then
-      begin
-        Next := StartCombatAnimation(Next, CombatEvents, Cmd)
-      end
-      else
-      begin
-        Next := StopAnimation(Next, Cmd)
-      end;
-
-      return QueueViewport(Next)
-    end;
-    ClientEvent.ExplorationMap(Value):
-    begin
-      Next.MapRequestPending := false;
-      Next.MapHasState := true;
-      Next.MapView := Value.View;
-      Next.MapLabel := Value.LabelText;
-      Next.MapOriginX := Value.OriginX;
-      Next.MapOriginY := Value.OriginY;
-      Next.MapWidth := Value.Width;
-      Next.MapHeight := Value.Height;
-      Next.MapRows := Value.Rows;
-      Next.MapKnowledgeRows := Value.KnowledgeRows;
-      Next.MapPlayerWorldX := Value.PlayerWorldX;
-      Next.MapPlayerWorldY := Value.PlayerWorldY;
-      Next.MapPlayerInWindow := Value.PlayerInWindow;
-      Next.Status := 'Map ready.';
-      if (Next.Overlay = ClientOverlay.ExplorationMapOverlay) and
-         (((Next.MapDesiredOriginX <> Value.OriginX) or (Next.MapDesiredOriginY <> Value.OriginY)) or ((Next.MapDesiredWidth <> Value.Width) or (Next.MapDesiredHeight <> Value.Height))) then
-      begin
-        return QueueExplorationMap(Next)
-      end;
-
-      return Next
-    end;
-    ClientEvent.Interaction(Title, Message):
-    begin
-      Next.Pending := false;
-      if Title <> '' then
-      begin
-        Next.DescriptionTitle := Title;
-        Next.DescriptionText := Message;
-        Next.DescriptionOffset := 0;
-        Next.Overlay := ClientOverlay.DescriptionOverlay;
-        Next.FocusedControl := 0;
-        Next.Status := 'Reading...'
-      end
-      else
-      begin
-        Next.Status := Message
-      end;
-
-      return AppendMessage(Next, Message)
-    end;
-    ClientEvent.SaveCompleted:
-    begin
-      Next.Pending := false;
-      Next.SaveAvailable := true;
-      Next.Status := 'Game saved.';
-      return AppendMessage(Next, Next.Status)
-    end;
-    ClientEvent.Defeated(Message):
-    begin
-      // The server ended the game session; the connection stays ready for a new session choice.
-      Next := StopAnimation(Next, Cmd);
-      Next.Screen := ClientScreen.StartScreen;
-      Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
-      Next.Overlay := ClientOverlay.DefeatOverlay;
-      Next.FocusedControl := OverlayBackControlId;
-      Next.Pending := false;
-      Next.MapRequestPending := false;
-      Next.HasVisibleState := false;
-      Next.DamageTaken := false;
-      Next.DefeatMessage := Message;
-      Next.Status := 'You have fallen.';
-      return AppendMessage(Next, Message)
-    end;
-    ClientEvent.MapRejected(Code, Message):
-    begin
-      Next.MapRequestPending := false;
-      Next.Status := Message;
-      return AppendMessage(Next, 'Rejected: ' + Message)
-    end;
-    ClientEvent.Rejected(Code, Message):
-    begin
-      Next.Pending := false;
-      if Next.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
-      begin
+        Next.Screen := ClientScreen.GameScreen;
         Next.Overlay := ClientOverlay.NoOverlay;
-        Next.FocusedControl := NewGameControlId
-      end;
+        // A viewport response during reading must not dismiss the description.
+        if State.Overlay = ClientOverlay.DescriptionOverlay then
+          begin
+            Next.Overlay := ClientOverlay.DescriptionOverlay;
+          end;
+        end if;
 
-      if Code = 'save_removed' then
+        // Gear changes answer with a state; the overlays stay open to show the result.
+        if (State.Overlay = ClientOverlay.InventoryOverlay) or
+           (State.Overlay = ClientOverlay.CharacterSheetOverlay) then
+          begin
+            Next.Overlay := State.Overlay;
+          end;
+        end if;
+
+        Next.ConnectionPhase := ClientConnectionPhase.Active;
+        Next.FocusedControl := 0;
+        Next.HasVisibleState := true;
+        Next.View := ViewForVisibleState(Value);
+        case Value of
+          when VisibleState.MapState(MapValue):
+            begin
+              Next.OriginX := MapValue.OriginX;
+              Next.OriginY := MapValue.OriginY;
+              Next.Width := MapValue.Width;
+              Next.Height := MapValue.Height;
+              Next.Rows := MapValue.Rows;
+              Next.KnowledgeRows := MapValue.KnowledgeRows;
+              Next.PlayerX := MapValue.PlayerX;
+              Next.PlayerY := MapValue.PlayerY;
+              Next.WorldX := MapValue.WorldX;
+              Next.WorldY := MapValue.WorldY;
+              Next.Inventory := MapValue.Inventory;
+              Next.Character := MapValue.Character;
+              Next.PrimaryTitle := '';
+              Next.PrimaryStatus := '';
+            end;
+          when VisibleState.FirstPersonState(FirstPersonValue):
+            begin
+              Next.OriginX := 0;
+              Next.OriginY := 0;
+              Next.Width := FirstPersonValue.Width;
+              Next.Height := FirstPersonValue.Height;
+              Next.Rows := FirstPersonValue.Rows;
+              Next.KnowledgeRows := FirstPersonValue.KnowledgeRows;
+              Next.PlayerX := FirstPersonValue.PlayerX;
+              Next.PlayerY := FirstPersonValue.PlayerY;
+              Next.WorldX := 0;
+              Next.WorldY := 0;
+              Next.FirstPersonFacing := FirstPersonValue.Facing;
+              Next.Inventory := FirstPersonValue.Inventory;
+              Next.Character := FirstPersonValue.Character;
+              Next.PrimaryTitle := FirstPersonValue.Title;
+              Next.PrimaryStatus := FirstPersonValue.Status;
+            end;
+        end case;
+
+        Next.Pending := false;
+        mutable var Health: integer := 0;
+        mutable var MaxHealth: integer := 0;
+        mutable var CombatLog: array of string := [];
+        mutable var CombatEvents: array of VisibleCombatEvent := [];
+        case Value of
+          when VisibleState.MapState(MapValue):
+            begin
+              Health := MapValue.Health;
+              MaxHealth := MapValue.MaxHealth;
+            end;
+          when VisibleState.FirstPersonState(FirstPersonValue):
+            begin
+              Health := FirstPersonValue.Health;
+              MaxHealth := FirstPersonValue.MaxHealth;
+              CombatLog := FirstPersonValue.CombatLog;
+              CombatEvents := FirstPersonValue.CombatEvents;
+            end;
+        end case;
+
+        Next := MoveInventorySelection(Next, 0);
+        // Only a drop within one running game flashes; loading or starting never does.
+        Next.DamageTaken := (State.HasVisibleState and (State.Health > 0)) and
+                            (Health < State.Health);
+        Next.Health := Health;
+        Next.MaxHealth := MaxHealth;
+        for Entry: string in CombatLog do
+          begin
+            Next := AppendMessage(Next, Entry);
+          end;
+        end for;
+
+        if Next.View = ViewKind.FirstPerson then
+          begin
+            // A newly carried identity confirms pickup until the next authoritative update.
+            // Initial/load projections do not announce existing inventory as a new pickup.
+            if State.HasVisibleState then
+              begin
+                for Item: VisibleInventoryItem in Next.Inventory do
+                  begin
+                    mutable var Known: boolean := false;
+                    for Previous: VisibleInventoryItem in State.Inventory do
+                      begin
+                        if Previous.Id = Item.Id then
+                          begin
+                            Known := true;
+                          end;
+                        end if;
+                      end;
+                    end for;
+
+                    if not Known then
+                      begin
+                        Next.PrimaryStatus := 'Picked up: ' + Item.Name;
+                      end;
+                    end if;
+                  end;
+                end for;
+              end;
+            end if;
+
+            Next.Status := 'Connected';
+          end;
+        else
+          begin
+            Next.Status := 'Connected';
+          end;
+        end if;
+
+        if Std.Arrays.Length(CombatLog) > 0 then
+          begin
+            Next.Status := CombatLog[Std.Arrays.Length(CombatLog) - 1];
+          end;
+        end if;
+
+        if Next.View = ViewKind.FirstPerson then
+          begin
+            Next := StartCombatAnimation(Next, CombatEvents, Cmd);
+          end;
+        else
+          begin
+            Next := StopAnimation(Next, Cmd);
+          end;
+        end if;
+
+        return QueueViewport(Next);
+      end;
+    when ClientEvent.ExplorationMap(Value):
       begin
-        Next.SaveAvailable := false;
-        Next.FocusedControl := NewGameControlId
-      end;
+        Next.MapRequestPending := false;
+        Next.MapHasState := true;
+        Next.MapView := Value.View;
+        Next.MapLabel := Value.LabelText;
+        Next.MapOriginX := Value.OriginX;
+        Next.MapOriginY := Value.OriginY;
+        Next.MapWidth := Value.Width;
+        Next.MapHeight := Value.Height;
+        Next.MapRows := Value.Rows;
+        Next.MapKnowledgeRows := Value.KnowledgeRows;
+        Next.MapPlayerWorldX := Value.PlayerWorldX;
+        Next.MapPlayerWorldY := Value.PlayerWorldY;
+        Next.MapPlayerInWindow := Value.PlayerInWindow;
+        Next.Status := 'Map ready.';
+        if (Next.Overlay = ClientOverlay.ExplorationMapOverlay) and
+           (((Next.MapDesiredOriginX <> Value.OriginX) or (Next.MapDesiredOriginY <> Value.OriginY)) or ((Next.MapDesiredWidth <> Value.Width) or (Next.MapDesiredHeight <> Value.Height))) then
+          begin
+            return QueueExplorationMap(Next);
+          end;
+        end if;
 
-      Next.Status := Message;
-      return AppendMessage(Next, 'Rejected: ' + Message)
-    end;
-    ClientEvent.Failed(Message):
-    begin
-      Next := StopAnimation(Next, Cmd);
-      Next.ConnectionPhase := ClientConnectionPhase.Failed;
-      Next.Overlay := ClientOverlay.NoOverlay;
-      Next.FocusedControl := ConnectControlId;
-      Next.Pending := false;
-      Next.Status := 'Connection failed: ' + Message;
-      return AppendMessage(Next, Next.Status)
-    end;
-    ClientEvent.Disconnected:
-    begin
-      Next := StopAnimation(Next, Cmd);
-      Next.ConnectionPhase := ClientConnectionPhase.Disconnected;
-      Next.Overlay := ClientOverlay.NoOverlay;
-      Next.FocusedControl := ConnectControlId;
-      Next.Pending := false;
-      Next.Status := 'Disconnected';
-      return AppendMessage(Next, 'Disconnected')
-    end
-  end
-end;
+        return Next;
+      end;
+    when ClientEvent.Interaction(Title, Message):
+      begin
+        Next.Pending := false;
+        if Title <> '' then
+          begin
+            Next.DescriptionTitle := Title;
+            Next.DescriptionText := Message;
+            Next.DescriptionOffset := 0;
+            Next.Overlay := ClientOverlay.DescriptionOverlay;
+            Next.FocusedControl := 0;
+            Next.Status := 'Reading...';
+          end;
+        else
+          begin
+            Next.Status := Message;
+          end;
+        end if;
+
+        return AppendMessage(Next, Message);
+      end;
+    when ClientEvent.SaveCompleted:
+      begin
+        Next.Pending := false;
+        Next.SaveAvailable := true;
+        Next.Status := 'Game saved.';
+        return AppendMessage(Next, Next.Status);
+      end;
+    when ClientEvent.Defeated(Message):
+      begin
+        // The server ended the game session; the connection stays ready for a new session choice.
+        Next := StopAnimation(Next, Cmd);
+        Next.Screen := ClientScreen.StartScreen;
+        Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
+        Next.Overlay := ClientOverlay.DefeatOverlay;
+        Next.FocusedControl := OverlayBackControlId;
+        Next.Pending := false;
+        Next.MapRequestPending := false;
+        Next.HasVisibleState := false;
+        Next.DamageTaken := false;
+        Next.DefeatMessage := Message;
+        Next.Status := 'You have fallen.';
+        return AppendMessage(Next, Message);
+      end;
+    when ClientEvent.MapRejected(Code, Message):
+      begin
+        Next.MapRequestPending := false;
+        Next.Status := Message;
+        return AppendMessage(Next, 'Rejected: ' + Message);
+      end;
+    when ClientEvent.Rejected(Code, Message):
+      begin
+        Next.Pending := false;
+        if Next.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
+          begin
+            Next.Overlay := ClientOverlay.NoOverlay;
+            Next.FocusedControl := NewGameControlId;
+          end;
+        end if;
+
+        if Code = 'save_removed' then
+          begin
+            Next.SaveAvailable := false;
+            Next.FocusedControl := NewGameControlId;
+          end;
+        end if;
+
+        Next.Status := Message;
+        return AppendMessage(Next, 'Rejected: ' + Message);
+      end;
+    when ClientEvent.Failed(Message):
+      begin
+        Next := StopAnimation(Next, Cmd);
+        Next.ConnectionPhase := ClientConnectionPhase.Failed;
+        Next.Overlay := ClientOverlay.NoOverlay;
+        Next.FocusedControl := ConnectControlId;
+        Next.Pending := false;
+        Next.Status := 'Connection failed: ' + Message;
+        return AppendMessage(Next, Next.Status);
+      end;
+    when ClientEvent.Disconnected:
+      begin
+        Next := StopAnimation(Next, Cmd);
+        Next.ConnectionPhase := ClientConnectionPhase.Disconnected;
+        Next.Overlay := ClientOverlay.NoOverlay;
+        Next.FocusedControl := ConnectControlId;
+        Next.Pending := false;
+        Next.Status := 'Disconnected';
+        return AppendMessage(Next, 'Disconnected');
+      end;
+  end case;
+end function;
+end unit;
