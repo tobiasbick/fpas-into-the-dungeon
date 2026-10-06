@@ -85,8 +85,11 @@ exposes immediate side branches, including at junctions with an open path ahead.
 Walls and floor samples share this eye and projection. There is no separate
 close-wall renderer or camera placed in a neighboring field. The player's
 authoritative coordinate, collision, interaction reach, and facing do not change.
-Interior visibility includes the immediate left and right fields in addition to
-the existing forward sight cone, without revealing a whole sideways corridor.
+Interior visibility tests field extents at the forward sight cone's edges,
+with a one-field margin for the rearward eye. This includes immediate left and
+right neighbors and the partly projected fields ahead, preventing opaque fog
+slabs at the screen edges. Fields behind the player and fields farther sideways
+on the player's row stay hidden; distance and wall occlusion remain enforced.
 Unknown and remembered-but-not-currently-visible fields both stop first-person
 rays as dark fog. Wall and floor sampling consult the same server-provided
 knowledge mask; map memory never extends current first-person sight.

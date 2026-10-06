@@ -21,6 +21,8 @@ It is part of this plan, not a deferred design task.
   passed 48/48.
 - [x] Step 5: entrances, world metadata, and generated dungeons in play.
 - [x] Step 6: complete TCP visit and documentation. Awaiting user review.
+- [x] Rendering review correction: lateral fog removed and confirmed in the
+  running game by the user on 2026-10-06. The full suite passed 56/56.
 
 Verification after step 2: changed sources formatted, all affected projects
 passed `fpas check`, game tests passed 10/10, world tests passed 2/2, and
@@ -344,6 +346,31 @@ Step 6 is implemented:
 - Documentation synchronized: overview, area transitions, first-person
   interior, items, combat, persistent game state, runtime data, unbounded
   world, level storage, product terminology, client UI, README, and roadmap.
+
+## Review correction: lateral fog in the first-person view
+
+- A small empty-room replay reproduced the reported dark screen-edge slabs:
+  edge rays hit unknown fields even though their floor or wall edge was in the
+  90-degree camera projection. The server tested field centers against the
+  cone, while the renderer's eye is shifted backward within the player field.
+- `InteriorVisibility` now includes the partly projected fields along both
+  forward cone edges, with a one-field margin. Range, line of sight, wall-face
+  occlusion, and hidden fields behind or farther sideways remain enforced.
+  Camera angle, eye offset, and aspect correction are unchanged.
+- `lateral_visibility_render_test` first failed with `expected '#', got '?'`
+  and passes after the change. It replays actual visibility through raycasting
+  and scene pixels at four room positions, all cardinal facings, and two
+  terminal widths. It also checks the angular boundary's hidden side and rear
+  fields. Existing fog and corridor tests guard remembered geometry and walls.
+- Verification: changed sources pass `fpas fmt --check`,
+  `fpas check dungeon.fpasworkspace` passed, and
+  `fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` passed 56/56.
+  The reproduction was red before the fix and green afterwards, including
+  all four facings; the rendered before/after comparison removes the false
+  fog slabs. Protocol, stored formats, and generated output are unchanged.
+  The user confirmed on 2026-10-06 that the rendering now fits in the running
+  game. The rendering issue is closed. Acceptance of the complete 14a feature
+  remains a separate final review step.
 
 ## Ground rules
 

@@ -1,0 +1,160 @@
+// Replays an open room's server visibility through the renderer to catch lateral fog walls.
+program LateralVisibilityRenderTest;
+
+uses
+  Dungeon.Client.Raycast, Dungeon.Client.Raycast.Rays, Dungeon.Coordinates,
+  Dungeon.Exploration.Sight, Dungeon.Interior, Dungeon.Protocol, Dungeon.Test.Fixtures, Std.Arrays,
+  Std.Results, Std.Test;
+
+function Room(): InteriorMap;
+begin
+  mutable var Cells: array of InteriorCellKind := Std.Arrays.Fill(InteriorCellKind.Floor, 49);
+  for N: integer := 0 to 6 do
+    begin
+      Cells[N] := InteriorCellKind.Wall;
+      Cells[42 + N] := InteriorCellKind.Wall;
+      Cells[N * 7] := InteriorCellKind.Wall;
+      Cells[N * 7 + 6] := InteriorCellKind.Wall;
+    end;
+  end for;
+
+  Cells[36] := InteriorCellKind.ExitField;
+  return Std.Results.Unwrap(ValidateInteriorMap(FixtureDungeonMap() with Width := 7; Height := 7; Cells := Cells; Start := record
+    X := 2;
+    Y := 2;
+  end; Exit := record
+    X := 1;
+    Y := 5;
+  end; Items := []; Hostiles := []; end with));
+end function;
+
+function WireFacing(Facing: FacingDirection): FirstPersonFacing;
+begin
+  case Facing of
+    when FacingDirection.North:
+      begin
+        return FirstPersonFacing.North;
+      end;
+    when FacingDirection.East:
+      begin
+        return FirstPersonFacing.East;
+      end;
+    when FacingDirection.South:
+      begin
+        return FirstPersonFacing.South;
+      end;
+    when FacingDirection.West:
+      begin
+        return FirstPersonFacing.West;
+      end;
+  end case;
+end function;
+
+function Projection(Map: InteriorMap; Pose: FirstPersonPose): FirstPersonVisibleState;
+begin
+  var Visible: array of boolean := InteriorVisibility(Map, Pose);
+  mutable var Rows: array of string := [];
+  mutable var Knowledge: array of string := [];
+  for Y: integer := 0 to Map.Height - 1 do
+    begin
+      mutable var Row: string := '';
+      mutable var Mask: string := '';
+      for X: integer := 0 to Map.Width - 1 do
+        begin
+          if Visible[Y * Map.Width + X] then
+            begin
+              Row := Row + InteriorCellCode(Map.Cells[Y * Map.Width + X]);
+              Mask := Mask + 'v';
+            end;
+          else
+            begin
+              Row := Row + '?';
+              Mask := Mask + 'u';
+            end;
+          end if;
+        end;
+      end for;
+
+      Std.Arrays.Push(Rows, Row);
+      Std.Arrays.Push(Knowledge, Mask);
+    end;
+  end for;
+
+  return record
+    Title := 'Lateral visibility';
+    Status := '';
+    Width := Map.Width;
+    Height := Map.Height;
+    Rows := Rows;
+    KnowledgeRows := Knowledge;
+    PlayerX := Pose.Position.X;
+    PlayerY := Pose.Position.Y;
+    Facing := WireFacing(Pose.Facing);
+    Inventory := [];
+    Health := 20;
+    MaxHealth := 20;
+    Character := [];
+    CombatLog := [];
+    CombatEvents := [];
+  end;
+end function;
+
+begin
+  var Map: InteriorMap := Room();
+  for Direction: FacingDirection in [
+                                      FacingDirection.North,
+                                      FacingDirection.East,
+                                      FacingDirection.South,
+                                      FacingDirection.West
+                                    ] do
+    begin
+      var Pose: FirstPersonPose := record
+        Position := record
+          X := 3;
+          Y := 3;
+        end;
+        Facing := Direction;
+      end;
+      var Forward: InteriorPosition := StepOffset(Direction, RelativeStep.Forward);
+      var Side: InteriorPosition := StepOffset(Direction, RelativeStep.Right);
+      var Visible: array of boolean := InteriorVisibility(Map, Pose);
+      // Partly projected edge fields are known; farther sideways and behind remain hidden.
+      AssertTrue(Visible[((((3 + Forward.Y) + 2 * Side.Y) * Map.Width + 3) + Forward.X) + 2 * Side.X]);
+      AssertFalse(Visible[((3 + 2 * Side.Y) * Map.Width + 3) + 2 * Side.X]);
+      AssertFalse(Visible[((3 - Forward.Y) * Map.Width + 3) - Forward.X]);
+      for PX: integer in [2, 4] do
+        begin
+          for PY: integer in [2, 4] do
+            begin
+              var Value: FirstPersonVisibleState := Projection(Map, record
+                Position := record
+                  X := PX;
+                  Y := PY;
+                end;
+                Facing := Direction;
+              end);
+              // Every ray in this small empty room meets a wall within sight range.
+              for CameraX: real in [-1.0, -0.9, -0.5, 0.0, 0.5, 0.9, 1.0] do
+                begin
+                  AssertEquals('#', CastFirstPersonRay(Value, CameraX).FieldCode);
+                end;
+              end for;
+
+              for Width: integer in [81, 101] do
+                begin
+                  var Scene: FirstPersonScene := RenderFirstPersonScene(Value, Width, 37);
+                  for X: integer := 0 to Width - 1 do
+                    begin
+                      // The horizon intersects stone in every column; unknown fog is red 18.
+                      AssertTrue(Scene.Pixels[37 * Width + X] div 65536 > 30);
+                    end;
+                  end for;
+                end;
+              end for;
+            end;
+          end for;
+        end;
+      end for;
+    end;
+  end for;
+end.

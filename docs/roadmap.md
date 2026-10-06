@@ -8,7 +8,8 @@ the client and server executable and tested.
 stage contains a completed substage and explicitly deferred later work. `NEXT`
 is the only stage that should be detailed enough for immediate implementation.
 `LATER` gives an ordering direction and may change as the project teaches us
-more. `OPEN` marks a question that has not been decided.
+more. `IN REVIEW` means implementation is complete and final user acceptance
+is pending. `OPEN` marks a question that has not been decided.
 
 ## 1. Project foundation — DONE
 
@@ -94,6 +95,9 @@ real-process smoke tests cover the complete path. See
 The current presentation checkpoint uses one rearward rendering eye and a
 90-degree horizontal projection for both near and distant walls. Immediate
 lateral fields are visible so junctions can be read without moving or turning.
+Visibility also includes partly projected fields along the forward cone edges,
+preventing false dark slabs at the screen margins. Range and wall occlusion
+still apply; fields behind the player and farther sideways stay hidden.
 This changes presentation, not grid-based movement or interaction reach.
 
 ## 7. Persistent game state — DONE
@@ -418,8 +422,15 @@ contents, then 13b adds progression before 14c adds deeper levels.
   peak memory. Measure first-time generation and storage separately.
 - [x] Synchronize architecture, product terminology, persistence, and roadmap
   documentation.
+- [x] Correct false dark screen-edge fields by including partly visible fields
+  at the sight cone's edges. Cover all four facings and multiple terminal widths;
+  the user confirmed the rendering in the running game on 2026-10-06.
 - [ ] Review the generated-dungeon slice with the user and obtain explicit
   acceptance.
+
+The rendering correction passed `fpas check` and the complete workspace suite
+(56/56 tests). Its visual review is complete; final acceptance of the complete
+14a slice is still pending.
 
 Dungeon names, further opponent kinds, loot tables, and consumables belong to
 14b; stairs and deeper levels to 14c.

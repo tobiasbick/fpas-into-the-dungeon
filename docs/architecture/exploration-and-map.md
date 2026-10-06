@@ -43,10 +43,12 @@ sent. A rejected action changes neither discovery nor current visibility.
 
 Outdoor sight is a Euclidean circle with radius eight world fields. Terrain
 does not occlude it. Interior sight has a maximum range of eight fields and a
-90-degree cardinal forward field of view, plus the two immediately adjacent
-lateral fields. The lateral exception makes junctions readable from the
-rearward rendering eye; it does not reveal fields farther sideways or behind
-the player. Line of sight includes the first blocking
+90-degree cardinal forward field of view. The angular bounds include a field
+whose edge overlaps the projection, even when its center lies outside the
+cone. This needs a one-field margin at either forward cone edge for the
+rearward rendering eye and includes the two immediate lateral neighbors.
+Fields farther sideways on the player's row or behind the player remain
+hidden. Range and wall occlusion still apply. Line of sight includes the first blocking
 wall and excludes fields behind it. Currently visible fields are derived and
 are never persisted.
 
@@ -55,7 +57,7 @@ center ray along a corridor can enter a nearer wall cell even though the next
 cell's corridor-facing surface is visible. Each exposed, player-facing side
 is tested at its midpoint and near its corners with bounded grid DDA rays;
 intervening walls and closed grid-corner contacts block those rays. The
-existing range and facing limits still apply. Traversable fields retain their
+range and field-extent facing limits still apply. Traversable fields retain their
 line-of-sight test, so revealing a wall face does not reveal the room behind it.
 
 ## Projection and information boundary
