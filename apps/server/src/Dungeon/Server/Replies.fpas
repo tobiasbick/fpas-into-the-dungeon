@@ -4,11 +4,10 @@ unit Dungeon.Server.Replies;
 uses
   Dungeon.Server.Projection, Dungeon.Server.Session, Dungeon.Server.Logging, Dungeon.Combat,
   Dungeon.Exploration, Dungeon.GameState, Dungeon.Movement, Dungeon.Protocol,
-  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.World, Std.Net, Std.Str,
-  Std.Tasks;
+  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.World, Std.Net, Std.Tasks;
 
 // Encodes and sends one server message.
-public function SendMessage(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of boolean, string;
+public function SendMessage(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of (boolean, string);
 begin
   return WriteLine(ConnectionValue, EncodeServer(Message), Token);
 end function;
@@ -22,10 +21,10 @@ public function SendProjection(
   Viewport: ViewportSize;
   Report: TurnReport;
   Token: CancellationToken
-): result of WorldSession, string;
+): result of (WorldSession, string);
 begin
-  var Projection: SessionProjection := try ProjectSession(World, View, State, Viewport, Report);
-  var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Projection.State), Token);
+  const Projection: SessionProjection := try ProjectSession(World, View, State, Viewport, Report);
+  const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Projection.State), Token);
   return Ok(Projection.World);
 end function;
 
@@ -35,7 +34,7 @@ public function Reject(
   Code: string;
   Message: string;
   Token: CancellationToken
-): result of boolean, string;
+): result of (boolean, string);
 begin
   return SendMessage(ConnectionValue, ServerMessage.Rejected(Code, Message), Token);
 end function;
@@ -47,11 +46,11 @@ function CommitTurn(
   Report: TurnReport;
   ConnectionValue: Connection;
   Token: CancellationToken
-): result of ServerSession, string;
+): result of (ServerSession, string);
 begin
-  var View: AreaView := try SessionAreaView(Session, Changed);
-  var Revealed: GameState := try RevealCurrentArea(View, Changed);
-  mutable var Next: ServerSession := Session;
+  const View: AreaView := try SessionAreaView(Session, Changed);
+  const Revealed: GameState := try RevealCurrentArea(View, Changed);
+  var Next: ServerSession := Session;
   Next.State := Some(Revealed);
   Next.Dirty := true;
   Next.World := try SendProjection(ConnectionValue, Session.World, View, Revealed, Session.Viewport, Report, Token);
@@ -64,26 +63,22 @@ public function CommitState(
   Changed: GameState;
   ConnectionValue: Connection;
   Token: CancellationToken
-): result of ServerSession, string;
+): result of (ServerSession, string);
 begin
   return CommitTurn(Session, Changed, NoTurnReport(), ConnectionValue, Token);
 end function;
 
-type
-  // Revealed candidate state and its projection, both built before anything is sent.
-  PreparedTransition = record
-    State: GameState;
-    Projection: SessionProjection;
-  end record;
+// Revealed candidate state and its projection, both built before anything is sent.
+type PreparedTransition = record
+  State: GameState;
+  Projection: SessionProjection;
+end record;
 
-function PrepareTransition(Session: ServerSession; Transition: AreaTransition): result of PreparedTransition, string;
+function PrepareTransition(Session: ServerSession; Transition: AreaTransition): result of (PreparedTransition, string);
 begin
-  var Revealed: GameState := try RevealCurrentArea(Transition.View, Transition.State);
-  var Valid: GameState := try ValidateGameState(Transition.View, Revealed);
-  return Ok(record
-    State := Valid;
-    Projection := try ProjectSession(Session.World, Transition.View, Valid, Session.Viewport, NoTurnReport());
-  end);
+  const Revealed: GameState := try RevealCurrentArea(Transition.View, Transition.State);
+  const Valid: GameState := try ValidateGameState(Transition.View, Revealed);
+  return Ok(PreparedTransition(State := Valid, Projection := try ProjectSession(Session.World, Transition.View, Valid, Session.Viewport, NoTurnReport())));
 end function;
 
 // Installs an applied area transition: reveals and validates the candidate and builds its
@@ -94,22 +89,22 @@ public function CommitTransition(
   Transition: AreaTransition;
   ConnectionValue: Connection;
   Token: CancellationToken
-): result of ServerSession, string;
+): result of (ServerSession, string);
 begin
   case PrepareTransition(Session, Transition) of
-    when Ok(Prepared):
+    when Ok(const Prepared):
       begin
-        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Prepared.Projection.State), Token);
-        mutable var Next: ServerSession := Session;
+        const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Prepared.Projection.State), Token);
+        var Next: ServerSession := Session;
         Next.State := Some(Prepared.State);
         Next.Dirty := true;
         Next.Interior := Transition.View.Interior;
         Next.World := Prepared.Projection.World;
         return Ok(Next);
       end;
-    when Error(Reason):
+    when Error(const Reason):
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
+        const Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
         return Ok(Session);
       end;
   end case;
@@ -118,7 +113,7 @@ end function;
 // Joins one turn's messages into the bounded defeat summary.
 function DefeatSummary(Log: array of string): string;
 begin
-  mutable var Summary: string := '';
+  var Summary: string := '';
   for Entry: string in Log do
     begin
       if Summary = '' then
@@ -139,9 +134,9 @@ begin
     end;
   end if;
 
-  if Std.Str.Length(Summary) > MaximumCombatLogTextLength then
+  if Summary.Length() > MaximumCombatLogTextLength then
     begin
-      Summary := Std.Str.Substring(Summary, Std.Str.Length(Summary) - MaximumCombatLogTextLength, MaximumCombatLogTextLength);
+      Summary := Summary.Slice(Summary.Length() - MaximumCombatLogTextLength, MaximumCombatLogTextLength);
     end;
   end if;
 
@@ -156,24 +151,21 @@ public function PlayTurn(
   ConnectionValue: Connection;
   Token: CancellationToken;
   Logs: option of channel of ServerLogEvent
-): result of ServerSession, string;
+): result of (ServerSession, string);
 begin
-  var State: GameState := try RequireActiveState(Session.State);
+  const State: GameState := try RequireActiveState(Session.State);
   case ResolveTurn(try SessionAreaView(Session, State), State, Action) of
-    when Ok(Outcome):
+    when Ok(const Outcome):
       begin
         case Outcome of
-          when TurnOutcome.Continued(Changed, Log, Events):
+          when TurnOutcome.Continued(const Changed, const Log, const Events):
             begin
-              return CommitTurn(Session, Changed, record
-                Log := Log;
-                Events := Events;
-              end, ConnectionValue, Token);
+              return CommitTurn(Session, Changed, TurnReport(Log := Log, Events := Events), ConnectionValue, Token);
             end;
-          when TurnOutcome.Defeated(Log):
+          when TurnOutcome.Defeated(const Log):
             begin
-              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
-              mutable var Ended: ServerSession := Session;
+              const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
+              var Ended: ServerSession := Session;
               Ended.State := None;
               Ended.Dirty := false;
               Ended.Interior := None;
@@ -181,10 +173,10 @@ begin
             end;
         end case;
       end;
-    when Error(Reason):
+    when Error(const Reason):
       begin
         LogServer(Logs, 'rejected', (RejectionCode + ': ') + Reason);
-        var Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
+        const Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
         return Ok(Session);
       end;
   end case;

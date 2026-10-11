@@ -4,16 +4,16 @@ unit Dungeon.Client.Ui.Session;
 uses
   Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Intentions, Dungeon.Client.Ui.Layout,
   Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Protocol, Dungeon.Protocol.Worlds,
-  Dungeon.RuntimeData, Std.Arrays, Std.Conv, Std.Str, Std.Tasks, Std.Tui;
+  Dungeon.RuntimeData, Std.Conv, Std.Tasks, Std.Tui;
 
 // Appends one entry to the bounded message history, dropping the oldest.
 public function AppendMessage(State: ClientModel; Text: string): ClientModel;
 begin
-  mutable var Next: ClientModel := State;
-  mutable var Values: array of string := Std.Arrays.Concat(State.Messages, [Text]);
-  if Std.Arrays.Length(Values) > MaximumMessages then
+  var Next: ClientModel := State;
+  var Values: array of string := State.Messages.Concat([Text]);
+  if Values.Length() > MaximumMessages then
     begin
-      Values := Std.Arrays.Slice(Values, Std.Arrays.Length(Values) - MaximumMessages, MaximumMessages);
+      Values := Values.Slice(Values.Length() - MaximumMessages, MaximumMessages);
     end;
   end if;
 
@@ -24,7 +24,7 @@ end function;
 // Closes the active overlay and restores the focus that belongs to the screen below it.
 public function CloseOverlay(State: ClientModel): ClientModel;
 begin
-  mutable var Next: ClientModel := State;
+  var Next: ClientModel := State;
   if State.Overlay = ClientOverlay.DescriptionOverlay then
     begin
       Next.Status := 'Ready';
@@ -111,15 +111,15 @@ end function;
 // Starts the network subscription and shows the connecting start screen.
 public function StartConnection(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
 begin
-  var Host: string := State.Host;
-  var Port: integer := State.Port;
-  var Requests: channel of ClientMessage := State.Requests;
-  var Events: channel of ClientEvent := State.Events;
-  var Viewport: WorldViewport := DesiredWorldViewport(State);
-  Cmd.ReplaceSubscription(NetworkSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
+  const Host: string := State.Host;
+  const Port: integer := State.Port;
+  const Requests: channel of ClientMessage := State.Requests;
+  const Events: channel of ClientEvent := State.Events;
+  const Viewport: WorldViewport := DesiredWorldViewport(State);
+  Cmd.ReplaceSubscription(NetworkSubscriptionId, function(Token: CancellationToken): result of (boolean, string) begin
     return Dungeon.Client.Network.RunNetwork(Host, Port, Viewport.Width, Viewport.Height, Requests, Events, Token);
   end function);
-  mutable var Next: ClientModel := State;
+  var Next: ClientModel := State;
   Next.Screen := ClientScreen.StartScreen;
   Next.Overlay := ClientOverlay.NoOverlay;
   Next.ConnectionPhase := ClientConnectionPhase.Connecting;
@@ -142,7 +142,7 @@ begin
       Cmd.CancelSubscription(NetworkSubscriptionId);
     end;
   end if;
-  mutable var Next: ClientModel := State;
+  var Next: ClientModel := State;
   Next.Screen := ClientScreen.StartScreen;
   Next.Overlay := ClientOverlay.NoOverlay;
   Next.ConnectionPhase := ClientConnectionPhase.Offline;
@@ -163,43 +163,42 @@ begin
     end;
   end if;
 
-  case TrySend(State.Requests, Message) of
-    when Ok(Queued):
-      begin
-        if not Queued then
+  if TrySend(State.Requests, Message) is Ok(const Queued) then
+    begin
+      if not Queued then
+        begin
+          return State;
+        end;
+      end if;
+      var Next: ClientModel := State;
+      Next.Pending := true;
+      Next.PendingCreatedWorld := false;
+      Next.PendingChangesProgress := Message = ClientMessage.StartNewGame;
+      case Message of
+        when ClientMessage.CreateWorld(const Seed, const RegionChunks):
           begin
-            return State;
+            Next.PendingCreatedWorld := true;
+            Next.PendingChangesProgress := true;
           end;
-        end if;
-        mutable var Next: ClientModel := State;
-        Next.Pending := true;
-        Next.PendingCreatedWorld := false;
-        Next.PendingChangesProgress := Message = ClientMessage.StartNewGame;
-        case Message of
-          when ClientMessage.CreateWorld(Seed, RegionChunks):
-            begin
-              Next.PendingCreatedWorld := true;
-              Next.PendingChangesProgress := true;
-            end;
-          when ClientMessage.LoadGame:
-            begin
-              Next.PendingChangesProgress := not CatalogHasSave(State.Catalog);
-            end;
-          else
-            begin
-              null;
-            end;
-        end case;
+        when ClientMessage.LoadGame:
+          begin
+            Next.PendingChangesProgress := not CatalogHasSave(State.Catalog);
+          end;
+        when clientmessage.Hello(_, _, _), clientmessage.StartNewGame, clientmessage.SaveGame, clientmessage.OverwriteSaveGame, clientmessage.ListWorlds(_, _), clientmessage.SelectWorld(_), clientmessage.Viewport(_, _), clientmessage.ExplorationMap(_, _, _, _), clientmessage.Move(_, _), clientmessage.StepFirstPerson(_), clientmessage.TurnFirstPerson(_), clientmessage.Interact, clientmessage.Attack, clientmessage.Wait, clientmessage.Equip(_), clientmessage.Unequip(_), clientmessage.DropItem(_), clientmessage.Disconnect:
+          begin
+            null;
+          end;
+      end case;
 
-        Next.FocusedControl := CancelSessionStartControlId;
-        Next.Status := Status;
-        return Next;
-      end;
-    else
-      begin
-        return State;
-      end;
-  end case;
+      Next.FocusedControl := CancelSessionStartControlId;
+      Next.Status := Status;
+      return Next;
+    end;
+  else
+    begin
+      return State;
+    end;
+  end if;
 end function;
 
 // Sends a save request during an active game with nothing pending.
@@ -211,52 +210,48 @@ begin
       return State;
     end;
   end if;
-  mutable var Message: ClientMessage := ClientMessage.SaveGame;
+  var Message: ClientMessage := ClientMessage.SaveGame;
   if State.Overlay = ClientOverlay.SaveConfirmationOverlay then
     Message := ClientMessage.OverwriteSaveGame;
   end if;
 
-  case TrySend(State.Requests, Message) of
-    when Ok(Queued):
-      begin
-        if not Queued then
-          begin
-            return State;
-          end;
-        end if;
-        mutable var Next: ClientModel := State;
-        Next.Overlay := ClientOverlay.NoOverlay;
-        Next.FocusedControl := 0;
-        Next.Pending := true;
-        Next.Status := 'Saving game...';
-        return Next;
-      end;
-    else
-      begin
-        return State;
-      end;
-  end case;
+  if TrySend(State.Requests, Message) is Ok(const Queued) then
+    begin
+      if not Queued then
+        begin
+          return State;
+        end;
+      end if;
+      var Next: ClientModel := State;
+      Next.Overlay := ClientOverlay.NoOverlay;
+      Next.FocusedControl := 0;
+      Next.Pending := true;
+      Next.Status := 'Saving game...';
+      return Next;
+    end;
+  else
+    begin
+      return State;
+    end;
+  end if;
 end function;
 
 function PersistPanelPreferences(State: ClientModel): ClientModel;
 begin
-  if Std.Str.Length(State.ClientConfigPath) = 0 then
+  if State.ClientConfigPath.Length() = 0 then
     begin
       return State;
     end;
   end if;
 
-  case SaveClientPreferences(State.ClientConfigPath, record
-    ContextPanelVisible := State.ContextPanelVisible;
-    MessagePanelVisible := State.MessagePanelVisible;
-  end) of
-    when Ok(Written):
+  case SaveClientPreferences(State.ClientConfigPath, ClientPreferences(ContextPanelVisible := State.ContextPanelVisible, MessagePanelVisible := State.MessagePanelVisible)) of
+    when Ok(const Written):
       begin
         return State;
       end;
-    when Error(Message):
+    when Error(const Message):
       begin
-        mutable var Next: ClientModel := State;
+        var Next: ClientModel := State;
         Next.Status := 'Cannot save client preferences: ' + Message;
         return AppendMessage(Next, Next.Status);
       end;
@@ -266,7 +261,7 @@ end function;
 // Shows or hides the context panel, docked or as an overlay, and stores the preference.
 public function ToggleContext(State: ClientModel): ClientModel;
 begin
-  mutable var Next: ClientModel := State;
+  var Next: ClientModel := State;
   if ContextCanDock(State) then
     begin
       Next.ContextPanelVisible := not State.ContextPanelVisible;
@@ -289,7 +284,7 @@ end function;
 // Shows or hides the message panel, docked or as an overlay, and stores the preference.
 public function ToggleMessages(State: ClientModel): ClientModel;
 begin
-  mutable var Next: ClientModel := State;
+  var Next: ClientModel := State;
   if MessagesCanDock(State) then
     begin
       Next.MessagePanelVisible := not State.MessagePanelVisible;

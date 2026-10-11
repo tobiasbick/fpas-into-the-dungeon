@@ -5,21 +5,18 @@ uses
   Dungeon.Areas, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Terrain,
   Dungeon.World, Dungeon.World.Interiors, Dungeon.World.Interiors.Errors,
   Dungeon.World.Savegame.Discovery, Dungeon.World.Savegame.Errors, Dungeon.World.Savegame.Entities,
-  Dungeon.World.Savegame.Player, Std.Arrays, Std.Conv, Std.Dictionaries, Std.Fs, Std.Json,
-  Std.Json.Fields, Std.Path;
+  Dungeon.World.Savegame.Player, Std.Conv, Std.Fs, Std.Json, Std.Json.Fields, Std.Path;
 
-public const
-  // Current-only savegame schema written below each selected world.
-  SaveGameFormatVersion: integer := 7;
+// Current-only savegame schema written below each selected world.
+public const SaveGameFormatVersion: integer := 7;
 
-public type
-  // Inspection result: absent, invalid and preserved with its reason, or fully validated state.
-  SaveGameLoad = enum
-    Missing;
-    Invalid(Reason: string);
-    // Fully checked state and the exact current geometry used during validation.
-    Loaded(State: GameState; View: AreaView);
-  end enum;
+// Inspection result: absent, invalid and preserved with its reason, or fully validated state.
+public type SaveGameLoad = enum
+  Missing;
+  Invalid(Reason: string);
+  // Fully checked state and the exact current geometry used during validation.
+  Loaded(State: GameState; View: AreaView);
+end enum;
 
 function SaveGameDirectory(World: WorldSession): string;
 begin
@@ -33,9 +30,9 @@ begin
 end function;
 
 // Deletes only the selected world's single save, returning false when it is already absent.
-public function DeleteSaveGame(World: WorldSession): result of boolean, string;
+public function DeleteSaveGame(World: WorldSession): result of (boolean, string);
 begin
-  var Path: string := SaveGamePath(World);
+  const Path: string := SaveGamePath(World);
   if not Std.Fs.Exists(Path) then
     begin
       return Ok(false);
@@ -54,20 +51,20 @@ end function;
 // Encodes only authoritative resumable state using the current savegame schema.
 public function EncodeSaveGame(WorldId: string; State: GameState): string;
 begin
-  mutable var Visited: array of JsonValue := [];
+  var Visited: array of JsonValue := [];
   for AreaId: string in State.VisitedAreas do
     begin
-      Std.Arrays.Push(Visited, JsonValue.String(AreaId));
+      Visited.Push(JsonValue.String(AreaId));
     end;
   end for;
 
   return Std.Json.Stringify(JsonValue.Object(['format_version': JsonValue.Number(IntToReal(SaveGameFormatVersion)), 'world_id': JsonValue.String(WorldId), 'area_kind': JsonValue.String(AreaKindName(State.Area)), 'area_id': JsonValue.String(State.AreaId), 'player': EncodePlayer(State.Player), 'return_location': EncodeReturnLocation(State.ReturnLocation), 'exploration': EncodeExploration(State.Exploration), 'visited_areas': JsonValue.ArrayValue(Visited), 'items': JsonValue.ArrayValue(EncodeItems(State.Items)), 'health': JsonValue.Number(IntToReal(State.Health)), 'hostiles': JsonValue.ArrayValue(EncodeHostiles(State.Hostiles)), 'random_state': JsonValue.Number(IntToReal(State.RandomState))]));
 end function;
 
-function DecodeSaveGameFields(Text: string; Metadata: WorldMetadata): result of GameState, string;
+function DecodeSaveGameFields(Text: string; Metadata: WorldMetadata): result of (GameState, string);
 begin
-  var Fields: dict of string to JsonValue := try ParseObject(Text);
-  if Std.Dictionaries.Length(Fields) <> 12 then
+  const Fields: dict of string to JsonValue := try ParseObject(Text);
+  if Fields.Length() <> 12 then
     begin
       return Error('savegame has an unexpected field set');
     end;
@@ -84,33 +81,21 @@ begin
       return Error('savegame world id does not match selected world');
     end;
   end if;
-  var State: GameState := record
-    Area := try DecodeAreaKind(try StringField(Fields, 'area_kind'));
-    AreaId := try StringField(Fields, 'area_id');
-    Player := try DecodePlayer(try ObjectField(Fields, 'player'));
-    ReturnLocation := try DecodeReturnLocation(try ObjectField(Fields, 'return_location'));
-    Exploration := try DecodeExploration(try ObjectField(Fields, 'exploration'));
-    VisitedAreas := try StringArrayField(Fields, 'visited_areas');
-    Items := try DecodeItems(try ArrayField(Fields, 'items'));
-    Health := try IntegerField(Fields, 'health');
-    Hostiles := try DecodeHostiles(try ArrayField(Fields, 'hostiles'));
-    RandomState := try IntegerField(Fields, 'random_state');
-  end;
-
+  const State: GameState := GameState(Area := try DecodeAreaKind(try StringField(Fields, 'area_kind')), AreaId := try StringField(Fields, 'area_id'), Player := try DecodePlayer(try ObjectField(Fields, 'player')), ReturnLocation := try DecodeReturnLocation(try ObjectField(Fields, 'return_location')), Exploration := try DecodeExploration(try ObjectField(Fields, 'exploration')), VisitedAreas := try StringArrayField(Fields, 'visited_areas'), Items := try DecodeItems(try ArrayField(Fields, 'items')), Health := try IntegerField(Fields, 'health'), Hostiles := try DecodeHostiles(try ArrayField(Fields, 'hostiles')), RandomState := try IntegerField(Fields, 'random_state'));
   return ValidateSaveShape(Metadata, State);
 end function;
 
 // First load phase: decodes an exact current-version save and checks its self-contained fields
 // without reading levels. Not a full validation; only states that also pass ValidateSavedGame
 // against their visited levels may become active. Every error is prefixed with `invalid savegame:`.
-public function DecodeSaveGameState(Text: string; Metadata: WorldMetadata): result of GameState, string;
+public function DecodeSaveGameState(Text: string; Metadata: WorldMetadata): result of (GameState, string);
 begin
   case DecodeSaveGameFields(Text, Metadata) of
-    when Ok(Value):
+    when Ok(const Value):
       begin
         return Ok(Value);
       end;
-    when Error(Message):
+    when Error(const Message):
       begin
         return Error('invalid savegame: ' + Message);
       end;
@@ -139,10 +124,10 @@ end function;
 // Loads the selected world's save in three phases: decode its self-contained fields, read every
 // visited level once, then validate the state against those maps. A missing or invalid level is a
 // world-data failure that preserves the save; invalid save content is also preserved. Never generates.
-public function LoadSaveGame(World: WorldSession): result of SaveGameLoad, PersistenceFailure;
+public function LoadSaveGame(World: WorldSession): result of (SaveGameLoad, PersistenceFailure);
 begin
-  var Path: string := SaveGamePath(World);
-  var Parent: string := Std.Path.Join([World.Directory, 'saves']);
+  const Path: string := SaveGamePath(World);
+  const Parent: string := Std.Path.Join([World.Directory, 'saves']);
   if Std.Fs.Exists(Parent) and not Std.Fs.IsDir(Parent) then
     return Error(PersistenceFailure.Io('savegame directory exists but is not a directory'));
   end if;
@@ -158,55 +143,55 @@ begin
       return Error(PersistenceFailure.Io('savegame path exists but is not a file'));
     end;
   end if;
-  mutable var Text: string := '';
+  var Text: string := '';
   case Std.Fs.ReadText(Path) of
-    when Ok(Value):
+    when Ok(const Value):
       begin
         Text := Value;
       end;
-    when Error(Message):
+    when Error(const Message):
       begin
         return Error(PersistenceFailure.Io('cannot read savegame: ' + Message));
       end;
   end case;
-  mutable var Decoded: GameState := NewGame(World.Metadata);
+  var Decoded: GameState := NewGame(World.Metadata);
   case DecodeSaveGameState(Text, World.Metadata) of
-    when Ok(Value):
+    when Ok(const Value):
       begin
         Decoded := Value;
       end;
-    when Error(Message):
+    when Error(const Message):
       begin
         return Ok(SaveGameLoad.Invalid(Message));
       end;
   end case;
-  mutable var Maps: array of InteriorMap := [];
+  var Maps: array of InteriorMap := [];
   case ReadVisitedLevels(World, Decoded) of
-    when Ok(Value):
+    when Ok(const Value):
       begin
         Maps := Value;
       end;
-    when Error(Failure):
+    when Error(const Failure):
       begin
         return Error(PersistenceFailure.Level(Failure));
       end;
   end case;
 
   case ValidateSavedGame(World.Metadata, Decoded, Maps) of
-    when Ok(State):
+    when Ok(const State):
       begin
         case AreaViewFor(World.Metadata, State, CurrentMap(State, Maps)) of
-          when Ok(View):
+          when Ok(const View):
             begin
               return Ok(SaveGameLoad.Loaded(State, View));
             end;
-          when Error(Message):
+          when Error(const Message):
             begin
               return Ok(SaveGameLoad.Invalid('invalid savegame: ' + Message));
             end;
         end case;
       end;
-    when Error(Message):
+    when Error(const Message):
       begin
         return Ok(SaveGameLoad.Invalid('invalid savegame: ' + Message));
       end;
@@ -215,58 +200,55 @@ end function;
 
 // Validates the state against its visited levels and atomically replaces the selected world's
 // single save. Failures never delete anything and leave the previous save intact.
-public function WriteSaveGame(World: WorldSession; State: GameState): result of boolean, PersistenceFailure;
+public function WriteSaveGame(World: WorldSession; State: GameState): result of (boolean, PersistenceFailure);
 begin
-  case ValidateSaveShape(World.Metadata, State) of
-    when Error(Message):
-      begin
-        return Error(PersistenceFailure.InvalidState(Message));
-      end;
-    else
-      begin
-        null;
-      end;
-  end case;
-  mutable var Maps: array of InteriorMap := [];
+  if ValidateSaveShape(World.Metadata, State) is Error(const Message) then
+    begin
+      return Error(PersistenceFailure.InvalidState(Message));
+    end;
+  else
+    begin
+      null;
+    end;
+  end if;
+  var Maps: array of InteriorMap := [];
   case ReadVisitedLevels(World, State) of
-    when Ok(Value):
+    when Ok(const Value):
       begin
         Maps := Value;
       end;
-    when Error(Failure):
+    when Error(const Failure):
       begin
         return Error(PersistenceFailure.Level(Failure));
       end;
   end case;
 
-  case ValidateSavedGame(World.Metadata, State, Maps) of
-    when Error(Message):
-      begin
-        return Error(PersistenceFailure.InvalidState(Message));
-      end;
-    else
-      begin
-        null;
-      end;
-  end case;
+  if ValidateSavedGame(World.Metadata, State, Maps) is Error(const Message) then
+    begin
+      return Error(PersistenceFailure.InvalidState(Message));
+    end;
+  else
+    begin
+      null;
+    end;
+  end if;
 
-  case Std.Fs.CreateDirAll(SaveGameDirectory(World)) of
-    when Error(Message):
-      begin
-        return Error(PersistenceFailure.Io('cannot create savegame directory: ' + Message));
-      end;
-    else
-      begin
-        null;
-      end;
-  end case;
+  if Std.Fs.CreateDirAll(SaveGameDirectory(World)) is Error(const Message) then
+    begin
+      return Error(PersistenceFailure.Io('cannot create savegame directory: ' + Message));
+    end;
+  else
+    begin
+      null;
+    end;
+  end if;
 
   case Std.Fs.WriteTextAtomic(SaveGamePath(World), EncodeSaveGame(World.Metadata.Id, State)) of
-    when Ok(Written):
+    when Ok(const Written):
       begin
         return Ok(true);
       end;
-    when Error(Message):
+    when Error(const Message):
       begin
         return Error(PersistenceFailure.Io('cannot write savegame: ' + Message));
       end;

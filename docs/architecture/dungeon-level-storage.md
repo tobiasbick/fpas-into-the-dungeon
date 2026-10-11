@@ -82,10 +82,10 @@ public contract; normal imports and purpose comments are added during coding.
 
 ```pascal
 public function AreaViewFor(Metadata: WorldMetadata; State: GameState;
-  Map: option of InteriorMap): result of AreaView, string;
+  Map: option of InteriorMap): result of (AreaView, string);
 public function MaterializeArea(State: GameState; Map: InteriorMap): GameState;
 public function ValidateSavedGame(Metadata: WorldMetadata; State: GameState;
-  Maps: array of InteriorMap): result of GameState, string;
+  Maps: array of InteriorMap): result of (GameState, string);
 ```
 
 `AreaViewFor` requires `None` outdoors and a matching map indoors; it never
@@ -100,9 +100,9 @@ and returns an already visited state unchanged.
 
 ```pascal
 public function AreaTransitionTarget(View: AreaView; State: GameState):
-  result of string, string;
+  result of (string, string);
 public function ActivateAreaTransition(View: AreaView; State: GameState;
-  TargetMap: option of InteriorMap): result of AreaTransition, string;
+  TargetMap: option of InteriorMap): result of (AreaTransition, string);
 ```
 
 `AreaTransitionTarget` validates the current pose and entrance/exit interaction
@@ -130,11 +130,11 @@ end enum;
 
 ```pascal
 public function ReadLevel(World: WorldSession; AreaId: string):
-  result of InteriorMap, LevelFailure;
+  result of (InteriorMap, LevelFailure);
 public function OpenLevelForEntry(World: WorldSession; State: GameState;
-  AreaId: string): result of InteriorMap, LevelFailure;
+  AreaId: string): result of (InteriorMap, LevelFailure);
 public function ReadVisitedLevels(World: WorldSession; State: GameState):
-  result of array of InteriorMap, LevelFailure;
+  result of (array of InteriorMap, LevelFailure);
 ```
 
 `ReadLevel` never generates or writes. `OpenLevelForEntry` first tries a read;
@@ -148,7 +148,7 @@ unbounded cache. The server retains only the current map between intentions.
 `Dungeon.World.Interiors.Encoding` provides
 `EncodeLevel(Metadata: WorldMetadata; Map: InteriorMap): string` for validated
 input and `DecodeLevel(Text: string; Metadata: WorldMetadata; AreaId: string):
-result of InteriorMap, string` with the schema above. Storage wraps decode
+result of (InteriorMap, string)` with the schema above. Storage wraps decode
 errors as `LevelFailure.Invalid`; I/O errors are never relabeled as invalid
 content. The world layer may import game rules; the reverse is forbidden.
 
@@ -156,7 +156,7 @@ content. The world layer may import game rules; the reverse is forbidden.
 
 Split save processing into three phases: decode and check self-contained save
 fields; read its referenced level files; validate game state against those maps.
-Expose `DecodeSaveGameState(Text, Metadata): result of GameState, string` for
+Expose `DecodeSaveGameState(Text, Metadata): result of (GameState, string)` for
 the first phase and remove the old all-in-one `DecodeSaveGame` entry point.
 The first phase checks schema/version/world, canonical and unique area and
 entity IDs, visited-area membership, inventory/slot bounds, and scalar and
@@ -164,10 +164,10 @@ shape constraints without map access. It is explicitly not full validation.
 Only fully validated states may become active.
 
 The exact decoder signature is `DecodeSaveGameState(Text: string;
-Metadata: WorldMetadata): result of GameState, string`. The storage signatures
-are `LoadSaveGame(World: WorldSession): result of SaveGameLoad,
-PersistenceFailure` and `WriteSaveGame(World: WorldSession; State: GameState):
-result of boolean, PersistenceFailure`. A successful write returns `true`.
+Metadata: WorldMetadata): result of (GameState, string)`. The storage signatures
+are `LoadSaveGame(World: WorldSession): result of (SaveGameLoad,
+PersistenceFailure)` and `WriteSaveGame(World: WorldSession; State: GameState):
+result of (boolean, PersistenceFailure)`. A successful write returns `true`.
 
 Keep `LoadSaveGame(World)` and `WriteSaveGame(World, State)` parameter lists.
 Their error type becomes `PersistenceFailure`, owned by

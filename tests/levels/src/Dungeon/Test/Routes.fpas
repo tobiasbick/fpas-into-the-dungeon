@@ -4,13 +4,13 @@ unit Dungeon.Test.Routes;
 uses
   Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.Interior, Dungeon.Interior.Generation,
   Dungeon.Protocol, Dungeon.Terrain, Dungeon.Terrain.Chunks, Dungeon.Terrain.Entrances,
-  Dungeon.Test.Fixtures, Std.Arrays, Std.Math, Std.Results, Std.Str;
+  Dungeon.Test.Fixtures, Std.Math;
 
 // The spawn dungeon a server generates and stores for this world on first entry.
 public function SpawnDungeonMap(Metadata: WorldMetadata): InteriorMap;
 begin
-  var Region: RegionCoordinate := RegionOf(Metadata, Metadata.Spawn);
-  return Std.Results.Unwrap(GenerateDungeon(Metadata.Seed, Region.X, Region.Y, SpawnDungeonAreaId(Metadata)));
+  const Region: RegionCoordinate := RegionOf(Metadata, Metadata.Spawn);
+  return GenerateDungeon(Metadata.Seed, Region.X, Region.Y, SpawnDungeonAreaId(Metadata)).Unwrap();
 end function;
 
 // Converts one route move into the client intention that performs it.
@@ -35,7 +35,7 @@ end function;
 // Reads the player's pose from a first-person projection.
 public function VisiblePose(View: FirstPersonVisibleState): FirstPersonPose;
 begin
-  mutable var Facing: FacingDirection := FacingDirection.North;
+  var Facing: FacingDirection := FacingDirection.North;
   case View.Facing of
     when FirstPersonFacing.East:
       begin
@@ -49,46 +49,34 @@ begin
       begin
         Facing := FacingDirection.West;
       end;
-    else
+    when firstpersonfacing.North:
       begin
         null;
       end;
   end case;
 
-  return record
-    Position := record
-      X := View.PlayerX;
-      Y := View.PlayerY;
-    end;
-    Facing := Facing;
-  end;
+  return FirstPersonPose(Position := InteriorPosition(X := View.PlayerX, Y := View.PlayerY), Facing := Facing);
 end function;
 
 // Returns the field directly ahead of a projected player.
 public function FieldAhead(View: FirstPersonVisibleState): InteriorPosition;
 begin
-  var Pose: FirstPersonPose := VisiblePose(View);
-  var Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
-  return record
-    X := Pose.Position.X + Offset.X;
-    Y := Pose.Position.Y + Offset.Y;
-  end;
+  const Pose: FirstPersonPose := VisiblePose(View);
+  const Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
+  return InteriorPosition(X := Pose.Position.X + Offset.X, Y := Pose.Position.Y + Offset.Y);
 end function;
 
 // Returns every field on which a projection shows a standing opponent.
 public function VisibleHostiles(View: FirstPersonVisibleState): array of InteriorPosition;
 begin
-  mutable var Fields: array of InteriorPosition := [];
-  for Y: integer := 0 to Std.Arrays.Length(View.Rows) - 1 do
+  var Fields: array of InteriorPosition := [];
+  for Y: integer := 0 to View.Rows.Length() - 1 do
     begin
-      for X: integer := 0 to Std.Str.Length(View.Rows[Y]) - 1 do
+      for X: integer := 0 to View.Rows[Y].Length() - 1 do
         begin
-          if Std.Str.CharAt(View.Rows[Y], X) = InteriorHostileCode then
+          if View.Rows[Y].CharAt(X) = InteriorHostileCode then
             begin
-              Std.Arrays.Push(Fields, record
-                X := X;
-                Y := Y;
-              end);
+              Fields.Push(InteriorPosition(X := X, Y := Y));
             end;
           end if;
         end;
@@ -102,8 +90,8 @@ end function;
 // Returns whether a visible opponent stands on the field directly ahead.
 public function HostileAhead(View: FirstPersonVisibleState): boolean;
 begin
-  var Ahead: InteriorPosition := FieldAhead(View);
-  return Std.Str.CharAt(View.Rows[Ahead.Y], Ahead.X) = InteriorHostileCode;
+  const Ahead: InteriorPosition := FieldAhead(View);
+  return View.Rows[Ahead.Y].CharAt(Ahead.X) = InteriorHostileCode;
 end function;
 
 // Returns the walkable outdoor fields from From (exclusive) to Target along a shortest cardinal
@@ -115,49 +103,39 @@ public function OutdoorRoute(
   Margin: integer
 ): array of WorldPosition;
 begin
-  var Left: integer := Std.Math.Min(From.X, Target.X) - Margin;
-  var Top: integer := Std.Math.Min(From.Y, Target.Y) - Margin;
-  var Width: integer := ((Std.Math.Max(From.X, Target.X) + Margin) - Left) + 1;
-  var Height: integer := ((Std.Math.Max(From.Y, Target.Y) + Margin) - Top) + 1;
-  mutable var Previous: array of integer := Std.Arrays.Fill(-1, Width * Height);
-  var StartIndex: integer := ((From.Y - Top) * Width) + (From.X - Left);
+  const Left: integer := Std.Math.Min(From.X, Target.X) - Margin;
+  const Top: integer := Std.Math.Min(From.Y, Target.Y) - Margin;
+  const Width: integer := ((Std.Math.Max(From.X, Target.X) + Margin) - Left) + 1;
+  const Height: integer := ((Std.Math.Max(From.Y, Target.Y) + Margin) - Top) + 1;
+  var Previous: array of integer := array.Fill(-1, Width * Height);
+  const StartIndex: integer := ((From.Y - Top) * Width) + (From.X - Left);
   Previous[StartIndex] := StartIndex;
-  mutable var Queue: array of WorldPosition := [From];
-  mutable var ReadIndex: integer := 0;
-  var TargetIndex: integer := ((Target.Y - Top) * Width) + (Target.X - Left);
-  while (ReadIndex < Std.Arrays.Length(Queue)) and (Previous[TargetIndex] < 0) do
+  var Queue: array of WorldPosition := [From];
+  var ReadIndex: integer := 0;
+  const TargetIndex: integer := ((Target.Y - Top) * Width) + (Target.X - Left);
+  while (ReadIndex < Queue.Length()) and (Previous[TargetIndex] < 0) do
     begin
-      var Current: WorldPosition := Queue[ReadIndex];
+      const Current: WorldPosition := Queue[ReadIndex];
       ReadIndex := ReadIndex + 1;
-      for Offset: WorldPosition in [record
-        X := 1;
-        Y := 0;
-      end, record
-        X := -1;
-        Y := 0;
-      end, record
-        X := 0;
-        Y := 1;
-      end, record
-        X := 0;
-        Y := -1;
-      end] do
+      for Offset: WorldPosition in [
+                                     WorldPosition(X := 1, Y := 0),
+                                     WorldPosition(X := -1, Y := 0),
+                                     WorldPosition(X := 0, Y := 1),
+                                     WorldPosition(X := 0, Y := -1)
+                                   ] do
         begin
-          var Next: WorldPosition := record
-            X := Current.X + Offset.X;
-            Y := Current.Y + Offset.Y;
-          end;
-
+          const Next: WorldPosition := WorldPosition(X := Current.X + Offset.X, Y := Current.Y +
+                                                                                     Offset.Y);
           if ((Next.X >= Left) and (Next.X < Left + Width)) and
              ((Next.Y >= Top) and (Next.Y < Top + Height)) then
             begin
-              var Index: integer := ((Next.Y - Top) * Width) + (Next.X - Left);
+              const Index: integer := ((Next.Y - Top) * Width) + (Next.X - Left);
               if Previous[Index] < 0 then
                 begin
                   if IsWalkable(GenerateWorldCell(Metadata, Next.X, Next.Y)) then
                     begin
                       Previous[Index] := ((Current.Y - Top) * Width) + (Current.X - Left);
-                      Std.Arrays.Push(Queue, Next);
+                      Queue.Push(Next);
                     end;
                   end if;
                 end;
@@ -168,26 +146,23 @@ begin
       end for;
     end;
   end while;
-  mutable var Reversed: array of WorldPosition := [];
+  var Reversed: array of WorldPosition := [];
   if Previous[TargetIndex] < 0 then
     begin
       return Reversed;
     end;
   end if;
-  mutable var Index: integer := TargetIndex;
+  var Index: integer := TargetIndex;
   while Index <> StartIndex do
     begin
-      Std.Arrays.Push(Reversed, record
-        X := Left + (Index mod Width);
-        Y := Top + (Index div Width);
-      end);
+      Reversed.Push(WorldPosition(X := Left + (Index mod Width), Y := Top + (Index div Width)));
       Index := Previous[Index];
     end;
   end while;
-  mutable var Path: array of WorldPosition := [];
-  for Step: integer := Std.Arrays.Length(Reversed) - 1 downto 0 do
+  var Path: array of WorldPosition := [];
+  for Step: integer := Reversed.Length() - 1 downto 0 do
     begin
-      Std.Arrays.Push(Path, Reversed[Step]);
+      Path.Push(Reversed[Step]);
     end;
   end for;
 

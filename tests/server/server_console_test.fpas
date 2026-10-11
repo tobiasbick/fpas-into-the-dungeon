@@ -3,8 +3,7 @@ program ServerConsoleTest;
 
 uses
   Dungeon.RuntimeData, Dungeon.Server.Console, Dungeon.Server.Console.Model, Dungeon.Server.Logging,
-  Dungeon.World, Std.Arrays, Std.Conv, Std.Fs, Std.Results, Std.Str, Std.Tasks, Std.Test, Std.Time,
-  Std.Tui;
+  Dungeon.World, Std.Conv, Std.Fs, Std.Tasks, Std.Test, Std.Time, Std.Tui;
 
 function StaticUpdate(State: ConsoleModel; Msg: TuiMsg; Cmd: TuiCmdOutput): ConsoleModel;
 begin
@@ -15,7 +14,7 @@ end function;
 function ContainsScreen(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
 begin
   for Row: integer := 0 to Snapshot.Height - 1 do
-    if Std.Str.Contains(Snapshot.LineAt(Row), Text) then
+    if Snapshot.LineAt(Row).Contains(Text) then
       return true;
     end if;
   end for;
@@ -24,44 +23,32 @@ begin
 end function;
 
 begin
-  var Root: string := '.temp-data/console-' + IntToStr(TimestampMillis());
-  var Runtime: RuntimeSettings := Unwrap(LoadServerRuntime(Some(Root)));
-  var World: WorldSession := Unwrap(OpenWorld(Runtime.Paths.Worlds, 'kept', 24680, 4, 16));
-  var MetadataBefore: string := Unwrap(Std.Fs.ReadText(WorldMetadataPath(World)));
-  var Before: string := Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig));
-  mutable var Model: ConsoleModel := NewConsoleModel(Runtime.Paths.ServerConfig, Runtime.World);
+  const Root: string := '.temp-data/console-' + IntToStr(TimestampMillis());
+  const Runtime: RuntimeSettings := LoadServerRuntime(Some(Root)).Unwrap();
+  const World: WorldSession := OpenWorld(Runtime.Paths.Worlds, 'kept', 24680, 4, 16).Unwrap();
+  const MetadataBefore: string := Std.Fs.ReadText(WorldMetadataPath(World)).Unwrap();
+  const Before: string := Std.Fs.ReadText(Runtime.Paths.ServerConfig).Unwrap();
+  var Model: ConsoleModel := NewConsoleModel(Runtime.Paths.ServerConfig, Runtime.World);
   AssertFalse(Model.Connected);
-  Model := ApplyConsoleLog(Model, record
-    Kind := 'connected';
-    Text := 'Player connected';
-  end);
+  Model := ApplyConsoleLog(Model, ServerLogEvent(Kind := 'connected', Text := 'Player connected'));
   AssertTrue(Model.Connected);
-  Model := ApplyConsoleLog(Model, record
-    Kind := 'world';
-    Text := 'Playing world kept';
-  end);
+  Model := ApplyConsoleLog(Model, ServerLogEvent(Kind := 'world', Text := 'Playing world kept'));
   AssertEquals('Playing world kept', Model.Status);
   for Index: integer := 0 to 150 do
-    Model := ApplyConsoleLog(Model, record
-      Kind := 'rejected';
-      Text := IntToStr(Index);
-    end);
+    Model := ApplyConsoleLog(Model, ServerLogEvent(Kind := 'rejected', Text := IntToStr(Index)));
   end for;
 
-  AssertEquals(MaximumConsoleLines, Std.Arrays.Length(Model.Lines));
+  AssertEquals(MaximumConsoleLines, Model.Lines.Length());
   AssertEquals('rejected: 150', Model.Lines[MaximumConsoleLines - 1]);
-  Model := ApplyConsoleLog(Model, record
-    Kind := 'disconnected';
-    Text := 'Player disconnected';
-  end);
+  Model := ApplyConsoleLog(Model, ServerLogEvent(Kind := 'disconnected', Text := 'Player disconnected'));
   AssertFalse(Model.Connected);
-  var Queue: channel of ServerLogEvent := CreateChannel(2);
+  const Queue: channel of ServerLogEvent := CreateChannel(2);
   for Index: integer := 0 to 3 do
     LogServer(Some(Queue), 'world', IntToStr(Index));
   end for;
 
-  AssertEquals('2', Unwrap(ReceiveWithTimeout(Queue, 0)).Text);
-  AssertEquals('3', Unwrap(ReceiveWithTimeout(Queue, 0)).Text);
+  AssertEquals('2', ReceiveWithTimeout(Queue, 0).Unwrap().Text);
+  AssertEquals('3', ReceiveWithTimeout(Queue, 0).Unwrap().Text);
   discard CloseChannel(Queue);
   // Invalid text, overflow and range errors preserve both published defaults and exact file bytes.
   for Text: string in ['', 'abc', '9223372036854775808', '2147483648', '-2147483649'] do
@@ -69,28 +56,28 @@ begin
     AssertTrue(Model.SettingsOpen);
     AssertEquals(Runtime.World.Seed, Model.Seed);
     AssertTrue(Model.SettingsError <> '');
-    AssertEquals(Before, Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig)));
+    AssertEquals(Before, Std.Fs.ReadText(Runtime.Paths.ServerConfig).Unwrap());
   end for;
 
   for Text: string in ['0', '17', 'abc'] do
     Model := StoreConsoleSettings(Model with SeedText := '0'; RegionText := Text; end with);
     AssertTrue(Model.SettingsOpen);
-    AssertEquals(Before, Unwrap(Std.Fs.ReadText(Runtime.Paths.ServerConfig)));
+    AssertEquals(Before, Std.Fs.ReadText(Runtime.Paths.ServerConfig).Unwrap());
   end for;
 
   Model := StoreConsoleSettings(Model with SeedText := '-2147483648'; RegionText := '16'; end with);
   AssertFalse(Model.SettingsOpen);
   AssertEquals(-2147483648, Model.Seed);
   AssertEquals(16, Model.RegionChunks);
-  var Settings: ServerWorldConfig := Unwrap(ReadServerDefaults(Runtime.Paths.ServerConfig));
+  const Settings: ServerWorldConfig := ReadServerDefaults(Runtime.Paths.ServerConfig).Unwrap();
   AssertEquals(Model.Seed, Settings.Seed);
   AssertEquals(Model.RegionChunks, Settings.DungeonRegionChunks);
   AssertEquals(Runtime.World.Id, Settings.Id);
   AssertEquals(Runtime.World.ChunkCacheLimit, Settings.ChunkCacheLimit);
   AssertEquals(Runtime.World.MaximumViewWidth, Settings.MaximumViewWidth);
   AssertEquals(Runtime.World.MaximumViewHeight, Settings.MaximumViewHeight);
-  AssertEquals(MetadataBefore, Unwrap(Std.Fs.ReadText(WorldMetadataPath(World))));
-  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(100, 26));
+  AssertEquals(MetadataBefore, Std.Fs.ReadText(WorldMetadataPath(World)).Unwrap());
+  const App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(100, 26));
   Model := App.RunIterations(Model, StaticUpdate, ViewServerConsole, 0, 0);
   AssertTrue(ContainsScreen(App.SurfaceSnapshot(), 'Dungeon server'));
   Model.SettingsOpen := true;
@@ -103,5 +90,5 @@ begin
   AssertEquals(-2147483648, Model.Seed);
   AssertEquals(16, Model.RegionChunks);
   AssertTrue(Model.SettingsError <> '');
-  AssertEquals(-2147483648, Unwrap(ReadServerDefaults(Runtime.Paths.ServerConfig)).Seed);
+  AssertEquals(-2147483648, ReadServerDefaults(Runtime.Paths.ServerConfig).Unwrap().Seed);
 end.

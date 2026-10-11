@@ -47,14 +47,15 @@ fpas run apps/client/client.fpasprj
 ```
 
 This branch targets Functional Pascal revision
-[`269d8013`](https://github.com/tobiasbick/functional-pascal/commit/269d80132582ddcfb1f8615592e5229be42e9a19).
-Use the compiler and source standard library from the same checkout. The source
-uses the new statement terminators, named block endings, `when` case arms, and
-explicit result consumption. See the [migration plan](docs/plans/fpas-syntax-migration.md).
-
-This feature additionally requires `Std.Fs.ReadDir` (including its `go` call
-support) from the accompanying FPAS checkout; it is not part of the linked
-baseline revision.
+[`afd7b258d`](https://github.com/tobiasbick/functional-pascal/commit/afd7b258d1a239c5f5b96db80032a382eb10fd81).
+Use the release compiler and source standard library from the same checkout.
+The source
+uses individual declarations, immutable `const` and mutable `var` bindings,
+typed record constructors, `Result of (T, E)`, explicit pattern bindings,
+`is` tests for individual variants, and exhaustive enum cases.
+String, array, Option, and Result operations use
+native dot calls such as `Items.Length()` and `Outcome.Unwrap()`.
+See the [migration plan](docs/plans/fpas-syntax-migration.md).
 
 The game also uses `Std.Json.Fields`, `Std.Toml.Fields`, `Std.Fs.CreateDirAll`,
 context-typed record updates such as `State with Hostiles := []; end with`, and
@@ -95,7 +96,7 @@ fpas run tools/world-preview/world-preview.fpasprj -- continentalness
 See the [architecture overview](docs/architecture/overview.md) for the planned
 repository structure and the [roadmap](docs/roadmap.md) for the incremental
 development order. Functional Pascal's
-[language documentation](https://github.com/tobiasbick/functional-pascal/tree/269d80132582ddcfb1f8615592e5229be42e9a19/docs/pascal)
+[language documentation](https://github.com/tobiasbick/functional-pascal/tree/afd7b258d1a239c5f5b96db80032a382eb10fd81/docs/pascal)
 is the source of truth for the implementation.
 
 Contributions are described in [CONTRIBUTING.md](CONTRIBUTING.md).

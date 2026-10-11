@@ -447,7 +447,7 @@ a private helper; game rules never resolve maps. Step 5 replaces only that
 helper with storage access and removes it.
 
 - `Dungeon.Hostiles`: add
-  `HostilePlacement = record public Id: string; public Kind: HostileKind; public Position: InteriorPosition; end record;`
+  `public type HostilePlacement = record public Id: string; public Kind: HostileKind; public Position: InteriorPosition; end record;`
   and remove `RestlessSkeletonId`.
 - `Dungeon.Items`: add `public Kind: ItemKind` to `ItemPlacement`; remove the
   fixed item identities and `KnownItemKind`; rename the name and description
@@ -469,17 +469,17 @@ helper with storage access and removes it.
     opponents of the current area must lie on non-wall fields of that map.
   - `AreaView` is declared here, because `GameState` needs it and
     `Dungeon.Areas` imports `GameState`:
-    `AreaView = record public Metadata: WorldMetadata; public Interior: option of InteriorMap; end record;`
+    `public type AreaView = record public Metadata: WorldMetadata; public Interior: option of InteriorMap; end record;`
 - New unit `libs/game/src/Dungeon/Areas.fpas`:
   - `InitialDungeonMap` takes the metadata, sets `AreaId`, and names its
     placements `<area>:item:<n>` and `<area>:hostile:<n>`; only callers outside
     pure rules supply it during this intermediate step.
-  - `public function AreaViewFor(Metadata: WorldMetadata; State: GameState; Map: option of InteriorMap): result of AreaView, string;`
+  - `public function AreaViewFor(Metadata: WorldMetadata; State: GameState; Map: option of InteriorMap): result of (AreaView, string);`
   - `public function MaterializeArea(State: GameState; Map: InteriorMap): GameState;`
     adds the area to `VisitedAreas` and creates items
     (`InInterior(Map.AreaId, Position)`) and opponents (full health, not
     alerted) from the placements; a visited area is returned unchanged.
-  - `public function ValidateSavedGame(Metadata: WorldMetadata; State: GameState; Maps: array of InteriorMap): result of GameState, string;`
+  - `public function ValidateSavedGame(Metadata: WorldMetadata; State: GameState; Maps: array of InteriorMap): result of (GameState, string);`
     receives one map per visited area and requires that items and opponents
     correspond one to one to the placements of the visited areas (same
     identity and kind; an interior item lies on a valid field of its current
@@ -493,8 +493,8 @@ helper with storage access and removes it.
   `StepFirstPerson`, `TurnFirstPerson`, `Interact`, `ResolveTurn`,
   `RevealCurrentArea`. They read the map from `View.Interior` and never
   resolve maps themselves.
-- Transitions: `ActivateAreaTransition(View, State, TargetMap): result of AreaTransition, string`
-  with `AreaTransition = record public State: GameState; public View: AreaView; end record;`.
+- Transitions: `ActivateAreaTransition(View, State, TargetMap): result of (AreaTransition, string)`
+  with `public type AreaTransition = record public State: GameState; public View: AreaView; end record;`.
   `TargetMap` is `option of InteriorMap`. `Interact` returns
   `InteractionOutcome.TransitionRequested(TargetAreaId: string)` without
   changing state. The server supplies the target map (or `None` for outdoors)
@@ -557,8 +557,8 @@ an item retains its identity and location across save/load and revisits.
 Goal: deterministic generated maps; not yet reachable in play.
 
 - New unit `libs/game/src/Dungeon/Interior/Generation.fpas`:
-  - `public const GeneratedDungeonWidth: integer := 31; GeneratedDungeonHeight: integer := 21;`
-  - `public function GenerateDungeon(Seed: integer; RegionX: integer; RegionY: integer; AreaId: string): result of InteriorMap, string;`
+  - `public const GeneratedDungeonWidth: integer := 31; public const GeneratedDungeonHeight: integer := 21;`
+  - `public function GenerateDungeon(Seed: integer; RegionX: integer; RegionY: integer; AreaId: string): result of (InteriorMap, string);`
   - Attempt `A` from 0 to 15 seeds the generator with
     `PositiveModulo(Seed * 7919 + RegionX * 104729 + RegionY * 1299709 + A * 15485863, RandomStateModulus)`.
   - Follow the five generator rules of the architecture document exactly:
@@ -592,7 +592,7 @@ Goal: deterministic generated maps; not yet reachable in play.
 Goal: the world contains generated dungeons; the hand-authored dungeon is gone.
 
 - New unit `libs/game/src/Dungeon/Terrain/Entrances.fpas`:
-  - `RegionCoordinate = record public X: integer; public Y: integer; end record;`
+  - `public type RegionCoordinate = record public X: integer; public Y: integer; end record;`
   - `RegionOf(Metadata, Position): RegionCoordinate` using `FloorDivide` by
     `Metadata.DungeonRegionChunks * WorldChunkSize`.
   - `EntranceCandidate(Metadata, Region): WorldPosition`: offset inside the

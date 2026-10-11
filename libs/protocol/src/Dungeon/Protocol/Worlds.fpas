@@ -1,18 +1,16 @@
 // Strict bounded catalog codec and shared client-safe world selection predicates.
 unit Dungeon.Protocol.Worlds;
 
-uses
-  Dungeon.Protocol, Std.Arrays, Std.Conv, Std.Dictionaries, Std.Json, Std.Json.Fields, Std.Net.Utf8,
-  Std.Parse, Std.Str;
+uses Dungeon.Protocol, Std.Conv, Std.Json, Std.Json.Fields, Std.Net.Utf8, Std.Parse;
 
 // Parses integer input without panicking on invalid or overflowing text.
-public function ParseWorldInteger(Text: string): result of integer, string;
+public function ParseWorldInteger(Text: string): result of (integer, string);
 begin
   return Std.Parse.TryInt(Text);
 end function;
 
 // Rejects traversal and malformed identities before they can reach storage.
-public function ValidateWorldIdentity(Id: string): result of string, string;
+public function ValidateWorldIdentity(Id: string): result of (string, string);
 begin
   if (Id.Length() < 1) or (Id.Length() > 64) then
     begin
@@ -22,7 +20,7 @@ begin
 
   for Index: integer := 0 to Id.Length() - 1 do
     begin
-      if not 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_'.Contains(Std.Str.CharAt(Id, Index)) then
+      if not 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_'.Contains(Id.CharAt(Index)) then
         begin
           return Error('invalid world id character');
         end;
@@ -36,19 +34,7 @@ end function;
 // Valid empty menu before the server supplies its catalog; no selected world is assumed.
 public function EmptyWorldCatalog(Seed: integer; RegionChunks: integer): WorldCatalog;
 begin
-  return record
-    Worlds := [];
-    SelectedId := '';
-    SelectionReason := '';
-    Offset := 0;
-    Total := 0;
-    DefaultSeed := Seed;
-    MinimumSeed := -2147483648;
-    MaximumSeed := 2147483647;
-    DefaultRegionChunks := RegionChunks;
-    MinimumRegionChunks := 1;
-    MaximumRegionChunks := 16;
-  end;
+  return WorldCatalog(Worlds := [], SelectedId := '', SelectionReason := '', Offset := 0, Total := 0, DefaultSeed := Seed, MinimumSeed := -2147483648, MaximumSeed := 2147483647, DefaultRegionChunks := RegionChunks, MinimumRegionChunks := 1, MaximumRegionChunks := 16);
 end function;
 
 // Finds the selected entry on this page; a missing selection has no world actions.
@@ -71,7 +57,7 @@ end function;
 public function CanContinueWorld(Catalog: WorldCatalog): boolean;
 begin
   case SelectedWorld(Catalog) of
-    when Some(World):
+    when Some(const World):
       begin
         return (World.Status = 'ready') and
                ((World.SaveStatus = 'missing') or (World.SaveStatus = 'available'));
@@ -87,7 +73,7 @@ end function;
 public function CatalogHasSave(Catalog: WorldCatalog): boolean;
 begin
   case SelectedWorld(Catalog) of
-    when Some(World):
+    when Some(const World):
       begin
         return (World.Status = 'ready') and (World.SaveStatus <> 'missing');
       end;
@@ -101,10 +87,10 @@ end function;
 // Encodes seeds as decimal text to retain every bit of existing 64-bit world seeds.
 public function EncodeWorldCatalog(Catalog: WorldCatalog): JsonValue;
 begin
-  mutable var Entries: array of JsonValue := [];
+  var Entries: array of JsonValue := [];
   for World: WorldSummary in Catalog.Worlds do
     begin
-      Std.Arrays.Push(Entries, JsonValue.Object(['id': JsonValue.String(World.Id), 'seed': JsonValue.String(IntToStr(World.Seed)), 'region_chunks': JsonValue.Number(IntToReal(World.RegionChunks)), 'status': JsonValue.String(World.Status), 'save_status': JsonValue.String(World.SaveStatus), 'reason': JsonValue.String(World.Reason)]));
+      Entries.Push(JsonValue.Object(['id': JsonValue.String(World.Id), 'seed': JsonValue.String(IntToStr(World.Seed)), 'region_chunks': JsonValue.Number(IntToReal(World.RegionChunks)), 'status': JsonValue.String(World.Status), 'save_status': JsonValue.String(World.SaveStatus), 'reason': JsonValue.String(World.Reason)]));
     end;
   end for;
 
@@ -112,9 +98,9 @@ begin
 end function;
 
 // Bounds page arithmetic, text, unique identities, and classified statuses.
-public function ValidateWorldCatalog(Catalog: WorldCatalog): result of WorldCatalog, string;
+public function ValidateWorldCatalog(Catalog: WorldCatalog): result of (WorldCatalog, string);
 begin
-  var Count: integer := Std.Arrays.Length(Catalog.Worlds);
+  const Count: integer := Catalog.Worlds.Length();
   if (Count > MaximumWorldsPerPage) or (Catalog.Offset < 0) or (Catalog.Total < Catalog.Offset) or (Count > Catalog.Total - Catalog.Offset) or
      ((Count = 0) and (Catalog.Offset <> Catalog.Total)) then
     begin
@@ -123,7 +109,7 @@ begin
   end if;
 
   if Catalog.SelectedId <> '' then
-    var Valid: string := try ValidateWorldIdentity(Catalog.SelectedId);
+    const Valid: string := try ValidateWorldIdentity(Catalog.SelectedId);
   end if;
 
   if (Catalog.MinimumSeed <> -2147483648) or (Catalog.MaximumSeed <> 2147483647) or (Catalog.DefaultSeed < Catalog.MinimumSeed) or (Catalog.DefaultSeed > Catalog.MaximumSeed) or (Catalog.MinimumRegionChunks <> 1) or (Catalog.MaximumRegionChunks <> 16) or (Catalog.DefaultRegionChunks < 1) or (Catalog.DefaultRegionChunks > 16) or
@@ -132,23 +118,23 @@ begin
       return Error('invalid world parameter policy');
     end;
   end if;
-  mutable var Ids: array of string := [];
+  var Ids: array of string := [];
   for World: WorldSummary in Catalog.Worlds do
     begin
-      var Valid: string := try ValidateWorldIdentity(World.Id);
-      if Std.Arrays.Contains(Ids, World.Id) or (World.Reason.Length() > MaximumWorldReasonLength) or not Std.Arrays.Contains([
-                                                                                                                               'ready',
-                                                                                                                               'incompatible',
-                                                                                                                               'storage_error'
-                                                                                                                             ], World.Status) or
-         not Std.Arrays.Contains([
-                                   'missing',
-                                   'available',
-                                   'incompatible',
-                                   'storage_error',
-                                   'world_data_error',
-                                   'unknown'
-                                 ], World.SaveStatus) then
+      const Valid: string := try ValidateWorldIdentity(World.Id);
+      if Ids.Contains(World.Id) or (World.Reason.Length() > MaximumWorldReasonLength) or not [
+                                                                                               'ready',
+                                                                                               'incompatible',
+                                                                                               'storage_error'
+                                                                                             ].Contains(World.Status) or
+         not [
+               'missing',
+               'available',
+               'incompatible',
+               'storage_error',
+               'world_data_error',
+               'unknown'
+             ].Contains(World.SaveStatus) then
         begin
           return Error('invalid world catalog entry');
         end;
@@ -167,12 +153,11 @@ begin
         end;
       end if;
 
-      Std.Arrays.Push(Ids, World.Id);
+      Ids.Push(World.Id);
     end;
   end for;
 
-  if Std.Arrays.Length(Std.Net.Utf8.Encode(Stringify(EncodeWorldCatalog(Catalog)))) >
-     MaximumLineBytes - 64 then
+  if Std.Net.Utf8.Encode(Stringify(EncodeWorldCatalog(Catalog))).Length() > MaximumLineBytes - 64 then
     return Error('world catalog exceeds the transport frame budget');
   end if;
 
@@ -180,85 +165,63 @@ begin
 end function;
 
 // Decodes exact nested fields and validates the whole catalog before installation.
-public function WorldCatalogField(Fields: dict of string to JsonValue): result of WorldCatalog, string;
+public function WorldCatalogField(Fields: dict of string to JsonValue): result of (WorldCatalog, string);
 begin
-  case try Field(Fields, 'catalog') of
-    when JsonValue.Object(Values):
-      begin
-        if Std.Dictionaries.Length(Values) <> 11 then
-          begin
-            return Error('catalog has unexpected fields');
-          end;
-        end if;
-        mutable var Catalog: WorldCatalog := record
-          Worlds := [];
-          SelectedId := try StringField(Values, 'selected_id');
-          SelectionReason := try StringField(Values, 'selection_reason');
-          Offset := try IntegerField(Values, 'offset');
-          Total := try IntegerField(Values, 'total');
-          DefaultSeed := try IntegerField(Values, 'default_seed');
-          MinimumSeed := try IntegerField(Values, 'minimum_seed');
-          MaximumSeed := try IntegerField(Values, 'maximum_seed');
-          DefaultRegionChunks := try IntegerField(Values, 'default_region_chunks');
-          MinimumRegionChunks := try IntegerField(Values, 'minimum_region_chunks');
-          MaximumRegionChunks := try IntegerField(Values, 'maximum_region_chunks');
+  if try Field(Fields, 'catalog') is JsonValue.Object(const Values) then
+    begin
+      if Values.Length() <> 11 then
+        begin
+          return Error('catalog has unexpected fields');
         end;
-        mutable var Worlds: array of WorldSummary := [];
-        case try Field(Values, 'worlds') of
-          when JsonValue.ArrayValue(Entries):
+      end if;
+      var Catalog: WorldCatalog := WorldCatalog(Worlds := [], SelectedId := try StringField(Values, 'selected_id'), SelectionReason := try StringField(Values, 'selection_reason'), Offset := try IntegerField(Values, 'offset'), Total := try IntegerField(Values, 'total'), DefaultSeed := try IntegerField(Values, 'default_seed'), MinimumSeed := try IntegerField(Values, 'minimum_seed'), MaximumSeed := try IntegerField(Values, 'maximum_seed'), DefaultRegionChunks := try IntegerField(Values, 'default_region_chunks'), MinimumRegionChunks := try IntegerField(Values, 'minimum_region_chunks'), MaximumRegionChunks := try IntegerField(Values, 'maximum_region_chunks'));
+      var Worlds: array of WorldSummary := [];
+      if try Field(Values, 'worlds') is JsonValue.ArrayValue(const Entries) then
+        begin
+          if Entries.Length() > MaximumWorldsPerPage then
             begin
-              if Std.Arrays.Length(Entries) > MaximumWorldsPerPage then
+              return Error('too many catalog entries');
+            end;
+          end if;
+
+          for Entry: JsonValue in Entries do
+            begin
+              if Entry is JsonValue.Object(const Item) then
                 begin
-                  return Error('too many catalog entries');
+                  if Item.Length() <> 6 then
+                    begin
+                      return Error('world entry has unexpected fields');
+                    end;
+                  end if;
+                  const SeedText: string := try StringField(Item, 'seed');
+                  const Seed: integer := try ParseWorldInteger(SeedText);
+                  if IntToStr(Seed) <> SeedText then
+                    return Error('world seed must be canonical decimal text');
+                  end if;
+
+                  Worlds.Push(WorldSummary(Id := try StringField(Item, 'id'), Seed := Seed, RegionChunks := try IntegerField(Item, 'region_chunks'), Status := try StringField(Item, 'status'), SaveStatus := try StringField(Item, 'save_status'), Reason := try StringField(Item, 'reason')));
+                end;
+              else
+                begin
+                  return Error('world entry must be an object');
                 end;
               end if;
-
-              for Entry: JsonValue in Entries do
-                begin
-                  case Entry of
-                    when JsonValue.Object(Item):
-                      begin
-                        if Std.Dictionaries.Length(Item) <> 6 then
-                          begin
-                            return Error('world entry has unexpected fields');
-                          end;
-                        end if;
-                        var SeedText: string := try StringField(Item, 'seed');
-                        var Seed: integer := try ParseWorldInteger(SeedText);
-                        if IntToStr(Seed) <> SeedText then
-                          return Error('world seed must be canonical decimal text');
-                        end if;
-
-                        Std.Arrays.Push(Worlds, record
-                          Id := try StringField(Item, 'id');
-                          Seed := Seed;
-                          RegionChunks := try IntegerField(Item, 'region_chunks');
-                          Status := try StringField(Item, 'status');
-                          SaveStatus := try StringField(Item, 'save_status');
-                          Reason := try StringField(Item, 'reason');
-                        end);
-                      end;
-                    else
-                      begin
-                        return Error('world entry must be an object');
-                      end;
-                  end case;
-                end;
-              end for;
             end;
-          else
-            begin
-              return Error('worlds must be an array');
-            end;
-        end case;
+          end for;
+        end;
+      else
+        begin
+          return Error('worlds must be an array');
+        end;
+      end if;
 
-        Catalog.Worlds := Worlds;
-        return ValidateWorldCatalog(Catalog);
-      end;
-    else
-      begin
-        return Error('catalog must be an object');
-      end;
-  end case;
+      Catalog.Worlds := Worlds;
+      return ValidateWorldCatalog(Catalog);
+    end;
+  else
+    begin
+      return Error('catalog must be an object');
+    end;
+  end if;
 end function;
 end unit;

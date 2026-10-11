@@ -5,30 +5,30 @@ uses
   Dungeon.Areas, Dungeon.Exploration, Dungeon.GameState, Dungeon.Interior, Dungeon.Protocol,
   Dungeon.Protocol.Worlds, Dungeon.RuntimeData, Dungeon.Server.Config, Dungeon.Server.Failures,
   Dungeon.Server.Logging, Dungeon.Server.Projection, Dungeon.Server.Replies, Dungeon.Server.Session,
-  Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Catalog, Dungeon.World.Savegame,
-  Std.Arrays, Std.Fs, Std.Net, Std.Options, Std.Tasks, Std.Str;
+  Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Catalog, Dungeon.World.Savegame, Std.Fs,
+  Std.Net, Std.Tasks;
 
 // Reads current creation defaults; selected world parameters remain independent of TOML changes.
-public function CreationDefaults(Config: ServerConfig): result of WorldCatalog, string;
+public function CreationDefaults(Config: ServerConfig): result of (WorldCatalog, string);
 begin
-  var ValidIdentity: string := try ValidateWorldIdentity(Config.WorldId);
+  const ValidIdentity: string := try ValidateWorldIdentity(Config.WorldId);
   if Config.ConfigPath <> '' then
-    var Settings: ServerWorldConfig := try ReadServerDefaults(Config.ConfigPath);
+    const Settings: ServerWorldConfig := try ReadServerDefaults(Config.ConfigPath);
     return Ok(EmptyWorldCatalog(Settings.Seed, Settings.DungeonRegionChunks));
   end if;
-  var Valid: boolean := try ValidateServerDefaults(Config.WorldSeed, Config.DungeonRegionChunks);
+  const Valid: boolean := try ValidateServerDefaults(Config.WorldSeed, Config.DungeonRegionChunks);
   return Ok(EmptyWorldCatalog(Config.WorldSeed, Config.DungeonRegionChunks));
 end function;
 
 // Builds one bounded page; -1 chooses the preselected world's page for the handshake.
-public function CatalogFor(Config: ServerConfig; SelectedId: string; RequestedOffset: integer): result of WorldCatalog, string;
+public function CatalogFor(Config: ServerConfig; SelectedId: string; RequestedOffset: integer): result of (WorldCatalog, string);
 begin
-  mutable var Catalog: WorldCatalog := try CreationDefaults(Config);
-  var Entries: array of WorldEntry := try Dungeon.World.Catalog.ListWorlds(Config.WorldsRoot, Config.ChunkCacheLimit);
-  Catalog.Total := Std.Arrays.Length(Entries);
+  var Catalog: WorldCatalog := try CreationDefaults(Config);
+  const Entries: array of WorldEntry := try Dungeon.World.Catalog.ListWorlds(Config.WorldsRoot, Config.ChunkCacheLimit);
+  Catalog.Total := Entries.Length();
   Catalog.SelectedId := SelectedId;
   Catalog.SelectionReason := 'Selected world is missing. Create a world or select another.';
-  mutable var Offset: integer := RequestedOffset;
+  var Offset: integer := RequestedOffset;
   for Index: integer := 0 to Catalog.Total - 1 do
     if Entries[Index].Id = SelectedId then
       Catalog.SelectionReason := Entries[Index].Reason;
@@ -55,21 +55,13 @@ begin
   end if;
 
   Catalog.Offset := Offset;
-  mutable var Summaries: array of WorldSummary := [];
+  var Summaries: array of WorldSummary := [];
   for Index: integer := Offset to Catalog.Total - 1 do
     if Index < Offset + MaximumWorldsPerPage then
-      var Entry: WorldEntry := Entries[Index];
-      mutable var Summary: WorldSummary := record
-        Id := Entry.Id;
-        Seed := 0;
-        RegionChunks := 0;
-        Status := Entry.Status;
-        SaveStatus := Entry.SaveStatus;
-        Reason := Entry.Reason;
-      end;
-
+      const Entry: WorldEntry := Entries[Index];
+      var Summary: WorldSummary := WorldSummary(Id := Entry.Id, Seed := 0, RegionChunks := 0, Status := Entry.Status, SaveStatus := Entry.SaveStatus, Reason := Entry.Reason);
       case Entry.Metadata of
-        when Some(Metadata):
+        when Some(const Metadata):
           begin
             Summary.Seed := Metadata.Seed;
             Summary.RegionChunks := Metadata.DungeonRegionChunks;
@@ -80,11 +72,11 @@ begin
           end;
       end case;
 
-      if Std.Str.Length(Summary.Reason) > 96 then
-        Summary.Reason := Std.Str.Substring(Summary.Reason, 0, 96);
+      if Summary.Reason.Length() > 96 then
+        Summary.Reason := Summary.Reason.Slice(0, 96);
       end if;
 
-      Std.Arrays.Push(Summaries, Summary);
+      Summaries.Push(Summary);
     end if;
   end for;
 
@@ -93,31 +85,16 @@ begin
 end function;
 
 // Creates an idle transport session. Missing/incompatible preselection does not create a world.
-public function NewServerSession(Config: ServerConfig; Viewport: ViewportSize): result of ServerSession, string;
+public function NewServerSession(Config: ServerConfig; Viewport: ViewportSize): result of (ServerSession, string);
 begin
-  mutable var Session: ServerSession := record
-    World := record
-      Directory := '';
-      Metadata := try NewWorldMetadata('unselected', 12345, 4);
-      Cache := [];
-      Clock := 0;
-      CacheLimit := Config.ChunkCacheLimit;
-    end;
-    WorldSelected := false;
-    Dirty := false;
-    State := None;
-    Interior := None;
-    Viewport := Viewport;
-    Finished := false;
-  end;
-
+  var Session: ServerSession := ServerSession(World := WorldSession(Directory := '', Metadata := try NewWorldMetadata('unselected', 12345, 4), Cache := [], Clock := 0, CacheLimit := Config.ChunkCacheLimit), WorldSelected := false, Dirty := false, State := None, Interior := None, Viewport := Viewport, Finished := false);
   case OpenExistingWorld(Config.WorldsRoot, Config.WorldId, Config.ChunkCacheLimit) of
-    when Ok(World):
+    when Ok(const World):
       begin
         Session.World := World;
         Session.WorldSelected := true;
       end;
-    when Error(Failure):
+    when Error(const Failure):
       begin
         null;
       end;
@@ -133,10 +110,10 @@ function RejectWorld(
   Code: string;
   Reason: string;
   Token: CancellationToken
-): result of ServerSession, string;
+): result of (ServerSession, string);
 begin
   LogServer(Config.Logs, 'rejected', (Code + ': ') + Reason);
-  var Sent: boolean := try Reject(ConnectionValue, Code, Reason, Token);
+  const Sent: boolean := try Reject(ConnectionValue, Code, Reason, Token);
   return Ok(Session);
 end function;
 
@@ -150,56 +127,52 @@ function InstallGame(
   ConnectionValue: Connection;
   Config: ServerConfig;
   Token: CancellationToken
-): result of ServerSession, string;
+): result of (ServerSession, string);
 begin
-  mutable var Prepared: result of GameState, string := Error('Cannot prepare world');
-  mutable var View: AreaView := record
-    Metadata := World.Metadata;
-    Interior := None;
-  end;
-
+  var Prepared: result of (GameState, string) := Error('Cannot prepare world');
+  var View: AreaView := AreaView(Metadata := World.Metadata, Interior := None);
   case AreaViewFor(World.Metadata, State, Interior) of
-    when Error(Reason):
+    when Error(const Reason):
       begin
         LogServer(Config.Logs, 'error', Reason);
         return RejectWorld(Session, Config, ConnectionValue, 'world_data_error', 'Cannot validate the selected world.', Token);
       end;
-    when Ok(Value):
+    when Ok(const Value):
       begin
         View := Value;
       end;
   end case;
 
   case RevealCurrentArea(View, State) of
-    when Error(Reason):
+    when Error(const Reason):
       begin
         return RejectWorld(Session, Config, ConnectionValue, 'world_data_error', 'Cannot reveal the selected world.', Token);
       end;
-    when Ok(Revealed):
+    when Ok(const Revealed):
       begin
         Prepared := ValidateGameState(View, Revealed);
       end;
   end case;
-  mutable var Valid: GameState := State;
+  var Valid: GameState := State;
   case Prepared of
-    when Error(Reason):
+    when Error(const Reason):
       begin
         return RejectWorld(Session, Config, ConnectionValue, 'world_data_error', 'Cannot validate the selected game.', Token);
       end;
-    when Ok(Value):
+    when Ok(const Value):
       begin
         Valid := Value;
       end;
   end case;
 
   case ProjectSession(World, View, Valid, Session.Viewport, NoTurnReport()) of
-    when Error(Reason):
+    when Error(const Reason):
       begin
         return RejectWorld(Session, Config, ConnectionValue, 'storage_error', 'Cannot prepare the selected world. Check storage access.', Token);
       end;
-    when Ok(Projection):
+    when Ok(const Projection):
       begin
-        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Projection.State), Token);
+        const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Projection.State), Token);
         LogServer(Config.Logs, 'world', 'Playing world ' + World.Metadata.Id);
         return Ok(Session with World := Projection.World; WorldSelected := true; State := Some(Valid); Interior := Interior; Dirty := Dirty; end with);
       end;
@@ -213,29 +186,29 @@ public function HandleWorldMessage(
   ConnectionValue: Connection;
   Config: ServerConfig;
   Token: CancellationToken
-): result of option of ServerSession, string;
+): result of (option of ServerSession, string);
 begin
-  var Active: boolean := Std.Options.IsSome(Session.State);
-  mutable var Next: ServerSession := Session;
+  const Active: boolean := Session.State.IsSome();
+  var Next: ServerSession := Session;
   case Message of
-    when ClientMessage.ListWorlds(Offset, DiscardProgress):
+    when ClientMessage.ListWorlds(const Offset, const DiscardProgress):
       begin
         if Active and Session.Dirty and not DiscardProgress then
           return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'discard_required', 'Confirm discarding unsaved progress or cancel.', Token)));
         end if;
-        mutable var Id: string := Config.WorldId;
+        var Id: string := Config.WorldId;
         if Session.WorldSelected then
           Id := Session.World.Metadata.Id;
         end if;
 
         case CatalogFor(Config, Id, Offset) of
-          when Error(Reason):
+          when Error(const Reason):
             begin
               return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'storage_error', 'Cannot list worlds. Check storage and server settings.', Token)));
             end;
-          when Ok(Catalog):
+          when Ok(const Catalog):
             begin
-              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Worlds(Catalog), Token);
+              const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Worlds(Catalog), Token);
               Next.State := None;
               Next.Interior := None;
               Next.Dirty := false;
@@ -243,29 +216,29 @@ begin
             end;
         end case;
       end;
-    when ClientMessage.SelectWorld(Id):
+    when ClientMessage.SelectWorld(const Id):
       begin
         if Active then
           return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'session_already_started', 'Return to world selection first.', Token)));
         end if;
 
         case OpenExistingWorld(Config.WorldsRoot, Id, Config.ChunkCacheLimit) of
-          when Error(Failure):
+          when Error(const Failure):
             begin
-              mutable var Code: string := 'world_incompatible';
-              mutable var Reason: string := 'World is incompatible. Delete or recreate it.';
+              var Code: string := 'world_incompatible';
+              var Reason: string := 'World is incompatible. Delete or recreate it.';
               case Failure of
                 when WorldAccessFailure.Missing:
                   begin
                     Code := 'world_missing';
                     Reason := 'World is missing. Create a world or select another.';
                   end;
-                when WorldAccessFailure.Io(Detail):
+                when WorldAccessFailure.Io(const Detail):
                   begin
                     Code := 'storage_error';
                     Reason := 'World storage access failed.';
                   end;
-                else
+                when worldaccessfailure.Incompatible(_):
                   begin
                     null;
                   end;
@@ -273,16 +246,16 @@ begin
 
               return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, Code, Reason, Token)));
             end;
-          when Ok(World):
+          when Ok(const World):
             begin
               case CatalogFor(Config, Id, -1) of
-                when Error(Reason):
+                when Error(const Reason):
                   begin
                     return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'storage_error', 'Cannot prepare world selection.', Token)));
                   end;
-                when Ok(Catalog):
+                when Ok(const Catalog):
                   begin
-                    var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Worlds(Catalog), Token);
+                    const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Worlds(Catalog), Token);
                     LogServer(Config.Logs, 'world', 'Selected world ' + Id);
                     return Ok(Some(Session with World := World; WorldSelected := true; end with));
                   end;
@@ -290,30 +263,30 @@ begin
             end;
         end case;
       end;
-    when ClientMessage.CreateWorld(Seed, RegionChunks):
+    when ClientMessage.CreateWorld(const Seed, const RegionChunks):
       begin
         if Active then
           return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'session_already_started', 'Return to world selection first.', Token)));
         end if;
 
         case CreationDefaults(Config) of
-          when Error(Reason):
+          when Error(const Reason):
             begin
               return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'storage_error', 'Cannot read server defaults.', Token)));
             end;
-          when Ok(Defaults):
+          when Ok(const Defaults):
             begin
               null;
             end;
         end case;
 
         case Dungeon.World.Catalog.CreateWorld(Config.WorldsRoot, Seed, RegionChunks, Config.ChunkCacheLimit) of
-          when Error(Reason):
+          when Error(const Reason):
             begin
               LogServer(Config.Logs, 'error', Reason);
               return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'create_failed', 'Cannot create world. Check parameters and storage access.', Token)));
             end;
-          when Ok(World):
+          when Ok(const World):
             begin
               LogServer(Config.Logs, 'world', 'Created world ' + World.Metadata.Id);
               return Ok(Some(try InstallGame(Session, World, NewGame(World.Metadata), None, true, ConnectionValue, Config, Token)));
@@ -343,23 +316,23 @@ begin
         end if;
 
         case LoadSaveGame(Session.World) of
-          when Error(Failure):
+          when Error(const Failure):
             begin
-              var Rejection: FailureRejection := PersistenceRejection(Session.World.Metadata.Id, 'load_failed', Failure);
+              const Rejection: FailureRejection := PersistenceRejection(Session.World.Metadata.Id, 'load_failed', Failure);
               return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, Rejection.Code, Rejection.Message, Token)));
             end;
-          when Ok(Loaded):
+          when Ok(const Loaded):
             begin
               case Loaded of
                 when SaveGameLoad.Missing:
                   begin
                     return Ok(Some(try InstallGame(Session, Session.World, NewGame(Session.World.Metadata), None, true, ConnectionValue, Config, Token)));
                   end;
-                when SaveGameLoad.Invalid(Reason):
+                when SaveGameLoad.Invalid(const Reason):
                   begin
                     return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, 'save_incompatible', 'Saved game is incompatible and was kept. Start over or recreate it.', Token)));
                   end;
-                when SaveGameLoad.Loaded(State, View):
+                when SaveGameLoad.Loaded(const State, const View):
                   begin
                     LogServer(Config.Logs, 'world', 'Loaded world ' + Session.World.Metadata.Id);
                     return Ok(Some(try InstallGame(Session, Session.World, State, View.Interior, false, ConnectionValue, Config, Token)));
@@ -379,20 +352,20 @@ begin
         end if;
 
         case WriteSaveGame(Session.World, try RequireActiveState(Session.State)) of
-          when Error(Failure):
+          when Error(const Failure):
             begin
-              var Rejection: FailureRejection := PersistenceRejection(Session.World.Metadata.Id, 'save_failed', Failure);
+              const Rejection: FailureRejection := PersistenceRejection(Session.World.Metadata.Id, 'save_failed', Failure);
               return Ok(Some(try RejectWorld(Session, Config, ConnectionValue, Rejection.Code, Rejection.Message, Token)));
             end;
-          when Ok(Written):
+          when Ok(const Written):
             begin
-              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.SaveCompleted, Token);
+              const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.SaveCompleted, Token);
               LogServer(Config.Logs, 'world', 'Saved world ' + Session.World.Metadata.Id);
               return Ok(Some(Session with Dirty := false; end with));
             end;
         end case;
       end;
-    else
+    when clientmessage.Hello(_, _, _), clientmessage.Viewport(_, _), clientmessage.ExplorationMap(_, _, _, _), clientmessage.Move(_, _), clientmessage.StepFirstPerson(_), clientmessage.TurnFirstPerson(_), clientmessage.Interact, clientmessage.Attack, clientmessage.Wait, clientmessage.Equip(_), clientmessage.Unequip(_), clientmessage.DropItem(_), clientmessage.Disconnect:
       begin
         return Ok(None);
       end;

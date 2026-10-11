@@ -4,13 +4,13 @@ program ServerAdmissionTest;
 uses
   Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
   Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config, Dungeon.Server.Logging,
-  Std.Conv, Std.Fs, Std.Net, Std.Results, Std.Tasks, Std.Test, Std.Time;
+  Std.Conv, Std.Fs, Std.Net, Std.Tasks, Std.Test, Std.Time;
 
 procedure WaitLog(Logs: channel of ServerLogEvent; Kind: string);
 begin
-  mutable var Found: boolean := false;
+  var Found: boolean := false;
   while not Found do
-    var Value: ServerLogEvent := Unwrap(ReceiveWithTimeout(Logs, 30000));
+    const Value: ServerLogEvent := ReceiveWithTimeout(Logs, 30000).Unwrap();
     if Value.Kind = 'error' then
       panic(Value.Text);
     end if;
@@ -19,99 +19,87 @@ begin
   end while;
 end procedure;
 
-function RunReported(Config: ServerConfig; Port: integer; Token: CancellationToken): result of boolean, string;
+function RunReported(Config: ServerConfig; Port: integer; Token: CancellationToken): result of (boolean, string);
 begin
-  var Outcome: result of boolean, string := RunServerWithCancellation('127.0.0.1', Port, Config, Token);
-  case Outcome of
-    when Error(Reason):
-      begin
-        LogServer(Config.Logs, 'error', Reason);
-      end;
-    else
-      begin
-        null;
-      end;
-  end case;
+  const Outcome: result of (boolean, string) := RunServerWithCancellation('127.0.0.1', Port, Config, Token);
+  if Outcome is Error(const Reason) then
+    begin
+      LogServer(Config.Logs, 'error', Reason);
+    end;
+  else
+    begin
+      null;
+    end;
+  end if;
 
   return Outcome;
 end function;
 
 begin
-  var Root: string := '.temp-data/admission-' + IntToStr(TimestampMillis());
-  var Reservation: Listener := Unwrap(Listen('127.0.0.1', 0));
-  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(Reservation));
-  AssertTrue(Unwrap(CloseListener(Reservation)));
-  var Logs: channel of ServerLogEvent := CreateChannel(256);
-  var Config: ServerConfig := record
-    ConfigPath := '';
-    Logs := Some(Logs);
-    WorldsRoot := Root;
-    WorldId := 'absent';
-    WorldSeed := 12345;
-    DungeonRegionChunks := 4;
-    ChunkCacheLimit := 32;
-    MaximumViewWidth := 80;
-    MaximumViewHeight := 24;
-  end;
-  var Stop: CancellationSource := CreateCancellationSource();
-  var Token: CancellationToken := GetCancellationToken(Stop);
-  var Worker: task := go RunReported(Config, Address.Port, Token);
+  const Root: string := '.temp-data/admission-' + IntToStr(TimestampMillis());
+  const Reservation: Listener := Listen('127.0.0.1', 0).Unwrap();
+  const Address: NetworkAddress := ListenerLocalAddress(Reservation).Unwrap();
+  AssertTrue(CloseListener(Reservation).Unwrap());
+  const Logs: channel of ServerLogEvent := CreateChannel(256);
+  const Config: ServerConfig := ServerConfig(ConfigPath := '', Logs := Some(Logs), WorldsRoot := Root, WorldId := 'absent', WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32, MaximumViewWidth := 80, MaximumViewHeight := 24);
+  const Stop: CancellationSource := CreateCancellationSource();
+  const Token: CancellationToken := GetCancellationToken(Stop);
+  const Worker: task := go RunReported(Config, Address.Port, Token);
   WaitLog(Logs, 'status');
   AssertTrue(Std.Fs.IsDir(Root));
-  var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(Client, 30000)));
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 9, 5)), Token)));
-  var Welcome: LineRead := Unwrap(ReadLine(NewLineReader(Client), Token));
-  case Unwrap(DecodeServer(Welcome.Line)) of
-    when ServerMessage.Welcome(Version, Catalog):
-      begin
-        AssertEquals(0, Catalog.Total);
-      end;
-    else
-      begin
-        panic('expected first admitted client');
-      end;
-  end case;
+  const Client: Connection := Connect('127.0.0.1', Address.Port, 5000).Unwrap();
+  AssertTrue(SetTimeout(Client, 30000).Unwrap());
+  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 9, 5)), Token)
+               .Unwrap());
+  const Welcome: LineRead := ReadLine(NewLineReader(Client), Token).Unwrap();
+  if DecodeServer(Welcome.Line).Unwrap() is ServerMessage.Welcome(const Version, const Catalog) then
+    begin
+      AssertEquals(0, Catalog.Total);
+    end;
+  else
+    begin
+      panic('expected first admitted client');
+    end;
+  end if;
 
   AssertFalse(Std.Fs.Exists(Root + '/absent'));
   // Busy rejection arrives promptly even while the first player has an idle connection.
-  var Second: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(Second, 30000)));
-  var Busy: LineRead := Unwrap(ReadLine(NewLineReader(Second), Token));
-  case Unwrap(DecodeServer(Busy.Line)) of
-    when ServerMessage.Rejected(Code, Reason):
-      begin
-        AssertEquals('server_busy', Code);
-      end;
-    else
-      begin
-        panic('expected busy rejection');
-      end;
-  end case;
+  const Second: Connection := Connect('127.0.0.1', Address.Port, 5000).Unwrap();
+  AssertTrue(SetTimeout(Second, 30000).Unwrap());
+  const Busy: LineRead := ReadLine(NewLineReader(Second), Token).Unwrap();
+  if DecodeServer(Busy.Line).Unwrap() is ServerMessage.Rejected(const Code, const Reason) then
+    begin
+      AssertEquals('server_busy', Code);
+    end;
+  else
+    begin
+      panic('expected busy rejection');
+    end;
+  end if;
 
-  AssertTrue(Unwrap(Close(Second)));
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
+  AssertTrue(Close(Second).Unwrap());
+  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
   WaitLog(Logs, 'disconnected');
-  AssertTrue(Unwrap(Close(Client)));
-  var Third: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(Third, 30000)));
-  AssertTrue(Unwrap(WriteLine(Third, EncodeClient(ClientMessage.Hello(ProtocolVersion, 9, 5)), Token)));
-  var Again: LineRead := Unwrap(ReadLine(NewLineReader(Third), Token));
-  case Unwrap(DecodeServer(Again.Line)) of
-    when ServerMessage.Welcome(Version, Catalog):
-      begin
-        AssertEquals(0, Catalog.Total);
-      end;
-    else
-      begin
-        panic('expected admission after disconnect');
-      end;
-  end case;
+  AssertTrue(Close(Client).Unwrap());
+  const Third: Connection := Connect('127.0.0.1', Address.Port, 5000).Unwrap();
+  AssertTrue(SetTimeout(Third, 30000).Unwrap());
+  AssertTrue(WriteLine(Third, EncodeClient(ClientMessage.Hello(ProtocolVersion, 9, 5)), Token)
+               .Unwrap());
+  const Again: LineRead := ReadLine(NewLineReader(Third), Token).Unwrap();
+  if DecodeServer(Again.Line).Unwrap() is ServerMessage.Welcome(const Version, const Catalog) then
+    begin
+      AssertEquals(0, Catalog.Total);
+    end;
+  else
+    begin
+      panic('expected admission after disconnect');
+    end;
+  end if;
 
   // Console shutdown uses the same external cancellation path, joining an idle connected session.
   discard Cancel(Stop);
-  AssertTrue(Unwrap(Std.Tasks.Wait(Worker)));
-  AssertTrue(Unwrap(Close(Third)));
-  AssertTrue(IsError(Connect('127.0.0.1', Address.Port, 100)));
+  AssertTrue(Std.Tasks.Wait(Worker).Unwrap());
+  AssertTrue(Close(Third).Unwrap());
+  AssertTrue(Connect('127.0.0.1', Address.Port, 100).IsError());
   discard CloseChannel(Logs);
 end.

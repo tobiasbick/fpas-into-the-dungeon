@@ -4,110 +4,102 @@ unit Dungeon.Test.Wire;
 uses
   Dungeon.Coordinates, Dungeon.Interior, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
   Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.Terrain,
-  Dungeon.Test.Fixtures, Dungeon.Test.Routes, Std.Net, Std.Results, Std.Str, Std.Tasks, Std.Test;
+  Dungeon.Test.Fixtures, Dungeon.Test.Routes, Std.Net, Std.Tasks, Std.Test;
 
-public type
-  // One connected test client: its connection, the reader after the last response, and that response.
-  WireClient = record
-    public Connection: Connection;
-    public Reader: LineReader;
-    public Last: ServerMessage;
-  end record;
+// One connected test client: its connection, the reader after the last response, and that response.
+public type WireClient = record
+  public Connection: Connection;
+  public Reader: LineReader;
+  public Last: ServerMessage;
+end record;
 
 // Connects to a test server on the loopback interface and completes the handshake.
 public function ConnectClient(Port: integer; Token: CancellationToken): WireClient;
 begin
-  var ConnectionValue: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Port, 5000));
-  AssertTrue(Std.Results.Unwrap(SetTimeout(ConnectionValue, 120000)));
-  AssertTrue(Std.Results.Unwrap(WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion, 20, 10)), Token)));
-  var Welcome: LineRead := Std.Results.Unwrap(ReadLine(NewLineReader(ConnectionValue), Token));
-  return record
-    Connection := ConnectionValue;
-    Reader := Welcome.Reader;
-    Last := Std.Results.Unwrap(DecodeServer(Welcome.Line));
-  end;
+  const ConnectionValue: Connection := Connect('127.0.0.1', Port, 5000).Unwrap();
+  AssertTrue(SetTimeout(ConnectionValue, 120000).Unwrap());
+  AssertTrue(WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion, 20, 10)), Token)
+               .Unwrap());
+  const Welcome: LineRead := ReadLine(NewLineReader(ConnectionValue), Token).Unwrap();
+  return WireClient(Connection := ConnectionValue, Reader := Welcome.Reader, Last := DecodeServer(Welcome.Line)
+                                                                                       .Unwrap());
 end function;
 
 // Sends one intention and records the single response.
 public function Exchange(Client: WireClient; Message: ClientMessage; Token: CancellationToken): WireClient;
 begin
-  AssertTrue(Std.Results.Unwrap(WriteLine(Client.Connection, EncodeClient(Message), Token)));
-  var Response: LineRead := Std.Results.Unwrap(ReadLine(Client.Reader, Token));
-  return Client with Reader := Response.Reader; Last := Std.Results.Unwrap(DecodeServer(Response.Line)); end with;
+  AssertTrue(WriteLine(Client.Connection, EncodeClient(Message), Token).Unwrap());
+  const Response: LineRead := ReadLine(Client.Reader, Token).Unwrap();
+  return Client with Reader := Response.Reader; Last := DecodeServer(Response.Line).Unwrap(); end with;
 end function;
 
 // Returns the last response as a first-person projection.
 public function FirstPersonOf(Client: WireClient): FirstPersonVisibleState;
 begin
-  case Client.Last of
-    when ServerMessage.State(Value):
-      begin
-        case Value of
-          when VisibleState.FirstPersonState(Fields):
-            begin
-              return Fields;
-            end;
-          else
-            begin
-              panic('expected a first-person state');
-            end;
-        end case;
-      end;
-    else
-      begin
-        panic('expected a state message, got ' + EncodeServer(Client.Last));
-      end;
-  end case;
+  if Client.Last is ServerMessage.State(const Value) then
+    begin
+      if Value is VisibleState.FirstPersonState(const Fields) then
+        begin
+          return Fields;
+        end;
+      else
+        begin
+          panic('expected a first-person state');
+        end;
+      end if;
+    end;
+  else
+    begin
+      panic('expected a state message, got ' + EncodeServer(Client.Last));
+    end;
+  end if;
 end function;
 
 // Returns the last response as a map projection.
 public function MapOf(Client: WireClient): MapVisibleState;
 begin
-  case Client.Last of
-    when ServerMessage.State(Value):
-      begin
-        case Value of
-          when VisibleState.MapState(Fields):
-            begin
-              return Fields;
-            end;
-          else
-            begin
-              panic('expected a map state');
-            end;
-        end case;
-      end;
-    else
-      begin
-        panic('expected a state message, got ' + EncodeServer(Client.Last));
-      end;
-  end case;
+  if Client.Last is ServerMessage.State(const Value) then
+    begin
+      if Value is VisibleState.MapState(const Fields) then
+        begin
+          return Fields;
+        end;
+      else
+        begin
+          panic('expected a map state');
+        end;
+      end if;
+    end;
+  else
+    begin
+      panic('expected a state message, got ' + EncodeServer(Client.Last));
+    end;
+  end if;
 end function;
 
 // Requires that the last response confirmed a save.
 public procedure RequireSaved(Client: WireClient);
 begin
-  case Client.Last of
-    when ServerMessage.SaveCompleted:
-      begin
-        null;
-      end;
-    else
-      begin
-        panic('expected save completion');
-      end;
-  end case;
+  if Client.Last is ServerMessage.SaveCompleted then
+    begin
+      null;
+    end;
+  else
+    begin
+      panic('expected save completion');
+    end;
+  end if;
 end procedure;
 
 // Walks the outdoor player cardinally onto Target, x first, then y; every step must succeed.
 public function WalkOutdoors(Client: WireClient; Target: WorldPosition; Token: CancellationToken): WireClient;
 begin
-  mutable var Current: WireClient := Client;
-  mutable var Position: MapVisibleState := MapOf(Current);
+  var Current: WireClient := Client;
+  var Position: MapVisibleState := MapOf(Current);
   while (Position.WorldX <> Target.X) or (Position.WorldY <> Target.Y) do
     begin
-      mutable var DeltaX: integer := 0;
-      mutable var DeltaY: integer := 0;
+      var DeltaX: integer := 0;
+      var DeltaY: integer := 0;
       if Position.WorldX < Target.X then
         begin
           DeltaX := 1;
@@ -145,10 +137,10 @@ public function WalkOutdoorRoute(
   Token: CancellationToken
 ): WireClient;
 begin
-  mutable var Current: WireClient := Client;
+  var Current: WireClient := Client;
   for Field: WorldPosition in Route do
     begin
-      var Position: MapVisibleState := MapOf(Current);
+      const Position: MapVisibleState := MapOf(Current);
       Current := Exchange(Current, ClientMessage.Move(Field.X - Position.WorldX, Field.Y -
                                                                                  Position.WorldY), Token);
       AssertEquals(Field.X, MapOf(Current).WorldX);
@@ -162,11 +154,11 @@ end function;
 // Sends a route's intentions in order; each must yield a first-person state.
 public function WalkRoute(Client: WireClient; Moves: array of RouteMove; Token: CancellationToken): WireClient;
 begin
-  mutable var Current: WireClient := Client;
+  var Current: WireClient := Client;
   for Move: RouteMove in Moves do
     begin
       Current := Exchange(Current, RouteMessage(Move), Token);
-      var Checked: FirstPersonVisibleState := FirstPersonOf(Current);
+      const Checked: FirstPersonVisibleState := FirstPersonOf(Current);
     end;
   end for;
 
@@ -182,8 +174,8 @@ public function FaceOpponent(
   Token: CancellationToken
 ): WireClient;
 begin
-  mutable var Current: WireClient := Client;
-  mutable var View: FirstPersonVisibleState := FirstPersonOf(Current);
+  var Current: WireClient := Client;
+  var View: FirstPersonVisibleState := FirstPersonOf(Current);
   for Move: RouteMove in RouteTo(Map, VisiblePose(View), Origin, []) do
     begin
       if not HostileAhead(View) then
@@ -198,7 +190,7 @@ begin
       end if;
     end;
   end for;
-  mutable var Waited: integer := 0;
+  var Waited: integer := 0;
   while (not HostileAhead(View)) and (Waited < 8) do
     begin
       Current := Exchange(Current, ClientMessage.Wait, Token);
@@ -212,30 +204,29 @@ begin
 end function;
 
 // Attacks the opponent ahead until it is destroyed; returns false when the player falls instead.
-public function FightAhead(Client: WireClient; Token: CancellationToken): result of WireClient, string;
+public function FightAhead(Client: WireClient; Token: CancellationToken): result of (WireClient, string);
 begin
-  mutable var Current: WireClient := Client;
+  var Current: WireClient := Client;
   for Blow: integer := 1 to 80 do
     begin
       Current := Exchange(Current, ClientMessage.Attack, Token);
-      case Current.Last of
-        when ServerMessage.Defeated(Summary):
-          begin
-            return Error('the player fell: ' + Summary);
-          end;
-        else
-          begin
-            for Entry: VisibleCombatEvent in FirstPersonOf(Current).CombatEvents do
-              begin
-                if Entry.Kind = VisibleCombatEventKind.HostileDefeated then
-                  begin
-                    return Ok(Current);
-                  end;
-                end if;
-              end;
-            end for;
-          end;
-      end case;
+      if Current.Last is ServerMessage.Defeated(const Summary) then
+        begin
+          return Error('the player fell: ' + Summary);
+        end;
+      else
+        begin
+          for Entry: VisibleCombatEvent in FirstPersonOf(Current).CombatEvents do
+            begin
+              if Entry.Kind = VisibleCombatEventKind.HostileDefeated then
+                begin
+                  return Ok(Current);
+                end;
+              end if;
+            end;
+          end for;
+        end;
+      end if;
     end;
   end for;
 
@@ -249,50 +240,49 @@ public function WalkTo(
   Map: InteriorMap;
   Target: InteriorPosition;
   Token: CancellationToken
-): result of WireClient, string;
+): result of (WireClient, string);
 begin
-  mutable var Current: WireClient := Client;
-  mutable var View: FirstPersonVisibleState := FirstPersonOf(Current);
+  var Current: WireClient := Client;
+  var View: FirstPersonVisibleState := FirstPersonOf(Current);
   for Attempt: integer := 1 to 400 do
     begin
-      var Pose: FirstPersonPose := VisiblePose(View);
+      const Pose: FirstPersonPose := VisiblePose(View);
       if SamePosition(Pose.Position, Target) then
         begin
           return Ok(Current);
         end;
       end if;
 
-      case TryRouteTo(Map, Pose, Target, VisibleHostiles(View)) of
-        when Ok(Moves):
-          begin
-            Current := Exchange(Current, RouteMessage(Moves[0]), Token);
-          end;
-        else
-          begin
-            if HostileAhead(View) then
-              begin
-                Current := try FightAhead(Current, Token);
-              end;
-            else
-              begin
-                Current := Exchange(Current, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token);
-              end;
-            end if;
-          end;
-      end case;
+      if TryRouteTo(Map, Pose, Target, VisibleHostiles(View)) is Ok(const Moves) then
+        begin
+          Current := Exchange(Current, RouteMessage(Moves[0]), Token);
+        end;
+      else
+        begin
+          if HostileAhead(View) then
+            begin
+              Current := try FightAhead(Current, Token);
+            end;
+          else
+            begin
+              Current := Exchange(Current, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token);
+            end;
+          end if;
+        end;
+      end if;
 
       case Current.Last of
-        when ServerMessage.State(Value):
+        when ServerMessage.State(const Value):
           begin
             View := FirstPersonOf(Current);
           end;
-        when ServerMessage.Rejected(Code, Message):
+        when ServerMessage.Rejected(const Code, const Message):
           begin
             // Blocked by an opponent that was not visible yet: wait one turn to see it.
             Current := Exchange(Current, ClientMessage.Wait, Token);
             View := FirstPersonOf(Current);
           end;
-        else
+        when servermessage.Welcome(_, _), servermessage.Worlds(_), servermessage.ExplorationMap(_), servermessage.Interaction(_, _), servermessage.SaveCompleted, servermessage.Defeated(_), servermessage.ErrorMessage(_, _):
           begin
             return Error('unexpected response while walking: ' + EncodeServer(Current.Last));
           end;
@@ -306,7 +296,7 @@ end function;
 // Disconnects and closes the client connection.
 public procedure CloseClient(Client: WireClient; Token: CancellationToken);
 begin
-  AssertTrue(Std.Results.Unwrap(WriteLine(Client.Connection, EncodeClient(ClientMessage.Disconnect), Token)));
-  AssertTrue(Std.Results.Unwrap(Close(Client.Connection)));
+  AssertTrue(WriteLine(Client.Connection, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
+  AssertTrue(Close(Client.Connection).Unwrap());
 end procedure;
 end unit;
