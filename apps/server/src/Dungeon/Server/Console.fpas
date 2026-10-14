@@ -1,32 +1,32 @@
 // Optional live terminal console owning the listener subscription and settings editor.
 unit Dungeon.Server.Console;
 
-uses
-  Dungeon.RuntimeData, Dungeon.Server, Dungeon.Server.Config, Dungeon.Server.Console.Model,
-  Dungeon.Server.Logging, Std.Console, Std.Conv, Std.Tasks, Std.Tui;
+uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console.Model as Model, Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Conv as Conv, Std.Tasks as Tasks, Std.Tui as Tui;
 
 type ConsoleState = record
-  Model: ConsoleModel;
+  Model: Model.ConsoleModel;
   Host: string;
   Port: integer;
-  Config: ServerConfig;
-  Events: channel of ServerLogEvent;
+  Config: ConfigUnit.ServerConfig;
+  Events: channel of Logging.ServerLogEvent;
 end record;
 
-function UpdateConsole(State: ConsoleState; Msg: TuiMsg; Cmd: TuiCmdOutput): ConsoleState;
+function UpdateConsole(State: ConsoleState; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ConsoleState;
 begin
-  Cmd.Set(TuiCmd.NoCommand);
+  Cmd.Set(Tui.TuiCmd.NoCommand);
   case Msg of
-    when TuiMsg.Started:
+    when Tui.TuiMsg.Started:
       begin
         const Host: string := State.Host;
         const Port: integer := State.Port;
-        const Config: ServerConfig := State.Config;
-        Cmd.ReplaceSubscription(1, function(Token: CancellationToken): result of (boolean, string) begin
-          return RunServerWithCancellation(Host, Port, Config, Token);
-        end function);
+        const Config: ConfigUnit.ServerConfig := State.Config;
+        Cmd.ReplaceSubscription(
+          1, function(Token: Tasks.CancellationToken): result of (boolean, string) begin
+            return Server.RunServerWithCancellation(Host, Port, Config, Token);
+          end function
+        );
       end;
-    when TuiMsg.FocusChanged(const Previous, const Current):
+    when Tui.TuiMsg.FocusChanged(const Previous, const Current):
       begin
         case Current of
           when Some(const Id):
@@ -39,20 +39,23 @@ begin
             end;
         end case;
       end;
-    when TuiMsg.BackgroundFailed(const Id, const Kind, const Message, const Code, const Line, const Column):
+    when Tui.TuiMsg.BackgroundFailed(const Id, const Kind, const Message, const Code, const Line, const Column):
       begin
-        return State with Model := ApplyConsoleLog(State.Model, ServerLogEvent(Kind := 'error', Text := Message)); end with;
+        return State with Model := Model.ApplyConsoleLog(
+          State.Model,
+          Logging.ServerLogEvent(Kind := 'error', Text := Message)
+        ); end with;
       end;
-    when TuiMsg.Action(const Source, const Action):
+    when Tui.TuiMsg.Action(const Source, const Action):
       begin
         if Action.Value = 1 then
-          const Seed: string := IntToStr(State.Model.Seed);
-          const Region: string := IntToStr(State.Model.RegionChunks);
+          const Seed: string := Conv.IntToStr(State.Model.Seed);
+          const Region: string := Conv.IntToStr(State.Model.RegionChunks);
           return State with Model := State.Model with SettingsOpen := true; FocusedControl := 10; SettingsError := ''; SeedText := Seed; SeedCaret := Seed.Length(); RegionText := Region; RegionCaret := Region.Length(); end with; end with;
         end if;
 
         if Action.Value = 2 then
-          return State with Model := StoreConsoleSettings(State.Model); end with;
+          return State with Model := Model.StoreConsoleSettings(State.Model); end with;
         end if;
 
         if Action.Value = 3 then
@@ -60,13 +63,15 @@ begin
         end if;
 
         if Action.Value = 4 then
-          Cmd.Set(TuiCmd.Quit);
+          Cmd.Set(Tui.TuiCmd.Quit);
         end if;
       end;
-    when TuiMsg.TextChanged(const Source, const Action, const Text, const Caret):
+    when Tui.TuiMsg.TextChanged(const Source, const Action, const Text, const Caret):
       begin
-        if not State.Model.SettingsOpen or (Text.Length() > 32) or (Caret < 0) or
-           (Caret > Text.Length()) then
+        if not State.Model.SettingsOpen or (Text.Length() > 32) or (Caret < 0)
+          or
+          (Caret > Text.Length())
+        then
           return State;
         end if;
 
@@ -78,29 +83,32 @@ begin
           return State with Model := State.Model with RegionText := Text; RegionCaret := Caret; end with; end with;
         end if;
       end;
-    when TuiMsg.Key(const Key):
+    when Tui.TuiMsg.Key(const Key):
       begin
-        if (Key.kind = TuiKeyKind.Character) and Key.ctrl and ((Key.ch = 'c') or (Key.ch = 'C')) then
-          Cmd.Set(TuiCmd.Quit);
+        if (Key.kind = Tui.TuiKeyKind.Character) and Key.ctrl
+          and
+          ((Key.ch = 'c') or (Key.ch = 'C'))
+        then
+          Cmd.Set(Tui.TuiCmd.Quit);
         end if;
 
-        if (Key.kind = TuiKeyKind.Character) and Key.alt and ((Key.ch = 'x') or (Key.ch = 'X')) then
-          Cmd.Set(TuiCmd.Quit);
+        if (Key.kind = Tui.TuiKeyKind.Character) and Key.alt and ((Key.ch = 'x') or (Key.ch = 'X')) then
+          Cmd.Set(Tui.TuiCmd.Quit);
         end if;
 
-        if Key.kind = TuiKeyKind.Escape then
+        if Key.kind = Tui.TuiKeyKind.Escape then
           return State with Model := State.Model with SettingsOpen := false; FocusedControl := 1; end with; end with;
         end if;
       end;
-    when TuiMsg.QuitRequested:
+    when Tui.TuiMsg.QuitRequested:
       begin
         if State.Model.SettingsOpen then
           return State with Model := State.Model with SettingsOpen := false; FocusedControl := 1; end with; end with;
         end if;
 
-        Cmd.Set(TuiCmd.Quit);
+        Cmd.Set(Tui.TuiCmd.Quit);
       end;
-    when tuimsg.Pointer(_), tuimsg.Tick(_), tuimsg.Resize(_), tuimsg.TextAreaChanged(_, _, _, _, _), tuimsg.CheckChanged(_, _, _), tuimsg.SelectionChanged(_, _, _), tuimsg.ScrollChanged(_, _, _), tuimsg.MenuChanged(_, _, _):
+    when Tui.TuiMsg.Pointer(_), Tui.TuiMsg.Tick(_), Tui.TuiMsg.Resize(_), Tui.TuiMsg.TextAreaChanged(_, _, _, _, _), Tui.TuiMsg.CheckChanged(_, _, _), Tui.TuiMsg.SelectionChanged(_, _, _), Tui.TuiMsg.ScrollChanged(_, _, _), Tui.TuiMsg.MenuChanged(_, _, _):
       begin
         null;
       end;
@@ -109,25 +117,25 @@ begin
   return State;
 end function;
 
-function UpdateConsoleEvent(State: ConsoleState; Value: ServerLogEvent; Cmd: TuiCmdOutput): ConsoleState;
+function UpdateConsoleEvent(State: ConsoleState; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): ConsoleState;
 begin
-  Cmd.Set(TuiCmd.NoCommand);
-  return State with Model := ApplyConsoleLog(State.Model, Value); end with;
+  Cmd.Set(Tui.TuiCmd.NoCommand);
+  return State with Model := Model.ApplyConsoleLog(State.Model, Value); end with;
 end function;
 
-function ConsoleFocus(State: ConsoleModel): option of TuiControlId;
+function ConsoleFocus(State: Model.ConsoleModel): option of Tui.TuiControlId;
 begin
   if State.FocusedControl > 0 then
-    return Some(TuiControlId.Create(State.FocusedControl));
+    return Some(Tui.TuiControlId.Create(State.FocusedControl));
   end if;
 
   return None;
 end function;
 
 // Renders live status, recent log lines and the optional controlled settings editor.
-public function ViewServerConsole(State: ConsoleModel): TuiElement;
+public function ViewServerConsole(State: Model.ConsoleModel): Tui.TuiElement;
 begin
-  var Items: array of TuiElement := [TuiElementBuilders.MakeLabel(State.Status)];
+  var Items: array of Tui.TuiElement := [Tui.TuiElementBuilders.MakeLabel(State.Status)];
   const Count: integer := State.Lines.Length();
   var Start: integer := Count - 8;
   if Start < 0 then
@@ -135,44 +143,92 @@ begin
   end if;
 
   for Index: integer := Start to Count - 1 do
-    Items.Push(TuiElementBuilders.MakeLabel(State.Lines[Index]));
+    Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(State.Lines[Index]));
   end for;
 
-  Items.Push(TuiElementBuilders.MakeButton(TuiControlId.Create(1), 'Settings', TuiAction.Create(1)));
-  Items.Push(TuiElementBuilders.MakeButton(TuiControlId.Create(4), 'Stop server (Alt+X)', TuiAction.Create(4)));
-  const Main: TuiElement := TuiElementBuilders.MakeOverlay('Dungeon server', [
-                                                                               TuiElementBuilders.MakeColumn(Items)
-                                                                             ]);
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeButton(
+      Tui.TuiControlId.Create(1),
+      'Settings',
+      Tui.TuiAction.Create(1)
+    )
+  );
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeButton(
+      Tui.TuiControlId.Create(4),
+      'Stop server (Alt+X)',
+      Tui.TuiAction.Create(4)
+    )
+  );
+  const Main: Tui.TuiElement := Tui.TuiElementBuilders.MakeOverlay(
+    'Dungeon server', [
+      Tui.TuiElementBuilders.MakeColumn(Items)
+    ]
+  );
   if State.SettingsOpen then
-    const Settings: TuiElement := TuiElementBuilders.MakeOverlay('Defaults for new worlds', [
-                                                                                              TuiElementBuilders.MakeColumn([
-                                                                                                                              TuiElementBuilders.MakeLabel('Seed: -2147483648 through 2147483647'),
-                                                                                                                              TuiElementBuilders.MakeInput(TuiControlId.Create(10), State.SeedText, State.SeedCaret, TuiAction.Create(10)),
-                                                                                                                              TuiElementBuilders.MakeLabel('Entrance region: 1 through 16 chunks'),
-                                                                                                                              TuiElementBuilders.MakeInput(TuiControlId.Create(11), State.RegionText, State.RegionCaret, TuiAction.Create(11)),
-                                                                                                                              TuiElementBuilders.MakeLabel(State.SettingsError),
-                                                                                                                              TuiElementBuilders.MakeButton(TuiControlId.Create(2), 'Save defaults', TuiAction.Create(2)),
-                                                                                                                              TuiElementBuilders.MakeButton(TuiControlId.Create(3), 'Cancel', TuiAction.Create(3))
-                                                                                                                            ])
-                                                                                            ]);
-    return TuiElementBuilders.MakeDesktop(ConsoleFocus(State), [Main, Settings]);
+    const Settings: Tui.TuiElement := Tui.TuiElementBuilders.MakeOverlay(
+      'Defaults for new worlds', [
+        Tui.TuiElementBuilders.MakeColumn([
+          Tui.TuiElementBuilders.MakeLabel('Seed: -2147483648 through 2147483647'),
+          Tui.TuiElementBuilders.MakeInput(
+            Tui.TuiControlId.Create(10),
+            State.SeedText,
+            State.SeedCaret,
+            Tui.TuiAction.Create(10)
+          ),
+          Tui.TuiElementBuilders.MakeLabel('Entrance region: 1 through 16 chunks'),
+          Tui.TuiElementBuilders.MakeInput(
+            Tui.TuiControlId.Create(11),
+            State.RegionText,
+            State.RegionCaret,
+            Tui.TuiAction.Create(11)
+          ),
+          Tui.TuiElementBuilders.MakeLabel(State.SettingsError),
+          Tui.TuiElementBuilders.MakeButton(
+            Tui.TuiControlId.Create(2),
+            'Save defaults',
+            Tui.TuiAction.Create(2)
+          ),
+          Tui.TuiElementBuilders.MakeButton(
+            Tui.TuiControlId.Create(3),
+            'Cancel',
+            Tui.TuiAction.Create(3)
+          )
+        ])
+      ]
+    );
+    return Tui.TuiElementBuilders.MakeDesktop(ConsoleFocus(State), [Main, Settings]);
   end if;
 
-  return TuiElementBuilders.MakeDesktop(ConsoleFocus(State), [Main]);
+  return Tui.TuiElementBuilders.MakeDesktop(ConsoleFocus(State), [Main]);
 end function;
 
-function ViewConsole(State: ConsoleState): TuiElement;
+function ViewConsole(State: ConsoleState): Tui.TuiElement;
 begin
   return ViewServerConsole(State.Model);
 end function;
 
 // Runs the live console; closing it cancels and joins the listener and connected session.
-public function RunServerConsole(Host: string; Port: integer; Config: ServerConfig): integer;
+public function RunServerConsole(Host: string; Port: integer; Config: ConfigUnit.ServerConfig): integer;
 begin
-  const Settings: ServerWorldConfig := ReadServerDefaults(Config.ConfigPath).Unwrap();
-  const Events: channel of ServerLogEvent := CreateChannel(256);
-  const State: ConsoleState := ConsoleState(Model := NewConsoleModel(Config.ConfigPath, Settings), Host := Host, Port := Port, Config := Config with Logs := Some(Events); end with, Events := Events);
-  discard TuiApplication.RunWithBackground(State, Events, UpdateConsole, UpdateConsoleEvent, ViewConsole);
+  const Settings: RuntimeData.ServerWorldConfig := RuntimeData.ReadServerDefaults(
+    Config.ConfigPath
+  ).Unwrap();
+  const Events: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const State: ConsoleState := ConsoleState(
+    Model := Model.NewConsoleModel(Config.ConfigPath, Settings),
+    Host := Host,
+    Port := Port,
+    Config := Config with Logs := Some(Events); end with,
+    Events := Events
+  );
+  discard Tui.TuiApplication.RunWithBackground(
+    State,
+    Events,
+    UpdateConsole,
+    UpdateConsoleEvent,
+    ViewConsole
+  );
   return 0;
 end function;
 end unit;

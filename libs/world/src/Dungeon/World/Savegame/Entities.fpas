@@ -1,34 +1,32 @@
 // Savegame JSON of items and opponents.
 unit Dungeon.World.Savegame.Entities;
 
-uses
-  Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Items, Dungeon.World.Names, Std.Conv, Std.Json,
-  Std.Json.Fields;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Items as ItemRules, Dungeon.World.Names as Names, Std.Conv as Conv, Std.Json as Json, Std.Json.Fields as JsonFields;
 
-function EquipmentSlotName(Value: EquipmentSlot): string;
+function EquipmentSlotName(Value: ItemRules.EquipmentSlot): string;
 begin
   case Value of
-    when EquipmentSlot.Weapon:
+    when ItemRules.EquipmentSlot.Weapon:
       begin
         return 'weapon';
       end;
-    when EquipmentSlot.Body:
+    when ItemRules.EquipmentSlot.Body:
       begin
         return 'body';
       end;
   end case;
 end function;
 
-function DecodeEquipmentSlot(Value: string): result of (EquipmentSlot, string);
+function DecodeEquipmentSlot(Value: string): result of (ItemRules.EquipmentSlot, string);
 begin
   case Value of
     when 'weapon':
       begin
-        return Ok(EquipmentSlot.Weapon);
+        return Ok(ItemRules.EquipmentSlot.Weapon);
       end;
     when 'body':
       begin
-        return Ok(EquipmentSlot.Body);
+        return Ok(ItemRules.EquipmentSlot.Body);
       end;
     else
       begin
@@ -37,27 +35,35 @@ begin
   end case;
 end function;
 
-function EncodeItemLocation(Value: ItemLocation): JsonValue;
+function EncodeItemLocation(Value: ItemRules.ItemLocation): Json.JsonValue;
 begin
   case Value of
-    when ItemLocation.InInterior(const AreaId, const Position):
+    when ItemRules.ItemLocation.InInterior(const AreaId, const Position):
       begin
-        return JsonValue.Object(['kind': JsonValue.String('interior'), 'area_id': JsonValue.String(AreaId), 'x': JsonValue.Number(IntToReal(Position.X)), 'y': JsonValue.Number(IntToReal(Position.Y))]);
+        return Json.JsonValue.Object([
+          'kind': Json.JsonValue.String('interior'),
+          'area_id': Json.JsonValue.String(AreaId),
+          'x': Json.JsonValue.Number(Conv.IntToReal(Position.X)),
+          'y': Json.JsonValue.Number(Conv.IntToReal(Position.Y))
+        ]);
       end;
-    when ItemLocation.CarriedByPlayer:
+    when ItemRules.ItemLocation.CarriedByPlayer:
       begin
-        return JsonValue.Object(['kind': JsonValue.String('carried')]);
+        return Json.JsonValue.Object(['kind': Json.JsonValue.String('carried')]);
       end;
-    when ItemLocation.EquippedByPlayer(const Slot):
+    when ItemRules.ItemLocation.EquippedByPlayer(const Slot):
       begin
-        return JsonValue.Object(['kind': JsonValue.String('equipped'), 'slot': JsonValue.String(EquipmentSlotName(Slot))]);
+        return Json.JsonValue.Object([
+          'kind': Json.JsonValue.String('equipped'),
+          'slot': Json.JsonValue.String(EquipmentSlotName(Slot))
+        ]);
       end;
   end case;
 end function;
 
-function DecodeItemLocation(Fields: dict of string to JsonValue): result of (ItemLocation, string);
+function DecodeItemLocation(Fields: dict of string to Json.JsonValue): result of (ItemRules.ItemLocation, string);
 begin
-  case try StringField(Fields, 'kind') of
+  case try JsonFields.StringField(Fields, 'kind') of
     when 'interior':
       begin
         if Fields.Length() <> 4 then
@@ -66,7 +72,15 @@ begin
           end;
         end if;
 
-        return Ok(ItemLocation.InInterior(try StringField(Fields, 'area_id'), InteriorPosition(X := try IntegerField(Fields, 'x'), Y := try IntegerField(Fields, 'y'))));
+        return Ok(
+          ItemRules.ItemLocation.InInterior(
+            try JsonFields.StringField(Fields, 'area_id'),
+            Coordinates.InteriorPosition(
+              X := try JsonFields.IntegerField(Fields, 'x'),
+              Y := try JsonFields.IntegerField(Fields, 'y')
+            )
+          )
+        );
       end;
     when 'carried':
       begin
@@ -76,7 +90,7 @@ begin
           end;
         end if;
 
-        return Ok(ItemLocation.CarriedByPlayer);
+        return Ok(ItemRules.ItemLocation.CarriedByPlayer);
       end;
     when 'equipped':
       begin
@@ -86,7 +100,11 @@ begin
           end;
         end if;
 
-        return Ok(ItemLocation.EquippedByPlayer(try DecodeEquipmentSlot(try StringField(Fields, 'slot'))));
+        return Ok(
+          ItemRules.ItemLocation.EquippedByPlayer(
+            try DecodeEquipmentSlot(try JsonFields.StringField(Fields, 'slot'))
+          )
+        );
       end;
     else
       begin
@@ -96,12 +114,18 @@ begin
 end function;
 
 // Encodes every item with identity, kind, and location.
-public function EncodeItems(Items: array of GameItem): array of JsonValue;
+public function EncodeItems(Items: array of ItemRules.GameItem): array of Json.JsonValue;
 begin
-  var Values: array of JsonValue := [];
-  for Item: GameItem in Items do
+  var Values: array of Json.JsonValue := [];
+  for Item: ItemRules.GameItem in Items do
     begin
-      Values.Push(JsonValue.Object(['id': JsonValue.String(Item.Id), 'kind': JsonValue.String(ItemKindName(Item.Kind)), 'location': EncodeItemLocation(Item.Location)]));
+      Values.PushInPlace(
+        Json.JsonValue.Object([
+          'id': Json.JsonValue.String(Item.Id),
+          'kind': Json.JsonValue.String(Names.ItemKindName(Item.Kind)),
+          'location': EncodeItemLocation(Item.Location)
+        ])
+      );
     end;
   end for;
 
@@ -109,26 +133,29 @@ begin
 end function;
 
 // Decodes exact item objects; the game state validates the complete set later.
-public function DecodeItems(Items: array of JsonValue): result of (array of GameItem, string);
+public function DecodeItems(Items: array of Json.JsonValue): result of (array of ItemRules.GameItem, string);
 begin
-  var Values: array of GameItem := [];
-  for Item: JsonValue in Items do
+  var Values: array of ItemRules.GameItem := [];
+  for Item: Json.JsonValue in Items do
     begin
-      if Item is JsonValue.Object(const Fields) then
-        begin
+      case Item of
+        when Json.JsonValue.Object(const Fields):
           if Fields.Length() <> 3 then
             begin
               return Error('savegame item has an unexpected field set');
             end;
           end if;
 
-          Values.Push(GameItem(Id := try StringField(Fields, 'id'), Kind := try DecodeItemKind(try StringField(Fields, 'kind')), Location := try DecodeItemLocation(try ObjectField(Fields, 'location'))));
-        end;
-      else
-        begin
+          Values.PushInPlace(
+            ItemRules.GameItem(
+              Id := try JsonFields.StringField(Fields, 'id'),
+              Kind := try Names.DecodeItemKind(try JsonFields.StringField(Fields, 'kind')),
+              Location := try DecodeItemLocation(try JsonFields.ObjectField(Fields, 'location'))
+            )
+          );
+        when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
           return Error('savegame items must contain only objects');
-        end;
-      end if;
+      end case;
     end;
   end for;
 
@@ -136,12 +163,22 @@ begin
 end function;
 
 // Encodes every opponent, including destroyed ones.
-public function EncodeHostiles(Hostiles: array of GameHostile): array of JsonValue;
+public function EncodeHostiles(Hostiles: array of HostileRules.GameHostile): array of Json.JsonValue;
 begin
-  var Values: array of JsonValue := [];
-  for Hostile: GameHostile in Hostiles do
+  var Values: array of Json.JsonValue := [];
+  for Hostile: HostileRules.GameHostile in Hostiles do
     begin
-      Values.Push(JsonValue.Object(['id': JsonValue.String(Hostile.Id), 'kind': JsonValue.String(HostileKindName(Hostile.Kind)), 'area_id': JsonValue.String(Hostile.AreaId), 'x': JsonValue.Number(IntToReal(Hostile.Position.X)), 'y': JsonValue.Number(IntToReal(Hostile.Position.Y)), 'health': JsonValue.Number(IntToReal(Hostile.Health)), 'alerted': JsonValue.Bool(Hostile.Alerted)]));
+      Values.PushInPlace(
+        Json.JsonValue.Object([
+          'id': Json.JsonValue.String(Hostile.Id),
+          'kind': Json.JsonValue.String(Names.HostileKindName(Hostile.Kind)),
+          'area_id': Json.JsonValue.String(Hostile.AreaId),
+          'x': Json.JsonValue.Number(Conv.IntToReal(Hostile.Position.X)),
+          'y': Json.JsonValue.Number(Conv.IntToReal(Hostile.Position.Y)),
+          'health': Json.JsonValue.Number(Conv.IntToReal(Hostile.Health)),
+          'alerted': Json.JsonValue.Bool(Hostile.Alerted)
+        ])
+      );
     end;
   end for;
 
@@ -149,27 +186,34 @@ begin
 end function;
 
 // Decodes exact opponent objects; the game state validates them later.
-public function DecodeHostiles(Items: array of JsonValue): result of (array of GameHostile, string);
+public function DecodeHostiles(Items: array of Json.JsonValue): result of (array of HostileRules.GameHostile, string);
 begin
-  var Hostiles: array of GameHostile := [];
-  for Item: JsonValue in Items do
+  var Hostiles: array of HostileRules.GameHostile := [];
+  for Item: Json.JsonValue in Items do
     begin
-      if Item is JsonValue.Object(const Fields) then
-        begin
+      case Item of
+        when Json.JsonValue.Object(const Fields):
           if Fields.Length() <> 7 then
             begin
               return Error('savegame opponent has an unexpected field set');
             end;
           end if;
-          const Position: InteriorPosition := InteriorPosition(X := try IntegerField(Fields, 'x'), Y := try IntegerField(Fields, 'y'));
-          const Hostile: GameHostile := GameHostile(Id := try StringField(Fields, 'id'), Kind := try DecodeHostileKind(try StringField(Fields, 'kind')), AreaId := try StringField(Fields, 'area_id'), Position := Position, Health := try IntegerField(Fields, 'health'), Alerted := try BooleanField(Fields, 'alerted'));
-          Hostiles.Push(Hostile);
-        end;
-      else
-        begin
+          const Position: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+            X := try JsonFields.IntegerField(Fields, 'x'),
+            Y := try JsonFields.IntegerField(Fields, 'y')
+          );
+          const Hostile: HostileRules.GameHostile := HostileRules.GameHostile(
+            Id := try JsonFields.StringField(Fields, 'id'),
+            Kind := try Names.DecodeHostileKind(try JsonFields.StringField(Fields, 'kind')),
+            AreaId := try JsonFields.StringField(Fields, 'area_id'),
+            Position := Position,
+            Health := try JsonFields.IntegerField(Fields, 'health'),
+            Alerted := try JsonFields.BooleanField(Fields, 'alerted')
+          );
+          Hostiles.PushInPlace(Hostile);
+        when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
           return Error('savegame opponents must be objects');
-        end;
-      end if;
+      end case;
     end;
   end for;
 

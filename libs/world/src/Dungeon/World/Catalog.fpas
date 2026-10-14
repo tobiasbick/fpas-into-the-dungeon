@@ -1,9 +1,7 @@
 // Non-destructive inspection, existing-only opening, and exclusive creation of worlds.
 unit Dungeon.World.Catalog;
 
-uses
-  Dungeon.Terrain, Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Encoding,
-  Dungeon.World.Savegame, Dungeon.World.Savegame.Errors, Std.Conv, Std.Fs, Std.Path;
+uses Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Dungeon.World.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps;
 
 // New-world parameter policy; the existing generator also supports wider stored seeds.
 public const MinimumWorldSeed: integer := -2147483648;
@@ -19,7 +17,7 @@ end enum;
 // One existing world, including unusable entries; inspection never changes its files.
 public type WorldEntry = record
   public Id: string;
-  public Metadata: option of WorldMetadata;
+  public Metadata: option of Terrain.WorldMetadata;
   // ready, incompatible, or storage_error.
   public Status: string;
   // missing, available, incompatible, storage_error, world_data_error, or unknown.
@@ -28,17 +26,14 @@ public type WorldEntry = record
 end record;
 
 // Opens only current valid metadata. It never creates directories, chunks, levels, or saves.
-public function OpenExistingWorld(Root: string; Id: string; CacheLimit: integer): result of (WorldSession, WorldAccessFailure);
+public function OpenExistingWorld(Root: string; Id: string; CacheLimit: integer): result of (WorldUnit.WorldSession, WorldAccessFailure);
 begin
-  if ValidateWorldId(Id) is Error(const Reason) then
-    begin
+  case Encoding.ValidateWorldId(Id) of
+    when Error(const Reason):
       return Error(WorldAccessFailure.Incompatible(Reason));
-    end;
-  else
-    begin
+    when Ok(_):
       null;
-    end;
-  end if;
+  end case;
 
   if CacheLimit < 1 then
     begin
@@ -46,45 +41,53 @@ begin
     end;
   end if;
 
-  if not Std.Fs.IsDir(Root) then
+  if not Fs.IsDir(Root) then
     begin
       return Error(WorldAccessFailure.Io('worlds root is not a directory'));
     end;
   end if;
-  const Directory: string := Std.Path.Join([Root, Id]);
-  if not Std.Fs.Exists(Directory) then
+  const Directory: string := PathOps.Join([Root, Id]);
+  if not Fs.Exists(Directory) then
     begin
       return Error(WorldAccessFailure.Missing);
     end;
   end if;
-  const Path: string := Std.Path.Join([Directory, 'world.json']);
-  if not Std.Fs.IsDir(Directory) or (Std.Fs.Exists(Path) and not Std.Fs.IsFile(Path)) then
+  const Path: string := PathOps.Join([Directory, 'world.json']);
+  if not Fs.IsDir(Directory) or (Fs.Exists(Path) and not Fs.IsFile(Path)) then
     begin
       return Error(WorldAccessFailure.Io('world storage path has the wrong type'));
     end;
   end if;
 
-  if not Std.Fs.Exists(Path) then
+  if not Fs.Exists(Path) then
     begin
       return Error(WorldAccessFailure.Incompatible('world metadata is missing'));
     end;
   end if;
 
-  case Std.Fs.ReadText(Path) of
+  case Fs.ReadText(Path) of
     when Error(const Reason):
       begin
         return Error(WorldAccessFailure.Io(Reason));
       end;
     when Ok(const Text):
       begin
-        case DecodeMetadata(Text, Id) of
+        case Encoding.DecodeMetadata(Text, Id) of
           when Error(const Reason):
             begin
               return Error(WorldAccessFailure.Incompatible(Reason));
             end;
           when Ok(const Metadata):
             begin
-              return Ok(WorldSession(Directory := Directory, Metadata := Metadata, Cache := [], Clock := 0, CacheLimit := CacheLimit));
+              return Ok(
+                WorldUnit.WorldSession(
+                  Directory := Directory,
+                  Metadata := Metadata,
+                  Cache := [],
+                  Clock := 0,
+                  CacheLimit := CacheLimit
+                )
+              );
             end;
         end case;
       end;
@@ -94,7 +97,13 @@ end function;
 // Inspects metadata and the complete save without deleting invalid content or generating levels.
 public function InspectWorld(Root: string; Id: string; CacheLimit: integer): WorldEntry;
 begin
-  var Entry: WorldEntry := WorldEntry(Id := Id, Metadata := None, Status := 'incompatible', SaveStatus := 'unknown', Reason := '');
+  var Entry: WorldEntry := WorldEntry(
+    Id := Id,
+    Metadata := None,
+    Status := 'incompatible',
+    SaveStatus := 'unknown',
+    Reason := ''
+  );
   case OpenExistingWorld(Root, Id, CacheLimit) of
     when Error(const Failure):
       begin
@@ -118,35 +127,32 @@ begin
       begin
         Entry.Metadata := Some(World.Metadata);
         Entry.Status := 'ready';
-        case LoadSaveGame(World) of
+        case Savegame.LoadSaveGame(World) of
           when Error(const Failure):
             begin
               Entry.SaveStatus := 'storage_error';
               Entry.Reason := 'Saved game storage failed. Check storage access.';
-              if Failure is PersistenceFailure.Level(const Level) then
-                begin
+              case Failure of
+                when Errors.PersistenceFailure.Level(const Level):
                   Entry.SaveStatus := 'world_data_error';
                   Entry.Reason := 'A referenced dungeon level is missing, invalid, or unreadable.';
-                end;
-              else
-                begin
+                when Errors.PersistenceFailure.InvalidState(_), Errors.PersistenceFailure.Io(_):
                   null;
-                end;
-              end if;
+              end case;
             end;
           when Ok(const Loaded):
             begin
               case Loaded of
-                when SaveGameLoad.Missing:
+                when Savegame.SaveGameLoad.Missing:
                   begin
                     Entry.SaveStatus := 'missing';
                   end;
-                when SaveGameLoad.Invalid(const Reason):
+                when Savegame.SaveGameLoad.Invalid(const Reason):
                   begin
                     Entry.SaveStatus := 'incompatible';
                     Entry.Reason := Reason + '. Recreate the save or start over.';
                   end;
-                when SaveGameLoad.Loaded(const State, const View):
+                when Savegame.SaveGameLoad.Loaded(const State, const View):
                   begin
                     Entry.SaveStatus := 'available';
                   end;
@@ -162,27 +168,24 @@ end function;
 // Lists canonical world directories in stable order. A root I/O failure fails the listing.
 public function ListWorlds(Root: string; CacheLimit: integer): result of (array of WorldEntry, string);
 begin
-  if not Std.Fs.IsDir(Root) then
+  if not Fs.IsDir(Root) then
     begin
       return Error('worlds root is missing or not a directory');
     end;
   end if;
-  const Paths: array of string := try Std.Fs.ReadDir(Root);
+  const Paths: array of string := try Fs.ReadDir(Root);
   var Entries: array of WorldEntry := [];
   for Path: string in Paths do
     begin
-      const Id: string := Std.Path.BaseName(Path);
-      if Std.Fs.IsDir(Path) then
+      const Id: string := PathOps.BaseName(Path);
+      if Fs.IsDir(Path) then
         begin
-          if ValidateWorldId(Id) is Ok(const Valid) then
-            begin
-              Entries.Push(InspectWorld(Root, Id, CacheLimit));
-            end;
-          else
-            begin
+          case Encoding.ValidateWorldId(Id) of
+            when Ok(const Valid):
+              Entries.PushInPlace(InspectWorld(Root, Id, CacheLimit));
+            when Error(_):
               null;
-            end;
-          end if;
+          end case;
         end;
       end if;
     end;
@@ -192,7 +195,7 @@ begin
 end function;
 
 // Allocates a new ID with exclusive directory creation; an existing identity is never reused.
-public function CreateWorld(Root: string; Seed: integer; RegionChunks: integer; CacheLimit: integer): result of (WorldSession, string);
+public function CreateWorld(Root: string; Seed: integer; RegionChunks: integer; CacheLimit: integer): result of (WorldUnit.WorldSession, string);
 begin
   if (Seed < MinimumWorldSeed) or (Seed > MaximumWorldSeed) then
     begin
@@ -206,29 +209,43 @@ begin
     end;
   end if;
   // Validate all generation parameters before creating any storage.
-  const Prepared: WorldMetadata := try NewWorldMetadata('pending', Seed, RegionChunks);
-  const Ready: boolean := try Std.Fs.CreateDirAll(Root);
+  const Prepared: Terrain.WorldMetadata := try Placement.NewWorldMetadata(
+    'pending',
+    Seed,
+    RegionChunks
+  );
+  const Ready: boolean := try Fs.CreateDirAll(Root);
   var Number: integer := 1;
   while Number < 1000000 do
     begin
-      const Id: string := 'world-' + IntToStr(Number);
-      const Directory: string := Std.Path.Join([Root, Id]);
-      if not Std.Fs.Exists(Directory) then
+      const Id: string := 'world-' + Conv.IntToStr(Number);
+      const Directory: string := PathOps.Join([Root, Id]);
+      if not Fs.Exists(Directory) then
         begin
-          case Std.Fs.CreateDir(Directory) of
+          case Fs.CreateDir(Directory) of
             when Ok(const Created):
               begin
-                const Metadata: WorldMetadata := Prepared with Id := Id; OutdoorAreaId := Id +
-                                                                                          ':outdoor'; end with;
-                const Written: boolean := try Std.Fs.WriteTextAtomic(Std.Path.Join([
-                                                                                     Directory,
-                                                                                     'world.json'
-                                                                                   ]), EncodeMetadata(Metadata));
-                return Ok(WorldSession(Directory := Directory, Metadata := Metadata, Cache := [], Clock := 0, CacheLimit := CacheLimit));
+                const Metadata: Terrain.WorldMetadata := Prepared with Id := Id; OutdoorAreaId := Id +
+                  ':outdoor'; end with;
+                const Written: boolean := try Fs.WriteTextAtomic(
+                  PathOps.Join([
+                    Directory,
+                    'world.json'
+                  ]), Encoding.EncodeMetadata(Metadata)
+                );
+                return Ok(
+                  WorldUnit.WorldSession(
+                    Directory := Directory,
+                    Metadata := Metadata,
+                    Cache := [],
+                    Clock := 0,
+                    CacheLimit := CacheLimit
+                  )
+                );
               end;
             when Error(const Reason):
               begin
-                if not Std.Fs.Exists(Directory) then
+                if not Fs.Exists(Directory) then
                   begin
                     return Error(Reason);
                   end;

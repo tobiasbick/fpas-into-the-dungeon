@@ -1,10 +1,7 @@
 // Turn-based combat: player actions, dice, opponent perception, pathfinding, attacks, and defeat.
 unit Dungeon.Combat;
 
-uses
-  Dungeon.Coordinates, Dungeon.Equipment, Dungeon.Exploration.Sight, Dungeon.GameState,
-  Dungeon.Hostiles, Dungeon.Interaction, Dungeon.Interior, Dungeon.Movement, Dungeon.Random,
-  Dungeon.Terrain, Std.Conv, Std.Math;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.Exploration.Sight as Sight, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interaction as Interaction, Dungeon.Interior as Interior, Dungeon.Movement as Movement, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Math as Math;
 
 // Upper bound of messages and of structured events reported for one resolved turn.
 public const MaximumTurnLogEntries: integer := 8;
@@ -15,7 +12,7 @@ public const RestlessSkeletonDamageSides: integer := 4;
 
 // One time-consuming player intention; turning and interaction never consume a turn.
 public type TurnAction = enum
-  Step(Direction: RelativeStep);
+  Step(Direction: Coordinates.RelativeStep);
   Attack;
   Wait;
   // Wears a carried item; an item already worn in its slot returns to the inventory.
@@ -43,26 +40,26 @@ end record;
 
 // Result of one accepted turn. Defeated ends the game session and carries no state.
 public type TurnOutcome = enum
-  Continued(State: GameState; Log: array of string; Events: array of CombatEvent);
+  Continued(State: GameState.GameState; Log: array of string; Events: array of CombatEvent);
   Defeated(Log: array of string);
 end enum;
 
 type DiceRoll = record
-  State: GameState;
+  State: GameState.GameState;
   Value: integer;
 end record;
 
 type TurnProgress = record
-  State: GameState;
+  State: GameState.GameState;
   Log: array of string;
   Events: array of CombatEvent;
   PlayerDefeated: boolean;
 end record;
 
 // Advances the persisted linear congruential generator and returns 1 through Sides.
-function Roll(State: GameState; Sides: integer): DiceRoll;
+function Roll(State: GameState.GameState; Sides: integer): DiceRoll;
 begin
-  const Draw: RandomDraw := DrawBelow(State.RandomState, Sides);
+  const Draw: Random.RandomDraw := Random.DrawBelow(State.RandomState, Sides);
   return DiceRoll(State := State with RandomState := Draw.State; end with, Value := Draw.Value + 1);
 end function;
 
@@ -71,7 +68,7 @@ begin
   var Log: array of string := Progress.Log;
   if Log.Length() < MaximumTurnLogEntries then
     begin
-      Log.Push(Message);
+      Log.PushInPlace(Message);
     end;
   end if;
 
@@ -83,48 +80,48 @@ begin
   var Events: array of CombatEvent := Progress.Events;
   if Events.Length() < MaximumTurnLogEntries then
     begin
-      Events.Push(CombatEvent(Kind := Kind, Amount := Amount));
+      Events.PushInPlace(CombatEvent(Kind := Kind, Amount := Amount));
     end;
   end if;
 
   return Progress with Events := Events; end with;
 end function;
 
-function WithHostile(State: GameState; Index: integer; Hostile: GameHostile): GameState;
+function WithHostile(State: GameState.GameState; Index: integer; Hostile: HostileRules.GameHostile): GameState.GameState;
 begin
-  var Hostiles: array of GameHostile := State.Hostiles;
+  var Hostiles: array of HostileRules.GameHostile := State.Hostiles;
   Hostiles[Index] := Hostile;
   return State with Hostiles := Hostiles; end with;
 end function;
 
-function Distance(Left: InteriorPosition; Right: InteriorPosition): integer;
+function Distance(Left: Coordinates.InteriorPosition; Right: Coordinates.InteriorPosition): integer;
 begin
-  return Std.Math.Max(Std.Math.Abs(Left.X - Right.X), Std.Math.Abs(Left.Y - Right.Y));
+  return Math.Max(Math.Abs(Left.X - Right.X), Math.Abs(Left.Y - Right.Y));
 end function;
 
-function IsOrthogonallyAdjacent(Left: InteriorPosition; Right: InteriorPosition): boolean;
+function IsOrthogonallyAdjacent(Left: Coordinates.InteriorPosition; Right: Coordinates.InteriorPosition): boolean;
 begin
-  return (Std.Math.Abs(Left.X - Right.X) + Std.Math.Abs(Left.Y - Right.Y)) = 1;
+  return (Math.Abs(Left.X - Right.X) + Math.Abs(Left.Y - Right.Y)) = 1;
 end function;
 
 // Either direction of the Bresenham line suffices, so perception is symmetric.
-function CanSee(Map: InteriorMap; Hostile: InteriorPosition; Player: InteriorPosition): boolean;
+function CanSee(Map: Interior.InteriorMap; Hostile: Coordinates.InteriorPosition; Player: Coordinates.InteriorPosition): boolean;
 begin
-  if Distance(Hostile, Player) > HostileSightRange then
+  if Distance(Hostile, Player) > HostileRules.HostileSightRange then
     begin
       return false;
     end;
   end if;
 
-  return HasLineOfSight(Map, Hostile, Player) or HasLineOfSight(Map, Player, Hostile);
+  return Sight.HasLineOfSight(Map, Hostile, Player) or Sight.HasLineOfSight(Map, Player, Hostile);
 end function;
 
-function Blocked(Map: InteriorMap; State: GameState; Position: InteriorPosition): boolean;
+function Blocked(Map: Interior.InteriorMap; State: GameState.GameState; Position: Coordinates.InteriorPosition): boolean;
 begin
-  case InteriorCellAt(Map, Position) of
+  case Interior.InteriorCellAt(Map, Position) of
     when Ok(const Cell):
       begin
-        if Cell = InteriorCellKind.Wall then
+        if Cell = Interior.InteriorCellKind.Wall then
           begin
             return true;
           end;
@@ -136,33 +133,35 @@ begin
       end;
   end case;
 
-  return StandingHostileAt(State, State.AreaId, Position) >= 0;
+  return GameState.StandingHostileAt(State, State.AreaId, Position) >= 0;
 end function;
 
 // Returns the first field of a shortest path from Start to Goal, or Start when no path exists.
 // Neighbors are explored north, east, south, west, so equal paths resolve deterministically.
 function NextStepToward(
-  Map: InteriorMap;
-  State: GameState;
-  Start: InteriorPosition;
-  Goal: InteriorPosition
-): InteriorPosition;
+  Map: Interior.InteriorMap;
+  State: GameState.GameState;
+  Start: Coordinates.InteriorPosition;
+  Goal: Coordinates.InteriorPosition
+): Coordinates.InteriorPosition;
 begin
-  const Offsets: array of InteriorPosition := [
-                                                InteriorPosition(X := 0, Y := -1),
-                                                InteriorPosition(X := 1, Y := 0),
-                                                InteriorPosition(X := 0, Y := 1),
-                                                InteriorPosition(X := -1, Y := 0)
-                                              ];
+  const Offsets: array of Coordinates.InteriorPosition := [
+    Coordinates.InteriorPosition(X := 0, Y := -1),
+    Coordinates.InteriorPosition(X := 1, Y := 0),
+    Coordinates.InteriorPosition(X := 0, Y := 1),
+    Coordinates.InteriorPosition(X := -1, Y := 0)
+  ];
   const FieldCount: integer := Map.Width * Map.Height;
   // Each visited field remembers the first step taken from Start to reach it.
   var FirstStep: array of integer := array.Fill(-1, FieldCount);
-  var Queue: array of InteriorPosition := [];
-  for Offset: InteriorPosition in Offsets do
+  var Queue: array of Coordinates.InteriorPosition := [];
+  for Offset: Coordinates.InteriorPosition in Offsets do
     begin
-      const Candidate: InteriorPosition := InteriorPosition(X := Start.X + Offset.X, Y := Start.Y +
-                                                                                          Offset.Y);
-      if SamePosition(Candidate, Goal) then
+      const Candidate: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+        X := Start.X + Offset.X, Y := Start.Y +
+        Offset.Y
+      );
+      if Coordinates.SamePosition(Candidate, Goal) then
         begin
           return Candidate;
         end;
@@ -174,7 +173,7 @@ begin
           if FirstStep[Index] < 0 then
             begin
               FirstStep[Index] := Index;
-              Queue.Push(Candidate);
+              Queue.PushInPlace(Candidate);
             end;
           end if;
         end;
@@ -184,27 +183,31 @@ begin
   var ReadIndex: integer := 0;
   while ReadIndex < Queue.Length() do
     begin
-      const Current: InteriorPosition := Queue[ReadIndex];
+      const Current: Coordinates.InteriorPosition := Queue[ReadIndex];
       const CurrentFirst: integer := FirstStep[(Current.Y * Map.Width) + Current.X];
       ReadIndex := ReadIndex + 1;
-      for Offset: InteriorPosition in Offsets do
+      for Offset: Coordinates.InteriorPosition in Offsets do
         begin
-          const Candidate: InteriorPosition := InteriorPosition(X := Current.X + Offset.X, Y := Current.Y +
-                                                                                                Offset.Y);
-          if SamePosition(Candidate, Goal) then
+          const Candidate: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+            X := Current.X + Offset.X, Y := Current.Y +
+            Offset.Y
+          );
+          if Coordinates.SamePosition(Candidate, Goal) then
             begin
-              return InteriorPosition(X := CurrentFirst mod Map.Width, Y := CurrentFirst div
-                                                                            Map.Width);
+              return Coordinates.InteriorPosition(
+                X := CurrentFirst mod Map.Width, Y := CurrentFirst div
+                Map.Width
+              );
             end;
           end if;
 
-          if not Blocked(Map, State, Candidate) and not SamePosition(Candidate, Start) then
+          if not Blocked(Map, State, Candidate) and not Coordinates.SamePosition(Candidate, Start) then
             begin
               const Index: integer := (Candidate.Y * Map.Width) + Candidate.X;
               if FirstStep[Index] < 0 then
                 begin
                   FirstStep[Index] := CurrentFirst;
-                  Queue.Push(Candidate);
+                  Queue.PushInPlace(Candidate);
                 end;
               end if;
             end;
@@ -221,12 +224,12 @@ end function;
 function HostileTurn(
   Progress: TurnProgress;
   Index: integer;
-  Map: InteriorMap;
-  Player: InteriorPosition
+  Map: Interior.InteriorMap;
+  Player: Coordinates.InteriorPosition
 ): TurnProgress;
 begin
-  const Hostile: GameHostile := Progress.State.Hostiles[Index];
-  const Name: string := HostileDisplayName(Hostile.Kind);
+  const Hostile: HostileRules.GameHostile := Progress.State.Hostiles[Index];
+  const Name: string := HostileRules.HostileDisplayName(Hostile.Kind);
   if not Hostile.Alerted then
     begin
       if not CanSee(Map, Hostile.Position, Player) then
@@ -235,8 +238,14 @@ begin
         end;
       end if;
 
-      return Logged(Progress with State := WithHostile(Progress.State, Index, Hostile with Alerted := true; end with); end with, ('The ' + Name) +
-                                                                                                                                 ' notices you.');
+      return Logged(
+        Progress with State := WithHostile(
+          Progress.State,
+          Index,
+          Hostile with Alerted := true; end with
+        ); end with, ('The ' + Name) +
+        ' notices you.'
+      );
     end;
   end if;
 
@@ -244,16 +253,27 @@ begin
     begin
       const HitRoll: DiceRoll := Roll(Progress.State, 20);
       // Armor raises the roll the opponent needs.
-      if HitRoll.Value < RestlessSkeletonHitThreshold + DeriveCharacterValues(Progress.State).Armor then
+      if HitRoll.Value <
+        RestlessSkeletonHitThreshold + Equipment.DeriveCharacterValues(Progress.State).Armor
+      then
         begin
-          return Happened(Logged(Progress with State := HitRoll.State; end with, ('The ' + Name) +
-                                                                                 ' misses you.'), CombatEventKind.HostileMiss, 0);
+          return Happened(
+            Logged(
+              Progress with State := HitRoll.State; end with, ('The ' + Name) +
+              ' misses you.'
+            ), CombatEventKind.HostileMiss, 0
+          );
         end;
       end if;
       const DamageRoll: DiceRoll := Roll(HitRoll.State, RestlessSkeletonDamageSides);
-      const Health: integer := Std.Math.Max(0, DamageRoll.State.Health - DamageRoll.Value);
-      const Hurt: TurnProgress := Happened(Logged(Progress with State := (DamageRoll.State with Health := Std.Math.Max(1, Health); end with); end with, ((('The ' + Name) + ' strikes you for ') + IntToStr(DamageRoll.Value)) +
-                                                                                                                                                        '.'), CombatEventKind.HostileHit, DamageRoll.Value);
+      const Health: integer := Math.Max(0, DamageRoll.State.Health - DamageRoll.Value);
+      const Hurt: TurnProgress := Happened(
+        Logged(
+          Progress with State := (DamageRoll.State with Health := Math.Max(1, Health); end with); end with,
+          ((('The ' + Name) + ' strikes you for ') + Conv.IntToStr(DamageRoll.Value)) +
+          '.'
+        ), CombatEventKind.HostileHit, DamageRoll.Value
+      );
       if Health = 0 then
         begin
           return Logged(Hurt with PlayerDefeated := true; end with, 'You have fallen.');
@@ -263,27 +283,38 @@ begin
       return Hurt;
     end;
   end if;
-  const Next: InteriorPosition := NextStepToward(Map, Progress.State, Hostile.Position, Player);
-  if SamePosition(Next, Player) then
+  const Next: Coordinates.InteriorPosition := NextStepToward(
+    Map,
+    Progress.State,
+    Hostile.Position,
+    Player
+  );
+  if Coordinates.SamePosition(Next, Player) then
     begin
       return Progress;
     end;
   end if;
 
-  return Progress with State := WithHostile(Progress.State, Index, Hostile with Position := Next; end with); end with;
+  return Progress with State := WithHostile(
+    Progress.State,
+    Index,
+    Hostile with Position := Next; end with
+  ); end with;
 end function;
 
 // Resolves the opponents' part of a turn after the player's accepted action.
-function HostilePhase(View: AreaView; Progress: TurnProgress): result of (TurnProgress, string);
+function HostilePhase(View: GameState.AreaView; Progress: TurnProgress): result of (TurnProgress, string);
 begin
-  const Pose: FirstPersonPose := try FirstPersonPlayerPose(Progress.State);
-  const Map: InteriorMap := try CurrentInterior(View, Progress.State);
+  const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(Progress.State);
+  const Map: Interior.InteriorMap := try GameState.CurrentInterior(View, Progress.State);
   var Current: TurnProgress := Progress;
   for Index: integer := 0 to Current.State.Hostiles.Length() - 1 do
     begin
-      const Hostile: GameHostile := Current.State.Hostiles[Index];
-      if ((Hostile.Health > 0) and (Hostile.AreaId = Current.State.AreaId)) and
-         not Current.PlayerDefeated then
+      const Hostile: HostileRules.GameHostile := Current.State.Hostiles[Index];
+      if ((Hostile.Health > 0) and (Hostile.AreaId = Current.State.AreaId))
+        and
+        not Current.PlayerDefeated
+      then
         begin
           Current := HostileTurn(Current, Index, Map, Pose.Position);
         end;
@@ -294,36 +325,62 @@ begin
   return Ok(Current);
 end function;
 
-function PlayerAttack(Valid: GameState): result of (TurnProgress, string);
+function PlayerAttack(Valid: GameState.GameState): result of (TurnProgress, string);
 begin
-  const Index: integer := HostileAhead(Valid);
+  const Index: integer := Interaction.HostileAhead(Valid);
   if Index < 0 then
     begin
       return Error('there is nothing to attack');
     end;
   end if;
-  const Hostile: GameHostile := Valid.Hostiles[Index];
-  const Name: string := HostileDisplayName(Hostile.Kind);
-  const Start: TurnProgress := TurnProgress(State := Valid, Log := [], Events := [], PlayerDefeated := false);
-  const Values: CharacterValues := DeriveCharacterValues(Valid);
+  const Hostile: HostileRules.GameHostile := Valid.Hostiles[Index];
+  const Name: string := HostileRules.HostileDisplayName(Hostile.Kind);
+  const Start: TurnProgress := TurnProgress(
+    State := Valid,
+    Log := [],
+    Events := [],
+    PlayerDefeated := false
+  );
+  const Values: Equipment.CharacterValues := Equipment.DeriveCharacterValues(Valid);
   const HitRoll: DiceRoll := Roll(Valid, 20);
   // Being attacked always alerts the opponent, even when the blow misses.
-  const Alerted: GameHostile := Hostile with Alerted := true; end with;
+  const Alerted: HostileRules.GameHostile := Hostile with Alerted := true; end with;
 
   if HitRoll.Value < Values.HitThreshold then
     begin
-      return Ok(Happened(Logged(Start with State := WithHostile(HitRoll.State, Index, Alerted); end with, ('You miss the ' + Name) +
-                                                                                                          '.'), CombatEventKind.PlayerMiss, 0));
+      return Ok(
+        Happened(
+          Logged(
+            Start with State := WithHostile(HitRoll.State, Index, Alerted); end with,
+            ('You miss the ' + Name) +
+            '.'
+          ), CombatEventKind.PlayerMiss, 0
+        )
+      );
     end;
   end if;
   const DamageRoll: DiceRoll := Roll(HitRoll.State, Values.DamageSides);
   const Damage: integer := DamageRoll.Value + Values.DamageBonus;
-  const Remaining: integer := Std.Math.Max(0, Hostile.Health - Damage);
-  const Struck: TurnProgress := Happened(Logged(Start with State := WithHostile(DamageRoll.State, Index, Alerted with Health := Remaining; end with); end with, ((('You hit the ' + Name) + ' for ') + IntToStr(Damage)) +
-                                                                                                                                                                '.'), CombatEventKind.PlayerHit, Damage);
+  const Remaining: integer := Math.Max(0, Hostile.Health - Damage);
+  const Struck: TurnProgress := Happened(
+    Logged(
+      Start with State := WithHostile(
+        DamageRoll.State,
+        Index,
+        Alerted with Health := Remaining; end with
+      ); end with, ((('You hit the ' + Name) + ' for ') + Conv.IntToStr(Damage)) +
+      '.'
+    ), CombatEventKind.PlayerHit, Damage
+  );
   if Remaining = 0 then
     begin
-      return Ok(Happened(Logged(Struck, ('The ' + Name) + ' collapses into a heap of bones.'), CombatEventKind.HostileDefeated, 0));
+      return Ok(
+        Happened(
+          Logged(Struck, ('The ' + Name) + ' collapses into a heap of bones.'),
+          CombatEventKind.HostileDefeated,
+          0
+        )
+      );
     end;
   end if;
 
@@ -332,18 +389,23 @@ end function;
 
 // Resolves one time-consuming player action followed by the opponents' turn.
 // Rejected actions return Error and leave time and the dice untouched.
-public function ResolveTurn(View: AreaView; State: GameState; Action: TurnAction): result of (TurnOutcome, string);
+public function ResolveTurn(View: GameState.AreaView; State: GameState.GameState; Action: TurnAction): result of (TurnOutcome, string);
 begin
-  const Valid: GameState := try ValidateGameState(View, State);
-  var Progress: TurnProgress := TurnProgress(State := Valid, Log := [], Events := [], PlayerDefeated := false);
+  const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
+  var Progress: TurnProgress := TurnProgress(
+    State := Valid,
+    Log := [],
+    Events := [],
+    PlayerDefeated := false
+  );
   case Action of
     when TurnAction.Step(const Direction):
       begin
-        Progress.State := try StepFirstPerson(View, Valid, Direction);
+        Progress.State := try Movement.StepFirstPerson(View, Valid, Direction);
       end;
     when TurnAction.Attack:
       begin
-        if Valid.Area <> AreaKind.Dungeon then
+        if Valid.Area <> Coordinates.AreaKind.Dungeon then
           begin
             return Error('there is nothing to attack');
           end;
@@ -357,22 +419,22 @@ begin
       end;
     when TurnAction.Equip(const ItemId):
       begin
-        const Change: EquipmentChange := try EquipItem(Valid, ItemId);
+        const Change: Equipment.EquipmentChange := try Equipment.EquipItem(Valid, ItemId);
         Progress := Logged(Progress with State := Change.State; end with, Change.Message);
       end;
     when TurnAction.Unequip(const ItemId):
       begin
-        const Change: EquipmentChange := try UnequipItem(Valid, ItemId);
+        const Change: Equipment.EquipmentChange := try Equipment.UnequipItem(Valid, ItemId);
         Progress := Logged(Progress with State := Change.State; end with, Change.Message);
       end;
     when TurnAction.Drop(const ItemId):
       begin
-        const Change: EquipmentChange := try DropItem(View, Valid, ItemId);
+        const Change: Equipment.EquipmentChange := try Equipment.DropItem(View, Valid, ItemId);
         Progress := Logged(Progress with State := Change.State; end with, Change.Message);
       end;
   end case;
 
-  if Progress.State.Area = AreaKind.Dungeon then
+  if Progress.State.Area = Coordinates.AreaKind.Dungeon then
     begin
       Progress := try HostilePhase(View, Progress);
     end;
@@ -384,6 +446,12 @@ begin
     end;
   end if;
 
-  return Ok(TurnOutcome.Continued(try ValidateGameState(View, Progress.State), Progress.Log, Progress.Events));
+  return Ok(
+    TurnOutcome.Continued(
+      try GameState.ValidateGameState(View, Progress.State),
+      Progress.Log,
+      Progress.Events
+    )
+  );
 end function;
 end unit;

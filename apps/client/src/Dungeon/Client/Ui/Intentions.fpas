@@ -1,31 +1,34 @@
 // Queues player intentions and map requests to the network task while no conflicting request is pending.
 unit Dungeon.Client.Ui.Intentions;
 
-uses Dungeon.Client.Ui.Layout, Dungeon.Client.Model, Dungeon.Protocol, Std.Tasks;
+uses Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Std.Tasks as Tasks;
 
 // Sends the desired world viewport while a game is active and no request is pending.
-public function QueueViewport(State: ClientModel): ClientModel;
+public function QueueViewport(State: Model.ClientModel): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.Pending then
     begin
       return State;
     end;
   end if;
-  const Desired: WorldViewport := DesiredWorldViewport(State);
+  const Desired: Layout.WorldViewport := Layout.DesiredWorldViewport(State);
   if (Desired.Width = State.RequestedWorldWidth) and (Desired.Height = State.RequestedWorldHeight) then
     begin
       return State;
     end;
   end if;
 
-  if TrySend(State.Requests, ClientMessage.Viewport(Desired.Width, Desired.Height)) is Ok(const Queued) then
-    begin
+  case Tasks.TrySend(
+    State.Requests,
+    Protocol.ClientMessage.Viewport(Desired.Width, Desired.Height)
+  ) of
+    when Ok(const Queued):
       if not Queued then
         begin
           return State;
         end;
       end if;
-      var Next: ClientModel := State;
+      var Next: Model.ClientModel := State;
       Next.RequestedWorldWidth := Desired.Width;
       Next.RequestedWorldHeight := Desired.Height;
       Next.Pending := true;
@@ -33,31 +36,36 @@ begin
       Next.PendingChangesProgress := false;
       Next.Status := 'Updating view...';
       return Next;
-    end;
-  else
-    begin
+    when Error(_):
       return State;
-    end;
-  end if;
+  end case;
 end function;
 
 // Requests the desired exploration-map window unless a map request is already pending.
-public function QueueExplorationMap(State: ClientModel): ClientModel;
+public function QueueExplorationMap(State: Model.ClientModel): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.MapRequestPending then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.MapRequestPending then
     begin
       return State;
     end;
   end if;
 
-  if TrySend(State.Requests, ClientMessage.ExplorationMap(State.MapDesiredOriginX, State.MapDesiredOriginY, State.MapDesiredWidth, State.MapDesiredHeight)) is Ok(const Queued) then
-    begin
+  case Tasks.TrySend(
+    State.Requests,
+    Protocol.ClientMessage.ExplorationMap(
+      State.MapDesiredOriginX,
+      State.MapDesiredOriginY,
+      State.MapDesiredWidth,
+      State.MapDesiredHeight
+    )
+  ) of
+    when Ok(const Queued):
       if not Queued then
         begin
           return State;
         end;
       end if;
-      var Next: ClientModel := State;
+      var Next: Model.ClientModel := State;
       Next.MapRequestPending := true;
       Next.Status := 'Loading map...';
       if State.MapHasState then
@@ -67,24 +75,21 @@ begin
       end if;
 
       return Next;
-    end;
-  else
-    begin
+    when Error(_):
       return State;
-    end;
-  end if;
+  end case;
 end function;
 
 // Centers the exploration-map window on the player and requests it.
-public function CenterMap(State: ClientModel): ClientModel;
+public function CenterMap(State: Model.ClientModel): Model.ClientModel;
 begin
-  var Next: ClientModel := State;
-  const Size: WorldViewport := DesiredMapViewport(State);
+  var Next: Model.ClientModel := State;
+  const Size: Layout.WorldViewport := Layout.DesiredMapViewport(State);
   Next.MapDesiredWidth := Size.Width;
   Next.MapDesiredHeight := Size.Height;
   var PlayerX: integer := State.WorldX;
   var PlayerY: integer := State.WorldY;
-  if State.View = ViewKind.FirstPerson then
+  if State.View = Protocol.ViewKind.FirstPerson then
     begin
       PlayerX := State.PlayerX;
       PlayerY := State.PlayerY;
@@ -97,24 +102,24 @@ begin
 end function;
 
 // Opens the exploration map centered on the player during an active game.
-public function OpenExplorationMap(State: ClientModel): ClientModel;
+public function OpenExplorationMap(State: Model.ClientModel): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or not State.HasVisibleState then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or not State.HasVisibleState then
     begin
       return State;
     end;
   end if;
-  var Next: ClientModel := State;
-  Next.Overlay := ClientOverlay.ExplorationMapOverlay;
+  var Next: Model.ClientModel := State;
+  Next.Overlay := Model.ClientOverlay.ExplorationMapOverlay;
   Next.FocusedControl := 0;
   Next.MapHasState := false;
   return CenterMap(Next);
 end function;
 
 // Moves the desired map window by one step; pending requests coalesce into the latest window.
-public function PanExplorationMap(State: ClientModel; DeltaX: integer; DeltaY: integer): ClientModel;
+public function PanExplorationMap(State: Model.ClientModel; DeltaX: integer; DeltaY: integer): Model.ClientModel;
 begin
-  var Next: ClientModel := State;
+  var Next: Model.ClientModel := State;
   Next.MapDesiredOriginX := State.MapDesiredOriginX + DeltaX;
   Next.MapDesiredOriginY := State.MapDesiredOriginY + DeltaY;
   if State.MapRequestPending then
@@ -128,147 +133,132 @@ begin
 end function;
 
 // Sends one outdoor movement intention while a game is active and no request is pending.
-public function QueueMove(State: ClientModel; DeltaX: integer; DeltaY: integer): ClientModel;
+public function QueueMove(State: Model.ClientModel; DeltaX: integer; DeltaY: integer): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.Pending then
     begin
       return State;
     end;
   end if;
 
-  if TrySend(State.Requests, ClientMessage.Move(DeltaX, DeltaY)) is Ok(const Queued) then
-    begin
+  case Tasks.TrySend(State.Requests, Protocol.ClientMessage.Move(DeltaX, DeltaY)) of
+    when Ok(const Queued):
       if not Queued then
         begin
           return State;
         end;
       end if;
-      var Next: ClientModel := State;
+      var Next: Model.ClientModel := State;
       Next.Pending := true;
       Next.PendingChangesProgress := true;
       Next.Status := 'Moving...';
       return Next;
-    end;
-  else
-    begin
+    when Error(_):
       return State;
-    end;
-  end if;
+  end case;
 end function;
 
 // Sends one first-person step while a game is active and no request is pending.
-public function QueueFirstPersonStep(State: ClientModel; Direction: FirstPersonStepDirection): ClientModel;
+public function QueueFirstPersonStep(State: Model.ClientModel; Direction: Protocol.FirstPersonStepDirection): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.Pending then
     begin
       return State;
     end;
   end if;
 
-  if TrySend(State.Requests, ClientMessage.StepFirstPerson(Direction)) is Ok(const Queued) then
-    begin
+  case Tasks.TrySend(State.Requests, Protocol.ClientMessage.StepFirstPerson(Direction)) of
+    when Ok(const Queued):
       if not Queued then
         begin
           return State;
         end;
       end if;
-      var Next: ClientModel := State;
+      var Next: Model.ClientModel := State;
       Next.Pending := true;
       Next.PendingChangesProgress := true;
       Next.Status := 'Moving one field...';
       return Next;
-    end;
-  else
-    begin
+    when Error(_):
       return State;
-    end;
-  end if;
+  end case;
 end function;
 
 // Queues one turn-consuming combat intention such as attack or wait.
-public function QueueCombatAction(State: ClientModel; Message: ClientMessage; Status: string): ClientModel;
+public function QueueCombatAction(State: Model.ClientModel; Message: Protocol.ClientMessage; Status: string): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.Pending then
     begin
       return State;
     end;
   end if;
 
-  if TrySend(State.Requests, Message) is Ok(const Queued) then
-    begin
+  case Tasks.TrySend(State.Requests, Message) of
+    when Ok(const Queued):
       if not Queued then
         begin
           return State;
         end;
       end if;
-      var Next: ClientModel := State;
+      var Next: Model.ClientModel := State;
       Next.Pending := true;
       Next.PendingChangesProgress := true;
       Next.Status := Status;
       return Next;
-    end;
-  else
-    begin
+    when Error(_):
       return State;
-    end;
-  end if;
+  end case;
 end function;
 
 // Sends one first-person turn while a game is active and no request is pending.
-public function QueueFirstPersonTurn(State: ClientModel; Direction: FirstPersonTurnDirection): ClientModel;
+public function QueueFirstPersonTurn(State: Model.ClientModel; Direction: Protocol.FirstPersonTurnDirection): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.Pending then
     begin
       return State;
     end;
   end if;
 
-  if TrySend(State.Requests, ClientMessage.TurnFirstPerson(Direction)) is Ok(const Queued) then
-    begin
+  case Tasks.TrySend(State.Requests, Protocol.ClientMessage.TurnFirstPerson(Direction)) of
+    when Ok(const Queued):
       if not Queued then
         begin
           return State;
         end;
       end if;
-      var Next: ClientModel := State;
+      var Next: Model.ClientModel := State;
       Next.Pending := true;
       Next.PendingChangesProgress := true;
       Next.Status := 'Turning...';
       return Next;
-    end;
-  else
-    begin
+    when Error(_):
       return State;
-    end;
-  end if;
+  end case;
 end function;
 
 // Sends the Enter interaction while a game is active and no request is pending.
-public function QueueInteraction(State: ClientModel): ClientModel;
+public function QueueInteraction(State: Model.ClientModel): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending then
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.Pending then
     begin
       return State;
     end;
   end if;
 
-  if TrySend(State.Requests, ClientMessage.Interact) is Ok(const Queued) then
-    begin
+  case Tasks.TrySend(State.Requests, Protocol.ClientMessage.Interact) of
+    when Ok(const Queued):
       if not Queued then
         begin
           return State;
         end;
       end if;
-      var Next: ClientModel := State;
+      var Next: Model.ClientModel := State;
       Next.Pending := true;
       Next.PendingChangesProgress := true;
       Next.Status := 'Interacting...';
       return Next;
-    end;
-  else
-    begin
+    when Error(_):
       return State;
-    end;
-  end if;
+  end case;
 end function;
 end unit;

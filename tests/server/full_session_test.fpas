@@ -1,349 +1,407 @@
 // Verifies the real client adapter, server world session, and colored TUI projection together.
 program DungeonFullSessionTest;
 
-uses
-  Dungeon.Test.Catalog, Dungeon.Areas.Identities, Dungeon.Client, Dungeon.Coordinates,
-  Dungeon.Hostiles, Dungeon.Interior, Dungeon.Interior.Generation.Validation, Dungeon.Test.Fixtures,
-  Dungeon.Test.Routes, Dungeon.Interaction, Dungeon.Protocol, Dungeon.RuntimeData, Dungeon.Server,
-  Dungeon.Server.Config, Dungeon.Terrain, Dungeon.World, Dungeon.Test.ClientSession,
-  Dungeon.Terrain.Placement, Std.Conv, Std.Fs, Std.Net, Std.Tasks, Std.Test, Std.Time, Std.Tui;
+uses Dungeon.Test.Catalog as CatalogUnit, Dungeon.Areas.Identities as Identities, Dungeon.Client as ClientUnit, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as Hostiles, Dungeon.Interior as Interior, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Routes as Routes, Dungeon.Interaction as Interaction, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.World as World, Dungeon.Test.ClientSession as ClientSession, Dungeon.Terrain.Placement as Placement, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
 
-function TestConfig(WorldsRoot: string): ServerConfig;
+function TestConfig(WorldsRoot: string): ConfigUnit.ServerConfig;
 begin
-  return ServerConfig(ConfigPath := '', Logs := None, WorldsRoot := WorldsRoot, WorldId := 'fresh-world', WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32, MaximumViewWidth := 240, MaximumViewHeight := 120);
+  return ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := WorldsRoot,
+    WorldId := 'fresh-world',
+    WorldSeed := 12345,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 120
+  );
 end function;
 
 function EnsureDirectory(Path: string): boolean;
 begin
-  if Std.Fs.IsDir(Path) then
+  if Fs.IsDir(Path) then
     begin
       return true;
     end;
   end if;
 
-  if Std.Fs.CreateDir(Path) is Ok(const Created) then
-    begin
+  case Fs.CreateDir(Path) of
+    when Ok(const Created):
       return true;
-    end;
-  else
-    begin
-      return Std.Fs.IsDir(Path);
-    end;
-  end if;
+    when Error(_):
+      return Fs.IsDir(Path);
+  end case;
 end function;
 
 procedure EnsureWorldRoot(WorldsRoot: string);
 begin
-  AssertTrue(EnsureDirectory('.temp-data'));
-  AssertTrue(EnsureDirectory(WorldsRoot));
+  Test.AssertTrue(EnsureDirectory('.temp-data'));
+  Test.AssertTrue(EnsureDirectory(WorldsRoot));
 end procedure;
 
-function ServeSession(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of (boolean, string);
+function ServeSession(ListenerValue: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  const Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
-  const Configured: boolean := try SetTimeout(Client, 30000);
-  const Outcome: result of (boolean, string) := ServeConnection(Client, Config, Token);
-  const Closed: boolean := try Close(Client);
+  const Client: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Configured: boolean := try Net.SetTimeout(Client, 30000);
+  const Outcome: result of (boolean, string) := Server.ServeConnection(Client, Config, Token);
+  const Closed: boolean := try Net.Close(Client);
   return Outcome;
 end function;
 
 // Serves one session and publishes its outcome so a stalled test reports the cause.
 function ServeOne(
-  ListenerValue: Listener;
-  Config: ServerConfig;
+  ListenerValue: Net.Listener;
+  Config: ConfigUnit.ServerConfig;
   Outcomes: channel of string;
-  Token: CancellationToken
+  Token: Tasks.CancellationToken
 ): result of (boolean, string);
 begin
   const Outcome: result of (boolean, string) := ServeSession(ListenerValue, Config, Token);
-  ReportOutcome(Outcomes, 'server', Outcome);
+  ClientSession.ReportOutcome(Outcomes, 'server', Outcome);
   return Outcome;
 end function;
 
-function RequireFirstPersonEvent(Received: ClientEvent): FirstPersonVisibleState;
+function RequireFirstPersonEvent(Received: ClientUnit.ClientEvent): Protocol.FirstPersonVisibleState;
 begin
-  if Received is ClientEvent.State(const VisibleValue) then
-    begin
-      if VisibleValue is VisibleState.FirstPersonState(const FirstPersonValue) then
-        begin
+  case Received of
+    when ClientUnit.ClientEvent.State(const VisibleValue):
+      case VisibleValue of
+        when Protocol.VisibleState.FirstPersonState(const FirstPersonValue):
           return FirstPersonValue;
-        end;
-      else
-        begin
+        when Protocol.VisibleState.MapState(_):
           panic('expected a first-person state');
-        end;
-      end if;
-    end;
-  else
-    begin
+      end case;
+    when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
       panic('expected a state event');
-    end;
-  end if;
+  end case;
 end function;
 
-function AheadOf(Pose: FirstPersonPose): InteriorPosition;
+function AheadOf(Pose: Coordinates.FirstPersonPose): Coordinates.InteriorPosition;
 begin
-  const Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
-  return InteriorPosition(X := Pose.Position.X + Offset.X, Y := Pose.Position.Y + Offset.Y);
+  const Offset: Coordinates.InteriorPosition := Coordinates.StepOffset(
+    Pose.Facing,
+    Coordinates.RelativeStep.Forward
+  );
+  return Coordinates.InteriorPosition(
+    X := Pose.Position.X + Offset.X,
+    Y := Pose.Position.Y + Offset.Y
+  );
 end function;
 
 begin
-  const WorldsRoot: string := '.temp-data/full-session-' + IntToStr(TimestampMillis());
+  const WorldsRoot: string := '.temp-data/full-session-' + Conv.IntToStr(Time.TimestampMillis());
   EnsureWorldRoot(WorldsRoot);
-  const Config: ServerConfig := TestConfig(WorldsRoot);
-  const Fixture: WorldSession := OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, 4, Config.ChunkCacheLimit)
-                                   .Unwrap();
-  const ExpectedMetadata: WorldMetadata := NewWorldMetadata(Config.WorldId, Config.WorldSeed, 4)
-                                             .Unwrap();
-  const Map: InteriorMap := SpawnDungeonMap(ExpectedMetadata);
-  var Pose: FirstPersonPose := FirstPersonPose(Position := Map.Start, Facing := Map.StartFacing);
-  const ListenerValue: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const Address: NetworkAddress := ListenerLocalAddress(ListenerValue).Unwrap();
-  const Source: CancellationSource := CreateCancellationSource();
-  const Token: CancellationToken := GetCancellationToken(Source);
-  const Outcomes: channel of string := CreateChannel(4);
-  const ServerTask: task := go ServeOne(ListenerValue, Config, Outcomes, Token);
-  const Requests: channel of ClientMessage := CreateChannel(4);
-  const Events: channel of ClientEvent := CreateChannel(8);
-  const ClientTask: task := go RunReportedClient('127.0.0.1', Address.Port, 13, 7, Requests, Events, Outcomes, Token);
-  const Cmd: TuiCmdOutput := TuiCmdOutput.Create();
-  var Model: ClientModel := NewClientModel('127.0.0.1', Address.Port, '', DefaultClientPreferences(), Requests, Events);
-  if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.Connected(const Catalog) then
-    begin
-      AssertFalse(FixtureSaveAvailable(Catalog));
-      AssertFalse(FixtureInvalidSave(Catalog));
-      Model := UpdateClientEvent(Model, ClientEvent.Connected(Catalog), Cmd);
-    end;
-  else
-    begin
-      panic('expected connected event');
-    end;
-  end if;
+  const Config: ConfigUnit.ServerConfig := TestConfig(WorldsRoot);
+  const Fixture: World.WorldSession := World.OpenWorld(
+    Config.WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    4,
+    Config.ChunkCacheLimit
+  ).Unwrap();
+  const ExpectedMetadata: Terrain.WorldMetadata := Placement.NewWorldMetadata(
+    Config.WorldId,
+    Config.WorldSeed,
+    4
+  ).Unwrap();
+  const Map: Interior.InteriorMap := Routes.SpawnDungeonMap(ExpectedMetadata);
+  var Pose: Coordinates.FirstPersonPose := Coordinates.FirstPersonPose(
+    Position := Map.Start,
+    Facing := Map.StartFacing
+  );
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  const Outcomes: channel of string := Tasks.CreateChannel(4);
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeOne(
+      ListenerValue,
+      Config,
+      Outcomes,
+      Token
+    );
+    const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+    const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(8);
+    const ClientTask: task of result of (boolean, string) := go ClientSession.RunReportedClient(
+      '127.0.0.1',
+      Address.Port,
+      13,
+      7,
+      Requests,
+      Events,
+      Outcomes,
+      Token
+    );
+    const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+    var Model: ClientUnit.ClientModel := ClientUnit.NewClientModel(
+      '127.0.0.1',
+      Address.Port,
+      '',
+      RuntimeData.DefaultClientPreferences(),
+      Requests,
+      Events
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 120000) of
+      when ClientUnit.ClientEvent.Connected(const Catalog):
+        Test.AssertFalse(CatalogUnit.FixtureSaveAvailable(Catalog));
+        Test.AssertFalse(CatalogUnit.FixtureInvalidSave(Catalog));
+        Model := ClientUnit.UpdateClientEvent(
+          Model,
+          ClientUnit.ClientEvent.Connected(Catalog),
+          Cmd
+        );
+      when ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.State(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected connected event');
+    end case;
 
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.StartNewGame, 1000).Unwrap());
-  if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.State(const Value) then
-    begin
-      if Value is VisibleState.MapState(const MapValue) then
-        begin
-          AssertEquals(13, MapValue.Width);
-          AssertEquals(7, MapValue.Height);
-          AssertEquals(ExpectedMetadata.Spawn.X, MapValue.WorldX);
-          AssertEquals(ExpectedMetadata.Spawn.Y, MapValue.WorldY);
-        end;
-      else
-        begin
-          panic('expected map state');
-        end;
-      end if;
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.StartNewGame, 1000).Unwrap()
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 120000) of
+      when ClientUnit.ClientEvent.State(const Value):
+        case Value of
+          when Protocol.VisibleState.MapState(const MapValue):
+            Test.AssertEquals(13, MapValue.Width);
+            Test.AssertEquals(7, MapValue.Height);
+            Test.AssertEquals(ExpectedMetadata.Spawn.X, MapValue.WorldX);
+            Test.AssertEquals(ExpectedMetadata.Spawn.Y, MapValue.WorldY);
+          when Protocol.VisibleState.FirstPersonState(_):
+            panic('expected map state');
+        end case;
 
-      Model := UpdateClientEvent(Model, ClientEvent.State(Value), Cmd);
-    end;
-  else
-    begin
-      panic('expected generated initial state');
-    end;
-  end if;
-  const App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(App.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle.Unwrap().Background.Kind =
-             TuiColorKind.Rgb);
-  App.Close();
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.Viewport(240, 20), 1000).Unwrap());
-  if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.State(const Value) then
-    begin
-      if Value is VisibleState.MapState(const MapValue) then
-        begin
-          AssertEquals(240, MapValue.Width);
-          AssertEquals(20, MapValue.Height);
-          AssertEquals(ExpectedMetadata.Spawn.X, MapValue.WorldX);
-          AssertTrue(MapValue.Rows[0].Contains('?'));
-          AssertTrue(MapValue.KnowledgeRows[0].Contains('u'));
-        end;
-      else
-        begin
-          panic('expected resized map state');
-        end;
-      end if;
-    end;
-  else
-    begin
-      panic('expected resized generated state');
-    end;
-  end if;
-  var CurrentX: integer := ExpectedMetadata.Spawn.X;
-  var CurrentY: integer := ExpectedMetadata.Spawn.Y;
-  var SawRemembered: boolean := false;
-  var SawVisible: boolean := false;
-  var SawUndiscovered: boolean := false;
-  for Step: integer := 1 to 3 do
-    begin
-      var DeltaX: integer := 0;
-      var DeltaY: integer := 0;
-      if CurrentX < ExpectedMetadata.SpawnEntrance.X then
-        begin
-          DeltaX := 1;
-        end;
-      else
-        if CurrentX > ExpectedMetadata.SpawnEntrance.X then
+        Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.State(Value), Cmd);
+      when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected generated initial state');
+    end case;
+    const App: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 24));
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+    Test.AssertTrue(
+      App.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle.Unwrap().Background.Kind =
+      Tui.TuiColorKind.Rgb
+    );
+    App.Close();
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Viewport(240, 20), 1000).Unwrap()
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 120000) of
+      when ClientUnit.ClientEvent.State(const Value):
+        case Value of
+          when Protocol.VisibleState.MapState(const MapValue):
+            Test.AssertEquals(240, MapValue.Width);
+            Test.AssertEquals(20, MapValue.Height);
+            Test.AssertEquals(ExpectedMetadata.Spawn.X, MapValue.WorldX);
+            Test.AssertTrue('?' in MapValue.Rows[0]);
+            Test.AssertTrue('u' in MapValue.KnowledgeRows[0]);
+          when Protocol.VisibleState.FirstPersonState(_):
+            panic('expected resized map state');
+        end case;
+      when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected resized generated state');
+    end case;
+    var CurrentX: integer := ExpectedMetadata.Spawn.X;
+    var CurrentY: integer := ExpectedMetadata.Spawn.Y;
+    var SawRemembered: boolean := false;
+    var SawVisible: boolean := false;
+    var SawUndiscovered: boolean := false;
+    for Step: integer := 1 to 3 do
+      begin
+        var DeltaX: integer := 0;
+        var DeltaY: integer := 0;
+        if CurrentX < ExpectedMetadata.SpawnEntrance.X then
           begin
-            DeltaX := -1;
+            DeltaX := 1;
           end;
         else
-          if CurrentY < ExpectedMetadata.SpawnEntrance.Y then
+          if CurrentX > ExpectedMetadata.SpawnEntrance.X then
             begin
-              DeltaY := 1;
+              DeltaX := -1;
             end;
           else
-            begin
-              DeltaY := -1;
-            end;
+            if CurrentY < ExpectedMetadata.SpawnEntrance.Y then
+              begin
+                DeltaY := 1;
+              end;
+            else
+              begin
+                DeltaY := -1;
+              end;
+            end if;
           end if;
         end if;
-      end if;
 
-      AssertTrue(SendWithTimeout(Requests, ClientMessage.Move(DeltaX, DeltaY), 1000).Unwrap());
-      if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.State(const VisibleValue) then
-        begin
-          if VisibleValue is VisibleState.MapState(const MapValue) then
-            begin
-              CurrentX := CurrentX + DeltaX;
-              CurrentY := CurrentY + DeltaY;
-              AssertEquals(CurrentX, MapValue.WorldX);
-              AssertEquals(CurrentY, MapValue.WorldY);
-              for KnowledgeRow: string in MapValue.KnowledgeRows do
-                begin
-                  SawRemembered := SawRemembered or KnowledgeRow.Contains('r');
-                  SawVisible := SawVisible or KnowledgeRow.Contains('v');
-                  SawUndiscovered := SawUndiscovered or KnowledgeRow.Contains('u');
-                end;
-              end for;
-            end;
-          else
-            begin
-              panic('expected map state while approaching entrance');
-            end;
-          end if;
-        end;
-      else
-        begin
-          panic('expected movement state');
-        end;
-      end if;
-    end;
-  end for;
+        Test.AssertTrue(
+          Tasks.SendWithTimeout(
+            Requests,
+            Protocol.ClientMessage.Move(DeltaX, DeltaY),
+            1000
+          ).Unwrap()
+        );
+        case ClientSession.NextClientEvent(Events, Outcomes, 120000) of
+          when ClientUnit.ClientEvent.State(const VisibleValue):
+            case VisibleValue of
+              when Protocol.VisibleState.MapState(const MapValue):
+                CurrentX := CurrentX + DeltaX;
+                CurrentY := CurrentY + DeltaY;
+                Test.AssertEquals(CurrentX, MapValue.WorldX);
+                Test.AssertEquals(CurrentY, MapValue.WorldY);
+                for KnowledgeRow: string in MapValue.KnowledgeRows do
+                  begin
+                    SawRemembered := SawRemembered or 'r' in KnowledgeRow;
+                    SawVisible := SawVisible or 'v' in KnowledgeRow;
+                    SawUndiscovered := SawUndiscovered or 'u' in KnowledgeRow;
+                  end;
+                end for;
+              when Protocol.VisibleState.FirstPersonState(_):
+                panic('expected map state while approaching entrance');
+            end case;
+          when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+            panic('expected movement state');
+        end case;
+      end;
+    end for;
 
-  AssertTrue(SawRemembered);
-  AssertTrue(SawVisible);
-  AssertTrue(SawUndiscovered);
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.Interact, 1000).Unwrap());
-  if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.State(const VisibleValue) then
-    begin
-      if VisibleValue is VisibleState.FirstPersonState(const FirstPersonValue) then
-        begin
-          AssertEquals(GeneratedDungeonLabel, FirstPersonValue.Title);
-          AssertEquals(GeneratedDungeonWidth, FirstPersonValue.Width);
-          AssertEquals(GeneratedDungeonHeight, FirstPersonValue.Height);
-          AssertEquals(Map.Start.X, FirstPersonValue.PlayerX);
-          AssertEquals(Map.Start.Y, FirstPersonValue.PlayerY);
-          AssertTrue(FirstPersonValue.Facing = FirstPersonFacing.East);
-          Pose := VisiblePose(FirstPersonValue);
-          Model := UpdateClientEvent(Model, ClientEvent.State(VisibleValue), Cmd);
-        end;
-      else
-        begin
-          panic('expected first-person client event');
-        end;
-      end if;
-    end;
-  else
-    begin
-      panic('expected entry state');
-    end;
-  end if;
-  const FirstPersonApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
-  Model := FirstPersonApp.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(FirstPersonApp.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle.Unwrap().Background.Kind =
-             TuiColorKind.Rgb);
-  FirstPersonApp.Close();
-  // Turn right until a wall stands ahead; turning is free and an ordinary wall offers nothing.
-  var Turns: integer := 0;
-  while (InteriorCellAt(Map, AheadOf(Pose)).Unwrap() <> InteriorCellKind.Wall) and (Turns < 4) do
-    begin
-      AssertTrue(SendWithTimeout(Requests, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), 1000)
-                   .Unwrap());
-      Pose := VisiblePose(RequireFirstPersonEvent(NextClientEvent(Events, Outcomes, 120000)));
-      Turns := Turns + 1;
-    end;
-  end while;
+    Test.AssertTrue(SawRemembered);
+    Test.AssertTrue(SawVisible);
+    Test.AssertTrue(SawUndiscovered);
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Interact, 1000).Unwrap()
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 120000) of
+      when ClientUnit.ClientEvent.State(const VisibleValue):
+        case VisibleValue of
+          when Protocol.VisibleState.FirstPersonState(const FirstPersonValue):
+            Test.AssertEquals(Identities.GeneratedDungeonLabel, FirstPersonValue.Title);
+            Test.AssertEquals(Validation.GeneratedDungeonWidth, FirstPersonValue.Width);
+            Test.AssertEquals(Validation.GeneratedDungeonHeight, FirstPersonValue.Height);
+            Test.AssertEquals(Map.Start.X, FirstPersonValue.PlayerX);
+            Test.AssertEquals(Map.Start.Y, FirstPersonValue.PlayerY);
+            Test.AssertTrue(FirstPersonValue.Facing = Protocol.FirstPersonFacing.East);
+            Pose := Routes.VisiblePose(FirstPersonValue);
+            Model := ClientUnit.UpdateClientEvent(
+              Model,
+              ClientUnit.ClientEvent.State(VisibleValue),
+              Cmd
+            );
+          when Protocol.VisibleState.MapState(_):
+            panic('expected first-person client event');
+        end case;
+      when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected entry state');
+    end case;
+    const FirstPersonApp: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(
+      Tui.TuiSize.Create(80, 24)
+    );
+    Model := FirstPersonApp.RunIterations(
+      Model,
+      ClientUnit.UpdateClient,
+      ClientUnit.ViewClient,
+      0,
+      0
+    );
+    Test.AssertTrue(
+      FirstPersonApp.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle.Unwrap().Background.Kind =
+      Tui.TuiColorKind.Rgb
+    );
+    FirstPersonApp.Close();
+    // Turn right until a wall stands ahead; turning is free and an ordinary wall offers nothing.
+    var Turns: integer := 0;
+    while (Interior.InteriorCellAt(Map, AheadOf(Pose)).Unwrap() <> Interior.InteriorCellKind.Wall)
+      and
+      (Turns < 4) do
+      begin
+        Test.AssertTrue(
+          Tasks.SendWithTimeout(
+            Requests,
+            Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Right),
+            1000
+          ).Unwrap()
+        );
+        Pose := Routes.VisiblePose(
+          RequireFirstPersonEvent(ClientSession.NextClientEvent(Events, Outcomes, 120000))
+        );
+        Turns := Turns + 1;
+      end;
+    end while;
 
-  AssertTrue(InteriorCellAt(Map, AheadOf(Pose)).Unwrap() = InteriorCellKind.Wall);
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.Interact, 1000).Unwrap());
-  if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.Interaction(const Title, const Message) then
-    begin
-      AssertEquals('', Title);
-      AssertEquals(NoInteractionMessage, Message);
-      Model := UpdateClientEvent(Model, ClientEvent.Interaction(Title, Message), Cmd);
-      AssertFalse(Model.Overlay = ClientOverlay.DescriptionOverlay);
-    end;
-  else
-    begin
-      panic('expected ordinary wall interaction response');
-    end;
-  end if;
+    Test.AssertTrue(
+      Interior.InteriorCellAt(Map, AheadOf(Pose)).Unwrap() = Interior.InteriorCellKind.Wall
+    );
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Interact, 1000).Unwrap()
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 120000) of
+      when ClientUnit.ClientEvent.Interaction(const Title, const Message):
+        Test.AssertEquals('', Title);
+        Test.AssertEquals(Interaction.NoInteractionMessage, Message);
+        Model := ClientUnit.UpdateClientEvent(
+          Model,
+          ClientUnit.ClientEvent.Interaction(Title, Message),
+          Cmd
+        );
+        Test.AssertFalse(Model.Overlay = ClientUnit.ClientOverlay.DescriptionOverlay);
+      when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.State(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected ordinary wall interaction response');
+    end case;
 
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.SaveGame, 1000).Unwrap());
-  if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.SaveCompleted then
-    begin
-      Model := UpdateClientEvent(Model, ClientEvent.SaveCompleted, Cmd);
-      AssertTrue(Model.SaveAvailable);
-      AssertEquals('Game saved.', Model.Status);
-    end;
-  else
-    begin
-      panic('expected client save-completed event');
-    end;
-  end if;
-  // Walk back to the exit of the generated dungeon around any resting skeleton.
-  var Avoid: array of InteriorPosition := [];
-  for Hostile: HostilePlacement in Map.Hostiles do
-    begin
-      Avoid.Push(Hostile.Position);
-    end;
-  end for;
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.SaveGame, 1000).Unwrap()
+    );
+    if ClientSession.NextClientEvent(Events, Outcomes, 120000) is ClientUnit.ClientEvent.SaveCompleted then
+      begin
+        Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.SaveCompleted, Cmd);
+        Test.AssertTrue(Model.SaveAvailable);
+        Test.AssertEquals('Game saved.', Model.Status);
+      end;
+    else
+      begin
+        panic('expected client save-completed event');
+      end;
+    end if;
+    // Walk back to the exit of the generated dungeon around any resting skeleton.
+    var Avoid: array of Coordinates.InteriorPosition := [];
+    for Hostile: Hostiles.HostilePlacement in Map.Hostiles do
+      begin
+        Avoid.PushInPlace(Hostile.Position);
+      end;
+    end for;
 
-  for Move: RouteMove in RouteTo(Map, Pose, Map.Exit, Avoid) do
-    begin
-      AssertTrue(SendWithTimeout(Requests, RouteMessage(Move), 1000).Unwrap());
-      Pose := VisiblePose(RequireFirstPersonEvent(NextClientEvent(Events, Outcomes, 120000)));
-    end;
-  end for;
+    for Move: Fixtures.RouteMove in Fixtures.RouteTo(Map, Pose, Map.Exit, Avoid) do
+      begin
+        Test.AssertTrue(Tasks.SendWithTimeout(Requests, Routes.RouteMessage(Move), 1000).Unwrap());
+        Pose := Routes.VisiblePose(
+          RequireFirstPersonEvent(ClientSession.NextClientEvent(Events, Outcomes, 120000))
+        );
+      end;
+    end for;
 
-  AssertTrue(SamePosition(Pose.Position, Map.Exit));
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.Interact, 1000).Unwrap());
-  if NextClientEvent(Events, Outcomes, 120000) is ClientEvent.State(const VisibleValue) then
-    begin
-      if VisibleValue is VisibleState.MapState(const MapValue) then
-        begin
-          AssertEquals(ExpectedMetadata.SpawnEntrance.X, MapValue.WorldX);
-          AssertEquals(ExpectedMetadata.SpawnEntrance.Y, MapValue.WorldY);
-        end;
-      else
-        begin
-          panic('expected restored map client event');
-        end;
-      end if;
-    end;
-  else
-    begin
-      panic('expected exit state');
-    end;
-  end if;
+    Test.AssertTrue(Coordinates.SamePosition(Pose.Position, Map.Exit));
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Interact, 1000).Unwrap()
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 120000) of
+      when ClientUnit.ClientEvent.State(const VisibleValue):
+        case VisibleValue of
+          when Protocol.VisibleState.MapState(const MapValue):
+            Test.AssertEquals(ExpectedMetadata.SpawnEntrance.X, MapValue.WorldX);
+            Test.AssertEquals(ExpectedMetadata.SpawnEntrance.Y, MapValue.WorldY);
+          when Protocol.VisibleState.FirstPersonState(_):
+            panic('expected restored map client event');
+        end case;
+      when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected exit state');
+    end case;
 
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.Disconnect, 1000).Unwrap());
-  AssertTrue(Std.Tasks.Wait(ClientTask).Unwrap());
-  AssertTrue(Std.Tasks.Wait(ServerTask).Unwrap());
-  AssertTrue(CloseListener(ListenerValue).Unwrap());
-  discard CloseChannel(Requests);
-  discard CloseChannel(Events);
-  discard CloseChannel(Outcomes);
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Disconnect, 1000).Unwrap()
+    );
+    Test.AssertTrue(Tasks.Wait(ClientTask).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+    discard Tasks.CloseChannel(Requests);
+    discard Tasks.CloseChannel(Events);
+    discard Tasks.CloseChannel(Outcomes);
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
 end.

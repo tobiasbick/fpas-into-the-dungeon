@@ -1,20 +1,18 @@
 // Verifies connected session selection and retryable save status through the pure client update seam.
 program DungeonClientSessionSaveUiTest;
 
-uses
-  Dungeon.Test.Catalog, Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Tasks, Std.Test,
-  Std.Tui;
+uses Dungeon.Test.Catalog as Catalog, Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
 
-function Action(ControlId: integer; ActionId: integer): TuiMsg;
+function Action(ControlId: integer; ActionId: integer): Tui.TuiMsg;
 begin
-  return TuiMsg.Action(TuiControlId.Create(ControlId), TuiAction.Create(ActionId));
+  return Tui.TuiMsg.Action(Tui.TuiControlId.Create(ControlId), Tui.TuiAction.Create(ActionId));
 end function;
 
-function ScreenContains(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
+function ScreenContains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
 begin
   for Row: integer := 0 to Snapshot.Height - 1 do
     begin
-      if Snapshot.LineAt(Row).Contains(Text) then
+      if Text in Snapshot.LineAt(Row) then
         begin
           return true;
         end;
@@ -26,18 +24,29 @@ begin
 end function;
 
 begin
-  const Requests: channel of ClientMessage := CreateChannel(4);
-  const Events: channel of ClientEvent := CreateChannel(1);
-  const Cmd: TuiCmdOutput := TuiCmdOutput.Create();
-  var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
-  Model := UpdateClientEvent(Model, ClientEvent.Connected(FixtureCatalog(true, false)), Cmd);
-  AssertTrue(Model.Screen = ClientScreen.StartScreen);
-  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.AwaitingSession);
-  AssertTrue(Model.SaveAvailable);
-  Model := UpdateClient(Model, Action(5, 105), Cmd);
-  AssertTrue(Model.Pending);
-  AssertEquals('Loading game...', Model.Status);
-  if ReceiveWithTimeout(Requests, 0).Unwrap() is ClientMessage.LoadGame then
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of Client.ClientEvent := Tasks.CreateChannel(1);
+  const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+  var Model: Client.ClientModel := Client.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Connected(Catalog.FixtureCatalog(true, false)),
+    Cmd
+  );
+  Test.AssertTrue(Model.Screen = Client.ClientScreen.StartScreen);
+  Test.AssertTrue(Model.ConnectionPhase = Client.ClientConnectionPhase.AwaitingSession);
+  Test.AssertTrue(Model.SaveAvailable);
+  Model := Client.UpdateClient(Model, Action(5, 105), Cmd);
+  Test.AssertTrue(Model.Pending);
+  Test.AssertEquals('Loading game...', Model.Status);
+  if Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.LoadGame then
     begin
       null;
     end;
@@ -47,15 +56,19 @@ begin
     end;
   end if;
 
-  Model := UpdateClient(Model, Action(5, 105), Cmd);
-  AssertTrue(ReceiveWithTimeout(Requests, 0).IsError());
-  Model := UpdateClientEvent(Model, ClientEvent.Rejected('load_failed', 'Saved game could not be loaded.'), Cmd);
-  AssertFalse(Model.Pending);
-  AssertTrue(Model.Screen = ClientScreen.StartScreen);
-  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.AwaitingSession);
-  AssertEquals('Saved game could not be loaded.', Model.Status);
-  Model := UpdateClient(Model, Action(4, 104), Cmd);
-  if ReceiveWithTimeout(Requests, 0).Unwrap() is ClientMessage.StartNewGame then
+  Model := Client.UpdateClient(Model, Action(5, 105), Cmd);
+  Test.AssertTrue((Tasks.ReceiveWithTimeout(Requests, 0) is Error(_)));
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Rejected('load_failed', 'Saved game could not be loaded.'),
+    Cmd
+  );
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Model.Screen = Client.ClientScreen.StartScreen);
+  Test.AssertTrue(Model.ConnectionPhase = Client.ClientConnectionPhase.AwaitingSession);
+  Test.AssertEquals('Saved game could not be loaded.', Model.Status);
+  Model := Client.UpdateClient(Model, Action(4, 104), Cmd);
+  if Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.StartNewGame then
     begin
       null;
     end;
@@ -64,24 +77,31 @@ begin
       panic('expected new-game intention after load failure');
     end;
   end if;
-  const MapValue: MapVisibleState := MapVisibleState(OriginX := -1, OriginY := -1, Width := 3, Height := 3, Rows := [
-                                                                                                                      'ggg',
-                                                                                                                      'ggg',
-                                                                                                                      'ggg'
-                                                                                                                    ], KnowledgeRows := [
-                                                                                                                                          'vvv',
-                                                                                                                                          'vvv',
-                                                                                                                                          'vvv'
-                                                                                                                                        ], PlayerX := 1, PlayerY := 1, WorldX := 0, WorldY := 0, Inventory := [], Health := 20, MaxHealth := 20, Character := []);
-  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.MapState(MapValue)), Cmd);
-  AssertTrue(Model.Screen = ClientScreen.GameScreen);
-  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.Active);
+  const MapValue: Protocol.MapVisibleState := Protocol.MapVisibleState(
+    OriginX := -1, OriginY := -1, Width := 3, Height := 3, Rows := [
+      'ggg',
+      'ggg',
+      'ggg'
+    ], KnowledgeRows := [
+      'vvv',
+      'vvv',
+      'vvv'
+    ], PlayerX := 1, PlayerY := 1, WorldX := 0, WorldY := 0, Inventory := [], Health := 20,
+    MaxHealth := 20, Character := []
+  );
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.State(Protocol.VisibleState.MapState(MapValue)),
+    Cmd
+  );
+  Test.AssertTrue(Model.Screen = Client.ClientScreen.GameScreen);
+  Test.AssertTrue(Model.ConnectionPhase = Client.ClientConnectionPhase.Active);
   Model.SaveAvailable := false;
-  Model := UpdateClient(Model, Action(14, 112), Cmd);
-  AssertTrue(Model.Pending);
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
-  AssertEquals('Saving game...', Model.Status);
-  if ReceiveWithTimeout(Requests, 0).Unwrap() is ClientMessage.SaveGame then
+  Model := Client.UpdateClient(Model, Action(14, 112), Cmd);
+  Test.AssertTrue(Model.Pending);
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertEquals('Saving game...', Model.Status);
+  if Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.SaveGame then
     begin
       null;
     end;
@@ -91,13 +111,17 @@ begin
     end;
   end if;
 
-  Model := UpdateClient(Model, Action(14, 112), Cmd);
-  AssertTrue(ReceiveWithTimeout(Requests, 0).IsError());
-  Model := UpdateClientEvent(Model, ClientEvent.Rejected('save_failed', 'Save failed; retry is available.'), Cmd);
-  AssertFalse(Model.Pending);
-  AssertEquals('Save failed; retry is available.', Model.Status);
-  Model := UpdateClient(Model, Action(14, 112), Cmd);
-  if ReceiveWithTimeout(Requests, 0).Unwrap() is ClientMessage.SaveGame then
+  Model := Client.UpdateClient(Model, Action(14, 112), Cmd);
+  Test.AssertTrue((Tasks.ReceiveWithTimeout(Requests, 0) is Error(_)));
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Rejected('save_failed', 'Save failed; retry is available.'),
+    Cmd
+  );
+  Test.AssertFalse(Model.Pending);
+  Test.AssertEquals('Save failed; retry is available.', Model.Status);
+  Model := Client.UpdateClient(Model, Action(14, 112), Cmd);
+  if Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.SaveGame then
     begin
       null;
     end;
@@ -107,16 +131,27 @@ begin
     end;
   end if;
 
-  discard CloseChannel(Requests);
-  discard CloseChannel(Events);
-  const CancelRequests: channel of ClientMessage := CreateChannel(4);
-  const CancelEvents: channel of ClientEvent := CreateChannel(1);
-  const CancelCmd: TuiCmdOutput := TuiCmdOutput.Create();
-  var CancelModel: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), CancelRequests, CancelEvents);
-  CancelModel := UpdateClientEvent(CancelModel, ClientEvent.Connected(FixtureCatalog(false, false)), CancelCmd);
-  CancelModel := UpdateClient(CancelModel, Action(4, 104), CancelCmd);
-  AssertTrue(CancelModel.Pending);
-  if ReceiveWithTimeout(CancelRequests, 0).Unwrap() is ClientMessage.StartNewGame then
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+  const CancelRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const CancelEvents: channel of Client.ClientEvent := Tasks.CreateChannel(1);
+  const CancelCmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+  var CancelModel: Client.ClientModel := Client.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    CancelRequests,
+    CancelEvents
+  );
+  CancelModel := Client.UpdateClientEvent(
+    CancelModel,
+    Client.ClientEvent.Connected(Catalog.FixtureCatalog(false, false)),
+    CancelCmd
+  );
+  CancelModel := Client.UpdateClient(CancelModel, Action(4, 104), CancelCmd);
+  Test.AssertTrue(CancelModel.Pending);
+  if Tasks.ReceiveWithTimeout(CancelRequests, 0).Unwrap() is Protocol.ClientMessage.StartNewGame then
     begin
       null;
     end;
@@ -126,29 +161,29 @@ begin
     end;
   end if;
 
-  CancelModel := UpdateClient(CancelModel, Action(7, 132), CancelCmd);
-  AssertTrue(CancelModel.Overlay = ClientOverlay.SessionCancelConfirmationOverlay);
-  AssertTrue(CancelModel.Pending);
-  const CancelApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(80, 24));
-  CancelModel := CancelApp.RunIterations(CancelModel, UpdateClient, ViewClient, 0, 0);
-  const CancelSurface: TuiSurfaceSnapshot := CancelApp.SurfaceSnapshot();
-  AssertTrue(ScreenContains(CancelSurface, 'Cancel session start?'));
-  AssertTrue(ScreenContains(CancelSurface, 'The connection will be closed.'));
-  AssertTrue(ScreenContains(CancelSurface, 'Continue waiting'));
-  AssertTrue(ScreenContains(CancelSurface, 'Cancel and disconnect'));
+  CancelModel := Client.UpdateClient(CancelModel, Action(7, 132), CancelCmd);
+  Test.AssertTrue(CancelModel.Overlay = Client.ClientOverlay.SessionCancelConfirmationOverlay);
+  Test.AssertTrue(CancelModel.Pending);
+  const CancelApp: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 24));
+  CancelModel := CancelApp.RunIterations(CancelModel, Client.UpdateClient, Client.ViewClient, 0, 0);
+  const CancelSurface: Tui.TuiSurfaceSnapshot := CancelApp.SurfaceSnapshot();
+  Test.AssertTrue(ScreenContains(CancelSurface, 'Cancel session start?'));
+  Test.AssertTrue(ScreenContains(CancelSurface, 'The connection will be closed.'));
+  Test.AssertTrue(ScreenContains(CancelSurface, 'Continue waiting'));
+  Test.AssertTrue(ScreenContains(CancelSurface, 'Cancel and disconnect'));
   CancelApp.Close();
-  CancelModel := UpdateClient(CancelModel, Action(33, 134), CancelCmd);
-  AssertTrue(CancelModel.Overlay = ClientOverlay.NoOverlay);
-  AssertEquals(7, CancelModel.FocusedControl);
-  AssertTrue(CancelModel.Pending);
-  CancelModel := UpdateClient(CancelModel, Action(7, 132), CancelCmd);
-  CancelModel := UpdateClient(CancelModel, Action(32, 133), CancelCmd);
-  AssertTrue(CancelModel.Screen = ClientScreen.StartScreen);
-  AssertTrue(CancelModel.ConnectionPhase = ClientConnectionPhase.Offline);
-  AssertTrue(CancelModel.Overlay = ClientOverlay.NoOverlay);
-  AssertFalse(CancelModel.Pending);
-  AssertEquals('Ready', CancelModel.Status);
-  if ReceiveWithTimeout(CancelRequests, 0).Unwrap() is ClientMessage.Disconnect then
+  CancelModel := Client.UpdateClient(CancelModel, Action(33, 134), CancelCmd);
+  Test.AssertTrue(CancelModel.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertEquals(7, CancelModel.FocusedControl);
+  Test.AssertTrue(CancelModel.Pending);
+  CancelModel := Client.UpdateClient(CancelModel, Action(7, 132), CancelCmd);
+  CancelModel := Client.UpdateClient(CancelModel, Action(32, 133), CancelCmd);
+  Test.AssertTrue(CancelModel.Screen = Client.ClientScreen.StartScreen);
+  Test.AssertTrue(CancelModel.ConnectionPhase = Client.ClientConnectionPhase.Offline);
+  Test.AssertTrue(CancelModel.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertFalse(CancelModel.Pending);
+  Test.AssertEquals('Ready', CancelModel.Status);
+  if Tasks.ReceiveWithTimeout(CancelRequests, 0).Unwrap() is Protocol.ClientMessage.Disconnect then
     begin
       null;
     end;
@@ -158,6 +193,6 @@ begin
     end;
   end if;
 
-  discard CloseChannel(CancelRequests);
-  discard CloseChannel(CancelEvents);
+  discard Tasks.CloseChannel(CancelRequests);
+  discard Tasks.CloseChannel(CancelEvents);
 end.

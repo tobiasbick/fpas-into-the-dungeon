@@ -1,108 +1,135 @@
 // Positive, malformed and boundary coverage for versioned world catalogs and lifecycle intentions.
 program WorldManagementProtocolTest;
 
-uses
-  Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
-  Dungeon.Protocol.Worlds, Dungeon.Test.Catalog, Std.Conv, Std.Test;
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.Test.Catalog as CatalogUnit, Std.Conv as Conv, Std.Test as Test;
 
-function CatalogRoundTrip(Value: WorldCatalog): WorldCatalog;
+function CatalogRoundTrip(Value: Protocol.WorldCatalog): Protocol.WorldCatalog;
 begin
-  if DecodeServer(EncodeServer(ServerMessage.Worlds(Value))).Unwrap() is ServerMessage.Worlds(const Catalog) then
-    begin
+  case ServerMessages.DecodeServer(
+    ServerMessages.EncodeServer(Protocol.ServerMessage.Worlds(Value))
+  ).Unwrap() of
+    when Protocol.ServerMessage.Worlds(const Catalog):
       return Catalog;
-    end;
-  else
-    begin
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
       panic('expected catalog');
-    end;
-  end if;
+  end case;
 end function;
 
 begin
-  for Message: ClientMessage in [
-                                  ClientMessage.ListWorlds(0, false),
-                                  ClientMessage.ListWorlds(1000000, true),
-                                  ClientMessage.SelectWorld('world-1'),
-                                  ClientMessage.CreateWorld(-2147483648, 1),
-                                  ClientMessage.CreateWorld(2147483647, 16),
-                                  ClientMessage.OverwriteSaveGame
-                                ] do
-    AssertTrue(Message = DecodeClient(EncodeClient(Message)).Unwrap());
+  for Message: Protocol.ClientMessage in [
+    Protocol.ClientMessage.ListWorlds(0, false),
+    Protocol.ClientMessage.ListWorlds(1000000, true),
+    Protocol.ClientMessage.SelectWorld('world-1'),
+    Protocol.ClientMessage.CreateWorld(-2147483648, 1),
+    Protocol.ClientMessage.CreateWorld(2147483647, 16),
+    Protocol.ClientMessage.OverwriteSaveGame
+  ] do
+    Test.AssertTrue(
+      Message = ClientMessages.DecodeClient(ClientMessages.EncodeClient(Message)).Unwrap()
+    );
   end for;
 
   for Text: string in [
-                        '{"type":"list_worlds","offset":-1,"discard":false}',
-                        '{"type":"list_worlds","offset":1000001,"discard":false}',
-                        '{"type":"list_worlds","offset":0,"discard":"yes"}',
-                        '{"type":"list_worlds","offset":0}',
-                        '{"type":"overwrite_save","extra":1}',
-                        '{"type":"select_world","id":"../outside"}',
-                        '{"type":"select_world","id":""}',
-                        '{"type":"create_world","seed":2147483648,"region_chunks":4}',
-                        '{"type":"create_world","seed":1,"region_chunks":0}',
-                        '{"type":"create_world","seed":1,"region_chunks":17}',
-                        '{"type":"create_world","seed":1.5,"region_chunks":4}',
-                        '{"type":"create_world","seed":"1","region_chunks":4}',
-                        '{"type":"create_world","seed":1,"seed":2,"region_chunks":4}'
-                      ] do
-    AssertTrue(DecodeClient(Text).IsError());
+    '{"type":"list_worlds","offset":-1,"discard":false}',
+    '{"type":"list_worlds","offset":1000001,"discard":false}',
+    '{"type":"list_worlds","offset":0,"discard":"yes"}',
+    '{"type":"list_worlds","offset":0}',
+    '{"type":"overwrite_save","extra":1}',
+    '{"type":"select_world","id":"../outside"}',
+    '{"type":"select_world","id":""}',
+    '{"type":"create_world","seed":2147483648,"region_chunks":4}',
+    '{"type":"create_world","seed":1,"region_chunks":0}',
+    '{"type":"create_world","seed":1,"region_chunks":17}',
+    '{"type":"create_world","seed":1.5,"region_chunks":4}',
+    '{"type":"create_world","seed":"1","region_chunks":4}',
+    '{"type":"create_world","seed":1,"seed":2,"region_chunks":4}'
+  ] do
+    Test.AssertTrue((ClientMessages.DecodeClient(Text) is Error(_)));
   end for;
-  const Empty: WorldCatalog := CatalogRoundTrip(EmptyWorldCatalog(0, 1));
-  AssertEquals(0, Empty.Total);
-  AssertFalse(CanContinueWorld(Empty));
-  AssertFalse(CatalogHasSave(Empty));
-  const Fixture: WorldCatalog := FixtureCatalog(false, false);
-  AssertTrue(CanContinueWorld(Fixture));
-  AssertFalse(CatalogHasSave(Fixture));
-  AssertFalse(CanContinueWorld(FixtureCatalog(false, true)));
-  AssertTrue(CatalogHasSave(FixtureCatalog(false, true)));
+  const Empty: Protocol.WorldCatalog := CatalogRoundTrip(WorldsUnit.EmptyWorldCatalog(0, 1));
+  Test.AssertEquals(0, Empty.Total);
+  Test.AssertFalse(WorldsUnit.CanContinueWorld(Empty));
+  Test.AssertFalse(WorldsUnit.CatalogHasSave(Empty));
+  const Fixture: Protocol.WorldCatalog := CatalogUnit.FixtureCatalog(false, false);
+  Test.AssertTrue(WorldsUnit.CanContinueWorld(Fixture));
+  Test.AssertFalse(WorldsUnit.CatalogHasSave(Fixture));
+  Test.AssertFalse(WorldsUnit.CanContinueWorld(CatalogUnit.FixtureCatalog(false, true)));
+  Test.AssertTrue(WorldsUnit.CatalogHasSave(CatalogUnit.FixtureCatalog(false, true)));
   // Original worlds can retain all signed 64-bit seed values even though new seeds are bounded.
-  var Worlds: array of WorldSummary := [];
-  for Index: integer := 0 to MaximumWorldsPerPage - 1 do
-    Worlds.Push(WorldSummary(Id := 'world-' + IntToStr(Index), Seed := 9223372036854775807, RegionChunks := 16, Status := 'ready', SaveStatus := 'available', Reason := 'x'
-                                                                                                                                                                          .RepeatStr(256)));
+  var Worlds: array of Protocol.WorldSummary := [];
+  for Index: integer := 0 to Protocol.MaximumWorldsPerPage - 1 do
+    Worlds.PushInPlace(
+      Protocol.WorldSummary(
+        Id := 'world-' + Conv.IntToStr(Index),
+        Seed := 9223372036854775807,
+        RegionChunks := 16,
+        Status := 'ready',
+        SaveStatus := 'available',
+        Reason := 'x'.RepeatStr(256)
+      )
+    );
   end for;
-  const Full: WorldCatalog := EmptyWorldCatalog(-2147483648, 16) with Worlds := Worlds; Total := 64; SelectedId := 'world-0'; end with;
-  const Decoded: WorldCatalog := CatalogRoundTrip(Full);
-  AssertEquals(64, Decoded.Worlds.Length());
-  AssertEquals(9223372036854775807, Decoded.Worlds[0].Seed);
-  AssertEquals(256, Decoded.Worlds[63].Reason.Length());
-  Worlds.Push(Worlds[0] with Id := 'overflow'; end with);
-  AssertTrue(DecodeServer(EncodeServer(ServerMessage.Worlds(Full with Worlds := Worlds; Total := 65; end with)))
-               .IsError());
-  for Invalid: WorldCatalog in [
-                                 Full with Offset := -1; end with,
-                                 Full with Total := 63; end with,
-                                 Full with DefaultSeed := 2147483648; end with,
-                                 Full with DefaultRegionChunks := 0; end with,
-                                 Full with SelectedId := '../invalid'; end with,
-                                 Full with SelectionReason := 'x'.RepeatStr(257); end with
-                               ] do
-    AssertTrue(DecodeServer(EncodeServer(ServerMessage.Worlds(Invalid))).IsError());
+  const Full: Protocol.WorldCatalog := WorldsUnit.EmptyWorldCatalog(-2147483648, 16) with Worlds := Worlds; Total := 64; SelectedId := 'world-0'; end with;
+  const Decoded: Protocol.WorldCatalog := CatalogRoundTrip(Full);
+  Test.AssertEquals(64, Decoded.Worlds.Length());
+  Test.AssertEquals(9223372036854775807, Decoded.Worlds[0].Seed);
+  Test.AssertEquals(256, Decoded.Worlds[63].Reason.Length());
+  Worlds.PushInPlace(Worlds[0] with Id := 'overflow'; end with);
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(
+        ServerMessages.EncodeServer(
+          Protocol.ServerMessage.Worlds(Full with Worlds := Worlds; Total := 65; end with)
+        )
+      ) is Error(_)
+    )
+  );
+  for Invalid: Protocol.WorldCatalog in [
+    Full with Offset := -1; end with,
+    Full with Total := 63; end with,
+    Full with DefaultSeed := 2147483648; end with,
+    Full with DefaultRegionChunks := 0; end with,
+    Full with SelectedId := '../invalid'; end with,
+    Full with SelectionReason := 'x'.RepeatStr(257); end with
+  ] do
+    Test.AssertTrue(
+      (
+        ServerMessages.DecodeServer(
+          ServerMessages.EncodeServer(Protocol.ServerMessage.Worlds(Invalid))
+        ) is Error(_)
+      )
+    );
   end for;
-  const Wire: string := EncodeServer(ServerMessage.Worlds(Fixture));
+  const Wire: string := ServerMessages.EncodeServer(Protocol.ServerMessage.Worlds(Fixture));
   for Bad: string in [
-                       Wire.Replace('"seed":"12345"', '"seed":12345'),
-                       Wire.Replace('"seed":"12345"', '"seed":"+12345"'),
-                       Wire.Replace('"seed":"12345"', '"seed":"9223372036854775808"'),
-                       Wire.Replace('"status":"ready"', '"status":"unknown"'),
-                       Wire.Replace('"save_status":"missing"', '"save_status":"unknown"'),
-                       Wire.Replace('"status":"ready"', '"status":"ready","extra":1'),
-                       Wire.Replace('"status":"ready"', '"status":"ready","status":"ready"'),
-                       Wire.Replace('"total":1', '"total":"1"'),
-                       Wire.Replace('"total":1', '"total":1,"extra":1')
-                     ] do
-    AssertTrue(DecodeServer(Bad).IsError());
+    Wire.Replace('"seed":"12345"', '"seed":12345'),
+    Wire.Replace('"seed":"12345"', '"seed":"+12345"'),
+    Wire.Replace('"seed":"12345"', '"seed":"9223372036854775808"'),
+    Wire.Replace('"status":"ready"', '"status":"unknown"'),
+    Wire.Replace('"save_status":"missing"', '"save_status":"unknown"'),
+    Wire.Replace('"status":"ready"', '"status":"ready","extra":1'),
+    Wire.Replace('"status":"ready"', '"status":"ready","status":"ready"'),
+    Wire.Replace('"total":1', '"total":"1"'),
+    Wire.Replace('"total":1', '"total":1,"extra":1')
+  ] do
+    Test.AssertTrue((ServerMessages.DecodeServer(Bad) is Error(_)));
   end for;
 
-  AssertTrue(ValidateWorldCatalog(Fixture with Worlds := [Fixture.Worlds[0], Fixture.Worlds[0]]; Total := 2; end with)
-               .IsError());
-  var Escaped: array of WorldSummary := [];
-  for Entry: WorldSummary in Full.Worlds do
-    Escaped.Push(Entry with Reason := string.Chr(1).RepeatStr(256); end with);
+  Test.AssertTrue(
+    (
+      WorldsUnit.ValidateWorldCatalog(
+        Fixture with Worlds := [Fixture.Worlds[0], Fixture.Worlds[0]]; Total := 2; end with
+      ) is Error(_)
+    )
+  );
+  var Escaped: array of Protocol.WorldSummary := [];
+  for Entry: Protocol.WorldSummary in Full.Worlds do
+    Escaped.PushInPlace(Entry with Reason := string.Chr(1).RepeatStr(256); end with);
   end for;
 
-  AssertTrue(ValidateWorldCatalog(Full with Worlds := Escaped; end with).IsError());
-  AssertTrue(ParseWorldInteger('9223372036854775808').IsError());
-  AssertTrue(ParseWorldInteger('abc').IsError());
+  Test.AssertTrue(
+    (WorldsUnit.ValidateWorldCatalog(Full with Worlds := Escaped; end with) is Error(_))
+  );
+  Test.AssertTrue((WorldsUnit.ParseWorldInteger('9223372036854775808') is Error(_)));
+  Test.AssertTrue((WorldsUnit.ParseWorldInteger('abc') is Error(_)));
 end.

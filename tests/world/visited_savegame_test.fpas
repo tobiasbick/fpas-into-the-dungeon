@@ -1,82 +1,92 @@
 // Verifies that saves retain first-visit entities and reject invalid visit lists.
 program VisitedSavegameTest;
 
-uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior, Dungeon.Items, Dungeon.Movement,
-  Dungeon.Test.Fixtures, Dungeon.Test.Levels, Dungeon.World, Dungeon.World.Savegame, Dungeon.Terrain,
-  Std.Conv, Std.Fs, Std.Test, Std.Time;
+uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as Interior, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
 
 begin
-  const Root: string := '.temp-data/visited-save-test-' + IntToStr(TimestampMillis());
-  const World: WorldSession := OpenWorld(Root, 'visited', 12345, 4, 16).Unwrap();
-  const Metadata: WorldMetadata := World.Metadata;
-  const Map: InteriorMap := SpawnLevel(World);
-  const Fresh: GameState := NewGame(Metadata);
-  AssertTrue(WriteSaveGame(World, Fresh).Unwrap());
-  AssertEquals(0, DecodeStoredSave(World, EncodeSaveGame(Metadata.Id, Fresh))
-                    .Unwrap()
-                    .VisitedAreas
-                    .Length());
-  const Entered: GameState := EnterSpawnLevel(World, Fresh).Unwrap();
-  var Changed: GameState := Entered;
-  Changed.Items[0] := Changed.Items[0] with Location := ItemLocation.CarriedByPlayer; end with;
+  const Root: string := '.temp-data/visited-save-test-' + Conv.IntToStr(Time.TimestampMillis());
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    Root,
+    'visited',
+    12345,
+    4,
+    16
+  ).Unwrap();
+  const Metadata: Terrain.WorldMetadata := World.Metadata;
+  const Map: Interior.InteriorMap := Levels.SpawnLevel(World);
+  const Fresh: GameState.GameState := GameState.NewGame(Metadata);
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Fresh).Unwrap());
+  Test.AssertEquals(
+    0,
+    Levels.DecodeStoredSave(
+      World,
+      Savegame.EncodeSaveGame(Metadata.Id, Fresh)
+    ).Unwrap().VisitedAreas.Length()
+  );
+  const Entered: GameState.GameState := Levels.EnterSpawnLevel(World, Fresh).Unwrap();
+  var Changed: GameState.GameState := Entered;
+  Changed.Items[0] := Changed.Items[0] with Location := Items.ItemLocation.CarriedByPlayer; end with;
 
   Changed.Hostiles[0] := Changed.Hostiles[0] with Health := 0; Alerted := true; end with;
 
-  Changed.Player := PlayerPosition.FirstPerson(FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing));
-  const Outside: GameState := LeaveLevel(World, Changed, Map).Unwrap();
-  AssertTrue(WriteSaveGame(World, Outside).Unwrap());
-  const Saved: string := Std.Fs.ReadText(SaveGamePath(World)).Unwrap();
-  AssertTrue(Saved.Contains('"visited_areas"'));
-  if LoadSaveGame(World).Unwrap() is SaveGameLoad.Loaded(const State, const View) then
-    begin
-      AssertTrue(ValidateGameState(View, State).IsOk());
-      AssertTrue(HasVisitedArea(State, Map.AreaId));
-      const Again: GameState := EnterSpawnLevel(World, State).Unwrap();
-      AssertEquals(3, Again.Items.Length());
-      AssertEquals(Map.Hostiles.Length(), Again.Hostiles.Length());
-      AssertTrue(Again.Items[0] = Changed.Items[0]);
-      AssertTrue(Again.Hostiles[0] = Changed.Hostiles[0]);
-      AssertTrue(WriteSaveGame(World, Again).Unwrap());
-      if LoadSaveGame(World).Unwrap() is SaveGameLoad.Loaded(const Indoor, const IndoorView) then
-        begin
-          AssertTrue(ValidateGameState(IndoorView, Indoor).IsOk());
-          AssertTrue(Indoor.Items[0] = Changed.Items[0]);
-          AssertTrue(Indoor.Hostiles[0] = Changed.Hostiles[0]);
-        end;
-      else
-        begin
+  Changed.Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing)
+  );
+  const Outside: GameState.GameState := Levels.LeaveLevel(World, Changed, Map).Unwrap();
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Outside).Unwrap());
+  const Saved: string := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  Test.AssertTrue('"visited_areas"' in Saved);
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, const View):
+      Test.AssertTrue((GameState.ValidateGameState(View, State) is Ok(_)));
+      Test.AssertTrue(GameState.HasVisitedArea(State, Map.AreaId));
+      const Again: GameState.GameState := Levels.EnterSpawnLevel(World, State).Unwrap();
+      Test.AssertEquals(3, Again.Items.Length());
+      Test.AssertEquals(Map.Hostiles.Length(), Again.Hostiles.Length());
+      Test.AssertTrue(Again.Items[0] = Changed.Items[0]);
+      Test.AssertTrue(Again.Hostiles[0] = Changed.Hostiles[0]);
+      Test.AssertTrue(Savegame.WriteSaveGame(World, Again).Unwrap());
+      case Savegame.LoadSaveGame(World).Unwrap() of
+        when Savegame.SaveGameLoad.Loaded(const Indoor, const IndoorView):
+          Test.AssertTrue((GameState.ValidateGameState(IndoorView, Indoor) is Ok(_)));
+          Test.AssertTrue(Indoor.Items[0] = Changed.Items[0]);
+          Test.AssertTrue(Indoor.Hostiles[0] = Changed.Hostiles[0]);
+        when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
           panic('expected indoor load');
-        end;
-      end if;
-    end;
-  else
-    begin
+      end case;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
       panic('expected outdoor load');
-    end;
-  end if;
+  end case;
   const VisitJson: string := ('"visited_areas":["' + Map.AreaId) + '"]';
-  AssertTrue(DecodeStoredSave(World, Saved.Replace(VisitJson, '"visited_areas":[]')).IsError());
-  AssertTrue(DecodeStoredSave(World, Saved.Replace(VisitJson, '"visited_areas":["wrong"]'))
-               .IsError());
+  Test.AssertTrue(
+    (Levels.DecodeStoredSave(World, Saved.Replace(VisitJson, '"visited_areas":[]')) is Error(_))
+  );
+  Test.AssertTrue(
+    (
+      Levels.DecodeStoredSave(World, Saved.Replace(VisitJson, '"visited_areas":["wrong"]')) is Error(_)
+    )
+  );
   const Duplicate: string := ((('"visited_areas":["' + Map.AreaId) + '","') + Map.AreaId) + '"]';
-  AssertTrue(DecodeStoredSave(World, Saved.Replace(VisitJson, Duplicate)).IsError());
-  AssertTrue(DecodeStoredSave(World, Saved.Replace(VisitJson, '"visited_areas":[42]')).IsError());
-  AssertTrue(DecodeStoredSave(World, Saved.Replace(VisitJson + ',', '')).IsError());
-  const Before: string := Std.Fs.ReadText(SaveGamePath(World)).Unwrap();
-  AssertTrue(WriteSaveGame(World, Outside with VisitedAreas := []; end with).IsError());
-  AssertEquals(Before, Std.Fs.ReadText(SaveGamePath(World)).Unwrap());
-  AssertTrue(WriteSaveGame(World, Fresh).Unwrap());
-  if LoadSaveGame(World).Unwrap() is SaveGameLoad.Loaded(const State, const View) then
-    begin
-      AssertEquals(0, State.VisitedAreas.Length());
-      AssertEquals(0, State.Items.Length());
-      AssertEquals(0, State.Hostiles.Length());
-      AssertTrue(ValidateGameState(View, State).IsOk());
-    end;
-  else
-    begin
+  Test.AssertTrue(
+    (Levels.DecodeStoredSave(World, Saved.Replace(VisitJson, Duplicate)) is Error(_))
+  );
+  Test.AssertTrue(
+    (Levels.DecodeStoredSave(World, Saved.Replace(VisitJson, '"visited_areas":[42]')) is Error(_))
+  );
+  Test.AssertTrue((Levels.DecodeStoredSave(World, Saved.Replace(VisitJson + ',', '')) is Error(_)));
+  const Before: string := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  Test.AssertTrue(
+    (Savegame.WriteSaveGame(World, Outside with VisitedAreas := []; end with) is Error(_))
+  );
+  Test.AssertEquals(Before, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Fresh).Unwrap());
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, const View):
+      Test.AssertEquals(0, State.VisitedAreas.Length());
+      Test.AssertEquals(0, State.Items.Length());
+      Test.AssertEquals(0, State.Hostiles.Length());
+      Test.AssertTrue((GameState.ValidateGameState(View, State) is Ok(_)));
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
       panic('expected fresh save');
-    end;
-  end if;
+  end case;
 end.

@@ -1,47 +1,45 @@
 // Applies authoritative network events to the client model.
 unit Dungeon.Client.Ui.Events;
 
-uses
-  Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Intentions, Dungeon.Client.Ui.Playback,
-  Dungeon.Client.Ui.Session, Dungeon.Client.Animation, Dungeon.Client.Character,
-  Dungeon.Client.Model, Dungeon.Protocol, Dungeon.Protocol.Worlds, Dungeon.Client.Ui.Worlds,
-  Std.Tui;
+uses Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Intentions as Intentions, Dungeon.Client.Ui.Playback as Playback, Dungeon.Client.Ui.Session as Session, Dungeon.Client.Animation as Animation, Dungeon.Client.Character as Character, Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as Worlds, Dungeon.Client.Ui.Worlds as UiWorlds, Std.Tui as Tui;
 
 // Applies authoritative messages emitted by the network task.
-public function UpdateClientEvent(State: ClientModel; Value: ClientEvent; Cmd: TuiCmdOutput): ClientModel;
+public function UpdateClientEvent(State: Model.ClientModel; Value: Model.ClientEvent; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
-  Cmd.Set(TuiCmd.NoCommand);
-  var Next: ClientModel := State;
+  Cmd.Set(Tui.TuiCmd.NoCommand);
+  var Next: Model.ClientModel := State;
   case Value of
-    when ClientEvent.Connected(const Catalog), ClientEvent.Worlds(const Catalog):
+    when Model.ClientEvent.Connected(const Catalog), Model.ClientEvent.Worlds(const Catalog):
       begin
-        const Installed: ClientModel := InstallCatalog(State, Catalog, Cmd);
-        if State.Overlay = ClientOverlay.DefeatOverlay then
-          return Installed with Overlay := ClientOverlay.DefeatOverlay; FocusedControl := OverlayBackControlId; Status := 'You have fallen.'; end with;
+        const Installed: Model.ClientModel := UiWorlds.InstallCatalog(State, Catalog, Cmd);
+        if State.Overlay = Model.ClientOverlay.DefeatOverlay then
+          return Installed with Overlay := Model.ClientOverlay.DefeatOverlay; FocusedControl := Controls.OverlayBackControlId; Status := 'You have fallen.'; end with;
         end if;
 
         return Installed;
       end;
-    when ClientEvent.State(const Value):
+    when Model.ClientEvent.State(const Value):
       begin
-        Next.Screen := ClientScreen.GameScreen;
-        Next.Overlay := ClientOverlay.NoOverlay;
+        Next.Screen := Model.ClientScreen.GameScreen;
+        Next.Overlay := Model.ClientOverlay.NoOverlay;
         // A viewport response during reading must not dismiss the description.
-        if State.Overlay = ClientOverlay.DescriptionOverlay then
+        if State.Overlay = Model.ClientOverlay.DescriptionOverlay then
           begin
-            Next.Overlay := ClientOverlay.DescriptionOverlay;
+            Next.Overlay := Model.ClientOverlay.DescriptionOverlay;
           end;
         end if;
 
         // Gear changes answer with a state; the overlays stay open to show the result.
-        if (State.Overlay = ClientOverlay.InventoryOverlay) or
-           (State.Overlay = ClientOverlay.CharacterSheetOverlay) then
+        if (State.Overlay = Model.ClientOverlay.InventoryOverlay)
+          or
+          (State.Overlay = Model.ClientOverlay.CharacterSheetOverlay)
+        then
           begin
             Next.Overlay := State.Overlay;
           end;
         end if;
 
-        Next.ConnectionPhase := ClientConnectionPhase.Active;
+        Next.ConnectionPhase := Model.ClientConnectionPhase.Active;
         Next.FocusedControl := 0;
         Next.HasVisibleState := true;
         Next.Dirty := State.Dirty or State.PendingChangesProgress;
@@ -52,9 +50,9 @@ begin
 
         Next.PendingChangesProgress := false;
         Next.PendingCreatedWorld := false;
-        Next.View := ViewForVisibleState(Value);
+        Next.View := Protocol.ViewForVisibleState(Value);
         case Value of
-          when VisibleState.MapState(const MapValue):
+          when Protocol.VisibleState.MapState(const MapValue):
             begin
               Next.OriginX := MapValue.OriginX;
               Next.OriginY := MapValue.OriginY;
@@ -71,7 +69,7 @@ begin
               Next.PrimaryTitle := '';
               Next.PrimaryStatus := '';
             end;
-          when VisibleState.FirstPersonState(const FirstPersonValue):
+          when Protocol.VisibleState.FirstPersonState(const FirstPersonValue):
             begin
               Next.OriginX := 0;
               Next.OriginY := 0;
@@ -95,14 +93,14 @@ begin
         var Health: integer := 0;
         var MaxHealth: integer := 0;
         var CombatLog: array of string := [];
-        var CombatEvents: array of VisibleCombatEvent := [];
+        var CombatEvents: array of Protocol.VisibleCombatEvent := [];
         case Value of
-          when VisibleState.MapState(const MapValue):
+          when Protocol.VisibleState.MapState(const MapValue):
             begin
               Health := MapValue.Health;
               MaxHealth := MapValue.MaxHealth;
             end;
-          when VisibleState.FirstPersonState(const FirstPersonValue):
+          when Protocol.VisibleState.FirstPersonState(const FirstPersonValue):
             begin
               Health := FirstPersonValue.Health;
               MaxHealth := FirstPersonValue.MaxHealth;
@@ -111,28 +109,30 @@ begin
             end;
         end case;
 
-        Next := MoveInventorySelection(Next, 0);
+        Next := Character.MoveInventorySelection(Next, 0);
         // Only a drop within one running game flashes; loading or starting never does.
-        Next.DamageTaken := (State.HasVisibleState and (State.Health > 0)) and
-                            (Health < State.Health);
+        Next.DamageTaken := (State.HasVisibleState and (State.Health > 0))
+          and
+          (Health < State.Health);
         Next.Health := Health;
         Next.MaxHealth := MaxHealth;
         for Entry: string in CombatLog do
           begin
-            Next := AppendMessage(Next, Entry);
+            Next := Session.AppendMessage(Next, Entry);
           end;
         end for;
 
-        if Next.View = ViewKind.FirstPerson then
+        if Next.View = Protocol.ViewKind.FirstPerson then
           begin
             // A newly carried identity confirms pickup until the next authoritative update.
             // Initial/load projections do not announce existing inventory as a new pickup.
             if State.HasVisibleState then
               begin
-                for Item: VisibleInventoryItem in Next.Inventory do
+                const Carried: array of Protocol.VisibleInventoryItem := Next.Inventory;
+                for Item: Protocol.VisibleInventoryItem in Carried do
                   begin
                     var Known: boolean := false;
-                    for Previous: VisibleInventoryItem in State.Inventory do
+                    for Previous: Protocol.VisibleInventoryItem in State.Inventory do
                       begin
                         if Previous.Id = Item.Id then
                           begin
@@ -166,19 +166,19 @@ begin
           end;
         end if;
 
-        if Next.View = ViewKind.FirstPerson then
+        if Next.View = Protocol.ViewKind.FirstPerson then
           begin
-            Next := StartCombatAnimation(Next, CombatEvents, Cmd);
+            Next := Playback.StartCombatAnimation(Next, CombatEvents, Cmd);
           end;
         else
           begin
-            Next := StopAnimation(Next, Cmd);
+            Next := Playback.StopAnimation(Next, Cmd);
           end;
         end if;
 
-        return QueueViewport(Next);
+        return Intentions.QueueViewport(Next);
       end;
-    when ClientEvent.ExplorationMap(const Value):
+    when Model.ClientEvent.ExplorationMap(const Value):
       begin
         Next.MapRequestPending := false;
         Next.MapHasState := true;
@@ -194,16 +194,24 @@ begin
         Next.MapPlayerWorldY := Value.PlayerWorldY;
         Next.MapPlayerInWindow := Value.PlayerInWindow;
         Next.Status := 'Map ready.';
-        if (Next.Overlay = ClientOverlay.ExplorationMapOverlay) and
-           (((Next.MapDesiredOriginX <> Value.OriginX) or (Next.MapDesiredOriginY <> Value.OriginY)) or ((Next.MapDesiredWidth <> Value.Width) or (Next.MapDesiredHeight <> Value.Height))) then
+        if (Next.Overlay = Model.ClientOverlay.ExplorationMapOverlay)
+          and
+          (
+            (
+              (Next.MapDesiredOriginX <> Value.OriginX)
+              or
+              (Next.MapDesiredOriginY <> Value.OriginY)
+            ) or ((Next.MapDesiredWidth <> Value.Width) or (Next.MapDesiredHeight <> Value.Height))
+          )
+        then
           begin
-            return QueueExplorationMap(Next);
+            return Intentions.QueueExplorationMap(Next);
           end;
         end if;
 
         return Next;
       end;
-    when ClientEvent.Interaction(const Title, const Message):
+    when Model.ClientEvent.Interaction(const Title, const Message):
       begin
         Next.Pending := false;
         if Title <> '' then
@@ -211,7 +219,7 @@ begin
             Next.DescriptionTitle := Title;
             Next.DescriptionText := Message;
             Next.DescriptionOffset := 0;
-            Next.Overlay := ClientOverlay.DescriptionOverlay;
+            Next.Overlay := Model.ClientOverlay.DescriptionOverlay;
             Next.FocusedControl := 0;
             Next.Status := 'Reading...';
           end;
@@ -221,91 +229,91 @@ begin
           end;
         end if;
 
-        return AppendMessage(Next, Message);
+        return Session.AppendMessage(Next, Message);
       end;
-    when ClientEvent.SaveCompleted:
+    when Model.ClientEvent.SaveCompleted:
       begin
         Next.Pending := false;
         Next.SaveAvailable := true;
         Next.Dirty := false;
         Next.Status := 'Game saved.';
-        return AppendMessage(Next, Next.Status);
+        return Session.AppendMessage(Next, Next.Status);
       end;
-    when ClientEvent.Defeated(const Message):
+    when Model.ClientEvent.Defeated(const Message):
       begin
         // The server ended the game session; the connection stays ready for a new session choice.
-        Next := StopAnimation(Next, Cmd);
-        Next.Screen := ClientScreen.StartScreen;
-        Next.ConnectionPhase := ClientConnectionPhase.AwaitingSession;
-        Next.Overlay := ClientOverlay.DefeatOverlay;
-        Next.FocusedControl := OverlayBackControlId;
+        Next := Playback.StopAnimation(Next, Cmd);
+        Next.Screen := Model.ClientScreen.StartScreen;
+        Next.ConnectionPhase := Model.ClientConnectionPhase.AwaitingSession;
+        Next.Overlay := Model.ClientOverlay.DefeatOverlay;
+        Next.FocusedControl := Controls.OverlayBackControlId;
         Next.Pending := false;
         Next.MapRequestPending := false;
         Next.HasVisibleState := false;
         Next.DamageTaken := false;
         Next.DefeatMessage := Message;
         Next.Dirty := false;
-        Next := QueueWorldList(Next, 0, false);
+        Next := UiWorlds.QueueWorldList(Next, 0, false);
         Next.Status := 'You have fallen.';
-        return AppendMessage(Next, Message);
+        return Session.AppendMessage(Next, Message);
       end;
-    when ClientEvent.MapRejected(const Code, const Message):
+    when Model.ClientEvent.MapRejected(const Code, const Message):
       begin
         Next.MapRequestPending := false;
         Next.Status := Message;
-        return AppendMessage(Next, 'Rejected: ' + Message);
+        return Session.AppendMessage(Next, 'Rejected: ' + Message);
       end;
-    when ClientEvent.Rejected(const Code, const Message):
+    when Model.ClientEvent.Rejected(const Code, const Message):
       begin
         Next.Pending := false;
         Next.PendingChangesProgress := false;
         Next.PendingCreatedWorld := false;
         if State.PendingCreatedWorld then
-          Next.Overlay := ClientOverlay.NewWorldOverlay;
-          Next.FocusedControl := SubmitWorldControlId;
+          Next.Overlay := Model.ClientOverlay.NewWorldOverlay;
+          Next.FocusedControl := Controls.SubmitWorldControlId;
         end if;
 
         if Code = 'overwrite_required' then
           Next.SaveAvailable := true;
-          Next.Overlay := ClientOverlay.SaveConfirmationOverlay;
-          Next.FocusedControl := CancelSaveControlId;
+          Next.Overlay := Model.ClientOverlay.SaveConfirmationOverlay;
+          Next.FocusedControl := Controls.CancelSaveControlId;
         end if;
 
         if Code = 'discard_required' then
           Next.Dirty := true;
-          Next.Overlay := ClientOverlay.DiscardConfirmationOverlay;
-          Next.FocusedControl := OverlayBackControlId;
+          Next.Overlay := Model.ClientOverlay.DiscardConfirmationOverlay;
+          Next.FocusedControl := Controls.OverlayBackControlId;
         end if;
 
-        if Next.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
+        if Next.Overlay = Model.ClientOverlay.SessionCancelConfirmationOverlay then
           begin
-            Next.Overlay := ClientOverlay.NoOverlay;
-            Next.FocusedControl := NewGameControlId;
+            Next.Overlay := Model.ClientOverlay.NoOverlay;
+            Next.FocusedControl := Controls.NewGameControlId;
           end;
         end if;
 
         Next.Status := Message;
-        return AppendMessage(Next, 'Rejected: ' + Message);
+        return Session.AppendMessage(Next, 'Rejected: ' + Message);
       end;
-    when ClientEvent.Failed(const Message):
+    when Model.ClientEvent.Failed(const Message):
       begin
-        Next := StopAnimation(Next, Cmd);
-        Next.ConnectionPhase := ClientConnectionPhase.Failed;
-        Next.Overlay := ClientOverlay.NoOverlay;
-        Next.FocusedControl := ConnectControlId;
+        Next := Playback.StopAnimation(Next, Cmd);
+        Next.ConnectionPhase := Model.ClientConnectionPhase.Failed;
+        Next.Overlay := Model.ClientOverlay.NoOverlay;
+        Next.FocusedControl := Controls.ConnectControlId;
         Next.Pending := false;
         Next.Status := 'Connection failed: ' + Message;
-        return AppendMessage(Next, Next.Status);
+        return Session.AppendMessage(Next, Next.Status);
       end;
-    when ClientEvent.Disconnected:
+    when Model.ClientEvent.Disconnected:
       begin
-        Next := StopAnimation(Next, Cmd);
-        Next.ConnectionPhase := ClientConnectionPhase.Disconnected;
-        Next.Overlay := ClientOverlay.NoOverlay;
-        Next.FocusedControl := ConnectControlId;
+        Next := Playback.StopAnimation(Next, Cmd);
+        Next.ConnectionPhase := Model.ClientConnectionPhase.Disconnected;
+        Next.Overlay := Model.ClientOverlay.NoOverlay;
+        Next.FocusedControl := Controls.ConnectControlId;
         Next.Pending := false;
         Next.Status := 'Disconnected';
-        return AppendMessage(Next, 'Disconnected');
+        return Session.AppendMessage(Next, 'Disconnected');
       end;
   end case;
 end function;

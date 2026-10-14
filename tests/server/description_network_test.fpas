@@ -1,62 +1,92 @@
 // Verifies titled inspection results cross the real client network adapter.
 program DescriptionNetworkTest;
 
-uses
-  Dungeon.Test.Catalog, Dungeon.Client, Dungeon.Protocol, Dungeon.Protocol.ServerMessages,
-  Dungeon.Protocol.Transport, Dungeon.Test.ClientSession, Std.Net, Std.Tasks, Std.Test;
+uses Dungeon.Test.Catalog as Catalog, Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Test.ClientSession as ClientSession, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
 
-function ServeSession(ListenerValue: Listener; Token: CancellationToken): result of (boolean, string);
+function ServeSession(ListenerValue: Net.Listener; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  const ConnectionValue: Connection := try AcceptWithCancellation(ListenerValue, Token);
-  const Reader: LineReader := NewLineReader(ConnectionValue);
-  const Hello: LineRead := try ReadLine(Reader, Token);
-  const Welcomed: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Welcome(ProtocolVersion, FixtureCatalog(false, false))), Token);
-  const Request: LineRead := try ReadLine(Hello.Reader, Token);
-  const Sent: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Interaction('Ancient coin', 'A tarnished coin.')), Token);
-  const FinalRead: LineRead := try ReadLine(Request.Reader, Token);
-  return Close(ConnectionValue);
+  const ConnectionValue: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Reader: Transport.LineReader := Transport.NewLineReader(ConnectionValue);
+  const Hello: Transport.LineRead := try Transport.ReadLine(Reader, Token);
+  const Welcomed: boolean := try Transport.WriteLine(
+    ConnectionValue,
+    ServerMessages.EncodeServer(
+      Protocol.ServerMessage.Welcome(
+        Protocol.ProtocolVersion,
+        Catalog.FixtureCatalog(false, false)
+      )
+    ),
+    Token
+  );
+  const Request: Transport.LineRead := try Transport.ReadLine(Hello.Reader, Token);
+  const Sent: boolean := try Transport.WriteLine(
+    ConnectionValue,
+    ServerMessages.EncodeServer(
+      Protocol.ServerMessage.Interaction('Ancient coin', 'A tarnished coin.')
+    ),
+    Token
+  );
+  const FinalRead: Transport.LineRead := try Transport.ReadLine(Request.Reader, Token);
+  return Net.Close(ConnectionValue);
 end function;
 
 // Serves the scripted session and publishes its outcome so a stalled test reports the cause.
 function ServeDescription(
-  ListenerValue: Listener;
+  ListenerValue: Net.Listener;
   Outcomes: channel of string;
-  Token: CancellationToken
+  Token: Tasks.CancellationToken
 ): result of (boolean, string);
 begin
   const Outcome: result of (boolean, string) := ServeSession(ListenerValue, Token);
-  ReportOutcome(Outcomes, 'server', Outcome);
+  ClientSession.ReportOutcome(Outcomes, 'server', Outcome);
   return Outcome;
 end function;
 
 begin
-  const ListenerValue: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const Address: NetworkAddress := ListenerLocalAddress(ListenerValue).Unwrap();
-  const Source: CancellationSource := CreateCancellationSource();
-  const Token: CancellationToken := GetCancellationToken(Source);
-  const Requests: channel of ClientMessage := CreateChannel(4);
-  const Events: channel of ClientEvent := CreateChannel(4);
-  const Outcomes: channel of string := CreateChannel(4);
-  const ServerTask: task := go ServeDescription(ListenerValue, Outcomes, Token);
-  const ClientTask: task := go RunReportedClient('127.0.0.1', Address.Port, 1, 1, Requests, Events, Outcomes, Token);
-  const Welcome: ClientEvent := NextClientEvent(Events, Outcomes, 5000);
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.Interact, 1000).Unwrap());
-  if NextClientEvent(Events, Outcomes, 5000) is ClientEvent.Interaction(const Title, const Message) then
-    begin
-      AssertEquals('Ancient coin', Title);
-      AssertEquals('A tarnished coin.', Message);
-    end;
-  else
-    begin
-      panic('expected inspection result');
-    end;
-  end if;
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of Client.ClientEvent := Tasks.CreateChannel(4);
+  const Outcomes: channel of string := Tasks.CreateChannel(4);
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeDescription(
+      ListenerValue,
+      Outcomes,
+      Token
+    );
+    const ClientTask: task of result of (boolean, string) := go ClientSession.RunReportedClient(
+      '127.0.0.1',
+      Address.Port,
+      1,
+      1,
+      Requests,
+      Events,
+      Outcomes,
+      Token
+    );
+    const Welcome: Client.ClientEvent := ClientSession.NextClientEvent(Events, Outcomes, 5000);
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Interact, 1000).Unwrap()
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 5000) of
+      when Client.ClientEvent.Interaction(const Title, const Message):
+        Test.AssertEquals('Ancient coin', Title);
+        Test.AssertEquals('A tarnished coin.', Message);
+      when Client.ClientEvent.Connected(_), Client.ClientEvent.Worlds(_), Client.ClientEvent.State(_), Client.ClientEvent.ExplorationMap(_), Client.ClientEvent.SaveCompleted, Client.ClientEvent.Rejected(_, _), Client.ClientEvent.MapRejected(_, _), Client.ClientEvent.Defeated(_), Client.ClientEvent.Failed(_), Client.ClientEvent.Disconnected:
+        panic('expected inspection result');
+    end case;
 
-  AssertTrue(SendWithTimeout(Requests, ClientMessage.Disconnect, 1000).Unwrap());
-  AssertTrue(Std.Tasks.Wait(ClientTask).Unwrap());
-  AssertTrue(Std.Tasks.Wait(ServerTask).Unwrap());
-  AssertTrue(CloseListener(ListenerValue).Unwrap());
-  discard CloseChannel(Requests);
-  discard CloseChannel(Events);
-  discard CloseChannel(Outcomes);
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Disconnect, 1000).Unwrap()
+    );
+    Test.AssertTrue(Tasks.Wait(ClientTask).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+  discard Tasks.CloseChannel(Outcomes);
 end.

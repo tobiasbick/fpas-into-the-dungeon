@@ -1,15 +1,12 @@
 // Verifies the inventory capacity, rejected pickups at capacity, and dropping carried items.
 program ItemDropTest;
 
-uses
-  Dungeon.Combat, Dungeon.Coordinates, Dungeon.Equipment, Dungeon.GameState, Dungeon.Hostiles,
-  Dungeon.Interaction, Dungeon.Interior, Dungeon.Items, Dungeon.Terrain, Dungeon.Test.Fixtures,
-  Std.Conv, Std.Test;
+uses Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interaction as Interaction, Dungeon.Interior as Interior, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Test.Fixtures as Fixtures, Std.Conv as Conv, Std.Test as Test;
 
 // Replaces the location of one item without any rule check.
-function Located(State: GameState; ItemId: string; Location: ItemLocation): GameState;
+function Located(State: GameState.GameState; ItemId: string; Location: ItemRules.ItemLocation): GameState.GameState;
 begin
-  var Items: array of GameItem := State.Items;
+  var Items: array of ItemRules.GameItem := State.Items;
   for Index: integer := 0 to Items.Length() - 1 do
     begin
       if Items[Index].Id = ItemId then
@@ -24,50 +21,56 @@ begin
 end function;
 
 // Adds carried coins that belong to no placement; per-intention rules do not check placements.
-function Extras(State: GameState; Count: integer): GameState;
+function Extras(State: GameState.GameState; Count: integer): GameState.GameState;
 begin
-  var Items: array of GameItem := State.Items;
+  var Items: array of ItemRules.GameItem := State.Items;
   for Index: integer := 1 to Count do
     begin
-      Items.Push(GameItem(Id := 'extra:' + IntToStr(Index), Kind := ItemKind.AncientCoin, Location := ItemLocation.CarriedByPlayer));
+      Items.PushInPlace(
+        ItemRules.GameItem(
+          Id := 'extra:' + Conv.IntToStr(Index),
+          Kind := ItemRules.ItemKind.AncientCoin,
+          Location := ItemRules.ItemLocation.CarriedByPlayer
+        )
+      );
     end;
   end for;
 
   return State with Items := Items; end with;
 end function;
 
-function Continued(Outcome: TurnOutcome): GameState;
+function Continued(Outcome: Combat.TurnOutcome): GameState.GameState;
 begin
   case Outcome of
-    when TurnOutcome.Continued(const State, const Log, const Events):
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
       begin
         return State;
       end;
-    when TurnOutcome.Defeated(const Log):
+    when Combat.TurnOutcome.Defeated(const Log):
       begin
         panic('expected the game to continue');
       end;
   end case;
 end function;
 
-function EventCount(Outcome: TurnOutcome): integer;
+function EventCount(Outcome: Combat.TurnOutcome): integer;
 begin
   case Outcome of
-    when TurnOutcome.Continued(const State, const Log, const Events):
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
       begin
         return Events.Length();
       end;
-    when TurnOutcome.Defeated(const Log):
+    when Combat.TurnOutcome.Defeated(const Log):
       begin
         return -1;
       end;
   end case;
 end function;
 
-function LogContains(Outcome: TurnOutcome; Text: string): boolean;
+function LogContains(Outcome: Combat.TurnOutcome; Text: string): boolean;
 begin
-  if Outcome is TurnOutcome.Continued(const State, const Log, const Events) then
-    begin
+  case Outcome of
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
       for Entry: string in Log do
         begin
           if Entry = Text then
@@ -77,132 +80,171 @@ begin
           end if;
         end;
       end for;
-    end;
-  else
-    begin
+    when Combat.TurnOutcome.Defeated(_):
       null;
-    end;
-  end if;
+  end case;
 
   return false;
 end function;
 
 // Summarizes what a turn did to the player and the dice, so two actions can be compared.
-function Summary(Outcome: TurnOutcome): string;
+function Summary(Outcome: Combat.TurnOutcome): string;
 begin
   case Outcome of
-    when TurnOutcome.Continued(const State, const Log, const Events):
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
       begin
-        return (((('continued ' + IntToStr(State.Health)) + ' ') + IntToStr(State.RandomState)) + ' ') +
-               IntToStr(Events.Length());
+        return (
+          ((('continued ' + Conv.IntToStr(State.Health)) + ' ') + Conv.IntToStr(State.RandomState)) +
+          ' '
+        ) +
+          Conv.IntToStr(Events.Length());
       end;
-    when TurnOutcome.Defeated(const Log):
+    when Combat.TurnOutcome.Defeated(const Log):
       begin
-        return 'defeated ' + IntToStr(Log.Length());
+        return 'defeated ' + Conv.IntToStr(Log.Length());
       end;
   end case;
 end function;
 
-function Turn(State: GameState; Action: TurnAction): result of (TurnOutcome, string);
+function Turn(State: GameState.GameState; Action: Combat.TurnAction): result of (Combat.TurnOutcome, string);
 begin
-  return ResolveTurn(FixtureAreaView(State), State, Action);
+  return Combat.ResolveTurn(Fixtures.FixtureAreaView(State), State, Action);
 end function;
 
 begin
-  const Map: InteriorMap := FixtureDungeonMap();
+  const Map: Interior.InteriorMap := Fixtures.FixtureDungeonMap();
   const CoinId: string := Map.Items[0].ItemId;
   const SwordId: string := Map.Items[1].ItemId;
-  AssertEquals(64, MaximumInventoryItems);
+  Test.AssertEquals(64, GameState.MaximumInventoryItems);
   // Pickup fills the last free place and is rejected at capacity without changing anything.
-  const OnCoin: GameState := FixtureDungeonState(Map.Items[0].Position, FacingDirection.North);
-  const Nearly: GameState := Extras(OnCoin, 63);
-  AssertFalse(InventoryIsFull(Nearly));
-  AssertTrue(ItemInteractionHint(Nearly).Contains('Pick up'));
-  if Interact(FixtureAreaView(Nearly), Nearly).Unwrap() is InteractionOutcome.StateChanged(const Picked) then
-    begin
-      AssertEquals(64, InventoryItems(Picked).Length());
-      AssertTrue(InventoryIsFull(Picked));
-    end;
-  else
-    begin
+  const OnCoin: GameState.GameState := Fixtures.FixtureDungeonState(
+    Map.Items[0].Position,
+    Coordinates.FacingDirection.North
+  );
+  const Nearly: GameState.GameState := Extras(OnCoin, 63);
+  Test.AssertFalse(GameState.InventoryIsFull(Nearly));
+  Test.AssertTrue('Pick up' in Interaction.ItemInteractionHint(Nearly));
+  case Interaction.Interact(Fixtures.FixtureAreaView(Nearly), Nearly).Unwrap() of
+    when Interaction.InteractionOutcome.StateChanged(const Picked):
+      Test.AssertEquals(64, GameState.InventoryItems(Picked).Length());
+      Test.AssertTrue(GameState.InventoryIsFull(Picked));
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.Described(_, _):
       panic('expected the pickup to change the state');
-    end;
-  end if;
-  const Full: GameState := Extras(OnCoin, 64);
-  AssertTrue(InventoryIsFull(Full));
-  AssertTrue(ItemInteractionHint(Full).Contains('inventory full'));
-  AssertTrue(ValidateGameState(FixtureAreaView(Full), Full).IsOk());
-  AssertTrue(Interact(FixtureAreaView(Full), Full).IsError());
-  AssertTrue(ValidateGameState(FixtureAreaView(OnCoin), Extras(OnCoin, 65)).IsError());
+  end case;
+  const Full: GameState.GameState := Extras(OnCoin, 64);
+  Test.AssertTrue(GameState.InventoryIsFull(Full));
+  Test.AssertTrue('inventory full' in Interaction.ItemInteractionHint(Full));
+  Test.AssertTrue((GameState.ValidateGameState(Fixtures.FixtureAreaView(Full), Full) is Ok(_)));
+  Test.AssertTrue((Interaction.Interact(Fixtures.FixtureAreaView(Full), Full) is Error(_)));
+  Test.AssertTrue(
+    (GameState.ValidateGameState(Fixtures.FixtureAreaView(OnCoin), Extras(OnCoin, 65)) is Error(_))
+  );
   // Worn items count toward the same capacity.
-  const WornFull: GameState := Located(Extras(OnCoin, 63), SwordId, ItemLocation.EquippedByPlayer(EquipmentSlot.Weapon));
-  AssertTrue(InventoryIsFull(WornFull));
-  AssertTrue(Interact(FixtureAreaView(WornFull), WornFull).IsError());
+  const WornFull: GameState.GameState := Located(
+    Extras(OnCoin, 63),
+    SwordId,
+    ItemRules.ItemLocation.EquippedByPlayer(ItemRules.EquipmentSlot.Weapon)
+  );
+  Test.AssertTrue(GameState.InventoryIsFull(WornFull));
+  Test.AssertTrue((Interaction.Interact(Fixtures.FixtureAreaView(WornFull), WornFull) is Error(_)));
   // Dropping lays a carried item on the occupied field, takes a turn, and can be undone by pickup.
-  const AtStart: GameState := FixtureDungeonState(Map.Start, Map.StartFacing);
-  const Holding: GameState := Located(AtStart, CoinId, ItemLocation.CarriedByPlayer);
-  const Dropping: TurnOutcome := Turn(Holding, TurnAction.Drop(CoinId)).Unwrap();
-  AssertTrue(LogContains(Dropping, 'You drop the ancient coin.'));
-  const Dropped: GameState := Continued(Dropping);
-  AssertEquals(0, InventoryItems(Dropped).Length());
-  if Dropped.Items[0].Location is ItemLocation.InInterior(const AreaId, const Position) then
-    begin
-      AssertEquals(Map.AreaId, AreaId);
-      AssertEquals(Map.Start.X, Position.X);
-      AssertEquals(Map.Start.Y, Position.Y);
-    end;
-  else
-    begin
+  const AtStart: GameState.GameState := Fixtures.FixtureDungeonState(Map.Start, Map.StartFacing);
+  const Holding: GameState.GameState := Located(
+    AtStart,
+    CoinId,
+    ItemRules.ItemLocation.CarriedByPlayer
+  );
+  const Dropping: Combat.TurnOutcome := Turn(Holding, Combat.TurnAction.Drop(CoinId)).Unwrap();
+  Test.AssertTrue(LogContains(Dropping, 'You drop the ancient coin.'));
+  const Dropped: GameState.GameState := Continued(Dropping);
+  Test.AssertEquals(0, GameState.InventoryItems(Dropped).Length());
+  case Dropped.Items[0].Location of
+    when ItemRules.ItemLocation.InInterior(const AreaId, const Position):
+      Test.AssertEquals(Map.AreaId, AreaId);
+      Test.AssertEquals(Map.Start.X, Position.X);
+      Test.AssertEquals(Map.Start.Y, Position.Y);
+    when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_):
       panic('expected the dropped item on the floor');
-    end;
-  end if;
+  end case;
 
-  AssertTrue(ItemInteractionHint(Dropped).Contains('Pick up'));
-  if Interact(FixtureAreaView(Dropped), Dropped).Unwrap() is InteractionOutcome.StateChanged(const Again) then
-    begin
-      AssertEquals(1, InventoryItems(Again).Length());
-    end;
-  else
-    begin
+  Test.AssertTrue('Pick up' in Interaction.ItemInteractionHint(Dropped));
+  case Interaction.Interact(Fixtures.FixtureAreaView(Dropped), Dropped).Unwrap() of
+    when Interaction.InteractionOutcome.StateChanged(const Again):
+      Test.AssertEquals(1, GameState.InventoryItems(Again).Length());
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.Described(_, _):
       panic('expected the dropped item to be picked up again');
-    end;
-  end if;
+  end case;
   // Dropping frees exactly one place at capacity.
-  const Packed: GameState := Extras(Holding, 63);
-  AssertTrue(InventoryIsFull(Packed));
-  const Relieved: GameState := Continued(Turn(Packed, TurnAction.Drop(CoinId)).Unwrap());
-  AssertFalse(InventoryIsFull(Relieved));
-  AssertEquals(63, InventoryItems(Relieved).Length());
+  const Packed: GameState.GameState := Extras(Holding, 63);
+  Test.AssertTrue(GameState.InventoryIsFull(Packed));
+  const Relieved: GameState.GameState := Continued(
+    Turn(Packed, Combat.TurnAction.Drop(CoinId)).Unwrap()
+  );
+  Test.AssertFalse(GameState.InventoryIsFull(Relieved));
+  Test.AssertEquals(63, GameState.InventoryItems(Relieved).Length());
   // Rejected drops change nothing: unknown, worn, lying, outdoors, on the exit, and onto another item.
-  AssertTrue(Turn(Holding, TurnAction.Drop('unknown-item')).IsError());
-  const Wearing: GameState := Located(AtStart, SwordId, ItemLocation.EquippedByPlayer(EquipmentSlot.Weapon));
-  AssertTrue(Turn(Wearing, TurnAction.Drop(SwordId)).IsError());
-  AssertTrue(Turn(AtStart, TurnAction.Drop(CoinId)).IsError());
-  const Metadata: WorldMetadata := FixtureMetadata();
-  const Outdoors: GameState := Holding with Area := AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := PlayerPosition.Outdoor(Metadata.Spawn); ReturnLocation := ReturnLocation.NoReturnLocation; end with;
+  Test.AssertTrue((Turn(Holding, Combat.TurnAction.Drop('unknown-item')) is Error(_)));
+  const Wearing: GameState.GameState := Located(
+    AtStart,
+    SwordId,
+    ItemRules.ItemLocation.EquippedByPlayer(ItemRules.EquipmentSlot.Weapon)
+  );
+  Test.AssertTrue((Turn(Wearing, Combat.TurnAction.Drop(SwordId)) is Error(_)));
+  Test.AssertTrue((Turn(AtStart, Combat.TurnAction.Drop(CoinId)) is Error(_)));
+  const Metadata: Terrain.WorldMetadata := Fixtures.FixtureMetadata();
+  const Outdoors: GameState.GameState := Holding with Area := Coordinates.AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.Spawn
+  ); ReturnLocation := Coordinates.ReturnLocation.NoReturnLocation; end with;
 
-  AssertTrue(Turn(Outdoors, TurnAction.Drop(CoinId)).IsError());
-  const OnExit: GameState := Located(FixtureDungeonState(Map.Exit, FacingDirection.East), CoinId, ItemLocation.CarriedByPlayer);
-  AssertTrue(Turn(OnExit, TurnAction.Drop(CoinId)).IsError());
-  const OnOtherItem: GameState := Located(OnCoin, SwordId, ItemLocation.CarriedByPlayer);
-  AssertTrue(Turn(OnOtherItem, TurnAction.Drop(SwordId)).IsError());
+  Test.AssertTrue((Turn(Outdoors, Combat.TurnAction.Drop(CoinId)) is Error(_)));
+  const OnExit: GameState.GameState := Located(
+    Fixtures.FixtureDungeonState(Map.Exit, Coordinates.FacingDirection.East),
+    CoinId,
+    ItemRules.ItemLocation.CarriedByPlayer
+  );
+  Test.AssertTrue((Turn(OnExit, Combat.TurnAction.Drop(CoinId)) is Error(_)));
+  const OnOtherItem: GameState.GameState := Located(
+    OnCoin,
+    SwordId,
+    ItemRules.ItemLocation.CarriedByPlayer
+  );
+  Test.AssertTrue((Turn(OnOtherItem, Combat.TurnAction.Drop(SwordId)) is Error(_)));
   // A floor item on the exit is invalid state.
-  AssertTrue(ValidateGameState(FixtureAreaView(OnExit), Located(OnExit, CoinId, ItemLocation.InInterior(Map.AreaId, Map.Exit)))
-               .IsError());
+  Test.AssertTrue(
+    (
+      GameState.ValidateGameState(
+        Fixtures.FixtureAreaView(OnExit),
+        Located(OnExit, CoinId, ItemRules.ItemLocation.InInterior(Map.AreaId, Map.Exit))
+      ) is Error(_)
+    )
+  );
   // A drop consumes the same turn as waiting: the adjacent opponent acts identically, and defeat ends the game.
-  const Beside: GameState := Holding with Player := PlayerPosition.FirstPerson(FirstPersonPose(Position := InteriorPosition(X := 3, Y := 4), Facing := FacingDirection.North)); Hostiles := [
-                                                                                                                                                                                              Holding.Hostiles[0] with Alerted := true; end with
-                                                                                                                                                                                            ]; end with;
+  const Beside: GameState.GameState := Holding with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(
+      Position := Coordinates.InteriorPosition(X := 3, Y := 4),
+      Facing := Coordinates.FacingDirection.North
+    )
+  ); Hostiles := [
+    Holding.Hostiles[0] with Alerted := true; end with
+  ]; end with;
 
-  AssertTrue(EventCount(Turn(Beside, TurnAction.Drop(CoinId)).Unwrap()) > 0);
-  AssertEquals(Summary(Turn(Beside, TurnAction.Wait).Unwrap()), Summary(Turn(Beside, TurnAction.Drop(CoinId))
-                                                                          .Unwrap()));
+  Test.AssertTrue(EventCount(Turn(Beside, Combat.TurnAction.Drop(CoinId)).Unwrap()) > 0);
+  Test.AssertEquals(
+    Summary(Turn(Beside, Combat.TurnAction.Wait).Unwrap()),
+    Summary(Turn(Beside, Combat.TurnAction.Drop(CoinId)).Unwrap())
+  );
   var Defeats: integer := 0;
   for Seed: integer := 1 to 40 do
     begin
-      const Fragile: GameState := Beside with Health := 1; RandomState := Seed; end with;
-      const DropResult: TurnOutcome := Turn(Fragile, TurnAction.Drop(CoinId)).Unwrap();
-      AssertEquals(Summary(Turn(Fragile, TurnAction.Wait).Unwrap()), Summary(DropResult));
+      const Fragile: GameState.GameState := Beside with Health := 1; RandomState := Seed; end with;
+      const DropResult: Combat.TurnOutcome := Turn(
+        Fragile,
+        Combat.TurnAction.Drop(CoinId)
+      ).Unwrap();
+      Test.AssertEquals(
+        Summary(Turn(Fragile, Combat.TurnAction.Wait).Unwrap()),
+        Summary(DropResult)
+      );
       if EventCount(DropResult) < 0 then
         begin
           Defeats := Defeats + 1;
@@ -211,5 +253,5 @@ begin
     end;
   end for;
 
-  AssertTrue(Defeats > 0);
+  Test.AssertTrue(Defeats > 0);
 end.

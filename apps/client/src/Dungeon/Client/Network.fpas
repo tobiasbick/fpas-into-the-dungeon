@@ -1,83 +1,86 @@
 // TCP session adapter between client intentions and model events.
 unit Dungeon.Client.Network;
 
-uses
-  Dungeon.Client.Model, Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.Worlds,
-  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Std.Net, Std.Tasks;
+uses Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.Worlds as Worlds, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Net as Net, Std.Tasks as Tasks;
 
 type ServerRead = record
-  Message: ServerMessage;
-  Reader: LineReader;
+  Message: Protocol.ServerMessage;
+  Reader: Transport.LineReader;
 end record;
 
-function Publish(Events: channel of ClientEvent; Value: ClientEvent; Token: CancellationToken): result of (boolean, string);
+function Publish(Events: channel of Model.ClientEvent; Value: Model.ClientEvent; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  return SendWithCancellation(Events, Value, Token);
+  return Tasks.SendWithCancellation(Events, Value, Token);
 end function;
 
-function ReadServer(Reader: LineReader; Token: CancellationToken): result of (ServerRead, string);
+function ReadServer(Reader: Transport.LineReader; Token: Tasks.CancellationToken): result of (ServerRead, string);
 begin
-  const ReadValue: LineRead := try ReadLine(Reader, Token);
-  return Ok(ServerRead(Message := try DecodeServer(ReadValue.Line), Reader := ReadValue.Reader));
+  const ReadValue: Transport.LineRead := try Transport.ReadLine(Reader, Token);
+  return Ok(
+    ServerRead(
+      Message := try ServerMessages.DecodeServer(ReadValue.Line),
+      Reader := ReadValue.Reader
+    )
+  );
 end function;
 
 // Returns whether a visible-state projection is a valid response to one request.
-function AcceptsState(Request: ClientMessage): boolean;
+function AcceptsState(Request: Protocol.ClientMessage): boolean;
 begin
   case Request of
-    when ClientMessage.CreateWorld(const Seed, const RegionChunks):
+    when Protocol.ClientMessage.CreateWorld(const Seed, const RegionChunks):
       begin
         return true;
       end;
-    when ClientMessage.StartNewGame:
+    when Protocol.ClientMessage.StartNewGame:
       begin
         return true;
       end;
-    when ClientMessage.LoadGame:
+    when Protocol.ClientMessage.LoadGame:
       begin
         return true;
       end;
-    when ClientMessage.Viewport(const Width, const Height):
+    when Protocol.ClientMessage.Viewport(const Width, const Height):
       begin
         return true;
       end;
-    when ClientMessage.Move(const DeltaX, const DeltaY):
+    when Protocol.ClientMessage.Move(const DeltaX, const DeltaY):
       begin
         return true;
       end;
-    when ClientMessage.StepFirstPerson(const Direction):
+    when Protocol.ClientMessage.StepFirstPerson(const Direction):
       begin
         return true;
       end;
-    when ClientMessage.TurnFirstPerson(const Direction):
+    when Protocol.ClientMessage.TurnFirstPerson(const Direction):
       begin
         return true;
       end;
-    when ClientMessage.Interact:
+    when Protocol.ClientMessage.Interact:
       begin
         return true;
       end;
-    when ClientMessage.Attack:
+    when Protocol.ClientMessage.Attack:
       begin
         return true;
       end;
-    when ClientMessage.Wait:
+    when Protocol.ClientMessage.Wait:
       begin
         return true;
       end;
-    when ClientMessage.Equip(const ItemId):
+    when Protocol.ClientMessage.Equip(const ItemId):
       begin
         return true;
       end;
-    when ClientMessage.Unequip(const ItemId):
+    when Protocol.ClientMessage.Unequip(const ItemId):
       begin
         return true;
       end;
-    when ClientMessage.DropItem(const ItemId):
+    when Protocol.ClientMessage.DropItem(const ItemId):
       begin
         return true;
       end;
-    when clientmessage.Hello(_, _, _), clientmessage.SaveGame, clientmessage.OverwriteSaveGame, clientmessage.ListWorlds(_, _), clientmessage.SelectWorld(_), clientmessage.ExplorationMap(_, _, _, _), clientmessage.Disconnect:
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Disconnect:
       begin
         return false;
       end;
@@ -86,34 +89,34 @@ end function;
 
 // Returns whether a defeat can answer one request: only turn-consuming intentions end a game.
 // Equipment changes and drops consume a turn, so the opponent can strike while the player handles gear.
-function AcceptsDefeat(Request: ClientMessage): boolean;
+function AcceptsDefeat(Request: Protocol.ClientMessage): boolean;
 begin
   case Request of
-    when ClientMessage.StepFirstPerson(const Direction):
+    when Protocol.ClientMessage.StepFirstPerson(const Direction):
       begin
         return true;
       end;
-    when ClientMessage.Attack:
+    when Protocol.ClientMessage.Attack:
       begin
         return true;
       end;
-    when ClientMessage.Wait:
+    when Protocol.ClientMessage.Wait:
       begin
         return true;
       end;
-    when ClientMessage.Equip(const ItemId):
+    when Protocol.ClientMessage.Equip(const ItemId):
       begin
         return true;
       end;
-    when ClientMessage.Unequip(const ItemId):
+    when Protocol.ClientMessage.Unequip(const ItemId):
       begin
         return true;
       end;
-    when ClientMessage.DropItem(const ItemId):
+    when Protocol.ClientMessage.DropItem(const ItemId):
       begin
         return true;
       end;
-    when clientmessage.Hello(_, _, _), clientmessage.StartNewGame, clientmessage.LoadGame, clientmessage.SaveGame, clientmessage.OverwriteSaveGame, clientmessage.ListWorlds(_, _), clientmessage.SelectWorld(_), clientmessage.CreateWorld(_, _), clientmessage.Viewport(_, _), clientmessage.ExplorationMap(_, _, _, _), clientmessage.Move(_, _), clientmessage.TurnFirstPerson(_), clientmessage.Interact, clientmessage.Disconnect:
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Disconnect:
       begin
         return false;
       end;
@@ -121,39 +124,48 @@ begin
 end function;
 
 // Maps one server response to its client event; None marks a response the request cannot produce.
-function ResponseEvent(Request: ClientMessage; Response: ServerMessage): option of ClientEvent;
+function ResponseEvent(Request: Protocol.ClientMessage; Response: Protocol.ServerMessage): option of Model.ClientEvent;
 begin
   case Response of
-    when ServerMessage.Worlds(const Catalog):
+    when Protocol.ServerMessage.Worlds(const Catalog):
       begin
         case Request of
-          when ClientMessage.ListWorlds(const Offset, const DiscardProgress):
+          when Protocol.ClientMessage.ListWorlds(const Offset, const DiscardProgress):
             begin
-              return Some(ClientEvent.Worlds(Catalog));
+              return Some(Model.ClientEvent.Worlds(Catalog));
             end;
-          when ClientMessage.SelectWorld(const Id):
+          when Protocol.ClientMessage.SelectWorld(const Id):
             begin
-              return Some(ClientEvent.Worlds(Catalog));
+              return Some(Model.ClientEvent.Worlds(Catalog));
             end;
-          when clientmessage.Hello(_, _, _), clientmessage.StartNewGame, clientmessage.LoadGame, clientmessage.SaveGame, clientmessage.OverwriteSaveGame, clientmessage.CreateWorld(_, _), clientmessage.Viewport(_, _), clientmessage.ExplorationMap(_, _, _, _), clientmessage.Move(_, _), clientmessage.StepFirstPerson(_), clientmessage.TurnFirstPerson(_), clientmessage.Interact, clientmessage.Attack, clientmessage.Wait, clientmessage.Equip(_), clientmessage.Unequip(_), clientmessage.DropItem(_), clientmessage.Disconnect:
+          when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
             begin
               null;
             end;
         end case;
       end;
-    when ServerMessage.State(const Value):
+    when Protocol.ServerMessage.State(const Value):
       begin
         if AcceptsState(Request) then
           begin
-            return Some(ClientEvent.State(Value));
+            return Some(Model.ClientEvent.State(Value));
           end;
         end if;
       end;
-    when ServerMessage.ExplorationMap(const Value):
+    when Protocol.ServerMessage.ExplorationMap(const Value):
       begin
-        if Request is ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height) then
+        case Request of
+          when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+            return Some(Model.ClientEvent.ExplorationMap(Value));
+          when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+            null;
+        end case;
+      end;
+    when Protocol.ServerMessage.Interaction(const Title, const Message):
+      begin
+        if Request is Protocol.ClientMessage.Interact then
           begin
-            return Some(ClientEvent.ExplorationMap(Value));
+            return Some(Model.ClientEvent.Interaction(Title, Message));
           end;
         else
           begin
@@ -161,52 +173,37 @@ begin
           end;
         end if;
       end;
-    when ServerMessage.Interaction(const Title, const Message):
-      begin
-        if Request is ClientMessage.Interact then
-          begin
-            return Some(ClientEvent.Interaction(Title, Message));
-          end;
-        else
-          begin
-            null;
-          end;
-        end if;
-      end;
-    when ServerMessage.Defeated(const Message):
+    when Protocol.ServerMessage.Defeated(const Message):
       begin
         if AcceptsDefeat(Request) then
           begin
-            return Some(ClientEvent.Defeated(Message));
+            return Some(Model.ClientEvent.Defeated(Message));
           end;
         end if;
       end;
-    when ServerMessage.SaveCompleted:
+    when Protocol.ServerMessage.SaveCompleted:
       begin
         case Request of
-          when ClientMessage.SaveGame, ClientMessage.OverwriteSaveGame:
+          when Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame:
             begin
-              return Some(ClientEvent.SaveCompleted);
+              return Some(Model.ClientEvent.SaveCompleted);
             end;
-          when clientmessage.Hello(_, _, _), clientmessage.StartNewGame, clientmessage.LoadGame, clientmessage.ListWorlds(_, _), clientmessage.SelectWorld(_), clientmessage.CreateWorld(_, _), clientmessage.Viewport(_, _), clientmessage.ExplorationMap(_, _, _, _), clientmessage.Move(_, _), clientmessage.StepFirstPerson(_), clientmessage.TurnFirstPerson(_), clientmessage.Interact, clientmessage.Attack, clientmessage.Wait, clientmessage.Equip(_), clientmessage.Unequip(_), clientmessage.DropItem(_), clientmessage.Disconnect:
+          when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
             begin
               null;
             end;
         end case;
       end;
-    when ServerMessage.Rejected(const Code, const Message):
+    when Protocol.ServerMessage.Rejected(const Code, const Message):
       begin
-        if Request is ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height) then
-          begin
-            return Some(ClientEvent.MapRejected(Code, Message));
-          end;
-        else
-          begin
-            return Some(ClientEvent.Rejected(Code, Message));
-          end;
-        end if;
+        case Request of
+          when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+            return Some(Model.ClientEvent.MapRejected(Code, Message));
+          when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+            return Some(Model.ClientEvent.Rejected(Code, Message));
+        end case;
       end;
-    when servermessage.Welcome(_, _), servermessage.ErrorMessage(_, _):
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
       begin
         null;
       end;
@@ -220,30 +217,36 @@ function RunNetworkSession(
   Port: integer;
   ViewWidth: integer;
   ViewHeight: integer;
-  Requests: channel of ClientMessage;
-  Events: channel of ClientEvent;
-  Token: CancellationToken
+  Requests: channel of Protocol.ClientMessage;
+  Events: channel of Model.ClientEvent;
+  Token: Tasks.CancellationToken
 ): result of (boolean, string);
 begin
-  const ConnectionValue: Connection := try ConnectWithCancellation(Host, Port, 5000, Token);
-  var Reader: LineReader := NewLineReader(ConnectionValue);
-  var Catalog: WorldCatalog := EmptyWorldCatalog(12345, 4);
-  const HelloSent: boolean := try WriteLine(ConnectionValue, EncodeClient(ClientMessage.Hello(ProtocolVersion, ViewWidth, ViewHeight)), Token);
+  const ConnectionValue: Net.Connection := try Net.ConnectWithCancellation(Host, Port, 5000, Token);
+  var Reader: Transport.LineReader := Transport.NewLineReader(ConnectionValue);
+  var Catalog: Protocol.WorldCatalog := Worlds.EmptyWorldCatalog(12345, 4);
+  const HelloSent: boolean := try Transport.WriteLine(
+    ConnectionValue,
+    ClientMessages.EncodeClient(
+      Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, ViewWidth, ViewHeight)
+    ),
+    Token
+  );
   case ReadServer(Reader, Token) of
     when Error(const Message):
       begin
-        const Closed: boolean := try Close(ConnectionValue);
+        const Closed: boolean := try Net.Close(ConnectionValue);
         return Error(Message);
       end;
     when Ok(const ReadValue):
       begin
         Reader := ReadValue.Reader;
         case ReadValue.Message of
-          when ServerMessage.Welcome(const Version, const Available):
+          when Protocol.ServerMessage.Welcome(const Version, const Available):
             begin
-              if Version <> ProtocolVersion then
+              if Version <> Protocol.ProtocolVersion then
                 begin
-                  const Closed: boolean := try Close(ConnectionValue);
+                  const Closed: boolean := try Net.Close(ConnectionValue);
                   return Error('server selected an unsupported protocol version');
                 end;
               else
@@ -252,68 +255,82 @@ begin
                 end;
               end if;
             end;
-          when ServerMessage.Rejected(const Code, const Message):
+          when Protocol.ServerMessage.Rejected(const Code, const Message):
             // The server rejects the session before Welcome when world data is unusable, then closes.
             begin
-              const Published: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
-              const Closed: boolean := try Close(ConnectionValue);
+              const Published: boolean := try Publish(
+                Events,
+                Model.ClientEvent.Failed(Message),
+                Token
+              );
+              const Closed: boolean := try Net.Close(ConnectionValue);
               return Ok(true);
             end;
-          when servermessage.Worlds(_), servermessage.State(_), servermessage.ExplorationMap(_), servermessage.Interaction(_, _), servermessage.SaveCompleted, servermessage.Defeated(_), servermessage.ErrorMessage(_, _):
+          when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
             begin
-              const Closed: boolean := try Close(ConnectionValue);
+              const Closed: boolean := try Net.Close(ConnectionValue);
               return Error('server did not welcome the client');
             end;
         end case;
       end;
   end case;
-  const Published: boolean := try Publish(Events, ClientEvent.Connected(Catalog), Token);
-  while not IsCancellationRequested(Token) do
+  const Published: boolean := try Publish(Events, Model.ClientEvent.Connected(Catalog), Token);
+  while not Tasks.IsCancellationRequested(Token) do
     begin
-      case ReceiveWithCancellation(Requests, Token) of
+      case Tasks.ReceiveWithCancellation(Requests, Token) of
         when Error(const Message):
           begin
-            const Closed: boolean := try Close(ConnectionValue);
+            const Closed: boolean := try Net.Close(ConnectionValue);
             return Ok(true);
           end;
         when Ok(const Request):
           begin
             case Request of
-              when ClientMessage.Hello(const Version, const Width, const Height):
+              when Protocol.ClientMessage.Hello(const Version, const Width, const Height):
                 begin
-                  const Closed: boolean := try Close(ConnectionValue);
+                  const Closed: boolean := try Net.Close(ConnectionValue);
                   return Error('hello can only be sent during connection setup');
                 end;
-              when ClientMessage.Disconnect:
+              when Protocol.ClientMessage.Disconnect:
                 begin
-                  const Written: boolean := try WriteLine(ConnectionValue, EncodeClient(Request), Token);
-                  const Closed: boolean := try Close(ConnectionValue);
+                  const Written: boolean := try Transport.WriteLine(
+                    ConnectionValue,
+                    ClientMessages.EncodeClient(Request),
+                    Token
+                  );
+                  const Closed: boolean := try Net.Close(ConnectionValue);
                   return Ok(true);
                 end;
-              when clientmessage.StartNewGame, clientmessage.LoadGame, clientmessage.SaveGame, clientmessage.OverwriteSaveGame, clientmessage.ListWorlds(_, _), clientmessage.SelectWorld(_), clientmessage.CreateWorld(_, _), clientmessage.Viewport(_, _), clientmessage.ExplorationMap(_, _, _, _), clientmessage.Move(_, _), clientmessage.StepFirstPerson(_), clientmessage.TurnFirstPerson(_), clientmessage.Interact, clientmessage.Attack, clientmessage.Wait, clientmessage.Equip(_), clientmessage.Unequip(_), clientmessage.DropItem(_):
+              when Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_):
                 begin
                   null;
                 end;
             end case;
-            const Written: boolean := try WriteLine(ConnectionValue, EncodeClient(Request), Token);
+            const Written: boolean := try Transport.WriteLine(
+              ConnectionValue,
+              ClientMessages.EncodeClient(Request),
+              Token
+            );
             // Every remaining request receives exactly one server response.
             case ReadServer(Reader, Token) of
               when Error(const Message):
                 begin
-                  const Closed: boolean := try Close(ConnectionValue);
+                  const Closed: boolean := try Net.Close(ConnectionValue);
                   return Error(Message);
                 end;
               when Ok(const ReadValue):
                 begin
                   Reader := ReadValue.Reader;
-                  if ReadValue.Message is ServerMessage.ErrorMessage(const Code, const Message) then
-                    begin
-                      const Sent: boolean := try Publish(Events, ClientEvent.Failed(Message), Token);
-                      const Closed: boolean := try Close(ConnectionValue);
+                  case ReadValue.Message of
+                    when Protocol.ServerMessage.ErrorMessage(const Code, const Message):
+                      const Sent: boolean := try Publish(
+                        Events,
+                        Model.ClientEvent.Failed(Message),
+                        Token
+                      );
+                      const Closed: boolean := try Net.Close(ConnectionValue);
                       return Ok(true);
-                    end;
-                  else
-                    begin
+                    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _):
                       case ResponseEvent(Request, ReadValue.Message) of
                         when Some(const ResponseValue):
                           begin
@@ -321,19 +338,18 @@ begin
                           end;
                         when None:
                           begin
-                            const Closed: boolean := try Close(ConnectionValue);
+                            const Closed: boolean := try Net.Close(ConnectionValue);
                             return Error('unexpected server response');
                           end;
                       end case;
-                    end;
-                  end if;
+                  end case;
                 end;
             end case;
           end;
       end case;
     end;
   end while;
-  const Closed: boolean := try Close(ConnectionValue);
+  const Closed: boolean := try Net.Close(ConnectionValue);
   return Ok(true);
 end function;
 
@@ -343,9 +359,9 @@ public function RunNetwork(
   Port: integer;
   ViewWidth: integer;
   ViewHeight: integer;
-  Requests: channel of ClientMessage;
-  Events: channel of ClientEvent;
-  Token: CancellationToken
+  Requests: channel of Protocol.ClientMessage;
+  Events: channel of Model.ClientEvent;
+  Token: Tasks.CancellationToken
 ): result of (boolean, string);
 begin
   case RunNetworkSession(Host, Port, ViewWidth, ViewHeight, Requests, Events, Token) of
@@ -355,7 +371,7 @@ begin
       end;
     when Error(const Message):
       begin
-        if IsCancellationRequested(Token) then
+        if Tasks.IsCancellationRequested(Token) then
           begin
             return Ok(true);
           end;

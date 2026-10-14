@@ -1,83 +1,83 @@
 // Verifies handshake, state transfer, movement, and disconnect over loopback TCP.
 program DungeonServerLoopbackTest;
 
-uses
-  Dungeon.Test.Catalog, Dungeon.Test.Fixtures, Dungeon.Test.Routes, Dungeon.Areas.Identities,
-  Dungeon.Coordinates, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Interior.Generation.Validation,
-  Dungeon.Interaction, Dungeon.Items, Dungeon.Protocol, Dungeon.Protocol.ClientMessages,
-  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config,
-  Dungeon.Terrain, Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Savegame, Std.Conv,
-  Std.Fs, Std.Net, Std.Path, Std.Tasks, Std.Test, Std.Time;
+uses Dungeon.Test.Catalog as CatalogUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Routes as Routes, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as Hostiles, Dungeon.Interior as Interior, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Interaction as Interaction, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as Placement, Dungeon.World as World, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
-function TestConfig(WorldsRoot: string): ServerConfig;
+function TestConfig(WorldsRoot: string): ConfigUnit.ServerConfig;
 begin
-  return ServerConfig(ConfigPath := '', Logs := None, WorldsRoot := WorldsRoot, WorldId := 'loopback', WorldSeed := 56789, DungeonRegionChunks := 4, ChunkCacheLimit := 32, MaximumViewWidth := 240, MaximumViewHeight := 20);
+  return ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := WorldsRoot,
+    WorldId := 'loopback',
+    WorldSeed := 56789,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 20
+  );
 end function;
 
 // This seed places the spawn on a signed chunk boundary so restart coverage
 // also proves discovery persistence across adjacent outdoor chunks.
 
-function RequireMap(Value: VisibleState): MapVisibleState;
+function RequireMap(Value: Protocol.VisibleState): Protocol.MapVisibleState;
 begin
-  if Value is VisibleState.MapState(const MapValue) then
-    begin
+  case Value of
+    when Protocol.VisibleState.MapState(const MapValue):
       return MapValue;
-    end;
-  else
-    begin
+    when Protocol.VisibleState.FirstPersonState(_):
       panic('expected map visible state');
-    end;
-  end if;
+  end case;
 end function;
 
-function RequireFirstPerson(Value: VisibleState): FirstPersonVisibleState;
+function RequireFirstPerson(Value: Protocol.VisibleState): Protocol.FirstPersonVisibleState;
 begin
-  if Value is VisibleState.FirstPersonState(const FirstPersonValue) then
-    begin
+  case Value of
+    when Protocol.VisibleState.FirstPersonState(const FirstPersonValue):
       return FirstPersonValue;
-    end;
-  else
-    begin
+    when Protocol.VisibleState.MapState(_):
       panic('expected first-person visible state');
-    end;
-  end if;
+  end case;
 end function;
 
 // One response line and the reader positioned after it.
 type Exchanged = record
-  Reader: LineReader;
-  Message: ServerMessage;
+  Reader: Transport.LineReader;
+  Message: Protocol.ServerMessage;
 end record;
 
 // Sends one client message and decodes the single response.
 function Ask(
-  Client: Connection;
-  Reader: LineReader;
-  Message: ClientMessage;
-  Token: CancellationToken
+  Client: Net.Connection;
+  Reader: Transport.LineReader;
+  Message: Protocol.ClientMessage;
+  Token: Tasks.CancellationToken
 ): Exchanged;
 begin
-  AssertTrue(WriteLine(Client, EncodeClient(Message), Token).Unwrap());
-  const LineValue: LineRead := ReadLine(Reader, Token).Unwrap();
-  return Exchanged(Reader := LineValue.Reader, Message := DecodeServer(LineValue.Line).Unwrap());
+  Test.AssertTrue(
+    Transport.WriteLine(Client, ClientMessages.EncodeClient(Message), Token).Unwrap()
+  );
+  const LineValue: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+  return Exchanged(
+    Reader := LineValue.Reader,
+    Message := ServerMessages.DecodeServer(LineValue.Line).Unwrap()
+  );
 end function;
 
-function RequireState(Message: ServerMessage): VisibleState;
+function RequireState(Message: Protocol.ServerMessage): Protocol.VisibleState;
 begin
-  if Message is ServerMessage.State(const Value) then
-    begin
+  case Message of
+    when Protocol.ServerMessage.State(const Value):
       return Value;
-    end;
-  else
-    begin
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
       panic('expected a state message');
-    end;
-  end if;
+  end case;
 end function;
 
-procedure RequireSaved(Message: ServerMessage);
+procedure RequireSaved(Message: Protocol.ServerMessage);
 begin
-  if Message is ServerMessage.SaveCompleted then
+  if Message is Protocol.ServerMessage.SaveCompleted then
     begin
       null;
     end;
@@ -90,880 +90,1151 @@ end procedure;
 
 function EnsureDirectory(Path: string): boolean;
 begin
-  if Std.Fs.IsDir(Path) then
+  if Fs.IsDir(Path) then
     begin
       return true;
     end;
   end if;
 
-  if Std.Fs.CreateDir(Path) is Ok(const Created) then
-    begin
+  case Fs.CreateDir(Path) of
+    when Ok(const Created):
       return true;
-    end;
-  else
-    begin
-      return Std.Fs.IsDir(Path);
-    end;
-  end if;
+    when Error(_):
+      return Fs.IsDir(Path);
+  end case;
 end function;
 
-procedure EnsureWorldRoot(Config: ServerConfig);
+procedure EnsureWorldRoot(Config: ConfigUnit.ServerConfig);
 begin
-  AssertTrue(EnsureDirectory('.temp-data'));
-  AssertTrue(EnsureDirectory(Config.WorldsRoot));
-  const Fixture: WorldSession := OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.DungeonRegionChunks, Config.ChunkCacheLimit)
-                                   .Unwrap();
+  Test.AssertTrue(EnsureDirectory('.temp-data'));
+  Test.AssertTrue(EnsureDirectory(Config.WorldsRoot));
+  const Fixture: World.WorldSession := World.OpenWorld(
+    Config.WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    Config.DungeonRegionChunks,
+    Config.ChunkCacheLimit
+  ).Unwrap();
 end procedure;
 
-function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of (boolean, string);
+function ServeOne(ListenerValue: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  const Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
-  const Configured: boolean := try SetTimeout(Client, 2000);
-  const Outcome: result of (boolean, string) := ServeConnection(Client, Config, Token);
-  const Closed: boolean := try Close(Client);
+  const Client: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Configured: boolean := try Net.SetTimeout(Client, 2000);
+  const Outcome: result of (boolean, string) := Server.ServeConnection(Client, Config, Token);
+  const Closed: boolean := try Net.Close(Client);
   return Outcome;
 end function;
 
 begin
-  const WorldsRoot: string := '.temp-data/server-loopback-' + IntToStr(TimestampMillis());
-  const Config: ServerConfig := TestConfig(WorldsRoot);
+  const WorldsRoot: string := '.temp-data/server-loopback-' + Conv.IntToStr(Time.TimestampMillis());
+  const Config: ConfigUnit.ServerConfig := TestConfig(WorldsRoot);
   EnsureWorldRoot(Config);
-  const Metadata: WorldMetadata := NewWorldMetadata(Config.WorldId, Config.WorldSeed, 4).Unwrap();
-  AssertEquals(0, LocalForCoordinate(Metadata.Spawn.X));
-  const ListenerValue: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const Address: NetworkAddress := ListenerLocalAddress(ListenerValue).Unwrap();
-  const Source: CancellationSource := CreateCancellationSource();
-  const Token: CancellationToken := GetCancellationToken(Source);
-  const ServerTask: task := go ServeOne(ListenerValue, Config, Token);
-  const Client: Connection := Connect('127.0.0.1', Address.Port, 5000).Unwrap();
-  AssertTrue(SetTimeout(Client, 120000).Unwrap());
-  var Reader: LineReader := NewLineReader(Client);
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)
-               .Unwrap());
-  const WelcomeRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := WelcomeRead.Reader;
-  if DecodeServer(WelcomeRead.Line) is Ok(const WelcomeMessage) then
-    begin
-      if WelcomeMessage is ServerMessage.Welcome(const Version, const Catalog) then
-        begin
-          AssertEquals(ProtocolVersion, Version);
-          AssertFalse(FixtureSaveAvailable(Catalog));
-          AssertFalse(FixtureInvalidSave(Catalog));
-        end;
-      else
-        begin
-          AssertTrue(false);
-        end;
-      end if;
-    end;
-  else
-    begin
-      panic('unexpected welcome: ' + WelcomeRead.Line);
-    end;
-  end if;
+  const Metadata: Terrain.WorldMetadata := Placement.NewWorldMetadata(
+    Config.WorldId,
+    Config.WorldSeed,
+    4
+  ).Unwrap();
+  Test.AssertEquals(0, Coordinates.LocalForCoordinate(Metadata.Spawn.X));
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeOne(
+      ListenerValue,
+      Config,
+      Token
+    );
+    const Client: Net.Connection := Net.Connect('127.0.0.1', Address.Port, 5000).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(Client, 120000).Unwrap());
+    var Reader: Transport.LineReader := Transport.NewLineReader(Client);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 13, 7)),
+        Token
+      ).Unwrap()
+    );
+    const WelcomeRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := WelcomeRead.Reader;
+    case ServerMessages.DecodeServer(WelcomeRead.Line) of
+      when Ok(const WelcomeMessage):
+        case WelcomeMessage of
+          when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+            Test.AssertEquals(Protocol.ProtocolVersion, Version);
+            Test.AssertFalse(CatalogUnit.FixtureSaveAvailable(Catalog));
+            Test.AssertFalse(CatalogUnit.FixtureInvalidSave(Catalog));
+          when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+            Test.AssertTrue(false);
+        end case;
+      when Error(_):
+        panic('unexpected welcome: ' + WelcomeRead.Line);
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 0)), Token).Unwrap());
-  const BeforeSessionRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := BeforeSessionRead.Reader;
-  if DecodeServer(BeforeSessionRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('session_not_started', Code);
-    end;
-  else
-    begin
-      panic('expected movement rejection before session selection');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Move(1, 0)),
+        Token
+      ).Unwrap()
+    );
+    const BeforeSessionRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := BeforeSessionRead.Reader;
+    case ServerMessages.DecodeServer(BeforeSessionRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('session_not_started', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected movement rejection before session selection');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.SaveGame), Token).Unwrap());
-  const BeforeSessionSaveRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := BeforeSessionSaveRead.Reader;
-  if DecodeServer(BeforeSessionSaveRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('session_not_started', Code);
-    end;
-  else
-    begin
-      panic('expected save rejection before session selection');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.SaveGame),
+        Token
+      ).Unwrap()
+    );
+    const BeforeSessionSaveRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := BeforeSessionSaveRead.Reader;
+    case ServerMessages.DecodeServer(BeforeSessionSaveRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('session_not_started', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected save rejection before session selection');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Viewport(20, 10)), Token).Unwrap());
-  const BeforeSessionViewportRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := BeforeSessionViewportRead.Reader;
-  if DecodeServer(BeforeSessionViewportRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('session_not_started', Code);
-    end;
-  else
-    begin
-      panic('expected viewport rejection before session selection');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Viewport(20, 10)),
+        Token
+      ).Unwrap()
+    );
+    const BeforeSessionViewportRead: Transport.LineRead := Transport.ReadLine(
+      Reader,
+      Token
+    ).Unwrap();
+    Reader := BeforeSessionViewportRead.Reader;
+    case ServerMessages.DecodeServer(BeforeSessionViewportRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('session_not_started', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected viewport rejection before session selection');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left)), Token)
-               .Unwrap());
-  const BeforeSessionTurnRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := BeforeSessionTurnRead.Reader;
-  if DecodeServer(BeforeSessionTurnRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('session_not_started', Code);
-    end;
-  else
-    begin
-      panic('expected turn rejection before session selection');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(
+          Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Left)
+        ),
+        Token
+      ).Unwrap()
+    );
+    const BeforeSessionTurnRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := BeforeSessionTurnRead.Reader;
+    case ServerMessages.DecodeServer(BeforeSessionTurnRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('session_not_started', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected turn rejection before session selection');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token).Unwrap());
-  const BeforeSessionTransitionRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := BeforeSessionTransitionRead.Reader;
-  if DecodeServer(BeforeSessionTransitionRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('session_not_started', Code);
-    end;
-  else
-    begin
-      panic('expected transition rejection before session selection');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Interact),
+        Token
+      ).Unwrap()
+    );
+    const BeforeSessionTransitionRead: Transport.LineRead := Transport.ReadLine(
+      Reader,
+      Token
+    ).Unwrap();
+    Reader := BeforeSessionTransitionRead.Reader;
+    case ServerMessages.DecodeServer(BeforeSessionTransitionRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('session_not_started', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected transition rejection before session selection');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.ExplorationMap(0, 0, 5, 5)), Token)
-               .Unwrap());
-  const BeforeSessionMapRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := BeforeSessionMapRead.Reader;
-  if DecodeServer(BeforeSessionMapRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('session_not_started', Code);
-    end;
-  else
-    begin
-      panic('expected exploration-map rejection before session selection');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.ExplorationMap(0, 0, 5, 5)),
+        Token
+      ).Unwrap()
+    );
+    const BeforeSessionMapRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := BeforeSessionMapRead.Reader;
+    case ServerMessages.DecodeServer(BeforeSessionMapRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('session_not_started', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected exploration-map rejection before session selection');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.StartNewGame), Token).Unwrap());
-  const InitialRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := InitialRead.Reader;
-  if DecodeServer(InitialRead.Line) is Ok(const InitialMessage) then
-    begin
-      if InitialMessage is ServerMessage.State(const Value) then
-        begin
-          const MapValue: MapVisibleState := RequireMap(Value);
-          AssertEquals(13, MapValue.Width);
-          AssertEquals(7, MapValue.Height);
-          AssertEquals(Metadata.Spawn.X - 6, MapValue.OriginX);
-          AssertEquals(Metadata.Spawn.Y - 3, MapValue.OriginY);
-          AssertEquals(6, MapValue.PlayerX);
-          AssertEquals(3, MapValue.PlayerY);
-          AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
-          AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
-          AssertEquals('vvvvvvvvvvvvv', MapValue.KnowledgeRows[0]);
-          AssertFalse(MapValue.Rows[0].Contains('?'));
-        end;
-      else
-        begin
-          AssertTrue(false);
-        end;
-      end if;
-    end;
-  else
-    begin
-      panic('unexpected initial state: ' + InitialRead.Line);
-    end;
-  end if;
-  const FarOriginX: integer := 1280000;
-  const FarOriginY: integer := -1280000;
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.ExplorationMap(FarOriginX, FarOriginY, 3, 2)), Token)
-               .Unwrap());
-  const FarMapRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := FarMapRead.Reader;
-  if DecodeServer(FarMapRead.Line).Unwrap() is ServerMessage.ExplorationMap(const Value) then
-    begin
-      AssertEquals('???', Value.Rows[0]);
-      AssertEquals('???', Value.Rows[1]);
-      AssertEquals('uuu', Value.KnowledgeRows[0]);
-      AssertFalse(Value.PlayerInWindow);
-      AssertEquals(Metadata.Spawn.X, Value.PlayerWorldX);
-      AssertEquals(Metadata.Spawn.Y, Value.PlayerWorldY);
-    end;
-  else
-    begin
-      panic('expected undiscovered exploration-map window');
-    end;
-  end if;
-  const InspectionWorld: WorldSession := OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, 4, Config.ChunkCacheLimit)
-                                           .Unwrap();
-  AssertFalse(Std.Fs.Exists(WorldChunkPath(InspectionWorld, ChunkCoordinate(X := ChunkForCoordinate(FarOriginX), Y := ChunkForCoordinate(FarOriginY)))));
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.StartNewGame), Token).Unwrap());
-  const SecondStartRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := SecondStartRead.Reader;
-  if DecodeServer(SecondStartRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('session_already_started', Code);
-    end;
-  else
-    begin
-      panic('expected repeated session selection to be rejected');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.StartNewGame),
+        Token
+      ).Unwrap()
+    );
+    const InitialRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := InitialRead.Reader;
+    case ServerMessages.DecodeServer(InitialRead.Line) of
+      when Ok(const InitialMessage):
+        case InitialMessage of
+          when Protocol.ServerMessage.State(const Value):
+            const MapValue: Protocol.MapVisibleState := RequireMap(Value);
+            Test.AssertEquals(13, MapValue.Width);
+            Test.AssertEquals(7, MapValue.Height);
+            Test.AssertEquals(Metadata.Spawn.X - 6, MapValue.OriginX);
+            Test.AssertEquals(Metadata.Spawn.Y - 3, MapValue.OriginY);
+            Test.AssertEquals(6, MapValue.PlayerX);
+            Test.AssertEquals(3, MapValue.PlayerY);
+            Test.AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+            Test.AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
+            Test.AssertEquals('vvvvvvvvvvvvv', MapValue.KnowledgeRows[0]);
+            Test.AssertFalse('?' in MapValue.Rows[0]);
+          when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+            Test.AssertTrue(false);
+        end case;
+      when Error(_):
+        panic('unexpected initial state: ' + InitialRead.Line);
+    end case;
+    const FarOriginX: integer := 1280000;
+    const FarOriginY: integer := -1280000;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(
+          Protocol.ClientMessage.ExplorationMap(FarOriginX, FarOriginY, 3, 2)
+        ),
+        Token
+      ).Unwrap()
+    );
+    const FarMapRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := FarMapRead.Reader;
+    case ServerMessages.DecodeServer(FarMapRead.Line).Unwrap() of
+      when Protocol.ServerMessage.ExplorationMap(const Value):
+        Test.AssertEquals('???', Value.Rows[0]);
+        Test.AssertEquals('???', Value.Rows[1]);
+        Test.AssertEquals('uuu', Value.KnowledgeRows[0]);
+        Test.AssertFalse(Value.PlayerInWindow);
+        Test.AssertEquals(Metadata.Spawn.X, Value.PlayerWorldX);
+        Test.AssertEquals(Metadata.Spawn.Y, Value.PlayerWorldY);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected undiscovered exploration-map window');
+    end case;
+    const InspectionWorld: World.WorldSession := World.OpenWorld(
+      WorldsRoot,
+      Config.WorldId,
+      Config.WorldSeed,
+      4,
+      Config.ChunkCacheLimit
+    ).Unwrap();
+    Test.AssertFalse(
+      Fs.Exists(
+        World.WorldChunkPath(
+          InspectionWorld,
+          Coordinates.ChunkCoordinate(
+            X := Coordinates.ChunkForCoordinate(FarOriginX),
+            Y := Coordinates.ChunkForCoordinate(FarOriginY)
+          )
+        )
+      )
+    );
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.StartNewGame),
+        Token
+      ).Unwrap()
+    );
+    const SecondStartRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := SecondStartRead.Reader;
+    case ServerMessages.DecodeServer(SecondStartRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('session_already_started', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected repeated session selection to be rejected');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token).Unwrap());
-  const EarlyActivationRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := EarlyActivationRead.Reader;
-  if DecodeServer(EarlyActivationRead.Line).Unwrap() is ServerMessage.Interaction(const Title, const Message) then
-    begin
-      AssertEquals(NoInteractionMessage, Message);
-    end;
-  else
-    begin
-      panic('expected a no-target interaction result away from the entrance');
-    end;
-  end if;
-  var CurrentX: integer := Metadata.Spawn.X;
-  var CurrentY: integer := Metadata.Spawn.Y;
-  for Step: integer := 1 to 3 do
-    begin
-      var DeltaX: integer := 0;
-      var DeltaY: integer := 0;
-      if CurrentX < Metadata.SpawnEntrance.X then
-        begin
-          DeltaX := 1;
-        end;
-      else
-        if CurrentX > Metadata.SpawnEntrance.X then
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Interact),
+        Token
+      ).Unwrap()
+    );
+    const EarlyActivationRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := EarlyActivationRead.Reader;
+    case ServerMessages.DecodeServer(EarlyActivationRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Interaction(const Title, const Message):
+        Test.AssertEquals(Interaction.NoInteractionMessage, Message);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected a no-target interaction result away from the entrance');
+    end case;
+    var CurrentX: integer := Metadata.Spawn.X;
+    var CurrentY: integer := Metadata.Spawn.Y;
+    for Step: integer := 1 to 3 do
+      begin
+        var DeltaX: integer := 0;
+        var DeltaY: integer := 0;
+        if CurrentX < Metadata.SpawnEntrance.X then
           begin
-            DeltaX := -1;
+            DeltaX := 1;
           end;
         else
-          if CurrentY < Metadata.SpawnEntrance.Y then
+          if CurrentX > Metadata.SpawnEntrance.X then
             begin
-              DeltaY := 1;
+              DeltaX := -1;
             end;
           else
-            begin
-              DeltaY := -1;
-            end;
+            if CurrentY < Metadata.SpawnEntrance.Y then
+              begin
+                DeltaY := 1;
+              end;
+            else
+              begin
+                DeltaY := -1;
+              end;
+            end if;
           end if;
         end if;
-      end if;
 
-      AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Move(DeltaX, DeltaY)), Token).Unwrap());
-      const MovedRead: LineRead := ReadLine(Reader, Token).Unwrap();
-      Reader := MovedRead.Reader;
-      if DecodeServer(MovedRead.Line).Unwrap() is ServerMessage.State(const Value) then
-        begin
-          CurrentX := CurrentX + DeltaX;
-          CurrentY := CurrentY + DeltaY;
-          const MapValue: MapVisibleState := RequireMap(Value);
-          AssertEquals(CurrentX, MapValue.WorldX);
-          AssertEquals(CurrentY, MapValue.WorldY);
-        end;
-      else
-        begin
-          panic('expected map state after entrance movement');
-        end;
-      end if;
-    end;
-  end for;
+        Test.AssertTrue(
+          Transport.WriteLine(
+            Client,
+            ClientMessages.EncodeClient(Protocol.ClientMessage.Move(DeltaX, DeltaY)),
+            Token
+          ).Unwrap()
+        );
+        const MovedRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+        Reader := MovedRead.Reader;
+        case ServerMessages.DecodeServer(MovedRead.Line).Unwrap() of
+          when Protocol.ServerMessage.State(const Value):
+            CurrentX := CurrentX + DeltaX;
+            CurrentY := CurrentY + DeltaY;
+            const MapValue: Protocol.MapVisibleState := RequireMap(Value);
+            Test.AssertEquals(CurrentX, MapValue.WorldX);
+            Test.AssertEquals(CurrentY, MapValue.WorldY);
+          when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+            panic('expected map state after entrance movement');
+        end case;
+      end;
+    end for;
 
-  AssertEquals(Metadata.SpawnEntrance.X, CurrentX);
-  AssertEquals(Metadata.SpawnEntrance.Y, CurrentY);
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Interact), Token).Unwrap());
-  const EnteredRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := EnteredRead.Reader;
-  // Entry: the generated 31 by 21 spawn dungeon, at its start facing east with the exit behind.
-  const Map: InteriorMap := SpawnDungeonMap(Metadata);
-  var Avoid: array of InteriorPosition := [];
-  for Hostile: HostilePlacement in Map.Hostiles do
-    begin
-      Avoid.Push(Hostile.Position);
-    end;
-  end for;
-  const Entered: FirstPersonVisibleState := RequireFirstPerson(RequireState(DecodeServer(EnteredRead.Line)
-                                                                              .Unwrap()));
-  AssertEquals(GeneratedDungeonLabel, Entered.Title);
-  AssertEquals(GeneratedDungeonWidth, Entered.Width);
-  AssertEquals(GeneratedDungeonHeight, Entered.Height);
-  AssertEquals(Map.Start.X, Entered.PlayerX);
-  AssertEquals(Map.Start.Y, Entered.PlayerY);
-  AssertTrue(Entered.Facing = FirstPersonFacing.East);
-  AssertEquals(0, Entered.Inventory.Length());
-  AssertEquals('v', Entered.KnowledgeRows[Map.Start.Y].CharAt(Map.Start.X));
-  // Both immediate lateral fields reach the client; the exit behind the player stays undiscovered.
-  for Side: integer in [-1, 1] do
-    begin
-      const Lateral: InteriorPosition := InteriorPosition(X := Map.Start.X, Y := Map.Start.Y + Side);
-      AssertEquals('v', Entered.KnowledgeRows[Lateral.Y].CharAt(Lateral.X));
-      AssertEquals(InteriorCellCode(InteriorCellAt(Map, Lateral).Unwrap()), Entered.Rows[Lateral.Y].CharAt(Lateral.X));
-    end;
-  end for;
+    Test.AssertEquals(Metadata.SpawnEntrance.X, CurrentX);
+    Test.AssertEquals(Metadata.SpawnEntrance.Y, CurrentY);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Interact),
+        Token
+      ).Unwrap()
+    );
+    const EnteredRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := EnteredRead.Reader;
+    // Entry: the generated 31 by 21 spawn dungeon, at its start facing east with the exit behind.
+    const Map: Interior.InteriorMap := Routes.SpawnDungeonMap(Metadata);
+    var Avoid: array of Coordinates.InteriorPosition := [];
+    for Hostile: Hostiles.HostilePlacement in Map.Hostiles do
+      begin
+        Avoid.PushInPlace(Hostile.Position);
+      end;
+    end for;
+    const Entered: Protocol.FirstPersonVisibleState := RequireFirstPerson(
+      RequireState(ServerMessages.DecodeServer(EnteredRead.Line).Unwrap())
+    );
+    Test.AssertEquals(Identities.GeneratedDungeonLabel, Entered.Title);
+    Test.AssertEquals(Validation.GeneratedDungeonWidth, Entered.Width);
+    Test.AssertEquals(Validation.GeneratedDungeonHeight, Entered.Height);
+    Test.AssertEquals(Map.Start.X, Entered.PlayerX);
+    Test.AssertEquals(Map.Start.Y, Entered.PlayerY);
+    Test.AssertTrue(Entered.Facing = Protocol.FirstPersonFacing.East);
+    Test.AssertEquals(0, Entered.Inventory.Length());
+    Test.AssertEquals('v', Entered.KnowledgeRows[Map.Start.Y][Map.Start.X]);
+    // Both immediate lateral fields reach the client; the exit behind the player stays undiscovered.
+    for Side: integer in [-1, 1] do
+      begin
+        const Lateral: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+          X := Map.Start.X,
+          Y := Map.Start.Y + Side
+        );
+        Test.AssertEquals('v', Entered.KnowledgeRows[Lateral.Y][Lateral.X]);
+        Test.AssertEquals(
+          Interior.InteriorCellCode(Interior.InteriorCellAt(Map, Lateral).Unwrap()),
+          Entered.Rows[Lateral.Y][Lateral.X]
+        );
+      end;
+    end for;
 
-  AssertEquals('?', Entered.Rows[Map.Exit.Y].CharAt(Map.Exit.X));
-  AssertEquals('u', Entered.KnowledgeRows[Map.Exit.Y].CharAt(Map.Exit.X));
-  // The test server caps windows at 20 rows; generated exits lie inside the outer wall.
-  var Answer: Exchanged := Ask(Client, Reader, ClientMessage.ExplorationMap(0, 0, GeneratedDungeonWidth, 20), Token);
-  Reader := Answer.Reader;
-  if Answer.Message is ServerMessage.ExplorationMap(const Value) then
-    begin
-      AssertTrue(Value.View = ViewKind.FirstPerson);
-      AssertEquals(GeneratedDungeonLabel, Value.LabelText);
-      AssertTrue(Value.PlayerInWindow);
-      AssertEquals(Map.Start.X, Value.PlayerWorldX);
-      AssertEquals(Map.Start.Y, Value.PlayerWorldY);
-      AssertEquals('?', Value.Rows[Map.Exit.Y].CharAt(Map.Exit.X));
-      AssertEquals('u', Value.KnowledgeRows[Map.Exit.Y].CharAt(Map.Exit.X));
-    end;
-  else
-    begin
-      panic('expected current interior exploration map');
-    end;
-  end if;
-  // Walk up to the coin, inspect it from the field before, then step onto it and pick it up.
-  const CoinField: InteriorPosition := Map.Items[0].Position;
-  const CoinId: string := ItemPlacementId(SpawnDungeonAreaId(Metadata), 0);
-  const CoinRoute: array of RouteMove := RouteTo(Map, VisiblePose(Entered), CoinField, Avoid);
-  var View: FirstPersonVisibleState := Entered;
-  for Index: integer := 0 to CoinRoute.Length() - 2 do
-    begin
-      Answer := Ask(Client, Reader, RouteMessage(CoinRoute[Index]), Token);
-      Reader := Answer.Reader;
-      View := RequireFirstPerson(RequireState(Answer.Message));
-    end;
-  end for;
-  const BeforeCoin: InteriorPosition := VisiblePose(View).Position;
-  AssertTrue(SamePosition(FieldAhead(View), CoinField));
-  AssertEquals('i', View.Rows[CoinField.Y].CharAt(CoinField.X));
-  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
-  Reader := Answer.Reader;
-  if Answer.Message is ServerMessage.Interaction(const Title, const Message) then
-    begin
-      AssertEquals(AncientCoinName, Title);
-      AssertEquals(AncientCoinDescription, Message);
-    end;
-  else
-    begin
-      panic('expected item inspection before pickup');
-    end;
-  end if;
+    Test.AssertEquals('?', Entered.Rows[Map.Exit.Y][Map.Exit.X]);
+    Test.AssertEquals('u', Entered.KnowledgeRows[Map.Exit.Y][Map.Exit.X]);
+    // The test server caps windows at 20 rows; generated exits lie inside the outer wall.
+    var Answer: Exchanged := Ask(
+      Client,
+      Reader,
+      Protocol.ClientMessage.ExplorationMap(0, 0, Validation.GeneratedDungeonWidth, 20),
+      Token
+    );
+    Reader := Answer.Reader;
+    case Answer.Message of
+      when Protocol.ServerMessage.ExplorationMap(const Value):
+        Test.AssertTrue(Value.View = Protocol.ViewKind.FirstPerson);
+        Test.AssertEquals(Identities.GeneratedDungeonLabel, Value.LabelText);
+        Test.AssertTrue(Value.PlayerInWindow);
+        Test.AssertEquals(Map.Start.X, Value.PlayerWorldX);
+        Test.AssertEquals(Map.Start.Y, Value.PlayerWorldY);
+        Test.AssertEquals('?', Value.Rows[Map.Exit.Y][Map.Exit.X]);
+        Test.AssertEquals('u', Value.KnowledgeRows[Map.Exit.Y][Map.Exit.X]);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected current interior exploration map');
+    end case;
+    // Walk up to the coin, inspect it from the field before, then step onto it and pick it up.
+    const CoinField: Coordinates.InteriorPosition := Map.Items[0].Position;
+    const CoinId: string := Items.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 0);
+    const CoinRoute: array of Fixtures.RouteMove := Fixtures.RouteTo(
+      Map,
+      Routes.VisiblePose(Entered),
+      CoinField,
+      Avoid
+    );
+    var View: Protocol.FirstPersonVisibleState := Entered;
+    for Index: integer := 0 to CoinRoute.Length() - 2 do
+      begin
+        Answer := Ask(Client, Reader, Routes.RouteMessage(CoinRoute[Index]), Token);
+        Reader := Answer.Reader;
+        View := RequireFirstPerson(RequireState(Answer.Message));
+      end;
+    end for;
+    const BeforeCoin: Coordinates.InteriorPosition := Routes.VisiblePose(View).Position;
+    Test.AssertTrue(Coordinates.SamePosition(Routes.FieldAhead(View), CoinField));
+    Test.AssertEquals('i', View.Rows[CoinField.Y][CoinField.X]);
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.Interact, Token);
+    Reader := Answer.Reader;
+    case Answer.Message of
+      when Protocol.ServerMessage.Interaction(const Title, const Message):
+        Test.AssertEquals(Items.AncientCoinName, Title);
+        Test.AssertEquals(Items.AncientCoinDescription, Message);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected item inspection before pickup');
+    end case;
 
-  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
-  Reader := Answer.Reader;
-  View := RequireFirstPerson(RequireState(Answer.Message));
-  AssertEquals('At your feet: Ancient coin — Enter: Pick up', View.Status);
-  AssertEquals(CoinField.X, View.PlayerX);
-  AssertEquals(CoinField.Y, View.PlayerY);
-  AssertEquals(0, View.Inventory.Length());
-  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
-  Reader := Answer.Reader;
-  View := RequireFirstPerson(RequireState(Answer.Message));
-  AssertEquals(1, View.Inventory.Length());
-  AssertEquals(CoinId, View.Inventory[0].Id);
-  AssertEquals(AncientCoinName, View.Inventory[0].Name);
-  AssertEquals('.', View.Rows[CoinField.Y].CharAt(CoinField.X));
-  // The coin is gone from the field: picking up again finds no second item at the player's feet.
-  AssertFalse(View.Status.Contains('Pick up'));
-  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward), Token);
-  Reader := Answer.Reader;
-  View := RequireFirstPerson(RequireState(Answer.Message));
-  AssertEquals(BeforeCoin.X, View.PlayerX);
-  AssertEquals(BeforeCoin.Y, View.PlayerY);
-  AssertEquals(1, View.Inventory.Length());
-  Answer := Ask(Client, Reader, ClientMessage.Move(1, 0), Token);
-  Reader := Answer.Reader;
-  if Answer.Message is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('movement_rejected', Code);
-      AssertEquals('movement is unavailable in the current area', Message);
-    end;
-  else
-    begin
-      panic('expected dungeon movement rejection');
-    end;
-  end if;
+    Answer := Ask(
+      Client,
+      Reader,
+      Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Forward),
+      Token
+    );
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    Test.AssertEquals('At your feet: Ancient coin — Enter: Pick up', View.Status);
+    Test.AssertEquals(CoinField.X, View.PlayerX);
+    Test.AssertEquals(CoinField.Y, View.PlayerY);
+    Test.AssertEquals(0, View.Inventory.Length());
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.Interact, Token);
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    Test.AssertEquals(1, View.Inventory.Length());
+    Test.AssertEquals(CoinId, View.Inventory[0].Id);
+    Test.AssertEquals(Items.AncientCoinName, View.Inventory[0].Name);
+    Test.AssertEquals('.', View.Rows[CoinField.Y][CoinField.X]);
+    // The coin is gone from the field: picking up again finds no second item at the player's feet.
+    Test.AssertFalse('Pick up' in View.Status);
+    Answer := Ask(
+      Client,
+      Reader,
+      Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Backward),
+      Token
+    );
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    Test.AssertEquals(BeforeCoin.X, View.PlayerX);
+    Test.AssertEquals(BeforeCoin.Y, View.PlayerY);
+    Test.AssertEquals(1, View.Inventory.Length());
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.Move(1, 0), Token);
+    Reader := Answer.Reader;
+    case Answer.Message of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('movement_rejected', Code);
+        Test.AssertEquals('movement is unavailable in the current area', Message);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected dungeon movement rejection');
+    end case;
 
-  Answer := Ask(Client, Reader, ClientMessage.Viewport(1000, 1000), Token);
-  Reader := Answer.Reader;
-  View := RequireFirstPerson(RequireState(Answer.Message));
-  AssertEquals(GeneratedDungeonLabel, View.Title);
-  AssertEquals(GeneratedDungeonWidth, View.Width);
-  AssertEquals(GeneratedDungeonHeight, View.Height);
-  AssertEquals(BeforeCoin.X, View.PlayerX);
-  AssertEquals(BeforeCoin.Y, View.PlayerY);
-  // Sideways steps move one field without turning, or are rejected by a wall.
-  for Direction: FirstPersonStepDirection in [
-                                               FirstPersonStepDirection.Left,
-                                               FirstPersonStepDirection.Right
-                                             ] do
-    begin
-      const Pose: FirstPersonPose := VisiblePose(View);
-      var Relative: RelativeStep := RelativeStep.Left;
-      if Direction = FirstPersonStepDirection.Right then
-        begin
-          Relative := RelativeStep.Right;
-        end;
-      end if;
-      const Offset: InteriorPosition := StepOffset(Pose.Facing, Relative);
-      const Side: InteriorPosition := InteriorPosition(X := Pose.Position.X + Offset.X, Y := Pose.Position.Y +
-                                                                                             Offset.Y);
-      Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(Direction), Token);
-      Reader := Answer.Reader;
-      if InteriorCellAt(Map, Side).Unwrap() = InteriorCellKind.Wall then
-        begin
-          if Answer.Message is ServerMessage.Rejected(const Code, const Message) then
-            begin
-              AssertEquals('movement_rejected', Code);
-            end;
-          else
-            begin
-              panic('expected a sideways step into a wall to be rejected');
-            end;
-          end if;
-        end;
-      else
-        begin
-          View := RequireFirstPerson(RequireState(Answer.Message));
-          AssertEquals(Side.X, View.PlayerX);
-          AssertEquals(Side.Y, View.PlayerY);
-          AssertTrue(VisiblePose(View).Facing = Pose.Facing);
-        end;
-      end if;
-    end;
-  end for;
-  // Turn until a wall stands ahead: it offers no interaction and blocks a step.
-  var Turns: integer := 0;
-  while (InteriorCellAt(Map, FieldAhead(View)).Unwrap() <> InteriorCellKind.Wall) and (Turns < 4) do
-    begin
-      Answer := Ask(Client, Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token);
-      Reader := Answer.Reader;
-      View := RequireFirstPerson(RequireState(Answer.Message));
-      Turns := Turns + 1;
-    end;
-  end while;
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.Viewport(1000, 1000), Token);
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    Test.AssertEquals(Identities.GeneratedDungeonLabel, View.Title);
+    Test.AssertEquals(Validation.GeneratedDungeonWidth, View.Width);
+    Test.AssertEquals(Validation.GeneratedDungeonHeight, View.Height);
+    Test.AssertEquals(BeforeCoin.X, View.PlayerX);
+    Test.AssertEquals(BeforeCoin.Y, View.PlayerY);
+    // Sideways steps move one field without turning, or are rejected by a wall.
+    for Direction: Protocol.FirstPersonStepDirection in [
+      Protocol.FirstPersonStepDirection.Left,
+      Protocol.FirstPersonStepDirection.Right
+    ] do
+      begin
+        const Pose: Coordinates.FirstPersonPose := Routes.VisiblePose(View);
+        var Relative: Coordinates.RelativeStep := Coordinates.RelativeStep.Left;
+        if Direction = Protocol.FirstPersonStepDirection.Right then
+          begin
+            Relative := Coordinates.RelativeStep.Right;
+          end;
+        end if;
+        const Offset: Coordinates.InteriorPosition := Coordinates.StepOffset(Pose.Facing, Relative);
+        const Side: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+          X := Pose.Position.X + Offset.X, Y := Pose.Position.Y +
+          Offset.Y
+        );
+        Answer := Ask(Client, Reader, Protocol.ClientMessage.StepFirstPerson(Direction), Token);
+        Reader := Answer.Reader;
+        if Interior.InteriorCellAt(Map, Side).Unwrap() = Interior.InteriorCellKind.Wall then
+          begin
+            case Answer.Message of
+              when Protocol.ServerMessage.Rejected(const Code, const Message):
+                Test.AssertEquals('movement_rejected', Code);
+              when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+                panic('expected a sideways step into a wall to be rejected');
+            end case;
+          end;
+        else
+          begin
+            View := RequireFirstPerson(RequireState(Answer.Message));
+            Test.AssertEquals(Side.X, View.PlayerX);
+            Test.AssertEquals(Side.Y, View.PlayerY);
+            Test.AssertTrue(Routes.VisiblePose(View).Facing = Pose.Facing);
+          end;
+        end if;
+      end;
+    end for;
+    // Turn until a wall stands ahead: it offers no interaction and blocks a step.
+    var Turns: integer := 0;
+    while (
+      Interior.InteriorCellAt(Map, Routes.FieldAhead(View)).Unwrap() <>
+      Interior.InteriorCellKind.Wall
+    ) and (Turns < 4) do
+      begin
+        Answer := Ask(
+          Client,
+          Reader,
+          Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Right),
+          Token
+        );
+        Reader := Answer.Reader;
+        View := RequireFirstPerson(RequireState(Answer.Message));
+        Turns := Turns + 1;
+      end;
+    end while;
 
-  AssertTrue(InteriorCellAt(Map, FieldAhead(View)).Unwrap() = InteriorCellKind.Wall);
-  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
-  Reader := Answer.Reader;
-  if Answer.Message is ServerMessage.Interaction(const Title, const Message) then
-    begin
-      AssertEquals('', Title);
-      AssertEquals(NoInteractionMessage, Message);
-    end;
-  else
-    begin
-      panic('expected no interaction with an ordinary wall');
-    end;
-  end if;
+    Test.AssertTrue(
+      Interior.InteriorCellAt(Map, Routes.FieldAhead(View)).Unwrap() =
+      Interior.InteriorCellKind.Wall
+    );
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.Interact, Token);
+    Reader := Answer.Reader;
+    case Answer.Message of
+      when Protocol.ServerMessage.Interaction(const Title, const Message):
+        Test.AssertEquals('', Title);
+        Test.AssertEquals(Interaction.NoInteractionMessage, Message);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected no interaction with an ordinary wall');
+    end case;
 
-  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
-  Reader := Answer.Reader;
-  if Answer.Message is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('movement_rejected', Code);
-      AssertEquals('a wall blocks the way', Message);
-    end;
-  else
-    begin
-      panic('expected wall collision rejection');
-    end;
-  end if;
-  // Head for the exit: save halfway, take one more move, and replace that save.
-  const ExitRoute: array of RouteMove := RouteTo(Map, VisiblePose(View), Map.Exit, Avoid);
-  AssertTrue(ExitRoute.Length() >= 3);
-  const Halfway: integer := ExitRoute.Length() div 2;
-  for Index: integer := 0 to Halfway - 1 do
-    begin
-      Answer := Ask(Client, Reader, RouteMessage(ExitRoute[Index]), Token);
-      Reader := Answer.Reader;
-      View := RequireFirstPerson(RequireState(Answer.Message));
-    end;
-  end for;
+    Answer := Ask(
+      Client,
+      Reader,
+      Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Forward),
+      Token
+    );
+    Reader := Answer.Reader;
+    case Answer.Message of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('movement_rejected', Code);
+        Test.AssertEquals('a wall blocks the way', Message);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected wall collision rejection');
+    end case;
+    // Head for the exit: save halfway, take one more move, and replace that save.
+    const ExitRoute: array of Fixtures.RouteMove := Fixtures.RouteTo(
+      Map,
+      Routes.VisiblePose(View),
+      Map.Exit,
+      Avoid
+    );
+    Test.AssertTrue(ExitRoute.Length() >= 3);
+    const Halfway: integer := ExitRoute.Length() div 2;
+    for Index: integer := 0 to Halfway - 1 do
+      begin
+        Answer := Ask(Client, Reader, Routes.RouteMessage(ExitRoute[Index]), Token);
+        Reader := Answer.Reader;
+        View := RequireFirstPerson(RequireState(Answer.Message));
+      end;
+    end for;
 
-  Answer := Ask(Client, Reader, ClientMessage.SaveGame, Token);
-  Reader := Answer.Reader;
-  RequireSaved(Answer.Message);
-  Answer := Ask(Client, Reader, RouteMessage(ExitRoute[Halfway]), Token);
-  Reader := Answer.Reader;
-  View := RequireFirstPerson(RequireState(Answer.Message));
-  const SavedPose: FirstPersonPose := VisiblePose(View);
-  // The entry field was seen before and stays discovered.
-  AssertFalse(View.KnowledgeRows[Map.Start.Y].CharAt(Map.Start.X) = 'u');
-  AssertFalse(View.Rows[Map.Start.Y].CharAt(Map.Start.X) = '?');
-  Answer := Ask(Client, Reader, ClientMessage.OverwriteSaveGame, Token);
-  Reader := Answer.Reader;
-  RequireSaved(Answer.Message);
-  for Index: integer := Halfway + 1 to ExitRoute.Length() - 1 do
-    begin
-      Answer := Ask(Client, Reader, RouteMessage(ExitRoute[Index]), Token);
-      Reader := Answer.Reader;
-      View := RequireFirstPerson(RequireState(Answer.Message));
-    end;
-  end for;
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.SaveGame, Token);
+    Reader := Answer.Reader;
+    RequireSaved(Answer.Message);
+    Answer := Ask(Client, Reader, Routes.RouteMessage(ExitRoute[Halfway]), Token);
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    const SavedPose: Coordinates.FirstPersonPose := Routes.VisiblePose(View);
+    // The entry field was seen before and stays discovered.
+    Test.AssertFalse(View.KnowledgeRows[Map.Start.Y][Map.Start.X] = 'u');
+    Test.AssertFalse(View.Rows[Map.Start.Y][Map.Start.X] = '?');
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Reader := Answer.Reader;
+    RequireSaved(Answer.Message);
+    for Index: integer := Halfway + 1 to ExitRoute.Length() - 1 do
+      begin
+        Answer := Ask(Client, Reader, Routes.RouteMessage(ExitRoute[Index]), Token);
+        Reader := Answer.Reader;
+        View := RequireFirstPerson(RequireState(Answer.Message));
+      end;
+    end for;
 
-  AssertTrue(SamePosition(VisiblePose(View).Position, Map.Exit));
-  // One step back and forward again shows the exit hint only on the exit field.
-  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Backward), Token);
-  Reader := Answer.Reader;
-  View := RequireFirstPerson(RequireState(Answer.Message));
-  AssertFalse(SamePosition(VisiblePose(View).Position, Map.Exit));
-  AssertFalse(View.Status = 'Press Enter to return to the outdoor region.');
-  Answer := Ask(Client, Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token);
-  Reader := Answer.Reader;
-  View := RequireFirstPerson(RequireState(Answer.Message));
-  AssertTrue(SamePosition(VisiblePose(View).Position, Map.Exit));
-  AssertEquals('Press Enter to return to the outdoor region.', View.Status);
-  Answer := Ask(Client, Reader, ClientMessage.Interact, Token);
-  Reader := Answer.Reader;
-  const LeftMap: MapVisibleState := RequireMap(RequireState(Answer.Message));
-  AssertEquals(Metadata.SpawnEntrance.X, LeftMap.WorldX);
-  AssertEquals(Metadata.SpawnEntrance.Y, LeftMap.WorldY);
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Viewport(1000, 1000)), Token).Unwrap());
-  const ResizedRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := ResizedRead.Reader;
-  if DecodeServer(ResizedRead.Line).Unwrap() is ServerMessage.State(const Value) then
-    begin
-      const MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(240, MapValue.Width);
-      AssertEquals(20, MapValue.Height);
-      AssertEquals(Metadata.SpawnEntrance.X, MapValue.WorldX);
-    end;
-  else
-    begin
-      panic('expected clamped viewport state');
-    end;
-  end if;
+    Test.AssertTrue(Coordinates.SamePosition(Routes.VisiblePose(View).Position, Map.Exit));
+    // One step back and forward again shows the exit hint only on the exit field.
+    Answer := Ask(
+      Client,
+      Reader,
+      Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Backward),
+      Token
+    );
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    Test.AssertFalse(Coordinates.SamePosition(Routes.VisiblePose(View).Position, Map.Exit));
+    Test.AssertFalse(View.Status = 'Press Enter to return to the outdoor region.');
+    Answer := Ask(
+      Client,
+      Reader,
+      Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Forward),
+      Token
+    );
+    Reader := Answer.Reader;
+    View := RequireFirstPerson(RequireState(Answer.Message));
+    Test.AssertTrue(Coordinates.SamePosition(Routes.VisiblePose(View).Position, Map.Exit));
+    Test.AssertEquals('Press Enter to return to the outdoor region.', View.Status);
+    Answer := Ask(Client, Reader, Protocol.ClientMessage.Interact, Token);
+    Reader := Answer.Reader;
+    const LeftMap: Protocol.MapVisibleState := RequireMap(RequireState(Answer.Message));
+    Test.AssertEquals(Metadata.SpawnEntrance.X, LeftMap.WorldX);
+    Test.AssertEquals(Metadata.SpawnEntrance.Y, LeftMap.WorldY);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Viewport(1000, 1000)),
+        Token
+      ).Unwrap()
+    );
+    const ResizedRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := ResizedRead.Reader;
+    case ServerMessages.DecodeServer(ResizedRead.Line).Unwrap() of
+      when Protocol.ServerMessage.State(const Value):
+        const MapValue: Protocol.MapVisibleState := RequireMap(Value);
+        Test.AssertEquals(240, MapValue.Width);
+        Test.AssertEquals(20, MapValue.Height);
+        Test.AssertEquals(Metadata.SpawnEntrance.X, MapValue.WorldX);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected clamped viewport state');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Move(1, 1)), Token).Unwrap());
-  const RejectedRead: LineRead := ReadLine(Reader, Token).Unwrap();
-  Reader := RejectedRead.Reader;
-  if DecodeServer(RejectedRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('movement_rejected', Code);
-      AssertEquals('movement must be one cardinal step', Message);
-    end;
-  else
-    begin
-      panic('expected rejected movement');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Move(1, 1)),
+        Token
+      ).Unwrap()
+    );
+    const RejectedRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    Reader := RejectedRead.Reader;
+    case ServerMessages.DecodeServer(RejectedRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('movement_rejected', Code);
+        Test.AssertEquals('movement must be one cardinal step', Message);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected rejected movement');
+    end case;
 
-  AssertTrue(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
-  AssertTrue(Close(Client).Unwrap());
-  AssertTrue(Std.Tasks.Wait(ServerTask).Unwrap());
-  AssertTrue(CloseListener(ListenerValue).Unwrap());
-  const WorldPath: string := Std.Path.Join([Config.WorldsRoot, Config.WorldId]);
-  const MetadataPath: string := Std.Path.Join([WorldPath, 'world.json']);
-  const ChunkPath: string := Std.Path.Join([
-                                             WorldPath,
-                                             'chunks',
-                                             'x_' + IntToStr(ChunkForCoordinate(Metadata.Spawn.X - 6)),
-                                             ('y_' + IntToStr(ChunkForCoordinate(Metadata.Spawn.Y - 3))) + '.json'
-                                           ]);
-  const MetadataBefore: string := Std.Fs.ReadText(MetadataPath).Unwrap();
-  const ChunkBefore: string := Std.Fs.ReadText(ChunkPath).Unwrap();
-  const RestartListener: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const RestartAddress: NetworkAddress := ListenerLocalAddress(RestartListener).Unwrap();
-  const RestartTask: task := go ServeOne(RestartListener, Config, Token);
-  const RestartClient: Connection := Connect('127.0.0.1', RestartAddress.Port, 5000).Unwrap();
-  AssertTrue(SetTimeout(RestartClient, 120000).Unwrap());
-  var RestartReader: LineReader := NewLineReader(RestartClient);
-  AssertTrue(WriteLine(RestartClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 1, 1)), Token)
-               .Unwrap());
-  const RestartWelcome: LineRead := ReadLine(RestartReader, Token).Unwrap();
-  RestartReader := RestartWelcome.Reader;
-  if DecodeServer(RestartWelcome.Line).Unwrap() is ServerMessage.Welcome(const Version, const Catalog) then
-    begin
-      AssertEquals(ProtocolVersion, Version);
-      AssertTrue(FixtureSaveAvailable(Catalog));
-      AssertFalse(FixtureInvalidSave(Catalog));
-    end;
-  else
-    begin
-      panic('expected restart welcome with saved-game availability');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Net.Close(Client).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+    Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+    const WorldPath: string := PathOps.Join([Config.WorldsRoot, Config.WorldId]);
+    const MetadataPath: string := PathOps.Join([WorldPath, 'world.json']);
+    const ChunkPath: string := PathOps.Join([
+      WorldPath,
+      'chunks',
+      'x_' + Conv.IntToStr(Coordinates.ChunkForCoordinate(Metadata.Spawn.X - 6)),
+      ('y_' + Conv.IntToStr(Coordinates.ChunkForCoordinate(Metadata.Spawn.Y - 3))) + '.json'
+    ]);
+    const MetadataBefore: string := Fs.ReadText(MetadataPath).Unwrap();
+    const ChunkBefore: string := Fs.ReadText(ChunkPath).Unwrap();
+    const RestartListener: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+    const RestartAddress: Net.NetworkAddress := Net.ListenerLocalAddress(RestartListener).Unwrap();
+    const RestartTask: task of result of (boolean, string) := go ServeOne(
+      RestartListener,
+      Config,
+      Token
+    );
+    const RestartClient: Net.Connection := Net.Connect(
+      '127.0.0.1',
+      RestartAddress.Port,
+      5000
+    ).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(RestartClient, 120000).Unwrap());
+    var RestartReader: Transport.LineReader := Transport.NewLineReader(RestartClient);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        RestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 1, 1)),
+        Token
+      ).Unwrap()
+    );
+    const RestartWelcome: Transport.LineRead := Transport.ReadLine(RestartReader, Token).Unwrap();
+    RestartReader := RestartWelcome.Reader;
+    case ServerMessages.DecodeServer(RestartWelcome.Line).Unwrap() of
+      when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+        Test.AssertEquals(Protocol.ProtocolVersion, Version);
+        Test.AssertTrue(CatalogUnit.FixtureSaveAvailable(Catalog));
+        Test.AssertFalse(CatalogUnit.FixtureInvalidSave(Catalog));
+      when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected restart welcome with saved-game availability');
+    end case;
 
-  AssertTrue(WriteLine(RestartClient, EncodeClient(ClientMessage.LoadGame), Token).Unwrap());
-  const RestartState: LineRead := ReadLine(RestartReader, Token).Unwrap();
-  RestartReader := RestartState.Reader;
-  var RestartView: FirstPersonVisibleState := RequireFirstPerson(RequireState(DecodeServer(RestartState.Line)
-                                                                                .Unwrap()));
-  AssertTrue(SamePosition(VisiblePose(RestartView).Position, SavedPose.Position));
-  AssertTrue(VisiblePose(RestartView).Facing = SavedPose.Facing);
-  AssertEquals(1, RestartView.Inventory.Length());
-  AssertEquals(CoinId, RestartView.Inventory[0].Id);
-  // The loaded game continues in the stored level: walk to the exit and leave with the coin.
-  for Move: RouteMove in RouteTo(Map, SavedPose, Map.Exit, Avoid) do
-    begin
-      Answer := Ask(RestartClient, RestartReader, RouteMessage(Move), Token);
-      RestartReader := Answer.Reader;
-      RestartView := RequireFirstPerson(RequireState(Answer.Message));
-    end;
-  end for;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        RestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.LoadGame),
+        Token
+      ).Unwrap()
+    );
+    const RestartState: Transport.LineRead := Transport.ReadLine(RestartReader, Token).Unwrap();
+    RestartReader := RestartState.Reader;
+    var RestartView: Protocol.FirstPersonVisibleState := RequireFirstPerson(
+      RequireState(ServerMessages.DecodeServer(RestartState.Line).Unwrap())
+    );
+    Test.AssertTrue(
+      Coordinates.SamePosition(Routes.VisiblePose(RestartView).Position, SavedPose.Position)
+    );
+    Test.AssertTrue(Routes.VisiblePose(RestartView).Facing = SavedPose.Facing);
+    Test.AssertEquals(1, RestartView.Inventory.Length());
+    Test.AssertEquals(CoinId, RestartView.Inventory[0].Id);
+    // The loaded game continues in the stored level: walk to the exit and leave with the coin.
+    for Move: Fixtures.RouteMove in Fixtures.RouteTo(Map, SavedPose, Map.Exit, Avoid) do
+      begin
+        Answer := Ask(RestartClient, RestartReader, Routes.RouteMessage(Move), Token);
+        RestartReader := Answer.Reader;
+        RestartView := RequireFirstPerson(RequireState(Answer.Message));
+      end;
+    end for;
 
-  Answer := Ask(RestartClient, RestartReader, ClientMessage.Interact, Token);
-  RestartReader := Answer.Reader;
-  const LoadedExit: MapVisibleState := RequireMap(RequireState(Answer.Message));
-  AssertEquals(Metadata.SpawnEntrance.X, LoadedExit.WorldX);
-  AssertEquals(Metadata.SpawnEntrance.Y, LoadedExit.WorldY);
-  AssertEquals(1, LoadedExit.Inventory.Length());
-  AssertEquals(CoinId, LoadedExit.Inventory[0].Id);
-  AssertTrue(WriteLine(RestartClient, EncodeClient(ClientMessage.OverwriteSaveGame), Token).Unwrap());
-  const OutdoorSavedRead: LineRead := ReadLine(RestartReader, Token).Unwrap();
-  RestartReader := OutdoorSavedRead.Reader;
-  if DecodeServer(OutdoorSavedRead.Line).Unwrap() is ServerMessage.SaveCompleted then
-    begin
-      null;
-    end;
-  else
-    begin
-      panic('expected outdoor save completion after leaving loaded interior');
-    end;
-  end if;
+    Answer := Ask(RestartClient, RestartReader, Protocol.ClientMessage.Interact, Token);
+    RestartReader := Answer.Reader;
+    const LoadedExit: Protocol.MapVisibleState := RequireMap(RequireState(Answer.Message));
+    Test.AssertEquals(Metadata.SpawnEntrance.X, LoadedExit.WorldX);
+    Test.AssertEquals(Metadata.SpawnEntrance.Y, LoadedExit.WorldY);
+    Test.AssertEquals(1, LoadedExit.Inventory.Length());
+    Test.AssertEquals(CoinId, LoadedExit.Inventory[0].Id);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        RestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.OverwriteSaveGame),
+        Token
+      ).Unwrap()
+    );
+    const OutdoorSavedRead: Transport.LineRead := Transport.ReadLine(RestartReader, Token).Unwrap();
+    RestartReader := OutdoorSavedRead.Reader;
+    if ServerMessages.DecodeServer(OutdoorSavedRead.Line).Unwrap() is Protocol.ServerMessage.SaveCompleted then
+      begin
+        null;
+      end;
+    else
+      begin
+        panic('expected outdoor save completion after leaving loaded interior');
+      end;
+    end if;
 
-  AssertTrue(WriteLine(RestartClient, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
-  AssertTrue(Close(RestartClient).Unwrap());
-  AssertTrue(Std.Tasks.Wait(RestartTask).Unwrap());
-  AssertTrue(CloseListener(RestartListener).Unwrap());
-  const OutdoorRestartListener: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const OutdoorRestartAddress: NetworkAddress := ListenerLocalAddress(OutdoorRestartListener)
-                                                   .Unwrap();
-  const OutdoorRestartTask: task := go ServeOne(OutdoorRestartListener, Config, Token);
-  const OutdoorRestartClient: Connection := Connect('127.0.0.1', OutdoorRestartAddress.Port, 5000)
-                                              .Unwrap();
-  AssertTrue(SetTimeout(OutdoorRestartClient, 120000).Unwrap());
-  var OutdoorRestartReader: LineReader := NewLineReader(OutdoorRestartClient);
-  AssertTrue(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)
-               .Unwrap());
-  const OutdoorRestartWelcome: LineRead := ReadLine(OutdoorRestartReader, Token).Unwrap();
-  OutdoorRestartReader := OutdoorRestartWelcome.Reader;
-  if DecodeServer(OutdoorRestartWelcome.Line).Unwrap() is ServerMessage.Welcome(const Version, const Catalog) then
-    begin
-      AssertEquals(ProtocolVersion, Version);
-      AssertTrue(FixtureSaveAvailable(Catalog));
-      AssertFalse(FixtureInvalidSave(Catalog));
-    end;
-  else
-    begin
-      panic('expected outdoor restart welcome with saved-game availability');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        RestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Net.Close(RestartClient).Unwrap());
+    Test.AssertTrue(Tasks.Wait(RestartTask).Unwrap());
+    Test.AssertTrue(Net.CloseListener(RestartListener).Unwrap());
+    const OutdoorRestartListener: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+    const OutdoorRestartAddress: Net.NetworkAddress := Net.ListenerLocalAddress(
+      OutdoorRestartListener
+    ).Unwrap();
+    const OutdoorRestartTask: task of result of (boolean, string) := go ServeOne(
+      OutdoorRestartListener,
+      Config,
+      Token
+    );
+    const OutdoorRestartClient: Net.Connection := Net.Connect(
+      '127.0.0.1',
+      OutdoorRestartAddress.Port,
+      5000
+    ).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(OutdoorRestartClient, 120000).Unwrap());
+    var OutdoorRestartReader: Transport.LineReader := Transport.NewLineReader(OutdoorRestartClient);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        OutdoorRestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 13, 7)),
+        Token
+      ).Unwrap()
+    );
+    const OutdoorRestartWelcome: Transport.LineRead := Transport.ReadLine(
+      OutdoorRestartReader,
+      Token
+    ).Unwrap();
+    OutdoorRestartReader := OutdoorRestartWelcome.Reader;
+    case ServerMessages.DecodeServer(OutdoorRestartWelcome.Line).Unwrap() of
+      when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+        Test.AssertEquals(Protocol.ProtocolVersion, Version);
+        Test.AssertTrue(CatalogUnit.FixtureSaveAvailable(Catalog));
+        Test.AssertFalse(CatalogUnit.FixtureInvalidSave(Catalog));
+      when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected outdoor restart welcome with saved-game availability');
+    end case;
 
-  AssertTrue(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.LoadGame), Token).Unwrap());
-  const OutdoorRestartState: LineRead := ReadLine(OutdoorRestartReader, Token).Unwrap();
-  OutdoorRestartReader := OutdoorRestartState.Reader;
-  if DecodeServer(OutdoorRestartState.Line).Unwrap() is ServerMessage.State(const Value) then
-    begin
-      const MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(Metadata.SpawnEntrance.X, MapValue.WorldX);
-      AssertEquals(Metadata.SpawnEntrance.Y, MapValue.WorldY);
-      AssertEquals(1, MapValue.Inventory.Length());
-      AssertEquals(ItemPlacementId(SpawnDungeonAreaId(Metadata), 0), MapValue.Inventory[0].Id);
-    end;
-  else
-    begin
-      panic('expected exact saved outdoor position after another server restart');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        OutdoorRestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.LoadGame),
+        Token
+      ).Unwrap()
+    );
+    const OutdoorRestartState: Transport.LineRead := Transport.ReadLine(
+      OutdoorRestartReader,
+      Token
+    ).Unwrap();
+    OutdoorRestartReader := OutdoorRestartState.Reader;
+    case ServerMessages.DecodeServer(OutdoorRestartState.Line).Unwrap() of
+      when Protocol.ServerMessage.State(const Value):
+        const MapValue: Protocol.MapVisibleState := RequireMap(Value);
+        Test.AssertEquals(Metadata.SpawnEntrance.X, MapValue.WorldX);
+        Test.AssertEquals(Metadata.SpawnEntrance.Y, MapValue.WorldY);
+        Test.AssertEquals(1, MapValue.Inventory.Length());
+        Test.AssertEquals(
+          Items.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 0),
+          MapValue.Inventory[0].Id
+        );
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected exact saved outdoor position after another server restart');
+    end case;
 
-  AssertTrue(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.ExplorationMap(Metadata.Spawn.X -
-                                                                                       8, Metadata.Spawn.Y -
-                                                                                          8, 17, 17)), Token)
-               .Unwrap());
-  const OutdoorMapRead: LineRead := ReadLine(OutdoorRestartReader, Token).Unwrap();
-  OutdoorRestartReader := OutdoorMapRead.Reader;
-  if DecodeServer(OutdoorMapRead.Line).Unwrap() is ServerMessage.ExplorationMap(const Value) then
-    begin
-      var HasRemembered: boolean := false;
-      for KnowledgeRow: string in Value.KnowledgeRows do
-        begin
-          if KnowledgeRow.Contains('r') then
-            begin
-              HasRemembered := true;
-            end;
-          end if;
-        end;
-      end for;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        OutdoorRestartClient, ClientMessages.EncodeClient(
+          Protocol.ClientMessage.ExplorationMap(
+            Metadata.Spawn.X -
+            8, Metadata.Spawn.Y -
+            8, 17, 17
+          )
+        ), Token
+      ).Unwrap()
+    );
+    const OutdoorMapRead: Transport.LineRead := Transport.ReadLine(
+      OutdoorRestartReader,
+      Token
+    ).Unwrap();
+    OutdoorRestartReader := OutdoorMapRead.Reader;
+    case ServerMessages.DecodeServer(OutdoorMapRead.Line).Unwrap() of
+      when Protocol.ServerMessage.ExplorationMap(const Value):
+        var HasRemembered: boolean := false;
+        for KnowledgeRow: string in Value.KnowledgeRows do
+          begin
+            if 'r' in KnowledgeRow then
+              begin
+                HasRemembered := true;
+              end;
+            end if;
+          end;
+        end for;
 
-      AssertTrue(HasRemembered);
-      AssertEquals(Metadata.SpawnEntrance.X, Value.PlayerWorldX);
-      AssertEquals(Metadata.SpawnEntrance.Y, Value.PlayerWorldY);
-    end;
-  else
-    begin
-      panic('expected persisted outdoor discovery after restart');
-    end;
-  end if;
+        Test.AssertTrue(HasRemembered);
+        Test.AssertEquals(Metadata.SpawnEntrance.X, Value.PlayerWorldX);
+        Test.AssertEquals(Metadata.SpawnEntrance.Y, Value.PlayerWorldY);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected persisted outdoor discovery after restart');
+    end case;
 
-  AssertTrue(WriteLine(OutdoorRestartClient, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
-  AssertTrue(Close(OutdoorRestartClient).Unwrap());
-  AssertTrue(Std.Tasks.Wait(OutdoorRestartTask).Unwrap());
-  AssertTrue(CloseListener(OutdoorRestartListener).Unwrap());
-  const SavedWorld: WorldSession := OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, 4, Config.ChunkCacheLimit)
-                                      .Unwrap();
-  const SavePath: string := SaveGamePath(SavedWorld);
-  const SavedBeforeNewGame: string := Std.Fs.ReadText(SavePath).Unwrap();
-  const NewGameListener: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const NewGameAddress: NetworkAddress := ListenerLocalAddress(NewGameListener).Unwrap();
-  const NewGameTask: task := go ServeOne(NewGameListener, Config, Token);
-  const NewGameClient: Connection := Connect('127.0.0.1', NewGameAddress.Port, 5000).Unwrap();
-  AssertTrue(SetTimeout(NewGameClient, 120000).Unwrap());
-  var NewGameReader: LineReader := NewLineReader(NewGameClient);
-  AssertTrue(WriteLine(NewGameClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)
-               .Unwrap());
-  const NewGameWelcome: LineRead := ReadLine(NewGameReader, Token).Unwrap();
-  NewGameReader := NewGameWelcome.Reader;
-  if DecodeServer(NewGameWelcome.Line).Unwrap() is ServerMessage.Welcome(const Version, const Catalog) then
-    begin
-      AssertEquals(ProtocolVersion, Version);
-      AssertTrue(FixtureSaveAvailable(Catalog));
-      AssertFalse(FixtureInvalidSave(Catalog));
-    end;
-  else
-    begin
-      panic('expected existing save before starting a separate new game');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        OutdoorRestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Net.Close(OutdoorRestartClient).Unwrap());
+    Test.AssertTrue(Tasks.Wait(OutdoorRestartTask).Unwrap());
+    Test.AssertTrue(Net.CloseListener(OutdoorRestartListener).Unwrap());
+    const SavedWorld: World.WorldSession := World.OpenWorld(
+      Config.WorldsRoot,
+      Config.WorldId,
+      Config.WorldSeed,
+      4,
+      Config.ChunkCacheLimit
+    ).Unwrap();
+    const SavePath: string := Savegame.SaveGamePath(SavedWorld);
+    const SavedBeforeNewGame: string := Fs.ReadText(SavePath).Unwrap();
+    const NewGameListener: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+    const NewGameAddress: Net.NetworkAddress := Net.ListenerLocalAddress(NewGameListener).Unwrap();
+    const NewGameTask: task of result of (boolean, string) := go ServeOne(
+      NewGameListener,
+      Config,
+      Token
+    );
+    const NewGameClient: Net.Connection := Net.Connect(
+      '127.0.0.1',
+      NewGameAddress.Port,
+      5000
+    ).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(NewGameClient, 120000).Unwrap());
+    var NewGameReader: Transport.LineReader := Transport.NewLineReader(NewGameClient);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        NewGameClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 13, 7)),
+        Token
+      ).Unwrap()
+    );
+    const NewGameWelcome: Transport.LineRead := Transport.ReadLine(NewGameReader, Token).Unwrap();
+    NewGameReader := NewGameWelcome.Reader;
+    case ServerMessages.DecodeServer(NewGameWelcome.Line).Unwrap() of
+      when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+        Test.AssertEquals(Protocol.ProtocolVersion, Version);
+        Test.AssertTrue(CatalogUnit.FixtureSaveAvailable(Catalog));
+        Test.AssertFalse(CatalogUnit.FixtureInvalidSave(Catalog));
+      when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected existing save before starting a separate new game');
+    end case;
 
-  AssertTrue(WriteLine(NewGameClient, EncodeClient(ClientMessage.StartNewGame), Token).Unwrap());
-  const NewGameStateRead: LineRead := ReadLine(NewGameReader, Token).Unwrap();
-  NewGameReader := NewGameStateRead.Reader;
-  if DecodeServer(NewGameStateRead.Line).Unwrap() is ServerMessage.State(const Value) then
-    begin
-      const MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
-      AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
-    end;
-  else
-    begin
-      panic('expected independent new-game state while a save exists');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        NewGameClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.StartNewGame),
+        Token
+      ).Unwrap()
+    );
+    const NewGameStateRead: Transport.LineRead := Transport.ReadLine(NewGameReader, Token).Unwrap();
+    NewGameReader := NewGameStateRead.Reader;
+    case ServerMessages.DecodeServer(NewGameStateRead.Line).Unwrap() of
+      when Protocol.ServerMessage.State(const Value):
+        const MapValue: Protocol.MapVisibleState := RequireMap(Value);
+        Test.AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+        Test.AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected independent new-game state while a save exists');
+    end case;
 
-  AssertTrue(WriteLine(NewGameClient, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
-  AssertTrue(Close(NewGameClient).Unwrap());
-  AssertTrue(Std.Tasks.Wait(NewGameTask).Unwrap());
-  AssertTrue(CloseListener(NewGameListener).Unwrap());
-  AssertEquals(SavedBeforeNewGame, Std.Fs.ReadText(SavePath).Unwrap());
-  const KeepPath: string := Std.Path.Join([SavedWorld.Directory, 'saves', 'keep.txt']);
-  AssertTrue(Std.Fs.WriteTextAtomic(KeepPath, 'keep').Unwrap());
-  AssertTrue(Std.Fs.WriteTextAtomic(SavePath, '{"format_version":2,"world_id":"loopback","area_kind":"outdoor_region","area_id":"loopback:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"},"exploration":{"outdoor_chunks":[{"chunk_x":0,"chunk_y":0,"rows":["1"]}],"interior_areas":[]}}')
-               .Unwrap());
-  const InvalidSaveText: string := Std.Fs.ReadText(SavePath).Unwrap();
-  const InvalidListener: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const InvalidAddress: NetworkAddress := ListenerLocalAddress(InvalidListener).Unwrap();
-  const InvalidTask: task := go ServeOne(InvalidListener, Config, Token);
-  const InvalidClient: Connection := Connect('127.0.0.1', InvalidAddress.Port, 5000).Unwrap();
-  AssertTrue(SetTimeout(InvalidClient, 120000).Unwrap());
-  var InvalidReader: LineReader := NewLineReader(InvalidClient);
-  AssertTrue(WriteLine(InvalidClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)
-               .Unwrap());
-  const InvalidWelcome: LineRead := ReadLine(InvalidReader, Token).Unwrap();
-  InvalidReader := InvalidWelcome.Reader;
-  if DecodeServer(InvalidWelcome.Line).Unwrap() is ServerMessage.Welcome(const Version, const Catalog) then
-    begin
-      AssertEquals(ProtocolVersion, Version);
-      AssertFalse(FixtureSaveAvailable(Catalog));
-      AssertTrue(FixtureInvalidSave(Catalog));
-    end;
-  else
-    begin
-      panic('expected invalid-save preservation in welcome');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        NewGameClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Net.Close(NewGameClient).Unwrap());
+    Test.AssertTrue(Tasks.Wait(NewGameTask).Unwrap());
+    Test.AssertTrue(Net.CloseListener(NewGameListener).Unwrap());
+    Test.AssertEquals(SavedBeforeNewGame, Fs.ReadText(SavePath).Unwrap());
+    const KeepPath: string := PathOps.Join([SavedWorld.Directory, 'saves', 'keep.txt']);
+    Test.AssertTrue(Fs.WriteTextAtomic(KeepPath, 'keep').Unwrap());
+    Test.AssertTrue(
+      Fs.WriteTextAtomic(
+        SavePath,
+        '{"format_version":2,"world_id":"loopback","area_kind":"outdoor_region","area_id":"loopback:outdoor","player":{"kind":"outdoor","x":0,"y":0},"return_location":{"kind":"none"},"exploration":{"outdoor_chunks":[{"chunk_x":0,"chunk_y":0,"rows":["1"]}],"interior_areas":[]}}'
+      ).Unwrap()
+    );
+    const InvalidSaveText: string := Fs.ReadText(SavePath).Unwrap();
+    const InvalidListener: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+    const InvalidAddress: Net.NetworkAddress := Net.ListenerLocalAddress(InvalidListener).Unwrap();
+    const InvalidTask: task of result of (boolean, string) := go ServeOne(
+      InvalidListener,
+      Config,
+      Token
+    );
+    const InvalidClient: Net.Connection := Net.Connect(
+      '127.0.0.1',
+      InvalidAddress.Port,
+      5000
+    ).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(InvalidClient, 120000).Unwrap());
+    var InvalidReader: Transport.LineReader := Transport.NewLineReader(InvalidClient);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        InvalidClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 13, 7)),
+        Token
+      ).Unwrap()
+    );
+    const InvalidWelcome: Transport.LineRead := Transport.ReadLine(InvalidReader, Token).Unwrap();
+    InvalidReader := InvalidWelcome.Reader;
+    case ServerMessages.DecodeServer(InvalidWelcome.Line).Unwrap() of
+      when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+        Test.AssertEquals(Protocol.ProtocolVersion, Version);
+        Test.AssertFalse(CatalogUnit.FixtureSaveAvailable(Catalog));
+        Test.AssertTrue(CatalogUnit.FixtureInvalidSave(Catalog));
+      when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected invalid-save preservation in welcome');
+    end case;
 
-  AssertEquals(InvalidSaveText, Std.Fs.ReadText(SavePath).Unwrap());
-  AssertEquals(MetadataBefore, Std.Fs.ReadText(MetadataPath).Unwrap());
-  AssertEquals(ChunkBefore, Std.Fs.ReadText(ChunkPath).Unwrap());
-  AssertEquals('keep', Std.Fs.ReadText(KeepPath).Unwrap());
-  AssertTrue(WriteLine(InvalidClient, EncodeClient(ClientMessage.LoadGame), Token).Unwrap());
-  const MissingRead: LineRead := ReadLine(InvalidReader, Token).Unwrap();
-  InvalidReader := MissingRead.Reader;
-  if DecodeServer(MissingRead.Line).Unwrap() is ServerMessage.Rejected(const Code, const Message) then
-    begin
-      AssertEquals('save_incompatible', Code);
-    end;
-  else
-    begin
-      panic('expected load to remain unavailable with an incompatible save');
-    end;
-  end if;
+    Test.AssertEquals(InvalidSaveText, Fs.ReadText(SavePath).Unwrap());
+    Test.AssertEquals(MetadataBefore, Fs.ReadText(MetadataPath).Unwrap());
+    Test.AssertEquals(ChunkBefore, Fs.ReadText(ChunkPath).Unwrap());
+    Test.AssertEquals('keep', Fs.ReadText(KeepPath).Unwrap());
+    Test.AssertTrue(
+      Transport.WriteLine(
+        InvalidClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.LoadGame),
+        Token
+      ).Unwrap()
+    );
+    const MissingRead: Transport.LineRead := Transport.ReadLine(InvalidReader, Token).Unwrap();
+    InvalidReader := MissingRead.Reader;
+    case ServerMessages.DecodeServer(MissingRead.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('save_incompatible', Code);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected load to remain unavailable with an incompatible save');
+    end case;
 
-  AssertTrue(WriteLine(InvalidClient, EncodeClient(ClientMessage.StartNewGame), Token).Unwrap());
-  const FreshStateRead: LineRead := ReadLine(InvalidReader, Token).Unwrap();
-  InvalidReader := FreshStateRead.Reader;
-  if DecodeServer(FreshStateRead.Line).Unwrap() is ServerMessage.State(const Value) then
-    begin
-      const MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
-      AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
-    end;
-  else
-    begin
-      panic('expected a fresh outdoor state after invalid-save preservation');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        InvalidClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.StartNewGame),
+        Token
+      ).Unwrap()
+    );
+    const FreshStateRead: Transport.LineRead := Transport.ReadLine(InvalidReader, Token).Unwrap();
+    InvalidReader := FreshStateRead.Reader;
+    case ServerMessages.DecodeServer(FreshStateRead.Line).Unwrap() of
+      when Protocol.ServerMessage.State(const Value):
+        const MapValue: Protocol.MapVisibleState := RequireMap(Value);
+        Test.AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+        Test.AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected a fresh outdoor state after invalid-save preservation');
+    end case;
 
-  AssertTrue(WriteLine(InvalidClient, EncodeClient(ClientMessage.OverwriteSaveGame), Token).Unwrap());
-  const FreshSavedRead: LineRead := ReadLine(InvalidReader, Token).Unwrap();
-  InvalidReader := FreshSavedRead.Reader;
-  if DecodeServer(FreshSavedRead.Line).Unwrap() is ServerMessage.SaveCompleted then
-    begin
-      null;
-    end;
-  else
-    begin
-      panic('expected a fresh save after invalid-save preservation');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        InvalidClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.OverwriteSaveGame),
+        Token
+      ).Unwrap()
+    );
+    const FreshSavedRead: Transport.LineRead := Transport.ReadLine(InvalidReader, Token).Unwrap();
+    InvalidReader := FreshSavedRead.Reader;
+    if ServerMessages.DecodeServer(FreshSavedRead.Line).Unwrap() is Protocol.ServerMessage.SaveCompleted then
+      begin
+        null;
+      end;
+    else
+      begin
+        panic('expected a fresh save after invalid-save preservation');
+      end;
+    end if;
 
-  AssertTrue(WriteLine(InvalidClient, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
-  AssertTrue(Close(InvalidClient).Unwrap());
-  AssertTrue(Std.Tasks.Wait(InvalidTask).Unwrap());
-  AssertTrue(CloseListener(InvalidListener).Unwrap());
-  const FreshRestartListener: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const FreshRestartAddress: NetworkAddress := ListenerLocalAddress(FreshRestartListener).Unwrap();
-  const FreshRestartTask: task := go ServeOne(FreshRestartListener, Config, Token);
-  const FreshRestartClient: Connection := Connect('127.0.0.1', FreshRestartAddress.Port, 5000)
-                                            .Unwrap();
-  AssertTrue(SetTimeout(FreshRestartClient, 120000).Unwrap());
-  var FreshRestartReader: LineReader := NewLineReader(FreshRestartClient);
-  AssertTrue(WriteLine(FreshRestartClient, EncodeClient(ClientMessage.Hello(ProtocolVersion, 13, 7)), Token)
-               .Unwrap());
-  const FreshRestartWelcome: LineRead := ReadLine(FreshRestartReader, Token).Unwrap();
-  FreshRestartReader := FreshRestartWelcome.Reader;
-  if DecodeServer(FreshRestartWelcome.Line).Unwrap() is ServerMessage.Welcome(const Version, const Catalog) then
-    begin
-      AssertEquals(ProtocolVersion, Version);
-      AssertTrue(FixtureSaveAvailable(Catalog));
-      AssertFalse(FixtureInvalidSave(Catalog));
-    end;
-  else
-    begin
-      panic('expected fresh save availability after restart');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        InvalidClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Net.Close(InvalidClient).Unwrap());
+    Test.AssertTrue(Tasks.Wait(InvalidTask).Unwrap());
+    Test.AssertTrue(Net.CloseListener(InvalidListener).Unwrap());
+    const FreshRestartListener: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+    const FreshRestartAddress: Net.NetworkAddress := Net.ListenerLocalAddress(
+      FreshRestartListener
+    ).Unwrap();
+    const FreshRestartTask: task of result of (boolean, string) := go ServeOne(
+      FreshRestartListener,
+      Config,
+      Token
+    );
+    const FreshRestartClient: Net.Connection := Net.Connect(
+      '127.0.0.1',
+      FreshRestartAddress.Port,
+      5000
+    ).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(FreshRestartClient, 120000).Unwrap());
+    var FreshRestartReader: Transport.LineReader := Transport.NewLineReader(FreshRestartClient);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        FreshRestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 13, 7)),
+        Token
+      ).Unwrap()
+    );
+    const FreshRestartWelcome: Transport.LineRead := Transport.ReadLine(
+      FreshRestartReader,
+      Token
+    ).Unwrap();
+    FreshRestartReader := FreshRestartWelcome.Reader;
+    case ServerMessages.DecodeServer(FreshRestartWelcome.Line).Unwrap() of
+      when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+        Test.AssertEquals(Protocol.ProtocolVersion, Version);
+        Test.AssertTrue(CatalogUnit.FixtureSaveAvailable(Catalog));
+        Test.AssertFalse(CatalogUnit.FixtureInvalidSave(Catalog));
+      when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected fresh save availability after restart');
+    end case;
 
-  AssertTrue(WriteLine(FreshRestartClient, EncodeClient(ClientMessage.LoadGame), Token).Unwrap());
-  const FreshLoadedRead: LineRead := ReadLine(FreshRestartReader, Token).Unwrap();
-  FreshRestartReader := FreshLoadedRead.Reader;
-  if DecodeServer(FreshLoadedRead.Line).Unwrap() is ServerMessage.State(const Value) then
-    begin
-      const MapValue: MapVisibleState := RequireMap(Value);
-      AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
-      AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
-    end;
-  else
-    begin
-      panic('expected fresh save to load after restart');
-    end;
-  end if;
+    Test.AssertTrue(
+      Transport.WriteLine(
+        FreshRestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.LoadGame),
+        Token
+      ).Unwrap()
+    );
+    const FreshLoadedRead: Transport.LineRead := Transport.ReadLine(
+      FreshRestartReader,
+      Token
+    ).Unwrap();
+    FreshRestartReader := FreshLoadedRead.Reader;
+    case ServerMessages.DecodeServer(FreshLoadedRead.Line).Unwrap() of
+      when Protocol.ServerMessage.State(const Value):
+        const MapValue: Protocol.MapVisibleState := RequireMap(Value);
+        Test.AssertEquals(Metadata.Spawn.X, MapValue.WorldX);
+        Test.AssertEquals(Metadata.Spawn.Y, MapValue.WorldY);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected fresh save to load after restart');
+    end case;
 
-  AssertTrue(WriteLine(FreshRestartClient, EncodeClient(ClientMessage.Disconnect), Token).Unwrap());
-  AssertTrue(Close(FreshRestartClient).Unwrap());
-  AssertTrue(Std.Tasks.Wait(FreshRestartTask).Unwrap());
-  AssertTrue(CloseListener(FreshRestartListener).Unwrap());
-  AssertEquals(MetadataBefore, Std.Fs.ReadText(MetadataPath).Unwrap());
-  AssertEquals(ChunkBefore, Std.Fs.ReadText(ChunkPath).Unwrap());
-  AssertEquals('keep', Std.Fs.ReadText(KeepPath).Unwrap());
+    Test.AssertTrue(
+      Transport.WriteLine(
+        FreshRestartClient,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Net.Close(FreshRestartClient).Unwrap());
+    Test.AssertTrue(Tasks.Wait(FreshRestartTask).Unwrap());
+    Test.AssertTrue(Net.CloseListener(FreshRestartListener).Unwrap());
+    Test.AssertEquals(MetadataBefore, Fs.ReadText(MetadataPath).Unwrap());
+    Test.AssertEquals(ChunkBefore, Fs.ReadText(ChunkPath).Unwrap());
+    Test.AssertEquals('keep', Fs.ReadText(KeepPath).Unwrap());
+  end scope;
 end.

@@ -2,17 +2,13 @@
 // Usage: fpas run tools/persistence-bench/persistence-bench.fpasprj -- <visited dungeons> [repetitions]
 program PersistenceBench;
 
-uses
-  Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.Exploration, Dungeon.GameState,
-  Dungeon.Interior, Dungeon.Items, Dungeon.Movement, Dungeon.Terrain, Dungeon.Terrain.Entrances,
-  Dungeon.Terrain.Placement, Dungeon.World, Dungeon.World.Interiors, Dungeon.World.Savegame,
-  Std.Args, Std.Console, Std.Conv, Std.Fs, Std.Math, Std.Path, Std.Time;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Interior as Interior, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Args as Args, Std.Console as Console, Std.Conv as Conv, Std.Fs as Fs, Std.Math as Math, Std.Parse as Parse, Std.Path as Path, Std.Time as Time;
 
 // Returns the first Count entrance regions, ring by ring around the spawn region.
-function EntranceRegions(Metadata: WorldMetadata; Count: integer): array of RegionCoordinate;
+function EntranceRegions(Metadata: Terrain.WorldMetadata; Count: integer): array of Entrances.RegionCoordinate;
 begin
-  const Spawn: RegionCoordinate := RegionOf(Metadata, Metadata.Spawn);
-  var Regions: array of RegionCoordinate := [Spawn];
+  const Spawn: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  var Regions: array of Entrances.RegionCoordinate := [Spawn];
   var Ring: integer := 1;
   while Regions.Length() < Count do
     begin
@@ -20,20 +16,21 @@ begin
         begin
           for DeltaX: integer := - Ring to Ring do
             begin
-              if (Std.Math.Max(Std.Math.Abs(DeltaX), Std.Math.Abs(DeltaY)) = Ring) and
-                 (Regions.Length() < Count) then
+              if (Math.Max(Math.Abs(DeltaX), Math.Abs(DeltaY)) = Ring)
+                and
+                (Regions.Length() < Count)
+              then
                 begin
-                  const Region: RegionCoordinate := RegionCoordinate(X := Spawn.X + DeltaX, Y := Spawn.Y +
-                                                                                                 DeltaY);
-                  if EntranceSite(Metadata, Region) is Some(const Site) then
-                    begin
-                      Regions.Push(Region);
-                    end;
-                  else
-                    begin
+                  const Region: Entrances.RegionCoordinate := Entrances.RegionCoordinate(
+                    X := Spawn.X + DeltaX, Y := Spawn.Y +
+                    DeltaY
+                  );
+                  case Entrances.EntranceSite(Metadata, Region) of
+                    when Some(const Site):
+                      Regions.PushInPlace(Region);
+                    when None:
                       null;
-                    end;
-                  end if;
+                  end case;
                 end;
               end if;
             end;
@@ -48,20 +45,17 @@ begin
   return Regions;
 end function;
 
-function SiteOf(Metadata: WorldMetadata; Region: RegionCoordinate): WorldPosition;
+function SiteOf(Metadata: Terrain.WorldMetadata; Region: Entrances.RegionCoordinate): Coordinates.WorldPosition;
 begin
-  if EntranceSite(Metadata, Region) is Some(const Site) then
-    begin
+  case Entrances.EntranceSite(Metadata, Region) of
+    when Some(const Site):
       return Site;
-    end;
-  else
-    begin
+    when None:
       panic('region lost its entrance site');
-    end;
-  end if;
+  end case;
 end function;
 
-function ItemIndex(State: GameState; Id: string): integer;
+function ItemIndex(State: GameState.GameState; Id: string): integer;
 begin
   for Index: integer := 0 to State.Items.Length() - 1 do
     begin
@@ -77,37 +71,52 @@ begin
 end function;
 
 begin
-  const Count: integer := StrToInt(ParamStr(0));
+  const Count: integer := Parse.Int(Args.ParamStr(0)).Unwrap();
   var Repetitions: integer := 3;
-  if ParamCount() > 1 then
+  if Args.ParamCount() > 1 then
     begin
-      Repetitions := StrToInt(ParamStr(1));
+      Repetitions := Parse.Int(Args.ParamStr(1)).Unwrap();
     end;
   end if;
-  const Root: string := Std.Path.Join([
-                                        '.temp-data',
-                                        'persistence-bench-' + IntToStr(TimestampMillis())
-                                      ]);
-  const World: WorldSession := OpenWorld(Root, 'bench', 24680, 1, 64).Unwrap();
-  const Metadata: WorldMetadata := World.Metadata;
-  const Regions: array of RegionCoordinate := EntranceRegions(Metadata, Count);
-  var State: GameState := NewGame(Metadata);
-  var Maps: array of InteriorMap := [];
+  const Root: string := Path.Join([
+    '.temp-data',
+    'persistence-bench-' + Conv.IntToStr(Time.TimestampMillis())
+  ]);
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(Root, 'bench', 24680, 1, 64).Unwrap();
+  const Metadata: Terrain.WorldMetadata := World.Metadata;
+  const Regions: array of Entrances.RegionCoordinate := EntranceRegions(Metadata, Count);
+  var State: GameState.GameState := GameState.NewGame(Metadata);
+  var Maps: array of Interior.InteriorMap := [];
   var EntryMillis: integer := 0;
   // Visit every dungeon once: discovery, a destroyed or surviving opponent, carried coins, and swords
   // transferred onto the next dungeon's entry field.
   for Index: integer := 0 to Regions.Length() - 1 do
     begin
-      const AreaId: string := DungeonAreaId(Metadata, Regions[Index]);
-      const Outside: GameState := State with Player := PlayerPosition.Outdoor(SiteOf(Metadata, Regions[Index])); end with;
-      const Started: integer := MonotonicMillis();
-      const Map: InteriorMap := OpenLevelForEntry(World, Outside, AreaId).Unwrap();
-      EntryMillis := EntryMillis + ElapsedMillis(Started);
-      Maps.Push(Map);
-      const OutdoorView: AreaView := AreaView(Metadata := Metadata, Interior := None);
-      const Entered: AreaTransition := ActivateAreaTransition(OutdoorView, Outside, Some(Map))
-                                         .Unwrap();
-      var Inside: GameState := RevealCurrentArea(Entered.View, Entered.State).Unwrap();
+      const AreaId: string := Identities.DungeonAreaId(Metadata, Regions[Index]);
+      const Outside: GameState.GameState := State with Player := Coordinates.PlayerPosition.Outdoor(
+        SiteOf(Metadata, Regions[Index])
+      ); end with;
+      const Started: integer := Time.MonotonicMillis();
+      const Map: Interior.InteriorMap := Interiors.OpenLevelForEntry(
+        World,
+        Outside,
+        AreaId
+      ).Unwrap();
+      EntryMillis := EntryMillis + Time.ElapsedMillis(Started);
+      Maps.PushInPlace(Map);
+      const OutdoorView: GameState.AreaView := GameState.AreaView(
+        Metadata := Metadata,
+        Interior := None
+      );
+      const Entered: Movement.AreaTransition := Movement.ActivateAreaTransition(
+        OutdoorView,
+        Outside,
+        Some(Map)
+      ).Unwrap();
+      var Inside: GameState.GameState := Exploration.RevealCurrentArea(
+        Entered.View,
+        Entered.State
+      ).Unwrap();
       if Index mod 2 = 0 then
         begin
           for HostileIndex: integer := 0 to Inside.Hostiles.Length() - 1 do
@@ -122,47 +131,59 @@ begin
         end;
       end if;
 
-      if InventoryItems(Inside).Length() < MaximumInventoryItems then
+      if GameState.InventoryItems(Inside).Length() < GameState.MaximumInventoryItems then
         begin
           const Coin: integer := ItemIndex(Inside, Map.Items[0].ItemId);
-          Inside.Items[Coin] := Inside.Items[Coin] with Location := ItemLocation.CarriedByPlayer; end with;
+          Inside.Items[Coin] := Inside.Items[Coin] with Location := Items.ItemLocation.CarriedByPlayer; end with;
         end;
       end if;
 
       if Index > 0 then
         begin
           const Sword: integer := ItemIndex(Inside, Maps[Index - 1].Items[1].ItemId);
-          Inside.Items[Sword] := Inside.Items[Sword] with Location := ItemLocation.InInterior(AreaId, Map.Start); end with;
+          Inside.Items[Sword] := Inside.Items[Sword] with Location := Items.ItemLocation.InInterior(
+            AreaId,
+            Map.Start
+          ); end with;
         end;
       end if;
-      const AtExit: GameState := Inside with Player := PlayerPosition.FirstPerson(FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing)); end with;
+      const AtExit: GameState.GameState := Inside with Player := Coordinates.PlayerPosition.FirstPerson(
+        Coordinates.FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing)
+      ); end with;
 
-      State := ActivateAreaTransition(Entered.View, AtExit, None).Unwrap().State;
+      State := Movement.ActivateAreaTransition(Entered.View, AtExit, None).Unwrap().State;
     end;
   end for;
 
-  WriteLn((((('visited=' + IntToStr(Count)) + ' items=') + IntToStr(State.Items.Length())) + ' first_entry_total_ms=') +
-          IntToStr(EntryMillis));
+  Console.WriteLn(
+    (
+      ((('visited=' + Conv.IntToStr(Count)) + ' items=') + Conv.IntToStr(State.Items.Length())) +
+      ' first_entry_total_ms='
+    ) +
+    Conv.IntToStr(EntryMillis)
+  );
   for Round: integer := 1 to Repetitions do
     begin
-      const SaveStarted: integer := MonotonicMillis();
-      const Written: boolean := WriteSaveGame(World, State).Unwrap();
-      const SaveMillis: integer := ElapsedMillis(SaveStarted);
-      const LoadStarted: integer := MonotonicMillis();
-      const Loaded: SaveGameLoad := LoadSaveGame(World).Unwrap();
-      const LoadMillis: integer := ElapsedMillis(LoadStarted);
-      if Loaded is SaveGameLoad.Loaded(const LoadedState, const View) then
-        begin
-          WriteLn((((('round=' + IntToStr(Round)) + ' save_ms=') + IntToStr(SaveMillis)) + ' load_ms=') +
-                  IntToStr(LoadMillis));
-        end;
-      else
-        begin
+      const SaveStarted: integer := Time.MonotonicMillis();
+      const Written: boolean := Savegame.WriteSaveGame(World, State).Unwrap();
+      const SaveMillis: integer := Time.ElapsedMillis(SaveStarted);
+      const LoadStarted: integer := Time.MonotonicMillis();
+      const Loaded: Savegame.SaveGameLoad := Savegame.LoadSaveGame(World).Unwrap();
+      const LoadMillis: integer := Time.ElapsedMillis(LoadStarted);
+      case Loaded of
+        when Savegame.SaveGameLoad.Loaded(const LoadedState, const View):
+          Console.WriteLn(
+            (
+              ((('round=' + Conv.IntToStr(Round)) + ' save_ms=') + Conv.IntToStr(SaveMillis)) +
+              ' load_ms='
+            ) +
+            Conv.IntToStr(LoadMillis)
+          );
+        when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
           panic('the saved state must load');
-        end;
-      end if;
+      end case;
     end;
   end for;
-  const SaveBytes: integer := Std.Fs.ReadText(SaveGamePath(World)).Unwrap().Length();
-  WriteLn('save_bytes=' + IntToStr(SaveBytes));
+  const SaveBytes: integer := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap().Length();
+  Console.WriteLn('save_bytes=' + Conv.IntToStr(SaveBytes));
 end.

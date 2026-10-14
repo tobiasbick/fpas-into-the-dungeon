@@ -1,82 +1,93 @@
 // Network test helpers for walking generated dungeons: routes as client intentions and pose reading.
 unit Dungeon.Test.Routes;
 
-uses
-  Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.Interior, Dungeon.Interior.Generation,
-  Dungeon.Protocol, Dungeon.Terrain, Dungeon.Terrain.Chunks, Dungeon.Terrain.Entrances,
-  Dungeon.Test.Fixtures, Std.Math;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Interior as Interior, Dungeon.Interior.Generation as Generation, Dungeon.Protocol as Protocol, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as Chunks, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.Fixtures as Fixtures, Std.Math as Math;
 
 // The spawn dungeon a server generates and stores for this world on first entry.
-public function SpawnDungeonMap(Metadata: WorldMetadata): InteriorMap;
+public function SpawnDungeonMap(Metadata: Terrain.WorldMetadata): Interior.InteriorMap;
 begin
-  const Region: RegionCoordinate := RegionOf(Metadata, Metadata.Spawn);
-  return GenerateDungeon(Metadata.Seed, Region.X, Region.Y, SpawnDungeonAreaId(Metadata)).Unwrap();
+  const Region: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  return Generation.GenerateDungeon(
+    Metadata.Seed,
+    Region.X,
+    Region.Y,
+    Fixtures.SpawnDungeonAreaId(Metadata)
+  ).Unwrap();
 end function;
 
 // Converts one route move into the client intention that performs it.
-public function RouteMessage(Move: RouteMove): ClientMessage;
+public function RouteMessage(Move: Fixtures.RouteMove): Protocol.ClientMessage;
 begin
   case Move of
-    when RouteMove.RouteTurnLeft:
+    when Fixtures.RouteMove.RouteTurnLeft:
       begin
-        return ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left);
+        return Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Left);
       end;
-    when RouteMove.RouteTurnRight:
+    when Fixtures.RouteMove.RouteTurnRight:
       begin
-        return ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right);
+        return Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Right);
       end;
-    when RouteMove.RouteForward:
+    when Fixtures.RouteMove.RouteForward:
       begin
-        return ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward);
+        return Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Forward);
       end;
   end case;
 end function;
 
 // Reads the player's pose from a first-person projection.
-public function VisiblePose(View: FirstPersonVisibleState): FirstPersonPose;
+public function VisiblePose(View: Protocol.FirstPersonVisibleState): Coordinates.FirstPersonPose;
 begin
-  var Facing: FacingDirection := FacingDirection.North;
+  var Facing: Coordinates.FacingDirection := Coordinates.FacingDirection.North;
   case View.Facing of
-    when FirstPersonFacing.East:
+    when Protocol.FirstPersonFacing.East:
       begin
-        Facing := FacingDirection.East;
+        Facing := Coordinates.FacingDirection.East;
       end;
-    when FirstPersonFacing.South:
+    when Protocol.FirstPersonFacing.South:
       begin
-        Facing := FacingDirection.South;
+        Facing := Coordinates.FacingDirection.South;
       end;
-    when FirstPersonFacing.West:
+    when Protocol.FirstPersonFacing.West:
       begin
-        Facing := FacingDirection.West;
+        Facing := Coordinates.FacingDirection.West;
       end;
-    when firstpersonfacing.North:
+    when Protocol.FirstPersonFacing.North:
       begin
         null;
       end;
   end case;
 
-  return FirstPersonPose(Position := InteriorPosition(X := View.PlayerX, Y := View.PlayerY), Facing := Facing);
+  return Coordinates.FirstPersonPose(
+    Position := Coordinates.InteriorPosition(X := View.PlayerX, Y := View.PlayerY),
+    Facing := Facing
+  );
 end function;
 
 // Returns the field directly ahead of a projected player.
-public function FieldAhead(View: FirstPersonVisibleState): InteriorPosition;
+public function FieldAhead(View: Protocol.FirstPersonVisibleState): Coordinates.InteriorPosition;
 begin
-  const Pose: FirstPersonPose := VisiblePose(View);
-  const Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
-  return InteriorPosition(X := Pose.Position.X + Offset.X, Y := Pose.Position.Y + Offset.Y);
+  const Pose: Coordinates.FirstPersonPose := VisiblePose(View);
+  const Offset: Coordinates.InteriorPosition := Coordinates.StepOffset(
+    Pose.Facing,
+    Coordinates.RelativeStep.Forward
+  );
+  return Coordinates.InteriorPosition(
+    X := Pose.Position.X + Offset.X,
+    Y := Pose.Position.Y + Offset.Y
+  );
 end function;
 
 // Returns every field on which a projection shows a standing opponent.
-public function VisibleHostiles(View: FirstPersonVisibleState): array of InteriorPosition;
+public function VisibleHostiles(View: Protocol.FirstPersonVisibleState): array of Coordinates.InteriorPosition;
 begin
-  var Fields: array of InteriorPosition := [];
+  var Fields: array of Coordinates.InteriorPosition := [];
   for Y: integer := 0 to View.Rows.Length() - 1 do
     begin
       for X: integer := 0 to View.Rows[Y].Length() - 1 do
         begin
-          if View.Rows[Y].CharAt(X) = InteriorHostileCode then
+          if View.Rows[Y][X] = Protocol.InteriorHostileCode then
             begin
-              Fields.Push(InteriorPosition(X := X, Y := Y));
+              Fields.PushInPlace(Coordinates.InteriorPosition(X := X, Y := Y));
             end;
           end if;
         end;
@@ -88,54 +99,58 @@ begin
 end function;
 
 // Returns whether a visible opponent stands on the field directly ahead.
-public function HostileAhead(View: FirstPersonVisibleState): boolean;
+public function HostileAhead(View: Protocol.FirstPersonVisibleState): boolean;
 begin
-  const Ahead: InteriorPosition := FieldAhead(View);
-  return View.Rows[Ahead.Y].CharAt(Ahead.X) = InteriorHostileCode;
+  const Ahead: Coordinates.InteriorPosition := FieldAhead(View);
+  return View.Rows[Ahead.Y][Ahead.X] = Protocol.InteriorHostileCode;
 end function;
 
 // Returns the walkable outdoor fields from From (exclusive) to Target along a shortest cardinal
 // path inside the bounding box of both fields grown by Margin; empty when none exists there.
 public function OutdoorRoute(
-  Metadata: WorldMetadata;
-  From: WorldPosition;
-  Target: WorldPosition;
+  Metadata: Terrain.WorldMetadata;
+  From: Coordinates.WorldPosition;
+  Target: Coordinates.WorldPosition;
   Margin: integer
-): array of WorldPosition;
+): array of Coordinates.WorldPosition;
 begin
-  const Left: integer := Std.Math.Min(From.X, Target.X) - Margin;
-  const Top: integer := Std.Math.Min(From.Y, Target.Y) - Margin;
-  const Width: integer := ((Std.Math.Max(From.X, Target.X) + Margin) - Left) + 1;
-  const Height: integer := ((Std.Math.Max(From.Y, Target.Y) + Margin) - Top) + 1;
+  const Left: integer := Math.Min(From.X, Target.X) - Margin;
+  const Top: integer := Math.Min(From.Y, Target.Y) - Margin;
+  const Width: integer := ((Math.Max(From.X, Target.X) + Margin) - Left) + 1;
+  const Height: integer := ((Math.Max(From.Y, Target.Y) + Margin) - Top) + 1;
   var Previous: array of integer := array.Fill(-1, Width * Height);
   const StartIndex: integer := ((From.Y - Top) * Width) + (From.X - Left);
   Previous[StartIndex] := StartIndex;
-  var Queue: array of WorldPosition := [From];
+  var Queue: array of Coordinates.WorldPosition := [From];
   var ReadIndex: integer := 0;
   const TargetIndex: integer := ((Target.Y - Top) * Width) + (Target.X - Left);
   while (ReadIndex < Queue.Length()) and (Previous[TargetIndex] < 0) do
     begin
-      const Current: WorldPosition := Queue[ReadIndex];
+      const Current: Coordinates.WorldPosition := Queue[ReadIndex];
       ReadIndex := ReadIndex + 1;
-      for Offset: WorldPosition in [
-                                     WorldPosition(X := 1, Y := 0),
-                                     WorldPosition(X := -1, Y := 0),
-                                     WorldPosition(X := 0, Y := 1),
-                                     WorldPosition(X := 0, Y := -1)
-                                   ] do
+      for Offset: Coordinates.WorldPosition in [
+        Coordinates.WorldPosition(X := 1, Y := 0),
+        Coordinates.WorldPosition(X := -1, Y := 0),
+        Coordinates.WorldPosition(X := 0, Y := 1),
+        Coordinates.WorldPosition(X := 0, Y := -1)
+      ] do
         begin
-          const Next: WorldPosition := WorldPosition(X := Current.X + Offset.X, Y := Current.Y +
-                                                                                     Offset.Y);
-          if ((Next.X >= Left) and (Next.X < Left + Width)) and
-             ((Next.Y >= Top) and (Next.Y < Top + Height)) then
+          const Next: Coordinates.WorldPosition := Coordinates.WorldPosition(
+            X := Current.X + Offset.X, Y := Current.Y +
+            Offset.Y
+          );
+          if ((Next.X >= Left) and (Next.X < Left + Width))
+            and
+            ((Next.Y >= Top) and (Next.Y < Top + Height))
+          then
             begin
               const Index: integer := ((Next.Y - Top) * Width) + (Next.X - Left);
               if Previous[Index] < 0 then
                 begin
-                  if IsWalkable(GenerateWorldCell(Metadata, Next.X, Next.Y)) then
+                  if Terrain.IsWalkable(Chunks.GenerateWorldCell(Metadata, Next.X, Next.Y)) then
                     begin
                       Previous[Index] := ((Current.Y - Top) * Width) + (Current.X - Left);
-                      Queue.Push(Next);
+                      Queue.PushInPlace(Next);
                     end;
                   end if;
                 end;
@@ -146,7 +161,7 @@ begin
       end for;
     end;
   end while;
-  var Reversed: array of WorldPosition := [];
+  var Reversed: array of Coordinates.WorldPosition := [];
   if Previous[TargetIndex] < 0 then
     begin
       return Reversed;
@@ -155,14 +170,16 @@ begin
   var Index: integer := TargetIndex;
   while Index <> StartIndex do
     begin
-      Reversed.Push(WorldPosition(X := Left + (Index mod Width), Y := Top + (Index div Width)));
+      Reversed.PushInPlace(
+        Coordinates.WorldPosition(X := Left + (Index mod Width), Y := Top + (Index div Width))
+      );
       Index := Previous[Index];
     end;
   end while;
-  var Path: array of WorldPosition := [];
+  var Path: array of Coordinates.WorldPosition := [];
   for Step: integer := Reversed.Length() - 1 downto 0 do
     begin
-      Path.Push(Reversed[Step]);
+      Path.PushInPlace(Reversed[Step]);
     end;
   end for;
 

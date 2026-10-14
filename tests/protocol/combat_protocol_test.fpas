@@ -1,27 +1,36 @@
 // Verifies combat messages, health and combat-log bounds, and the opponent code.
 program CombatProtocolTest;
 
-uses Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages, Std.Test;
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Std.Test as Test;
 
-function Corridor(Rows: array of string; Health: integer; MaxHealth: integer; Log: array of string): FirstPersonVisibleState;
+function Corridor(Rows: array of string; Health: integer; MaxHealth: integer; Log: array of string): Protocol.FirstPersonVisibleState;
 begin
-  return FirstPersonVisibleState(Title := 'Initial dungeon', Status := 'Restless skeleton 12/12 — Space: Attack', Width := 5, Height := 3, Rows := Rows, KnowledgeRows := [
-                                                                                                                                                                            'vvvvv',
-                                                                                                                                                                            'vvvvv',
-                                                                                                                                                                            'vvvvv'
-                                                                                                                                                                          ], PlayerX := 3, PlayerY := 1, Facing := FirstPersonFacing.West, Inventory := [], Health := Health, MaxHealth := MaxHealth, Character := [], CombatLog := Log, CombatEvents := []);
+  return Protocol.FirstPersonVisibleState(
+    Title := 'Initial dungeon', Status := 'Restless skeleton 12/12 — Space: Attack', Width := 5,
+    Height := 3, Rows := Rows, KnowledgeRows := [
+      'vvvvv',
+      'vvvvv',
+      'vvvvv'
+    ], PlayerX := 3, PlayerY := 1, Facing := Protocol.FirstPersonFacing.West, Inventory := [],
+    Health := Health, MaxHealth := MaxHealth, Character := [], CombatLog := Log, CombatEvents := []
+  );
 end function;
 
-function Encoded(Value: FirstPersonVisibleState): string;
+function Encoded(Value: Protocol.FirstPersonVisibleState): string;
 begin
-  return EncodeServer(ServerMessage.State(VisibleState.FirstPersonState(Value)));
+  return ServerMessages.EncodeServer(
+    Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(Value))
+  );
 end function;
 
 begin
-  AssertEquals(14, ProtocolVersion);
-  AssertEquals('{"type":"attack"}', EncodeClient(ClientMessage.Attack));
-  AssertEquals('{"type":"wait"}', EncodeClient(ClientMessage.Wait));
-  if DecodeClient('{"type":"attack"}').Unwrap() is ClientMessage.Attack then
+  Test.AssertEquals(14, Protocol.ProtocolVersion);
+  Test.AssertEquals(
+    '{"type":"attack"}',
+    ClientMessages.EncodeClient(Protocol.ClientMessage.Attack)
+  );
+  Test.AssertEquals('{"type":"wait"}', ClientMessages.EncodeClient(Protocol.ClientMessage.Wait));
+  if ClientMessages.DecodeClient('{"type":"attack"}').Unwrap() is Protocol.ClientMessage.Attack then
     begin
       null;
     end;
@@ -31,7 +40,7 @@ begin
     end;
   end if;
 
-  if DecodeClient('{"type":"wait"}').Unwrap() is ClientMessage.Wait then
+  if ClientMessages.DecodeClient('{"type":"wait"}').Unwrap() is Protocol.ClientMessage.Wait then
     begin
       null;
     end;
@@ -41,77 +50,119 @@ begin
     end;
   end if;
 
-  AssertTrue(DecodeClient('{"type":"attack","target":"skeleton"}').IsError());
-  AssertTrue(DecodeClient('{"type":"wait","turns":3}').IsError());
-  const Defeat: string := EncodeServer(ServerMessage.Defeated('The restless skeleton strikes you for 4. You have fallen.'));
-  if DecodeServer(Defeat).Unwrap() is ServerMessage.Defeated(const Summary) then
-    begin
-      AssertEquals('The restless skeleton strikes you for 4. You have fallen.', Summary);
-    end;
-  else
-    begin
+  Test.AssertTrue(
+    (ClientMessages.DecodeClient('{"type":"attack","target":"skeleton"}') is Error(_))
+  );
+  Test.AssertTrue((ClientMessages.DecodeClient('{"type":"wait","turns":3}') is Error(_)));
+  const Defeat: string := ServerMessages.EncodeServer(
+    Protocol.ServerMessage.Defeated('The restless skeleton strikes you for 4. You have fallen.')
+  );
+  case ServerMessages.DecodeServer(Defeat).Unwrap() of
+    when Protocol.ServerMessage.Defeated(const Summary):
+      Test.AssertEquals('The restless skeleton strikes you for 4. You have fallen.', Summary);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
       panic('expected defeat');
-    end;
-  end if;
+  end case;
 
-  AssertTrue(DecodeServer('{"type":"defeated","message":""}').IsError());
-  AssertTrue(DecodeServer('{"type":"defeated"}').IsError());
-  AssertTrue(DecodeServer(('{"type":"defeated","message":"' + 'x'.RepeatStr(MaximumCombatLogTextLength +
-                                                                            1)) +
-                          '"}')
-               .IsError());
+  Test.AssertTrue((ServerMessages.DecodeServer('{"type":"defeated","message":""}') is Error(_)));
+  Test.AssertTrue((ServerMessages.DecodeServer('{"type":"defeated"}') is Error(_)));
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(
+        (
+          '{"type":"defeated","message":"' + 'x'.RepeatStr(
+            Protocol.MaximumCombatLogTextLength +
+            1
+          )
+        ) +
+        '"}'
+      ) is Error(_)
+    )
+  );
   // A visible opponent directly ahead, with health and this turn's messages.
-  const Fight: FirstPersonVisibleState := Corridor(['#####', '#.h.#', '#####'], 14, 20, [
-                                                                                          'You hit the restless skeleton for 3.',
-                                                                                          'The restless skeleton strikes you for 2.'
-                                                                                        ]);
-  if DecodeServer(Encoded(Fight)).Unwrap() is ServerMessage.State(const Value) then
-    begin
-      if Value is VisibleState.FirstPersonState(const Decoded) then
-        begin
-          AssertEquals(14, Decoded.Health);
-          AssertEquals(20, Decoded.MaxHealth);
-          AssertEquals(2, Decoded.CombatLog.Length());
-          AssertEquals('The restless skeleton strikes you for 2.', Decoded.CombatLog[1]);
-          AssertEquals(InteriorHostileCode, Decoded.Rows[1].CharAt(2));
-        end;
-      else
-        begin
+  const Fight: Protocol.FirstPersonVisibleState := Corridor(
+    ['#####', '#.h.#', '#####'], 14, 20, [
+      'You hit the restless skeleton for 3.',
+      'The restless skeleton strikes you for 2.'
+    ]
+  );
+  case ServerMessages.DecodeServer(Encoded(Fight)).Unwrap() of
+    when Protocol.ServerMessage.State(const Value):
+      case Value of
+        when Protocol.VisibleState.FirstPersonState(const Decoded):
+          Test.AssertEquals(14, Decoded.Health);
+          Test.AssertEquals(20, Decoded.MaxHealth);
+          Test.AssertEquals(2, Decoded.CombatLog.Length());
+          Test.AssertEquals('The restless skeleton strikes you for 2.', Decoded.CombatLog[1]);
+          Test.AssertEquals(Protocol.InteriorHostileCode, Decoded.Rows[1][2]);
+        when Protocol.VisibleState.MapState(_):
           panic('expected first-person state');
-        end;
-      end if;
-    end;
-  else
-    begin
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
       panic('expected state');
-    end;
-  end if;
+  end case;
 
   // Health must stay within 1..MaxHealth..MaximumVisibleHealth.
-  AssertTrue(DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 0, 20, []))).IsError());
-  AssertTrue(DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 21, 20, []))).IsError());
-  AssertTrue(DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 5, MaximumVisibleHealth + 1, [])))
-               .IsError());
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 0, 20, []))) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 21, 20, []))) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(
+        Encoded(Corridor(['#####', '#...#', '#####'], 5, Protocol.MaximumVisibleHealth + 1, []))
+      ) is Error(_)
+    )
+  );
   // The combat log is bounded in entries and length, and entries are never empty.
   var LongLog: array of string := [];
-  for Index: integer := 0 to MaximumCombatLogEntries do
+  for Index: integer := 0 to Protocol.MaximumCombatLogEntries do
     begin
-      LongLog.Push('You wait.');
+      LongLog.PushInPlace('You wait.');
     end;
   end for;
 
-  AssertTrue(DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 5, 20, LongLog))).IsError());
-  AssertTrue(DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 5, 20, [
-                                                                                 'x'.RepeatStr(MaximumCombatLogTextLength + 1)
-                                                                               ])))
-               .IsError());
-  AssertTrue(DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 5, 20, ['']))).IsError());
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 5, 20, LongLog))) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(
+        Encoded(
+          Corridor(
+            ['#####', '#...#', '#####'], 5, 20, [
+              'x'.RepeatStr(Protocol.MaximumCombatLogTextLength + 1)
+            ]
+          )
+        )
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(Encoded(Corridor(['#####', '#...#', '#####'], 5, 20, ['']))) is Error(_)
+    )
+  );
   // The player never shares a field with a standing opponent.
-  AssertTrue(DecodeServer(Encoded(Corridor(['#####', '#..h#', '#####'], 5, 20, []))).IsError());
+  Test.AssertTrue(
+    (
+      ServerMessages.DecodeServer(Encoded(Corridor(['#####', '#..h#', '#####'], 5, 20, []))) is Error(_)
+    )
+  );
   // Opponents belong to the interior alphabet only.
-  AssertTrue(IsInteriorCellCode(InteriorHostileCode));
-  AssertFalse(IsMapCellCode(InteriorHostileCode));
+  Test.AssertTrue(Protocol.IsInteriorCellCode(Protocol.InteriorHostileCode));
+  Test.AssertFalse(Protocol.IsMapCellCode(Protocol.InteriorHostileCode));
   // States without the new fields belong to protocol version 10 and are rejected.
-  AssertTrue(Encoded(Fight).Contains('"health":14,'));
-  AssertTrue(DecodeServer(Encoded(Fight).Replace('"health":14,', '')).IsError());
+  Test.AssertTrue('"health":14,' in Encoded(Fight));
+  Test.AssertTrue(
+    (ServerMessages.DecodeServer(Encoded(Fight).Replace('"health":14,', '')) is Error(_))
+  );
 end.

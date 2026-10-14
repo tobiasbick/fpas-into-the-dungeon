@@ -1,9 +1,7 @@
 // The generic Enter interaction: environment hints, pickup, inspection, and exits.
 unit Dungeon.Interaction;
 
-uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Items,
-  Dungeon.Movement, Dungeon.Terrain, Dungeon.Terrain.Entrances, Std.Conv;
+uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as Interior, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv;
 
 // Successful interaction text when neither the current nor forward field offers an action.
 public const NoInteractionMessage: string := 'There is nothing to interact with.';
@@ -13,80 +11,84 @@ public type InteractionOutcome = enum
   // Requests a server-owned transition target without changing the state.
   TransitionRequested(TargetAreaId: string);
   // The interaction changed mutable state without changing areas.
-  StateChanged(State: GameState);
+  StateChanged(State: GameState.GameState);
   // Read-only information; an empty title denotes short feedback rather than inspection content.
   Described(Title: string; Text: string);
 end enum;
 
 // Describes the available item action for a validated interior state; empty means no item target.
-public function ItemInteractionHint(State: GameState): string;
+public function ItemInteractionHint(State: GameState.GameState): string;
 begin
-  if State.Player is PlayerPosition.FirstPerson(const Pose) then
-    begin
-      const Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
-      for Item: GameItem in State.Items do
+  case State.Player of
+    when Coordinates.PlayerPosition.FirstPerson(const Pose):
+      const Offset: Coordinates.InteriorPosition := Coordinates.StepOffset(
+        Pose.Facing,
+        Coordinates.RelativeStep.Forward
+      );
+      for Item: Items.GameItem in State.Items do
         begin
-          if Item.Location is ItemLocation.InInterior(const AreaId, const Position) then
-            begin
+          case Item.Location of
+            when Items.ItemLocation.InInterior(const AreaId, const Position):
               if AreaId = State.AreaId then
                 begin
                   if (Position.X = Pose.Position.X) and (Position.Y = Pose.Position.Y) then
                     begin
-                      if InventoryIsFull(State) then
+                      if GameState.InventoryIsFull(State) then
                         begin
-                          return ('At your feet: ' + ItemDisplayName(Item.Kind)) +
-                                 ' — inventory full';
+                          return ('At your feet: ' + Items.ItemDisplayName(Item.Kind)) +
+                            ' — inventory full';
                         end;
                       end if;
 
-                      return ('At your feet: ' + ItemDisplayName(Item.Kind)) + ' — Enter: Pick up';
+                      return ('At your feet: ' + Items.ItemDisplayName(Item.Kind)) +
+                        ' — Enter: Pick up';
                     end;
                   end if;
 
-                  if (Position.X = Pose.Position.X + Offset.X) and
-                     (Position.Y = Pose.Position.Y + Offset.Y) then
+                  if (Position.X = Pose.Position.X + Offset.X)
+                    and
+                    (Position.Y = Pose.Position.Y + Offset.Y)
+                  then
                     begin
-                      return ItemDisplayName(Item.Kind) + ' — Enter: Examine';
+                      return Items.ItemDisplayName(Item.Kind) + ' — Enter: Examine';
                     end;
                   end if;
                 end;
               end if;
-            end;
-          else
-            begin
+            when Items.ItemLocation.CarriedByPlayer, Items.ItemLocation.EquippedByPlayer(_):
               null;
-            end;
-          end if;
+          end case;
         end;
       end for;
-    end;
-  else
-    begin
+    when Coordinates.PlayerPosition.Outdoor(_):
       null;
-    end;
-  end if;
+  end case;
 
   return '';
 end function;
 
 // Returns the standing opponent directly ahead of a first-person player, or -1.
-public function HostileAhead(State: GameState): integer;
+public function HostileAhead(State: GameState.GameState): integer;
 begin
-  if State.Player is PlayerPosition.FirstPerson(const Pose) then
-    begin
-      const Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
-      return StandingHostileAt(State, State.AreaId, InteriorPosition(X := Pose.Position.X + Offset.X, Y := Pose.Position.Y +
-                                                                                                           Offset.Y));
-    end;
-  else
-    begin
+  case State.Player of
+    when Coordinates.PlayerPosition.FirstPerson(const Pose):
+      const Offset: Coordinates.InteriorPosition := Coordinates.StepOffset(
+        Pose.Facing,
+        Coordinates.RelativeStep.Forward
+      );
+      return GameState.StandingHostileAt(
+        State, State.AreaId, Coordinates.InteriorPosition(
+          X := Pose.Position.X + Offset.X, Y := Pose.Position.Y +
+          Offset.Y
+        )
+      );
+    when Coordinates.PlayerPosition.Outdoor(_):
       return -1;
-    end;
-  end if;
+  end case;
 end function;
 
 // Describes the opponent directly ahead with its health; empty means no opponent ahead.
-public function HostileInteractionHint(State: GameState): string;
+public function HostileInteractionHint(State: GameState.GameState): string;
 begin
   const Index: integer := HostileAhead(State);
   if Index < 0 then
@@ -94,13 +96,16 @@ begin
       return '';
     end;
   end if;
-  const Hostile: GameHostile := State.Hostiles[Index];
-  return ((((HostileDisplayName(Hostile.Kind) + ' ') + IntToStr(Hostile.Health)) + '/') + IntToStr(HostileMaximumHealth(Hostile.Kind))) +
-         ' — Space: Attack';
+  const Hostile: Hostiles.GameHostile := State.Hostiles[Index];
+  return (
+    (((Hostiles.HostileDisplayName(Hostile.Kind) + ' ') + Conv.IntToStr(Hostile.Health)) + '/') +
+    Conv.IntToStr(Hostiles.HostileMaximumHealth(Hostile.Kind))
+  ) +
+    ' — Space: Attack';
 end function;
 
 // Returns the highest-priority interaction hint for the current field and facing.
-public function InteractionHint(State: GameState): string;
+public function InteractionHint(State: GameState.GameState): string;
 begin
   const HostileHint: string := HostileInteractionHint(State);
   if HostileHint <> '' then
@@ -113,82 +118,103 @@ begin
 end function;
 
 // Resolves current-field transitions or pickup, then inspection ahead, without implicit movement.
-public function Interact(View: AreaView; State: GameState): result of (InteractionOutcome, string);
+public function Interact(View: GameState.AreaView; State: GameState.GameState): result of (InteractionOutcome, string);
 begin
-  const Metadata: WorldMetadata := View.Metadata;
-  const Valid: GameState := try ValidateGameState(View, State);
-  if Valid.Area = AreaKind.OutdoorRegion then
+  const Metadata: Terrain.WorldMetadata := View.Metadata;
+  const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
+  if Valid.Area = Coordinates.AreaKind.OutdoorRegion then
     begin
-      const OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(Valid);
-      if EntranceRegionAt(Metadata, OutdoorPosition).IsSome() then
+      const OutdoorPosition: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(
+        Valid
+      );
+      if (Entrances.EntranceRegionAt(Metadata, OutdoorPosition) is Some(_)) then
         begin
-          return Ok(InteractionOutcome.TransitionRequested(try AreaTransitionTarget(View, Valid)));
+          return Ok(
+            InteractionOutcome.TransitionRequested(try Movement.AreaTransitionTarget(View, Valid))
+          );
         end;
       end if;
 
       return Ok(InteractionOutcome.Described('', NoInteractionMessage));
     end;
   end if;
-  const Map: InteriorMap := try CurrentInterior(View, State);
-  const Pose: FirstPersonPose := try FirstPersonPlayerPose(Valid);
+  const Map: Interior.InteriorMap := try GameState.CurrentInterior(View, State);
+  const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(Valid);
   if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
     begin
-      return Ok(InteractionOutcome.TransitionRequested(try AreaTransitionTarget(View, Valid)));
+      return Ok(
+        InteractionOutcome.TransitionRequested(try Movement.AreaTransitionTarget(View, Valid))
+      );
     end;
   end if;
 
   for Index: integer := 0 to Valid.Items.Length() - 1 do
     begin
-      var Item: GameItem := Valid.Items[Index];
-      if Item.Location is ItemLocation.InInterior(const AreaId, const ItemPosition) then
-        begin
-          if (AreaId = Valid.AreaId) and
-             ((ItemPosition.X = Pose.Position.X) and (ItemPosition.Y = Pose.Position.Y)) then
+      var Item: Items.GameItem := Valid.Items[Index];
+      case Item.Location of
+        when Items.ItemLocation.InInterior(const AreaId, const ItemPosition):
+          if (AreaId = Valid.AreaId)
+            and
+            ((ItemPosition.X = Pose.Position.X) and (ItemPosition.Y = Pose.Position.Y))
+          then
             begin
-              if InventoryIsFull(Valid) then
+              if GameState.InventoryIsFull(Valid) then
                 begin
                   return Error('your inventory is full');
                 end;
               end if;
-              var Changed: GameState := Valid;
-              Item.Location := ItemLocation.CarriedByPlayer;
+              var Changed: GameState.GameState := Valid;
+              Item.Location := Items.ItemLocation.CarriedByPlayer;
               Changed.Items[Index] := Item;
-              return Ok(InteractionOutcome.StateChanged(try ValidateGameState(View, Changed)));
+              return Ok(
+                InteractionOutcome.StateChanged(try GameState.ValidateGameState(View, Changed))
+              );
             end;
           end if;
-        end;
-      else
-        begin
+        when Items.ItemLocation.CarriedByPlayer, Items.ItemLocation.EquippedByPlayer(_):
           null;
-        end;
-      end if;
+      end case;
     end;
   end for;
-  const Offset: InteriorPosition := StepOffset(Pose.Facing, RelativeStep.Forward);
-  const Target: InteriorPosition := InteriorPosition(X := Pose.Position.X + Offset.X, Y := Pose.Position.Y +
-                                                                                           Offset.Y);
-  if StandingHostileAt(Valid, Valid.AreaId, Target) >= 0 then
+  const Offset: Coordinates.InteriorPosition := Coordinates.StepOffset(
+    Pose.Facing,
+    Coordinates.RelativeStep.Forward
+  );
+  const Target: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+    X := Pose.Position.X + Offset.X, Y := Pose.Position.Y +
+    Offset.Y
+  );
+  if GameState.StandingHostileAt(Valid, Valid.AreaId, Target) >= 0 then
     begin
-      return Ok(InteractionOutcome.Described('', 'The restless skeleton rattles its bones at you. Press Space to attack.'));
+      return Ok(
+        InteractionOutcome.Described(
+          '',
+          'The restless skeleton rattles its bones at you. Press Space to attack.'
+        )
+      );
     end;
   end if;
 
-  for Item: GameItem in Valid.Items do
+  for Item: Items.GameItem in Valid.Items do
     begin
-      if Item.Location is ItemLocation.InInterior(const AreaId, const ItemPosition) then
-        begin
-          if (AreaId = Valid.AreaId) and
-             ((ItemPosition.X = Target.X) and (ItemPosition.Y = Target.Y)) then
+      case Item.Location of
+        when Items.ItemLocation.InInterior(const AreaId, const ItemPosition):
+          if (AreaId = Valid.AreaId)
+            and
+            ((ItemPosition.X = Target.X) and (ItemPosition.Y = Target.Y))
+          then
             begin
-              return Ok(InteractionOutcome.Described(ItemDisplayName(Item.Kind), ItemDescription(Item.Kind)));
+              return Ok(
+                InteractionOutcome.Described(
+                  Items.ItemDisplayName(Item.Kind),
+                  Items.ItemDescription(Item.Kind)
+                )
+              );
             end;
           end if;
-        end;
-      else
-        begin
+        when Items.ItemLocation.CarriedByPlayer, Items.ItemLocation.EquippedByPlayer(_):
           null;
-        end;
-      end if;
+      end case;
     end;
   end for;
 

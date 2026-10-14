@@ -1,101 +1,134 @@
 // Sends projections and rejections and commits accepted states and turns.
 unit Dungeon.Server.Replies;
 
-uses
-  Dungeon.Server.Projection, Dungeon.Server.Session, Dungeon.Server.Logging, Dungeon.Combat,
-  Dungeon.Exploration, Dungeon.GameState, Dungeon.Movement, Dungeon.Protocol,
-  Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport, Dungeon.World, Std.Net, Std.Tasks;
+uses Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks;
 
 // Encodes and sends one server message.
-public function SendMessage(ConnectionValue: Connection; Message: ServerMessage; Token: CancellationToken): result of (boolean, string);
+public function SendMessage(ConnectionValue: Net.Connection; Message: Protocol.ServerMessage; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  return WriteLine(ConnectionValue, EncodeServer(Message), Token);
+  return Transport.WriteLine(ConnectionValue, ServerMessages.EncodeServer(Message), Token);
 end function;
 
 // Projects the state, sends it, and returns the world session with its possibly grown cache.
 public function SendProjection(
-  ConnectionValue: Connection;
-  World: WorldSession;
-  View: AreaView;
-  State: GameState;
-  Viewport: ViewportSize;
-  Report: TurnReport;
-  Token: CancellationToken
-): result of (WorldSession, string);
+  ConnectionValue: Net.Connection;
+  World: WorldUnit.WorldSession;
+  View: GameState.AreaView;
+  State: GameState.GameState;
+  Viewport: SessionUnit.ViewportSize;
+  Report: ProjectionUnit.TurnReport;
+  Token: Tasks.CancellationToken
+): result of (WorldUnit.WorldSession, string);
 begin
-  const Projection: SessionProjection := try ProjectSession(World, View, State, Viewport, Report);
-  const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Projection.State), Token);
+  const Projection: ProjectionUnit.SessionProjection := try ProjectionUnit.ProjectSession(
+    World,
+    View,
+    State,
+    Viewport,
+    Report
+  );
+  const Sent: boolean := try SendMessage(
+    ConnectionValue,
+    Protocol.ServerMessage.State(Projection.State),
+    Token
+  );
   return Ok(Projection.World);
 end function;
 
 // Sends a rejection with a stable code and a player-facing message.
 public function Reject(
-  ConnectionValue: Connection;
+  ConnectionValue: Net.Connection;
   Code: string;
   Message: string;
-  Token: CancellationToken
+  Token: Tasks.CancellationToken
 ): result of (boolean, string);
 begin
-  return SendMessage(ConnectionValue, ServerMessage.Rejected(Code, Message), Token);
+  return SendMessage(ConnectionValue, Protocol.ServerMessage.Rejected(Code, Message), Token);
 end function;
 
 // Reveals the accepted state, makes it current, and sends its projection with the turn's report.
 function CommitTurn(
-  Session: ServerSession;
-  Changed: GameState;
-  Report: TurnReport;
-  ConnectionValue: Connection;
-  Token: CancellationToken
-): result of (ServerSession, string);
+  Session: SessionUnit.ServerSession;
+  Changed: GameState.GameState;
+  Report: ProjectionUnit.TurnReport;
+  ConnectionValue: Net.Connection;
+  Token: Tasks.CancellationToken
+): result of (SessionUnit.ServerSession, string);
 begin
-  const View: AreaView := try SessionAreaView(Session, Changed);
-  const Revealed: GameState := try RevealCurrentArea(View, Changed);
-  var Next: ServerSession := Session;
+  const View: GameState.AreaView := try SessionUnit.SessionAreaView(Session, Changed);
+  const Revealed: GameState.GameState := try Exploration.RevealCurrentArea(View, Changed);
+  var Next: SessionUnit.ServerSession := Session;
   Next.State := Some(Revealed);
   Next.Dirty := true;
-  Next.World := try SendProjection(ConnectionValue, Session.World, View, Revealed, Session.Viewport, Report, Token);
+  Next.World := try SendProjection(
+    ConnectionValue,
+    Session.World,
+    View,
+    Revealed,
+    Session.Viewport,
+    Report,
+    Token
+  );
   return Ok(Next);
 end function;
 
 // Reveals the accepted state, makes it current, and sends its projection without combat messages.
 public function CommitState(
-  Session: ServerSession;
-  Changed: GameState;
-  ConnectionValue: Connection;
-  Token: CancellationToken
-): result of (ServerSession, string);
+  Session: SessionUnit.ServerSession;
+  Changed: GameState.GameState;
+  ConnectionValue: Net.Connection;
+  Token: Tasks.CancellationToken
+): result of (SessionUnit.ServerSession, string);
 begin
-  return CommitTurn(Session, Changed, NoTurnReport(), ConnectionValue, Token);
+  return CommitTurn(Session, Changed, ProjectionUnit.NoTurnReport(), ConnectionValue, Token);
 end function;
 
 // Revealed candidate state and its projection, both built before anything is sent.
 type PreparedTransition = record
-  State: GameState;
-  Projection: SessionProjection;
+  State: GameState.GameState;
+  Projection: ProjectionUnit.SessionProjection;
 end record;
 
-function PrepareTransition(Session: ServerSession; Transition: AreaTransition): result of (PreparedTransition, string);
+function PrepareTransition(Session: SessionUnit.ServerSession; Transition: Movement.AreaTransition): result of (PreparedTransition, string);
 begin
-  const Revealed: GameState := try RevealCurrentArea(Transition.View, Transition.State);
-  const Valid: GameState := try ValidateGameState(Transition.View, Revealed);
-  return Ok(PreparedTransition(State := Valid, Projection := try ProjectSession(Session.World, Transition.View, Valid, Session.Viewport, NoTurnReport())));
+  const Revealed: GameState.GameState := try Exploration.RevealCurrentArea(
+    Transition.View,
+    Transition.State
+  );
+  const Valid: GameState.GameState := try GameState.ValidateGameState(Transition.View, Revealed);
+  return Ok(
+    PreparedTransition(
+      State := Valid,
+      Projection := try ProjectionUnit.ProjectSession(
+        Session.World,
+        Transition.View,
+        Valid,
+        Session.Viewport,
+        ProjectionUnit.NoTurnReport()
+      )
+    )
+  );
 end function;
 
 // Installs an applied area transition: reveals and validates the candidate and builds its
 // projection with the candidate's own map before anything is sent. A failure before sending
 // rejects the intention and returns the original session unchanged; state and map change together.
 public function CommitTransition(
-  Session: ServerSession;
-  Transition: AreaTransition;
-  ConnectionValue: Connection;
-  Token: CancellationToken
-): result of (ServerSession, string);
+  Session: SessionUnit.ServerSession;
+  Transition: Movement.AreaTransition;
+  ConnectionValue: Net.Connection;
+  Token: Tasks.CancellationToken
+): result of (SessionUnit.ServerSession, string);
 begin
   case PrepareTransition(Session, Transition) of
     when Ok(const Prepared):
       begin
-        const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.State(Prepared.Projection.State), Token);
-        var Next: ServerSession := Session;
+        const Sent: boolean := try SendMessage(
+          ConnectionValue,
+          Protocol.ServerMessage.State(Prepared.Projection.State),
+          Token
+        );
+        var Next: SessionUnit.ServerSession := Session;
         Next.State := Some(Prepared.State);
         Next.Dirty := true;
         Next.Interior := Transition.View.Interior;
@@ -134,9 +167,12 @@ begin
     end;
   end if;
 
-  if Summary.Length() > MaximumCombatLogTextLength then
+  if Summary.Length() > Protocol.MaximumCombatLogTextLength then
     begin
-      Summary := Summary.Slice(Summary.Length() - MaximumCombatLogTextLength, MaximumCombatLogTextLength);
+      Summary := Summary.Slice(
+        Summary.Length() - Protocol.MaximumCombatLogTextLength,
+        Protocol.MaximumCombatLogTextLength
+      );
     end;
   end if;
 
@@ -145,27 +181,37 @@ end function;
 
 // Resolves one time-consuming intention; defeat ends the game session but keeps the connection.
 public function PlayTurn(
-  Session: ServerSession;
-  Action: TurnAction;
+  Session: SessionUnit.ServerSession;
+  Action: Combat.TurnAction;
   RejectionCode: string;
-  ConnectionValue: Connection;
-  Token: CancellationToken;
-  Logs: option of channel of ServerLogEvent
-): result of (ServerSession, string);
+  ConnectionValue: Net.Connection;
+  Token: Tasks.CancellationToken;
+  Logs: option of channel of Logging.ServerLogEvent
+): result of (SessionUnit.ServerSession, string);
 begin
-  const State: GameState := try RequireActiveState(Session.State);
-  case ResolveTurn(try SessionAreaView(Session, State), State, Action) of
+  const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
+  case Combat.ResolveTurn(try SessionUnit.SessionAreaView(Session, State), State, Action) of
     when Ok(const Outcome):
       begin
         case Outcome of
-          when TurnOutcome.Continued(const Changed, const Log, const Events):
+          when Combat.TurnOutcome.Continued(const Changed, const Log, const Events):
             begin
-              return CommitTurn(Session, Changed, TurnReport(Log := Log, Events := Events), ConnectionValue, Token);
+              return CommitTurn(
+                Session,
+                Changed,
+                ProjectionUnit.TurnReport(Log := Log, Events := Events),
+                ConnectionValue,
+                Token
+              );
             end;
-          when TurnOutcome.Defeated(const Log):
+          when Combat.TurnOutcome.Defeated(const Log):
             begin
-              const Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Defeated(DefeatSummary(Log)), Token);
-              var Ended: ServerSession := Session;
+              const Sent: boolean := try SendMessage(
+                ConnectionValue,
+                Protocol.ServerMessage.Defeated(DefeatSummary(Log)),
+                Token
+              );
+              var Ended: SessionUnit.ServerSession := Session;
               Ended.State := None;
               Ended.Dirty := false;
               Ended.Interior := None;
@@ -175,7 +221,7 @@ begin
       end;
     when Error(const Reason):
       begin
-        LogServer(Logs, 'rejected', (RejectionCode + ': ') + Reason);
+        Logging.LogServer(Logs, 'rejected', (RejectionCode + ': ') + Reason);
         const Sent: boolean := try Reject(ConnectionValue, RejectionCode, Reason, Token);
         return Ok(Session);
       end;

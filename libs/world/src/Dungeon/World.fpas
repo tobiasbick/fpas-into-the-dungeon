@@ -1,9 +1,7 @@
 // Persistent chunk loading, creation, caching, and visible-window composition.
 unit Dungeon.World;
 
-uses
-  Dungeon.World.Encoding, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Movement, Dungeon.Terrain,
-  Dungeon.Terrain.Chunks, Dungeon.Terrain.Placement, Std.Conv, Std.Fs, Std.Path;
+uses Dungeon.World.Encoding as Encoding, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as Chunks, Dungeon.Terrain.Placement as Placement, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps;
 
 // Default deterministic seed used only when creating a selected world for the first time.
 public const DefaultWorldSeed: integer := 12345;
@@ -31,14 +29,14 @@ end record;
 
 // Internal cache entry carried immutably with the world session.
 public type CachedWorldChunk = record
-  public Chunk: WorldChunk;
+  public Chunk: Terrain.WorldChunk;
   public LastUsed: integer;
 end record;
 
 // Open authoritative world metadata, storage location, and bounded chunk cache.
 public type WorldSession = record
   public Directory: string;
-  public Metadata: WorldMetadata;
+  public Metadata: Terrain.WorldMetadata;
   public Cache: array of CachedWorldChunk;
   public Clock: integer;
   public CacheLimit: integer;
@@ -47,13 +45,13 @@ end record;
 // Returns a loaded chunk together with the updated immutable cache state.
 public type ChunkLoad = record
   public World: WorldSession;
-  public Chunk: WorldChunk;
+  public Chunk: Terrain.WorldChunk;
 end record;
 
 // Returns one cell together with the updated immutable cache state.
 public type CellLoad = record
   public World: WorldSession;
-  public Cell: WorldCell;
+  public Cell: Terrain.WorldCell;
 end record;
 
 // Returns a composed visible window together with the updated immutable cache state.
@@ -65,27 +63,27 @@ end record;
 // Returns an authoritative movement result together with the updated cache state.
 public type WorldMove = record
   public World: WorldSession;
-  public State: GameState;
+  public State: GameState.GameState;
 end record;
 
 // Returns the stable metadata path for an open world.
 public function WorldMetadataPath(World: WorldSession): string;
 begin
-  return Std.Path.Join([World.Directory, 'world.json']);
+  return PathOps.Join([World.Directory, 'world.json']);
 end function;
 
-function ChunkColumnDirectory(World: WorldSession; Coordinate: ChunkCoordinate): string;
+function ChunkColumnDirectory(World: WorldSession; Coordinate: Coordinates.ChunkCoordinate): string;
 begin
-  return Std.Path.Join([World.Directory, 'chunks', 'x_' + IntToStr(Coordinate.X)]);
+  return PathOps.Join([World.Directory, 'chunks', 'x_' + Conv.IntToStr(Coordinate.X)]);
 end function;
 
 // Returns the stable file path for positive or negative chunk coordinates.
-public function WorldChunkPath(World: WorldSession; Coordinate: ChunkCoordinate): string;
+public function WorldChunkPath(World: WorldSession; Coordinate: Coordinates.ChunkCoordinate): string;
 begin
-  return Std.Path.Join([
-                         ChunkColumnDirectory(World, Coordinate),
-                         ('y_' + IntToStr(Coordinate.Y)) + '.json'
-                       ]);
+  return PathOps.Join([
+    ChunkColumnDirectory(World, Coordinate),
+    ('y_' + Conv.IntToStr(Coordinate.Y)) + '.json'
+  ]);
 end function;
 
 // Opens an existing world or atomically creates new deterministic metadata.
@@ -98,32 +96,41 @@ public function OpenWorld(
   CacheLimit: integer
 ): result of (WorldSession, string);
 begin
-  const ValidId: string := try ValidateWorldId(WorldId);
+  const ValidId: string := try Encoding.ValidateWorldId(WorldId);
   if CacheLimit < 1 then
     begin
       return Error('world chunk cache limit must be positive');
     end;
   end if;
-  const RootReady: boolean := try Std.Fs.CreateDirAll(WorldsRoot);
-  const Directory: string := Std.Path.Join([WorldsRoot, ValidId]);
-  const DirectoryReady: boolean := try Std.Fs.CreateDirAll(Directory);
-  var Empty: WorldSession := WorldSession(Directory := Directory, Metadata := try NewWorldMetadata(ValidId, Seed, DungeonRegionChunks), Cache := [], Clock := 0, CacheLimit := CacheLimit);
-  const ChunksReady: boolean := try Std.Fs.CreateDirAll(Std.Path.Join([Directory, 'chunks']));
+  const RootReady: boolean := try Fs.CreateDirAll(WorldsRoot);
+  const Directory: string := PathOps.Join([WorldsRoot, ValidId]);
+  const DirectoryReady: boolean := try Fs.CreateDirAll(Directory);
+  var Empty: WorldSession := WorldSession(
+    Directory := Directory,
+    Metadata := try Placement.NewWorldMetadata(ValidId, Seed, DungeonRegionChunks),
+    Cache := [],
+    Clock := 0,
+    CacheLimit := CacheLimit
+  );
+  const ChunksReady: boolean := try Fs.CreateDirAll(PathOps.Join([Directory, 'chunks']));
   const MetadataPath: string := WorldMetadataPath(Empty);
-  var Metadata: WorldMetadata := Empty.Metadata;
-  if Std.Fs.Exists(MetadataPath) then
+  var Metadata: Terrain.WorldMetadata := Empty.Metadata;
+  if Fs.Exists(MetadataPath) then
     begin
-      if not Std.Fs.IsFile(MetadataPath) then
+      if not Fs.IsFile(MetadataPath) then
         begin
           return Error('world metadata path exists but is not a file: ' + MetadataPath);
         end;
       end if;
 
-      Metadata := try DecodeMetadata(try Std.Fs.ReadText(MetadataPath), ValidId);
+      Metadata := try Encoding.DecodeMetadata(try Fs.ReadText(MetadataPath), ValidId);
     end;
   else
     begin
-      const Written: boolean := try Std.Fs.WriteTextAtomic(MetadataPath, EncodeMetadata(Metadata));
+      const Written: boolean := try Fs.WriteTextAtomic(
+        MetadataPath,
+        Encoding.EncodeMetadata(Metadata)
+      );
     end;
   end if;
 
@@ -131,12 +138,14 @@ begin
   return Ok(Empty);
 end function;
 
-function CacheIndex(World: WorldSession; Coordinate: ChunkCoordinate): integer;
+function CacheIndex(World: WorldSession; Coordinate: Coordinates.ChunkCoordinate): integer;
 begin
   for Index: integer := 0 to World.Cache.Length() - 1 do
     begin
-      if (World.Cache[Index].Chunk.Coordinate.X = Coordinate.X) and
-         (World.Cache[Index].Chunk.Coordinate.Y = Coordinate.Y) then
+      if (World.Cache[Index].Chunk.Coordinate.X = Coordinate.X)
+        and
+        (World.Cache[Index].Chunk.Coordinate.Y = Coordinate.Y)
+      then
         begin
           return Index;
         end;
@@ -147,16 +156,21 @@ begin
   return -1;
 end function;
 
-function StoreInCache(World: WorldSession; Chunk: WorldChunk): WorldSession;
+function StoreInCache(World: WorldSession; Chunk: Terrain.WorldChunk): WorldSession;
 begin
   var Next: WorldSession := World;
   Next.Clock := World.Clock + 1;
   var Values: array of CachedWorldChunk := [];
   for Index: integer := 0 to World.Cache.Length() - 1 do
     begin
-      if not ((World.Cache[Index].Chunk.Coordinate.X = Chunk.Coordinate.X) and (World.Cache[Index].Chunk.Coordinate.Y = Chunk.Coordinate.Y)) then
+      if not (
+        (World.Cache[Index].Chunk.Coordinate.X = Chunk.Coordinate.X)
+        and
+        (World.Cache[Index].Chunk.Coordinate.Y = Chunk.Coordinate.Y)
+      )
+      then
         begin
-          Values.Push(World.Cache[Index]);
+          Values.PushInPlace(World.Cache[Index]);
         end;
       end if;
     end;
@@ -179,7 +193,7 @@ begin
         begin
           if Index <> OldestIndex then
             begin
-              Retained.Push(Values[Index]);
+              Retained.PushInPlace(Values[Index]);
             end;
           end if;
         end;
@@ -189,51 +203,66 @@ begin
     end;
   end if;
 
-  Values.Push(CachedWorldChunk(Chunk := Chunk, LastUsed := Next.Clock));
+  Values.PushInPlace(CachedWorldChunk(Chunk := Chunk, LastUsed := Next.Clock));
   Next.Cache := Values;
   return Next;
 end function;
 
-function ReadOrCreateChunk(World: WorldSession; Coordinate: ChunkCoordinate): result of (WorldChunk, string);
+function ReadOrCreateChunk(World: WorldSession; Coordinate: Coordinates.ChunkCoordinate): result of (Terrain.WorldChunk, string);
 begin
-  const ColumnReady: boolean := try Std.Fs.CreateDirAll(ChunkColumnDirectory(World, Coordinate));
+  const ColumnReady: boolean := try Fs.CreateDirAll(ChunkColumnDirectory(World, Coordinate));
   const Path: string := WorldChunkPath(World, Coordinate);
-  if Std.Fs.Exists(Path) then
+  if Fs.Exists(Path) then
     begin
-      if not Std.Fs.IsFile(Path) then
+      if not Fs.IsFile(Path) then
         begin
           return Error('chunk path exists but is not a file: ' + Path);
         end;
       end if;
 
-      return DecodeChunk(try Std.Fs.ReadText(Path), World.Metadata, Coordinate);
+      return Encoding.DecodeChunk(try Fs.ReadText(Path), World.Metadata, Coordinate);
     end;
   end if;
-  const Generated: WorldChunk := GenerateChunk(World.Metadata, Coordinate);
-  const Written: boolean := try Std.Fs.WriteTextAtomic(Path, EncodeChunk(World.Metadata.Id, Generated));
+  const Generated: Terrain.WorldChunk := Chunks.GenerateChunk(World.Metadata, Coordinate);
+  const Written: boolean := try Fs.WriteTextAtomic(
+    Path,
+    Encoding.EncodeChunk(World.Metadata.Id, Generated)
+  );
   return Ok(Generated);
 end function;
 
 // Loads one cached or persisted chunk, generating and storing it when absent.
-public function LoadWorldChunk(World: WorldSession; Coordinate: ChunkCoordinate): result of (ChunkLoad, string);
+public function LoadWorldChunk(World: WorldSession; Coordinate: Coordinates.ChunkCoordinate): result of (ChunkLoad, string);
 begin
   const Existing: integer := CacheIndex(World, Coordinate);
   if Existing >= 0 then
     begin
-      const Chunk: WorldChunk := World.Cache[Existing].Chunk;
+      const Chunk: Terrain.WorldChunk := World.Cache[Existing].Chunk;
       return Ok(ChunkLoad(World := StoreInCache(World, Chunk), Chunk := Chunk));
     end;
   end if;
-  const Loaded: WorldChunk := try ReadOrCreateChunk(World, Coordinate);
+  const Loaded: Terrain.WorldChunk := try ReadOrCreateChunk(World, Coordinate);
   return Ok(ChunkLoad(World := StoreInCache(World, Loaded), Chunk := Loaded));
 end function;
 
 // Loads one authoritative cell at signed world coordinates.
 public function LoadWorldCell(World: WorldSession; X: integer; Y: integer): result of (CellLoad, string);
 begin
-  const Coordinate: ChunkCoordinate := ChunkCoordinate(X := ChunkForCoordinate(X), Y := ChunkForCoordinate(Y));
+  const Coordinate: Coordinates.ChunkCoordinate := Coordinates.ChunkCoordinate(
+    X := Coordinates.ChunkForCoordinate(X),
+    Y := Coordinates.ChunkForCoordinate(Y)
+  );
   const Loaded: ChunkLoad := try LoadWorldChunk(World, Coordinate);
-  return Ok(CellLoad(World := Loaded.World, Cell := ChunkCell(Loaded.Chunk, LocalForCoordinate(X), LocalForCoordinate(Y))));
+  return Ok(
+    CellLoad(
+      World := Loaded.World,
+      Cell := Terrain.ChunkCell(
+        Loaded.Chunk,
+        Coordinates.LocalForCoordinate(X),
+        Coordinates.LocalForCoordinate(Y)
+      )
+    )
+  );
 end function;
 
 // Computes all chunks intersecting a positive-sized visible rectangle.
@@ -245,14 +274,27 @@ begin
     end;
   end if;
 
-  return Ok(ChunkRange(MinimumX := ChunkForCoordinate(OriginX), MinimumY := ChunkForCoordinate(OriginY), MaximumX := ChunkForCoordinate((OriginX + Width) -
-                                                                                                                                        1), MaximumY := ChunkForCoordinate((OriginY + Height) -
-                                                                                                                                                                           1)));
+  return Ok(
+    ChunkRange(
+      MinimumX := Coordinates.ChunkForCoordinate(OriginX),
+      MinimumY := Coordinates.ChunkForCoordinate(OriginY),
+      MaximumX := Coordinates.ChunkForCoordinate(
+        (OriginX + Width) -
+        1
+      ), MaximumY := Coordinates.ChunkForCoordinate(
+        (OriginY + Height) -
+        1
+      )
+    )
+  );
 end function;
 
-function CachedCell(World: WorldSession; X: integer; Y: integer): result of (WorldCell, string);
+function CachedCell(World: WorldSession; X: integer; Y: integer): result of (Terrain.WorldCell, string);
 begin
-  const Coordinate: ChunkCoordinate := ChunkCoordinate(X := ChunkForCoordinate(X), Y := ChunkForCoordinate(Y));
+  const Coordinate: Coordinates.ChunkCoordinate := Coordinates.ChunkCoordinate(
+    X := Coordinates.ChunkForCoordinate(X),
+    Y := Coordinates.ChunkForCoordinate(Y)
+  );
   const Index: integer := CacheIndex(World, Coordinate);
   if Index < 0 then
     begin
@@ -260,7 +302,13 @@ begin
     end;
   end if;
 
-  return Ok(ChunkCell(World.Cache[Index].Chunk, LocalForCoordinate(X), LocalForCoordinate(Y)));
+  return Ok(
+    Terrain.ChunkCell(
+      World.Cache[Index].Chunk,
+      Coordinates.LocalForCoordinate(X),
+      Coordinates.LocalForCoordinate(Y)
+    )
+  );
 end function;
 
 function PrepareWindow(World: WorldSession; Range: ChunkRange): result of (WorldSession, string);
@@ -277,7 +325,10 @@ begin
     begin
       for ChunkX: integer := Range.MinimumX - 1 to Range.MaximumX + 1 do
         begin
-          const Loaded: ChunkLoad := try LoadWorldChunk(Current, ChunkCoordinate(X := ChunkX, Y := ChunkY));
+          const Loaded: ChunkLoad := try LoadWorldChunk(
+            Current,
+            Coordinates.ChunkCoordinate(X := ChunkX, Y := ChunkY)
+          );
           Current := Loaded.World;
         end;
       end for;
@@ -288,14 +339,14 @@ begin
 end function;
 
 // Composes a centered client-safe window and preloads one surrounding chunk margin.
-public function LoadVisibleWindow(World: WorldSession; State: GameState; Width: integer; Height: integer): result of (WindowLoad, string);
+public function LoadVisibleWindow(World: WorldSession; State: GameState.GameState; Width: integer; Height: integer): result of (WindowLoad, string);
 begin
-  if State.Area <> AreaKind.OutdoorRegion then
+  if State.Area <> Coordinates.AreaKind.OutdoorRegion then
     begin
       return Error('visible outdoor windows require the outdoor area');
     end;
   end if;
-  const Player: WorldPosition := try OutdoorPlayerPosition(State);
+  const Player: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(State);
   const OriginX: integer := Player.X - (Width div 2);
   const OriginY: integer := Player.Y - (Height div 2);
   const Range: ChunkRange := try ChunkRangeForWindow(OriginX, OriginY, Width, Height);
@@ -306,36 +357,54 @@ begin
       var Row: string := '';
       for LocalX: integer := 0 to Width - 1 do
         begin
-          Row := Row + VisibleCellCode(try CachedCell(Prepared, OriginX + LocalX, OriginY + LocalY));
+          Row := Row +
+            Terrain.VisibleCellCode(try CachedCell(Prepared, OriginX + LocalX, OriginY + LocalY));
         end;
       end for;
 
-      Rows.Push(Row);
+      Rows.PushInPlace(Row);
     end;
   end for;
 
-  return Ok(WindowLoad(World := Prepared, Window := VisibleWindow(OriginX := OriginX, OriginY := OriginY, Width := Width, Height := Height, Rows := Rows, PlayerX := Player.X -
-                                                                                                                                                                     OriginX, PlayerY := Player.Y -
-                                                                                                                                                                                         OriginY)));
+  return Ok(
+    WindowLoad(
+      World := Prepared, Window := VisibleWindow(
+        OriginX := OriginX, OriginY := OriginY, Width := Width, Height := Height, Rows := Rows,
+        PlayerX := Player.X -
+        OriginX, PlayerY := Player.Y -
+        OriginY
+      )
+    )
+  );
 end function;
 
 // Applies movement against the generated target terrain and returns updated world state.
-public function MoveInWorld(World: WorldSession; State: GameState; DeltaX: integer; DeltaY: integer): result of (WorldMove, string);
+public function MoveInWorld(World: WorldSession; State: GameState.GameState; DeltaX: integer; DeltaY: integer): result of (WorldMove, string);
 begin
-  if State.Area <> AreaKind.OutdoorRegion then
+  if State.Area <> Coordinates.AreaKind.OutdoorRegion then
     begin
       return Error('movement is unavailable in the current area');
     end;
   end if;
 
-  if not (((DeltaX = 0) and ((DeltaY = -1) or (DeltaY = 1))) or ((DeltaY = 0) and ((DeltaX = -1) or (DeltaX = 1)))) then
+  if not (
+    ((DeltaX = 0) and ((DeltaY = -1) or (DeltaY = 1)))
+    or
+    ((DeltaY = 0) and ((DeltaX = -1) or (DeltaX = 1)))
+  )
+  then
     begin
       return Error('movement must be one cardinal step');
     end;
   end if;
-  const Player: WorldPosition := try OutdoorPlayerPosition(State);
+  const Player: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(State);
   const Target: CellLoad := try LoadWorldCell(World, Player.X + DeltaX, Player.Y + DeltaY);
-  return Ok(WorldMove(World := Target.World, State := try MovePlayer(State, DeltaX, DeltaY, Target.Cell)));
+  return Ok(
+    WorldMove(
+      World := Target.World,
+      State := try Movement.MovePlayer(State, DeltaX, DeltaY, Target.Cell)
+    )
+  );
 end function;
 
 // Returns the number of complete chunks currently retained in memory.

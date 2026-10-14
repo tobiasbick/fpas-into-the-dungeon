@@ -1,15 +1,13 @@
 // Verifies combat presentation: health panel, attack and wait keys, turn log, damage frame, and defeat.
 program DungeonCombatUiTest;
 
-uses
-  Dungeon.Test.Catalog, Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Tasks, Std.Test,
-  Std.Tui;
+uses Dungeon.Test.Catalog as Catalog, Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
 
-function ScreenContains(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
+function ScreenContains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
 begin
   for Row: integer := 0 to Snapshot.Height - 1 do
     begin
-      if Snapshot.LineAt(Row).Contains(Text) then
+      if Text in Snapshot.LineAt(Row) then
         begin
           return true;
         end;
@@ -20,48 +18,72 @@ begin
   return false;
 end function;
 
-function MakeKey(Kind: TuiKeyKind; Character: string): TuiKeyEvent;
+function MakeKey(Kind: Tui.TuiKeyKind; Character: string): Tui.TuiKeyEvent;
 begin
-  return TuiKeyEvent(kind := Kind, ch := Character, shift := false, ctrl := false, alt := false, meta := false);
+  return Tui.TuiKeyEvent(
+    kind := Kind,
+    ch := Character,
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
 end function;
 
-function Fight(Health: integer; Log: array of string): VisibleState;
+function Fight(Health: integer; Log: array of string): Protocol.VisibleState;
 begin
-  return VisibleState.FirstPersonState(FirstPersonVisibleState(Title := 'Initial dungeon', Status := 'Restless skeleton 9/12 — Space: Attack', Width := 5, Height := 3, Rows := [
-                                                                                                                                                                                  '#####',
-                                                                                                                                                                                  '#.h.#',
-                                                                                                                                                                                  '#####'
-                                                                                                                                                                                ], KnowledgeRows := [
-                                                                                                                                                                                                      'vvvvv',
-                                                                                                                                                                                                      'vvvvv',
-                                                                                                                                                                                                      'vvvvv'
-                                                                                                                                                                                                    ], PlayerX := 3, PlayerY := 1, Facing := FirstPersonFacing.West, Inventory := [], Health := Health, MaxHealth := 20, Character := [], CombatLog := Log, CombatEvents := []));
+  return Protocol.VisibleState.FirstPersonState(
+    Protocol.FirstPersonVisibleState(
+      Title := 'Initial dungeon', Status := 'Restless skeleton 9/12 — Space: Attack', Width := 5,
+      Height := 3, Rows := [
+        '#####',
+        '#.h.#',
+        '#####'
+      ], KnowledgeRows := [
+        'vvvvv',
+        'vvvvv',
+        'vvvvv'
+      ], PlayerX := 3, PlayerY := 1, Facing := Protocol.FirstPersonFacing.West, Inventory := [],
+      Health := Health, MaxHealth := 20, Character := [], CombatLog := Log, CombatEvents := []
+    )
+  );
 end function;
 
 begin
-  const Requests: channel of ClientMessage := CreateChannel(4);
-  const Events: channel of ClientEvent := CreateChannel(1);
-  var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of Client.ClientEvent := Tasks.CreateChannel(1);
+  var Model: Client.ClientModel := Client.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
   Model.ViewportWidth := 120;
   Model.ViewportHeight := 30;
   Model.RequestedWorldWidth := 78;
   Model.RequestedWorldHeight := 25;
-  const Cmd: TuiCmdOutput := TuiCmdOutput.Create();
-  Model := UpdateClientEvent(Model, ClientEvent.Connected(FixtureCatalog(false, false)), Cmd);
-  Model := UpdateClientEvent(Model, ClientEvent.State(Fight(20, [])), Cmd);
-  AssertEquals(20, Model.Health);
-  AssertEquals(20, Model.MaxHealth);
+  const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Connected(Catalog.FixtureCatalog(false, false)),
+    Cmd
+  );
+  Model := Client.UpdateClientEvent(Model, Client.ClientEvent.State(Fight(20, [])), Cmd);
+  Test.AssertEquals(20, Model.Health);
+  Test.AssertEquals(20, Model.MaxHealth);
   // Entering a game never flashes damage.
-  AssertFalse(Model.DamageTaken);
-  const App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(120, 30));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health 20/20 ████████'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Space: Attack'));
+  Test.AssertFalse(Model.DamageTaken);
+  const App: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 30));
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health 20/20 ████████'));
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Space: Attack'));
   // Space attacks and Z waits, each as one pending turn.
-  App.InjectKeyForTest(MakeKey(TuiKeyKind.Space, ' '));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
-  AssertTrue(Model.Pending);
-  if ReceiveWithTimeout(Requests, 0).Unwrap() is ClientMessage.Attack then
+  App.InjectKeyForTest(MakeKey(Tui.TuiKeyKind.Space, ' '));
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 1, 0);
+  Test.AssertTrue(Model.Pending);
+  if Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.Attack then
     begin
       null;
     end;
@@ -72,51 +94,63 @@ begin
   end if;
 
   // While a turn is pending, further combat input is ignored.
-  App.InjectKeyForTest(MakeKey(TuiKeyKind.Character, 'z'));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
-  AssertTrue(ReceiveWithTimeout(Requests, 0).IsError());
+  App.InjectKeyForTest(MakeKey(Tui.TuiKeyKind.Character, 'z'));
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 1, 0);
+  Test.AssertTrue((Tasks.ReceiveWithTimeout(Requests, 0) is Error(_)));
   // The turn's messages reach the message log, the last one the status line, and damage frames the view red.
-  Model := UpdateClientEvent(Model, ClientEvent.State(Fight(14, [
-                                                                  'You hit the restless skeleton for 3.',
-                                                                  'The restless skeleton strikes you for 6.'
-                                                                ])), Cmd);
-  AssertFalse(Model.Pending);
-  AssertTrue(Model.DamageTaken);
-  AssertEquals('The restless skeleton strikes you for 6.', Model.Status);
-  AssertEquals('The restless skeleton strikes you for 6.', Model.Messages[Model.Messages.Length() -
-                                                                          1]);
-  AssertEquals('You hit the restless skeleton for 3.', Model.Messages[Model.Messages.Length() - 2]);
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health 14/20 ██████░░'));
+  Model := Client.UpdateClientEvent(
+    Model, Client.ClientEvent.State(
+      Fight(
+        14, [
+          'You hit the restless skeleton for 3.',
+          'The restless skeleton strikes you for 6.'
+        ]
+      )
+    ), Cmd
+  );
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Model.DamageTaken);
+  Test.AssertEquals('The restless skeleton strikes you for 6.', Model.Status);
+  Test.AssertEquals(
+    'The restless skeleton strikes you for 6.', Model.Messages[
+      Model.Messages.Length() -
+      1
+    ]
+  );
+  Test.AssertEquals(
+    'You hit the restless skeleton for 3.',
+    Model.Messages[Model.Messages.Length() - 2]
+  );
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health 14/20 ██████░░'));
   var RedFrame: boolean := false;
-  const Snapshot: TuiSurfaceSnapshot := App.SurfaceSnapshot();
+  const Snapshot: Tui.TuiSurfaceSnapshot := App.SurfaceSnapshot();
   for X: integer := 0 to Snapshot.Width - 1 do
     begin
       for Y: integer := 0 to Snapshot.Height - 1 do
         begin
-          if Snapshot.CellAt(X, Y).ConcreteStyle is Some(const Style) then
-            begin
-              if ((Style.Background.Red = 150) and (Style.Background.Green = 18)) and
-                 (Style.Background.Blue = 18) then
+          case Snapshot.CellAt(X, Y).ConcreteStyle of
+            when Some(const Style):
+              if ((Style.Background.Red = 150) and (Style.Background.Green = 18))
+                and
+                (Style.Background.Blue = 18)
+              then
                 begin
                   RedFrame := true;
                 end;
               end if;
-            end;
-          else
-            begin
+            when None:
               null;
-            end;
-          end if;
+          end case;
         end;
       end for;
     end;
   end for;
 
-  AssertTrue(RedFrame);
-  App.InjectKeyForTest(MakeKey(TuiKeyKind.Character, 'Z'));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 1, 0);
-  if ReceiveWithTimeout(Requests, 0).Unwrap() is ClientMessage.Wait then
+  Test.AssertTrue(RedFrame);
+  App.InjectKeyForTest(MakeKey(Tui.TuiKeyKind.Character, 'Z'));
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 1, 0);
+  if Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.Wait then
     begin
       null;
     end;
@@ -127,35 +161,46 @@ begin
   end if;
 
   // Without further damage the frame disappears again.
-  Model := UpdateClientEvent(Model, ClientEvent.State(Fight(14, ['You wait.'])), Cmd);
-  AssertFalse(Model.DamageTaken);
+  Model := Client.UpdateClientEvent(Model, Client.ClientEvent.State(Fight(14, ['You wait.'])), Cmd);
+  Test.AssertFalse(Model.DamageTaken);
   // Defeat returns to the session start screen and explains what happened.
-  Model := UpdateClientEvent(Model, ClientEvent.Defeated('The restless skeleton strikes you for 4. You have fallen.'), Cmd);
-  AssertTrue(Model.Screen = ClientScreen.StartScreen);
-  AssertTrue(Model.ConnectionPhase = ClientConnectionPhase.AwaitingSession);
-  AssertTrue(Model.Overlay = ClientOverlay.DefeatOverlay);
-  AssertFalse(Model.HasVisibleState);
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'You have fallen'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'The restless skeleton strikes you for 4.'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Continue'));
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Defeated('The restless skeleton strikes you for 4. You have fallen.'),
+    Cmd
+  );
+  Test.AssertTrue(Model.Screen = Client.ClientScreen.StartScreen);
+  Test.AssertTrue(Model.ConnectionPhase = Client.ClientConnectionPhase.AwaitingSession);
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.DefeatOverlay);
+  Test.AssertFalse(Model.HasVisibleState);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'You have fallen'));
+  Test.AssertTrue(
+    ScreenContains(App.SurfaceSnapshot(), 'The restless skeleton strikes you for 4.')
+  );
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Continue'));
   // Defeat refreshes the server-selected world while retaining the report overlay.
-  if ReceiveWithTimeout(Requests, 0).Unwrap() is ClientMessage.ListWorlds(const Offset, const DiscardProgress) then
-    begin
-      AssertFalse(DiscardProgress);
-    end;
-  else
-    begin
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ListWorlds(const Offset, const DiscardProgress):
+      Test.AssertFalse(DiscardProgress);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
       panic('expected catalog refresh after defeat');
-    end;
-  end if;
+  end case;
 
-  Model := UpdateClientEvent(Model, ClientEvent.Worlds(FixtureCatalog(false, false)), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.DefeatOverlay);
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Worlds(Catalog.FixtureCatalog(false, false)),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.DefeatOverlay);
   // Continue leaves the report; the refreshed session choices are ready.
-  AssertTrue(Model.FocusedControl > 0);
-  Model := UpdateClient(Model, TuiMsg.Action(TuiControlId.Create(Model.FocusedControl), TuiAction.Create(120)), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Start over'));
+  Test.AssertTrue(Model.FocusedControl > 0);
+  Model := Client.UpdateClient(
+    Model,
+    Tui.TuiMsg.Action(Tui.TuiControlId.Create(Model.FocusedControl), Tui.TuiAction.Create(120)),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.NoOverlay);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Start over'));
 end.

@@ -1,32 +1,28 @@
 // Covers entrance regions and sites, the spawn entrance across region borders, and dungeon area identities.
 program EntrancesTest;
 
-uses
-  Dungeon.Areas.Identities, Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interior,
-  Dungeon.Interior.Generation, Dungeon.Movement, Dungeon.Terrain, Dungeon.Terrain.Chunks,
-  Dungeon.Terrain.Entrances, Dungeon.Terrain.Generation, Dungeon.Terrain.Placement, Std.Conv,
-  Std.Test;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as Interior, Dungeon.Interior.Generation as Generation, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as Chunks, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Generation as TerrainGeneration, Dungeon.Terrain.Placement as Placement, Std.Conv as Conv, Std.Test as Test;
 
-function Region(X: integer; Y: integer): RegionCoordinate;
+function Region(X: integer; Y: integer): Entrances.RegionCoordinate;
 begin
-  return RegionCoordinate(X := X, Y := Y);
+  return Entrances.RegionCoordinate(X := X, Y := Y);
 end function;
 
-function Position(X: integer; Y: integer): WorldPosition;
+function Position(X: integer; Y: integer): Coordinates.WorldPosition;
 begin
-  return WorldPosition(X := X, Y := Y);
+  return Coordinates.WorldPosition(X := X, Y := Y);
 end function;
 
-function SameField(Left: WorldPosition; Right: WorldPosition): boolean;
+function SameField(Left: Coordinates.WorldPosition; Right: Coordinates.WorldPosition): boolean;
 begin
   return (Left.X = Right.X) and (Left.Y = Right.Y);
 end function;
 
-function SameSite(Left: option of WorldPosition; Right: option of WorldPosition): boolean;
+function SameSite(Left: option of Coordinates.WorldPosition; Right: option of Coordinates.WorldPosition): boolean;
 begin
-  if Left.IsNone() or Right.IsNone() then
+  if (Left is None) or (Right is None) then
     begin
-      return Left.IsNone() and Right.IsNone();
+      return (Left is None) and (Right is None);
     end;
   end if;
 
@@ -38,128 +34,184 @@ function PaddedCoordinate(Value: integer): string;
 begin
   if Value < 0 then
     begin
-      return '-0' + IntToStr(- Value);
+      return '-0' + Conv.IntToStr(- Value);
     end;
   end if;
 
-  return '0' + IntToStr(Value);
+  return '0' + Conv.IntToStr(Value);
 end function;
 
 // Enters through the spawn entrance with a generated target map and returns the transition.
-function EnterSpawnEntrance(Metadata: WorldMetadata): AreaTransition;
+function EnterSpawnEntrance(Metadata: Terrain.WorldMetadata): Movement.AreaTransition;
 begin
-  const Outside: GameState := NewGame(Metadata) with Player := PlayerPosition.Outdoor(Metadata.SpawnEntrance); end with;
-  const View: AreaView := AreaView(Metadata := Metadata, Interior := None);
-  const Target: string := AreaTransitionTarget(View, Outside).Unwrap();
-  const TargetRegion: RegionCoordinate := ParseDungeonAreaId(Metadata, Target).Unwrap();
-  const Map: InteriorMap := GenerateDungeon(Metadata.Seed, TargetRegion.X, TargetRegion.Y, Target)
-                              .Unwrap();
-  return ActivateAreaTransition(View, Outside, Some(Map)).Unwrap();
+  const Outside: GameState.GameState := GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SpawnEntrance
+  ); end with;
+  const View: GameState.AreaView := GameState.AreaView(Metadata := Metadata, Interior := None);
+  const Target: string := Movement.AreaTransitionTarget(View, Outside).Unwrap();
+  const TargetRegion: Entrances.RegionCoordinate := Identities.ParseDungeonAreaId(
+    Metadata,
+    Target
+  ).Unwrap();
+  const Map: Interior.InteriorMap := Generation.GenerateDungeon(
+    Metadata.Seed,
+    TargetRegion.X,
+    TargetRegion.Y,
+    Target
+  ).Unwrap();
+  return Movement.ActivateAreaTransition(View, Outside, Some(Map)).Unwrap();
 end function;
 
 // The spawn entrance belongs to the spawn region even when it lies in a neighboring region;
 // the neighbor keeps its own ordinary entrance.
 procedure AssertSpawnEntranceAcrossBorder(
-  Base: WorldMetadata;
-  Spawn: WorldPosition;
-  Entrance: WorldPosition
+  Base: Terrain.WorldMetadata;
+  Spawn: Coordinates.WorldPosition;
+  Entrance: Coordinates.WorldPosition
 );
 begin
-  const Metadata: WorldMetadata := Base with Spawn := Spawn; SpawnEntrance := Entrance; end with;
-  const SpawnRegion: RegionCoordinate := RegionOf(Metadata, Spawn);
-  const Receiving: RegionCoordinate := RegionOf(Metadata, Entrance);
-  AssertTrue(SpawnRegion <> Receiving);
-  AssertTrue(EntranceRegionAt(Metadata, Entrance).Unwrap() = SpawnRegion);
-  AssertTrue(SameField(EntranceSite(Metadata, SpawnRegion).Unwrap(), Entrance));
-  const Entered: AreaTransition := EnterSpawnEntrance(Metadata);
-  AssertEquals(DungeonAreaId(Metadata, SpawnRegion), Entered.State.AreaId);
-  AssertTrue(Entered.State.ReturnLocation =
-             ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Entrance));
+  const Metadata: Terrain.WorldMetadata := Base with Spawn := Spawn; SpawnEntrance := Entrance; end with;
+  const SpawnRegion: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Spawn);
+  const Receiving: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Entrance);
+  Test.AssertTrue(SpawnRegion <> Receiving);
+  Test.AssertTrue(Entrances.EntranceRegionAt(Metadata, Entrance).Unwrap() = SpawnRegion);
+  Test.AssertTrue(SameField(Entrances.EntranceSite(Metadata, SpawnRegion).Unwrap(), Entrance));
+  const Entered: Movement.AreaTransition := EnterSpawnEntrance(Metadata);
+  Test.AssertEquals(Identities.DungeonAreaId(Metadata, SpawnRegion), Entered.State.AreaId);
+  Test.AssertTrue(
+    Entered.State.ReturnLocation =
+    Coordinates.ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Entrance)
+  );
   // The receiving region's ordinary site, if any, is still an entrance of that region.
-  const ReceivingCandidate: WorldPosition := EntranceCandidate(Metadata, Receiving);
-  case EntranceSite(Metadata, Receiving) of
+  const ReceivingCandidate: Coordinates.WorldPosition := Entrances.EntranceCandidate(
+    Metadata,
+    Receiving
+  );
+  case Entrances.EntranceSite(Metadata, Receiving) of
     when Some(const Site):
       begin
-        AssertTrue(SameField(Site, ReceivingCandidate));
-        AssertTrue(EntranceRegionAt(Metadata, Site).Unwrap() = Receiving);
+        Test.AssertTrue(SameField(Site, ReceivingCandidate));
+        Test.AssertTrue(Entrances.EntranceRegionAt(Metadata, Site).Unwrap() = Receiving);
       end;
     when None:
       begin
-        AssertTrue(EntranceRegionAt(Metadata, ReceivingCandidate).IsNone());
+        Test.AssertTrue((Entrances.EntranceRegionAt(Metadata, ReceivingCandidate) is None));
       end;
   end case;
-  const Chunk: ChunkCoordinate := ChunkCoordinate(X := ChunkForCoordinate(Entrance.X), Y := ChunkForCoordinate(Entrance.Y));
-  const Fields: array of WorldPosition := EntranceFieldsInChunk(Metadata, Chunk);
-  AssertTrue(SameField(Fields[0], Entrance));
-  for Field: WorldPosition in Fields do
+  const Chunk: Coordinates.ChunkCoordinate := Coordinates.ChunkCoordinate(
+    X := Coordinates.ChunkForCoordinate(Entrance.X),
+    Y := Coordinates.ChunkForCoordinate(Entrance.Y)
+  );
+  const Fields: array of Coordinates.WorldPosition := Entrances.EntranceFieldsInChunk(
+    Metadata,
+    Chunk
+  );
+  Test.AssertTrue(SameField(Fields[0], Entrance));
+  for Field: Coordinates.WorldPosition in Fields do
     begin
-      AssertTrue(SameField(Field, Entrance) or SameField(Field, ReceivingCandidate));
+      Test.AssertTrue(SameField(Field, Entrance) or SameField(Field, ReceivingCandidate));
     end;
   end for;
 end procedure;
 
 begin
-  const Metadata: WorldMetadata := NewWorldMetadata('entrances', 12345, 4).Unwrap();
-  const Again: WorldMetadata := NewWorldMetadata('entrances', 12345, 4).Unwrap();
+  const Metadata: Terrain.WorldMetadata := Placement.NewWorldMetadata(
+    'entrances',
+    12345,
+    4
+  ).Unwrap();
+  const Again: Terrain.WorldMetadata := Placement.NewWorldMetadata('entrances', 12345, 4).Unwrap();
   // Region size bounds.
-  AssertTrue(NewWorldMetadata('entrances', 12345, 0).IsError());
-  AssertTrue(NewWorldMetadata('entrances', 12345, 17).IsError());
-  AssertEquals(1, NewWorldMetadata('entrances', 12345, 1).Unwrap().DungeonRegionChunks);
-  AssertEquals(16, NewWorldMetadata('entrances', 12345, 16).Unwrap().DungeonRegionChunks);
+  Test.AssertTrue((Placement.NewWorldMetadata('entrances', 12345, 0) is Error(_)));
+  Test.AssertTrue((Placement.NewWorldMetadata('entrances', 12345, 17) is Error(_)));
+  Test.AssertEquals(
+    1,
+    Placement.NewWorldMetadata('entrances', 12345, 1).Unwrap().DungeonRegionChunks
+  );
+  Test.AssertEquals(
+    16,
+    Placement.NewWorldMetadata('entrances', 12345, 16).Unwrap().DungeonRegionChunks
+  );
   // Region coordinates use floor division of world fields by the region size in fields.
-  AssertTrue(RegionOf(Metadata, Position(0, 0)) = Region(0, 0));
-  AssertTrue(RegionOf(Metadata, Position(511, 511)) = Region(0, 0));
-  AssertTrue(RegionOf(Metadata, Position(512, -1)) = Region(1, -1));
-  AssertTrue(RegionOf(Metadata, Position(-512, -513)) = Region(-1, -2));
+  Test.AssertTrue(Entrances.RegionOf(Metadata, Position(0, 0)) = Region(0, 0));
+  Test.AssertTrue(Entrances.RegionOf(Metadata, Position(511, 511)) = Region(0, 0));
+  Test.AssertTrue(Entrances.RegionOf(Metadata, Position(512, -1)) = Region(1, -1));
+  Test.AssertTrue(Entrances.RegionOf(Metadata, Position(-512, -513)) = Region(-1, -2));
   // The spawn entrance is three steps from the spawn, an entrance in generated terrain, and leads to the spawn region.
-  const SpawnRegion: RegionCoordinate := RegionOf(Metadata, Metadata.Spawn);
-  AssertTrue(EntranceRegionAt(Metadata, Metadata.SpawnEntrance).Unwrap() = SpawnRegion);
-  AssertTrue(GenerateWorldCell(Metadata, Metadata.SpawnEntrance.X, Metadata.SpawnEntrance.Y).Feature =
-             TerrainFeatureKind.Entrance);
+  const SpawnRegion: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  Test.AssertTrue(
+    Entrances.EntranceRegionAt(Metadata, Metadata.SpawnEntrance).Unwrap() = SpawnRegion
+  );
+  Test.AssertTrue(
+    Chunks.GenerateWorldCell(Metadata, Metadata.SpawnEntrance.X, Metadata.SpawnEntrance.Y).Feature =
+    Terrain.TerrainFeatureKind.Entrance
+  );
   // Ordinary sites: deterministic, inside their region at least 16 fields from the border, on clear land.
   var SiteCount: integer := 0;
-  var EmptyRegion: option of RegionCoordinate := None;
-  var FirstSite: option of WorldPosition := None;
+  var EmptyRegion: option of Entrances.RegionCoordinate := None;
+  var FirstSite: option of Coordinates.WorldPosition := None;
   for RegionY: integer := -6 to 5 do
     begin
       for RegionX: integer := -6 to 5 do
         begin
-          const Current: RegionCoordinate := Region(RegionX, RegionY);
-          const Site: option of WorldPosition := EntranceSite(Metadata, Current);
-          AssertTrue(SameSite(Site, EntranceSite(Again, Current)));
-          const Candidate: WorldPosition := EntranceCandidate(Metadata, Current);
-          AssertTrue(RegionOf(Metadata, Candidate) = Current);
-          AssertTrue((Candidate.X - (RegionX * 512) >= 16) and
-                     (Candidate.X - (RegionX * 512) < 512 - 16));
-          AssertTrue((Candidate.Y - (RegionY * 512) >= 16) and
-                     (Candidate.Y - (RegionY * 512) < 512 - 16));
+          const Current: Entrances.RegionCoordinate := Region(RegionX, RegionY);
+          const Site: option of Coordinates.WorldPosition := Entrances.EntranceSite(
+            Metadata,
+            Current
+          );
+          Test.AssertTrue(SameSite(Site, Entrances.EntranceSite(Again, Current)));
+          const Candidate: Coordinates.WorldPosition := Entrances.EntranceCandidate(
+            Metadata,
+            Current
+          );
+          Test.AssertTrue(Entrances.RegionOf(Metadata, Candidate) = Current);
+          Test.AssertTrue(
+            (Candidate.X - (RegionX * 512) >= 16)
+            and
+            (Candidate.X - (RegionX * 512) < 512 - 16)
+          );
+          Test.AssertTrue(
+            (Candidate.Y - (RegionY * 512) >= 16)
+            and
+            (Candidate.Y - (RegionY * 512) < 512 - 16)
+          );
           case Site of
             when Some(const Field):
               begin
                 if Current <> SpawnRegion then
                   begin
                     SiteCount := SiteCount + 1;
-                    if FirstSite.IsNone() then
+                    if (FirstSite is None) then
                       begin
                         FirstSite := Some(Field);
                       end;
                     end if;
 
-                    AssertTrue(SameField(Field, Candidate));
-                    const Natural: WorldCell := NaturalCell(Metadata.Seed, Field.X, Field.Y);
-                    AssertTrue(Natural.Water = WaterKind.NoWater);
-                    AssertTrue(CellIsClearEntrance(Natural));
-                    AssertTrue(EntranceRegionAt(Metadata, Field).Unwrap() = Current);
-                    AssertTrue(GenerateWorldCell(Metadata, Field.X, Field.Y).Feature =
-                               TerrainFeatureKind.Entrance);
+                    Test.AssertTrue(SameField(Field, Candidate));
+                    const Natural: Terrain.WorldCell := TerrainGeneration.NaturalCell(
+                      Metadata.Seed,
+                      Field.X,
+                      Field.Y
+                    );
+                    Test.AssertTrue(Natural.Water = Terrain.WaterKind.NoWater);
+                    Test.AssertTrue(Entrances.CellIsClearEntrance(Natural));
+                    Test.AssertTrue(Entrances.EntranceRegionAt(Metadata, Field).Unwrap() = Current);
+                    Test.AssertTrue(
+                      Chunks.GenerateWorldCell(Metadata, Field.X, Field.Y).Feature =
+                      Terrain.TerrainFeatureKind.Entrance
+                    );
                   end;
                 end if;
               end;
             when None:
               begin
                 EmptyRegion := Some(Current);
-                AssertFalse(CellIsClearEntrance(NaturalCell(Metadata.Seed, Candidate.X, Candidate.Y)));
-                AssertTrue(EntranceRegionAt(Metadata, Candidate).IsNone());
+                Test.AssertFalse(
+                  Entrances.CellIsClearEntrance(
+                    TerrainGeneration.NaturalCell(Metadata.Seed, Candidate.X, Candidate.Y)
+                  )
+                );
+                Test.AssertTrue((Entrances.EntranceRegionAt(Metadata, Candidate) is None));
               end;
           end case;
         end;
@@ -167,13 +219,20 @@ begin
     end;
   end for;
 
-  AssertTrue(SiteCount > 0);
-  AssertTrue(EmptyRegion.IsSome());
+  Test.AssertTrue(SiteCount > 0);
+  Test.AssertTrue((EmptyRegion is Some(_)));
   // Fields next to a site are not entrances, and the spawn region has no ordinary candidate.
-  const SomeSite: WorldPosition := FirstSite.Unwrap();
-  AssertTrue(EntranceRegionAt(Metadata, Position(SomeSite.X + 1, SomeSite.Y)).IsNone());
-  AssertTrue(EntranceRegionAt(Metadata, EntranceCandidate(Metadata, SpawnRegion)).IsNone() or
-             SameField(EntranceCandidate(Metadata, SpawnRegion), Metadata.SpawnEntrance));
+  const SomeSite: Coordinates.WorldPosition := FirstSite.Unwrap();
+  Test.AssertTrue(
+    (Entrances.EntranceRegionAt(Metadata, Position(SomeSite.X + 1, SomeSite.Y)) is None)
+  );
+  Test.AssertTrue(
+    (
+      Entrances.EntranceRegionAt(Metadata, Entrances.EntranceCandidate(Metadata, SpawnRegion)) is None
+    )
+    or
+    SameField(Entrances.EntranceCandidate(Metadata, SpawnRegion), Metadata.SpawnEntrance)
+  );
   // A region contributes at most one ordinary entrance field to all its chunks together.
   var RegionFieldCount: integer := 0;
   for ChunkY: integer := 8 to 11 do
@@ -181,37 +240,65 @@ begin
       for ChunkX: integer := 8 to 11 do
         begin
           RegionFieldCount := RegionFieldCount +
-                              EntranceFieldsInChunk(Metadata, ChunkCoordinate(X := ChunkX, Y := ChunkY)).Length();
+            Entrances.EntranceFieldsInChunk(
+              Metadata,
+              Coordinates.ChunkCoordinate(X := ChunkX, Y := ChunkY)
+            ).Length();
         end;
       end for;
     end;
   end for;
 
-  AssertEquals(1, RegionFieldCount);
+  Test.AssertEquals(1, RegionFieldCount);
   // Area identities round-trip canonically and reject everything else.
-  const Site: RegionCoordinate := RegionOf(Metadata, SomeSite);
-  const AreaId: string := DungeonAreaId(Metadata, Site);
-  AssertTrue(ParseDungeonAreaId(Metadata, AreaId).Unwrap() = Site);
-  AssertEquals('entrances:dungeon:-1:-12', DungeonAreaId(Metadata, Region(-1, -12)));
-  AssertTrue(ParseDungeonAreaId(Metadata, DungeonAreaId(Metadata, EmptyRegion.Unwrap())).IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, 'other:dungeon:0:0').IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, 'entrances:dungeon:0').IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, 'entrances:dungeon:0:0:0').IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, 'entrances:dungeon:x:0').IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, 'entrances:dungeon:').IsError());
-  const SpawnAreaId: string := DungeonAreaId(Metadata, SpawnRegion);
-  AssertTrue(ParseDungeonAreaId(Metadata, SpawnAreaId).Unwrap() = SpawnRegion);
-  const SpawnY: string := IntToStr(SpawnRegion.Y);
-  AssertTrue(ParseDungeonAreaId(Metadata, (('entrances:dungeon:' + PaddedCoordinate(SpawnRegion.X)) + ':') +
-                                          SpawnY)
-               .IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, (('entrances:dungeon:+' + IntToStr(SpawnRegion.X)) + ':') +
-                                          SpawnY)
-               .IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, (('entrances:dungeon: ' + IntToStr(SpawnRegion.X)) + ':') +
-                                          SpawnY)
-               .IsError());
-  AssertTrue(ParseDungeonAreaId(Metadata, 'entrances:dungeon:-0:0').IsError());
+  const Site: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, SomeSite);
+  const AreaId: string := Identities.DungeonAreaId(Metadata, Site);
+  Test.AssertTrue(Identities.ParseDungeonAreaId(Metadata, AreaId).Unwrap() = Site);
+  Test.AssertEquals(
+    'entrances:dungeon:-1:-12',
+    Identities.DungeonAreaId(Metadata, Region(-1, -12))
+  );
+  Test.AssertTrue(
+    (
+      Identities.ParseDungeonAreaId(
+        Metadata,
+        Identities.DungeonAreaId(Metadata, EmptyRegion.Unwrap())
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue((Identities.ParseDungeonAreaId(Metadata, 'other:dungeon:0:0') is Error(_)));
+  Test.AssertTrue((Identities.ParseDungeonAreaId(Metadata, 'entrances:dungeon:0') is Error(_)));
+  Test.AssertTrue((Identities.ParseDungeonAreaId(Metadata, 'entrances:dungeon:0:0:0') is Error(_)));
+  Test.AssertTrue((Identities.ParseDungeonAreaId(Metadata, 'entrances:dungeon:x:0') is Error(_)));
+  Test.AssertTrue((Identities.ParseDungeonAreaId(Metadata, 'entrances:dungeon:') is Error(_)));
+  const SpawnAreaId: string := Identities.DungeonAreaId(Metadata, SpawnRegion);
+  Test.AssertTrue(Identities.ParseDungeonAreaId(Metadata, SpawnAreaId).Unwrap() = SpawnRegion);
+  const SpawnY: string := Conv.IntToStr(SpawnRegion.Y);
+  Test.AssertTrue(
+    (
+      Identities.ParseDungeonAreaId(
+        Metadata, (('entrances:dungeon:' + PaddedCoordinate(SpawnRegion.X)) + ':') +
+        SpawnY
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Identities.ParseDungeonAreaId(
+        Metadata, (('entrances:dungeon:+' + Conv.IntToStr(SpawnRegion.X)) + ':') +
+        SpawnY
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Identities.ParseDungeonAreaId(
+        Metadata, (('entrances:dungeon: ' + Conv.IntToStr(SpawnRegion.X)) + ':') +
+        SpawnY
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue((Identities.ParseDungeonAreaId(Metadata, 'entrances:dungeon:-0:0') is Error(_)));
   // The spawn entrance crosses a positive and a negative region border.
   AssertSpawnEntranceAcrossBorder(Metadata, Position(511, 40), Position(512, 42));
   AssertSpawnEntranceAcrossBorder(Metadata, Position(40, 0), Position(41, -2));

@@ -1,30 +1,35 @@
 // Plays a complete visit over TCP: enter, arm, defeat a skeleton, take items, save, load, and re-enter.
 program DungeonVisitTest;
 
-uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Hostiles, Dungeon.Interior, Dungeon.Items,
-  Dungeon.Protocol, Dungeon.Server, Dungeon.Server.Config, Dungeon.Terrain,
-  Dungeon.Terrain.Placement, Dungeon.Test.Fixtures, Dungeon.Test.Levels, Dungeon.Test.Routes,
-  Dungeon.Test.Wire, Dungeon.World, Dungeon.World.Savegame, Std.Conv, Std.Fs, Std.Net, Std.Tasks,
-  Std.Test, Std.Time;
+uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as Interior, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as Placement, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
-function TestConfig(WorldsRoot: string): ServerConfig;
+function TestConfig(WorldsRoot: string): ConfigUnit.ServerConfig;
 begin
-  return ServerConfig(ConfigPath := '', Logs := None, WorldsRoot := WorldsRoot, WorldId := 'dungeon-visit', WorldSeed := 9462, DungeonRegionChunks := 4, ChunkCacheLimit := 32, MaximumViewWidth := 240, MaximumViewHeight := 120);
+  return ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := WorldsRoot,
+    WorldId := 'dungeon-visit',
+    WorldSeed := 9462,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 120
+  );
 end function;
 
-function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of (boolean, string);
+function ServeOne(ListenerValue: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  const Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
-  const Configured: boolean := try SetTimeout(Client, 120000);
-  const Outcome: result of (boolean, string) := ServeConnection(Client, Config, Token);
-  const Closed: boolean := try Close(Client);
+  const Client: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Configured: boolean := try Net.SetTimeout(Client, 120000);
+  const Outcome: result of (boolean, string) := Server.ServeConnection(Client, Config, Token);
+  const Closed: boolean := try Net.Close(Client);
   return Outcome;
 end function;
 
-function HostileById(State: GameState; Id: string): GameHostile;
+function HostileById(State: GameState.GameState; Id: string): Hostiles.GameHostile;
 begin
-  for Hostile: GameHostile in State.Hostiles do
+  for Hostile: Hostiles.GameHostile in State.Hostiles do
     begin
       if Hostile.Id = Id then
         begin
@@ -37,9 +42,9 @@ begin
   panic('opponent not found');
 end function;
 
-function ItemById(State: GameState; Id: string): GameItem;
+function ItemById(State: GameState.GameState; Id: string): Items.GameItem;
 begin
-  for Item: GameItem in State.Items do
+  for Item: Items.GameItem in State.Items do
     begin
       if Item.Id = Id then
         begin
@@ -53,63 +58,128 @@ begin
 end function;
 
 begin
-  const WorldsRoot: string := '.temp-data/dungeon-visit-' + IntToStr(TimestampMillis());
-  AssertTrue(Std.Fs.CreateDirAll(WorldsRoot).Unwrap());
-  const Config: ServerConfig := TestConfig(WorldsRoot);
-  const Fixture: WorldSession := OpenWorld(Config.WorldsRoot, Config.WorldId, Config.WorldSeed, Config.DungeonRegionChunks, Config.ChunkCacheLimit)
-                                   .Unwrap();
-  const Metadata: WorldMetadata := NewWorldMetadata(Config.WorldId, Config.WorldSeed, 4).Unwrap();
-  const Map: InteriorMap := SpawnDungeonMap(Metadata);
-  const Skeleton: HostilePlacement := Map.Hostiles[0];
-  const Coin: ItemPlacement := Map.Items[0];
-  const Sword: ItemPlacement := Map.Items[1];
-  const Token: CancellationToken := GetCancellationToken(CreateCancellationSource());
-  const ListenerValue: Listener := Listen('127.0.0.1', 0).Unwrap();
-  const Port: integer := ListenerLocalAddress(ListenerValue).Unwrap().Port;
+  const WorldsRoot: string := '.temp-data/dungeon-visit-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(WorldsRoot).Unwrap());
+  const Config: ConfigUnit.ServerConfig := TestConfig(WorldsRoot);
+  const Fixture: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    Config.WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    Config.DungeonRegionChunks,
+    Config.ChunkCacheLimit
+  ).Unwrap();
+  const Metadata: Terrain.WorldMetadata := Placement.NewWorldMetadata(
+    Config.WorldId,
+    Config.WorldSeed,
+    4
+  ).Unwrap();
+  const Map: Interior.InteriorMap := Routes.SpawnDungeonMap(Metadata);
+  const Skeleton: Hostiles.HostilePlacement := Map.Hostiles[0];
+  const Coin: Items.ItemPlacement := Map.Items[0];
+  const Sword: Items.ItemPlacement := Map.Items[1];
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(
+    Tasks.CreateCancellationSource()
+  );
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port: integer := Net.ListenerLocalAddress(ListenerValue).Unwrap().Port;
   // First session: enter, take and wield the sword, destroy the skeleton, take the coin, leave, save.
-  const FirstServer: task := go ServeOne(ListenerValue, Config, Token);
-  var Client: WireClient := Exchange(ConnectClient(Port, Token), ClientMessage.StartNewGame, Token);
-  Client := Exchange(WalkOutdoors(Client, Metadata.SpawnEntrance, Token), ClientMessage.Interact, Token);
-  AssertEquals(Map.Start.X, FirstPersonOf(Client).PlayerX);
-  Client := WalkRoute(Client, RouteTo(Map, VisiblePose(FirstPersonOf(Client)), Sword.Position, [
-                                                                                                 Skeleton.Position
-                                                                                               ]), Token);
-  Client := Exchange(Exchange(Client, ClientMessage.Interact, Token), ClientMessage.Equip(Sword.ItemId), Token);
-  AssertTrue(FirstPersonOf(Client).Inventory[0].Equipped);
-  Client := FightAhead(FaceOpponent(Client, Map, Skeleton.Position, Token), Token).Unwrap();
-  Client := WalkRoute(Client, RouteTo(Map, VisiblePose(FirstPersonOf(Client)), Coin.Position, []), Token);
-  Client := Exchange(Client, ClientMessage.Interact, Token);
-  AssertEquals(2, FirstPersonOf(Client).Inventory.Length());
-  Client := WalkRoute(Client, RouteTo(Map, VisiblePose(FirstPersonOf(Client)), Map.Exit, []), Token);
-  Client := Exchange(Client, ClientMessage.Interact, Token);
-  AssertEquals(Metadata.SpawnEntrance.X, MapOf(Client).WorldX);
-  RequireSaved(Exchange(Client, ClientMessage.SaveGame, Token));
-  CloseClient(Client, Token);
-  AssertTrue(Std.Tasks.Wait(FirstServer).Unwrap());
+  scope
+    const FirstServer: task of result of (boolean, string) := go ServeOne(
+      ListenerValue,
+      Config,
+      Token
+    );
+    var Client: Wire.WireClient := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.StartNewGame,
+      Token
+    );
+    Client := Wire.Exchange(
+      Wire.WalkOutdoors(Client, Metadata.SpawnEntrance, Token),
+      Protocol.ClientMessage.Interact,
+      Token
+    );
+    Test.AssertEquals(Map.Start.X, Wire.FirstPersonOf(Client).PlayerX);
+    Client := Wire.WalkRoute(
+      Client, Fixtures.RouteTo(
+        Map, Routes.VisiblePose(Wire.FirstPersonOf(Client)), Sword.Position, [
+          Skeleton.Position
+        ]
+      ), Token
+    );
+    Client := Wire.Exchange(
+      Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token),
+      Protocol.ClientMessage.Equip(Sword.ItemId),
+      Token
+    );
+    Test.AssertTrue(Wire.FirstPersonOf(Client).Inventory[0].Equipped);
+    Client := Wire.FightAhead(
+      Wire.FaceOpponent(Client, Map, Skeleton.Position, Token),
+      Token
+    ).Unwrap();
+    Client := Wire.WalkRoute(
+      Client,
+      Fixtures.RouteTo(Map, Routes.VisiblePose(Wire.FirstPersonOf(Client)), Coin.Position, []),
+      Token
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Test.AssertEquals(2, Wire.FirstPersonOf(Client).Inventory.Length());
+    Client := Wire.WalkRoute(
+      Client,
+      Fixtures.RouteTo(Map, Routes.VisiblePose(Wire.FirstPersonOf(Client)), Map.Exit, []),
+      Token
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Test.AssertEquals(Metadata.SpawnEntrance.X, Wire.MapOf(Client).WorldX);
+    Wire.RequireSaved(Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token));
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(FirstServer).Unwrap());
+  end scope;
+
   // Second session: load the save outside, re-enter, and save inside.
-  const SecondServer: task := go ServeOne(ListenerValue, Config, Token);
-  Client := Exchange(ConnectClient(Port, Token), ClientMessage.LoadGame, Token);
-  AssertEquals(Metadata.SpawnEntrance.X, MapOf(Client).WorldX);
-  AssertEquals(2, MapOf(Client).Inventory.Length());
-  Client := Exchange(Client, ClientMessage.Interact, Token);
-  const Inside: FirstPersonVisibleState := FirstPersonOf(Client);
-  AssertEquals(Map.Start.X, Inside.PlayerX);
-  AssertEquals(Map.Start.Y, Inside.PlayerY);
-  RequireSaved(Exchange(Client, ClientMessage.OverwriteSaveGame, Token));
-  CloseClient(Client, Token);
-  AssertTrue(Std.Tasks.Wait(SecondServer).Unwrap());
-  AssertTrue(CloseListener(ListenerValue).Unwrap());
+  scope
+    const SecondServer: task of result of (boolean, string) := go ServeOne(
+      ListenerValue,
+      Config,
+      Token
+    );
+    var Client: Wire.WireClient := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.LoadGame,
+      Token
+    );
+    Test.AssertEquals(Metadata.SpawnEntrance.X, Wire.MapOf(Client).WorldX);
+    Test.AssertEquals(2, Wire.MapOf(Client).Inventory.Length());
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    const Inside: Protocol.FirstPersonVisibleState := Wire.FirstPersonOf(Client);
+    Test.AssertEquals(Map.Start.X, Inside.PlayerX);
+    Test.AssertEquals(Map.Start.Y, Inside.PlayerY);
+    Wire.RequireSaved(Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token));
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(SecondServer).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
   // The re-entered game keeps the destroyed skeleton and the taken items; nothing was restored.
-  const World: WorldSession := OpenWorld(WorldsRoot, Config.WorldId, Config.WorldSeed, 4, 32)
-                                 .Unwrap();
-  const Saved: GameState := DecodeStoredSave(World, Std.Fs.ReadText(SaveGamePath(World)).Unwrap())
-                              .Unwrap();
-  AssertTrue(Saved.Area = AreaKind.Dungeon);
-  AssertEquals(1, Saved.VisitedAreas.Length());
-  AssertEquals(0, HostileById(Saved, Skeleton.Id).Health);
-  AssertEquals(Map.Items.Length(), Saved.Items.Length());
-  AssertTrue(ItemById(Saved, Coin.ItemId).Location = ItemLocation.CarriedByPlayer);
-  AssertTrue(ItemById(Saved, Sword.ItemId).Location =
-             ItemLocation.EquippedByPlayer(EquipmentSlot.Weapon));
-  AssertEquals(2, InventoryItems(Saved).Length());
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    4,
+    32
+  ).Unwrap();
+  const Saved: GameState.GameState := Levels.DecodeStoredSave(
+    World,
+    Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap()
+  ).Unwrap();
+  Test.AssertTrue(Saved.Area = Coordinates.AreaKind.Dungeon);
+  Test.AssertEquals(1, Saved.VisitedAreas.Length());
+  Test.AssertEquals(0, HostileById(Saved, Skeleton.Id).Health);
+  Test.AssertEquals(Map.Items.Length(), Saved.Items.Length());
+  Test.AssertTrue(ItemById(Saved, Coin.ItemId).Location = Items.ItemLocation.CarriedByPlayer);
+  Test.AssertTrue(
+    ItemById(Saved, Sword.ItemId).Location =
+    Items.ItemLocation.EquippedByPlayer(Items.EquipmentSlot.Weapon)
+  );
+  Test.AssertEquals(2, GameState.InventoryItems(Saved).Length());
 end.

@@ -1,10 +1,7 @@
 // Pure terminal raycasting for validated first-person protocol states: scenes and composed frames.
 unit Dungeon.Client.Raycast;
 
-uses
-  Dungeon.Client.Raycast.Art, Dungeon.Client.Raycast.Pixels, Dungeon.Client.Raycast.Rays,
-  Dungeon.Client.Raycast.Sprites, Dungeon.Client.Raycast.Textures, Dungeon.Protocol, Std.Conv,
-  Std.Math, Std.Tui;
+uses Dungeon.Client.Raycast.Art as Art, Dungeon.Client.Raycast.Pixels as PixelOps, Dungeon.Client.Raycast.Rays as Rays, Dungeon.Client.Raycast.Sprites as Sprites, Dungeon.Client.Raycast.Textures as Textures, Dungeon.Protocol as Protocol, Std.Conv as Conv, Std.Math as Math, Std.Tui as Tui;
 
 // Walls, floor, and depth buffer of one state at one size; sprites are composed per frame.
 public type FirstPersonScene = record
@@ -16,37 +13,40 @@ end record;
 
 // Renders the static part of one frame: walls, floor, and the depth buffer.
 // One ray per column feeds both the wall slice and the depth buffer used for occlusion.
-public function RenderFirstPersonScene(Value: FirstPersonVisibleState; Width: integer; Height: integer): FirstPersonScene;
+public function RenderFirstPersonScene(Value: Protocol.FirstPersonVisibleState; Width: integer; Height: integer): FirstPersonScene;
 begin
-  const SafeWidth: integer := Std.Math.Max(0, Width);
-  const SafeHeight: integer := Std.Math.Max(0, Height);
+  const SafeWidth: integer := Math.Max(0, Width);
+  const SafeHeight: integer := Math.Max(0, Height);
   const PixelHeight: integer := SafeHeight * 2;
-  const Scale: real := IntToReal(PixelHeight) * TerminalAspectCorrection;
-  const Camera: FirstPersonCamera := FrameCamera(Value);
-  var Pixels: array of integer := array.Fill(CeilingPixel, SafeWidth * PixelHeight);
+  const Scale: real := Conv.IntToReal(PixelHeight) * Rays.TerminalAspectCorrection;
+  const Camera: Rays.FirstPersonCamera := Rays.FrameCamera(Value);
+  var Pixels: array of integer := array.Fill(PixelOps.CeilingPixel, SafeWidth * PixelHeight);
   var Depths: array of real := [];
   for X: integer := 0 to SafeWidth - 1 do
     begin
       var CameraX: real := 0.0;
       if SafeWidth > 1 then
         begin
-          CameraX := ((2.0 * IntToReal(X)) / IntToReal(SafeWidth - 1)) - 1.0;
+          CameraX := ((2.0 * Conv.IntToReal(X)) / Conv.IntToReal(SafeWidth - 1)) - 1.0;
         end;
       end if;
-      const Hit: FirstPersonRayHit := CastFirstPersonRay(Value, CameraX);
-      Depths.Push(Hit.Distance);
+      const Hit: Rays.FirstPersonRayHit := Rays.CastFirstPersonRay(Value, CameraX);
+      Depths.PushInPlace(Hit.Distance);
       const ProjectedHeight: real := Scale / Hit.Distance;
-      const WallHeight: integer := Std.Math.Clamp(Trunc(ProjectedHeight), 1, PixelHeight);
+      const WallHeight: integer := Math.Clamp(Math.Trunc(ProjectedHeight), 1, PixelHeight);
       const WallTop: integer := (PixelHeight - WallHeight) div 2;
       const WallBottom: integer := WallTop + WallHeight;
       // Texture rows follow the unclipped projection so close walls keep a stable pattern.
-      const ProjectedTop: real := (IntToReal(PixelHeight) - ProjectedHeight) / 2.0;
+      const ProjectedTop: real := (Conv.IntToReal(PixelHeight) - ProjectedHeight) / 2.0;
       for Y: integer := 0 to WallTop - 1 do
         begin
           const CeilingDenominator: integer := (PixelHeight - (2 * Y)) - 1;
           if CeilingDenominator > 0 then
             begin
-              Pixels[(Y * SafeWidth) + X] := Lit(CeilingPixel, Scale / IntToReal(CeilingDenominator));
+              Pixels[(Y * SafeWidth) + X] := PixelOps.Lit(
+                PixelOps.CeilingPixel,
+                Scale / Conv.IntToReal(CeilingDenominator)
+              );
             end;
           end if;
         end;
@@ -54,18 +54,24 @@ begin
 
       for Y: integer := WallTop to WallBottom - 1 do
         begin
-          const V: real := ((IntToReal(Y) + 0.5) - ProjectedTop) / ProjectedHeight;
-          Pixels[(Y * SafeWidth) + X] := WallTexel(Hit, V, WallHeight);
+          const V: real := ((Conv.IntToReal(Y) + 0.5) - ProjectedTop) / ProjectedHeight;
+          Pixels[(Y * SafeWidth) + X] := Textures.WallTexel(Hit, V, WallHeight);
         end;
       end for;
 
       for Y: integer := WallBottom to PixelHeight - 1 do
         begin
           const Denominator: integer := (2 * Y - PixelHeight) + 1;
-          var Floor: integer := Lit(FloorPixel, 1000.0);
+          var Floor: integer := PixelOps.Lit(PixelOps.FloorPixel, 1000.0);
           if Denominator > 0 then
             begin
-              Floor := ProjectFloorPixel(Value, Camera, CameraX, Scale / IntToReal(Denominator), Hit.Distance);
+              Floor := Textures.ProjectFloorPixel(
+                Value,
+                Camera,
+                CameraX,
+                Scale / Conv.IntToReal(Denominator),
+                Hit.Distance
+              );
             end;
           end if;
 
@@ -75,28 +81,38 @@ begin
     end;
   end for;
 
-  return FirstPersonScene(Width := SafeWidth, Height := SafeHeight, Pixels := Pixels, Depths := Depths);
+  return FirstPersonScene(
+    Width := SafeWidth,
+    Height := SafeHeight,
+    Pixels := Pixels,
+    Depths := Depths
+  );
 end function;
 
 // Draws sprites, the frame's animation effect, and the swing over one scene of the same state.
 public function ComposeFirstPersonGrid(
-  Value: FirstPersonVisibleState;
+  Value: Protocol.FirstPersonVisibleState;
   Scene: FirstPersonScene;
-  Effect: FirstPersonEffect
-): TuiCellGrid;
+  Effect: Sprites.FirstPersonEffect
+): Tui.TuiCellGrid;
 begin
   const SafeWidth: integer := Scene.Width;
   const SafeHeight: integer := Scene.Height;
   const PixelHeight: integer := SafeHeight * 2;
-  const Camera: FirstPersonCamera := FrameCamera(Value);
+  const Camera: Rays.FirstPersonCamera := Rays.FrameCamera(Value);
   var Pixels: array of integer := Scene.Pixels;
   const Depths: array of real := Scene.Depths;
   // Painter's order: far sprites first so nearer figures cover them.
-  var Remaining: array of Sprite := VisibleSprites(Value);
+  var Remaining: array of Sprites.Sprite := Sprites.VisibleSprites(Value);
   if Effect.FallenAhead then
     begin
-      Remaining.Push(Sprite(WorldX := IntToReal(FieldAheadX(Value)) + 0.5, WorldY := IntToReal(FieldAheadY(Value)) +
-                                                                                     0.5, HeightFraction := 0.9, Art := HostileArt(), Hostile := true));
+      Remaining.PushInPlace(
+        Sprites.Sprite(
+          WorldX := Conv.IntToReal(Sprites.FieldAheadX(Value)) + 0.5,
+          WorldY := Conv.IntToReal(Sprites.FieldAheadY(Value)) +
+          0.5, HeightFraction := 0.9, Art := Art.HostileArt(), Hostile := true
+        )
+      );
     end;
   end if;
 
@@ -105,7 +121,9 @@ begin
       var Farthest: integer := 0;
       for Index: integer := 1 to Remaining.Length() - 1 do
         begin
-          if SpriteDepth(Camera, Remaining[Index]) > SpriteDepth(Camera, Remaining[Farthest]) then
+          if Sprites.SpriteDepth(Camera, Remaining[Index]) >
+            Sprites.SpriteDepth(Camera, Remaining[Farthest])
+          then
             begin
               Farthest := Index;
             end;
@@ -113,31 +131,51 @@ begin
         end;
       end for;
 
-      Pixels := DrawSprite(Pixels, Depths, Camera, Remaining[Farthest], SafeWidth, PixelHeight, Effect);
-      Remaining := Remaining.Slice(0, Farthest)
-                     .Concat(Remaining.Slice(Farthest + 1, (Remaining.Length() - Farthest) - 1));
+      Pixels := Sprites.DrawSprite(
+        Pixels,
+        Depths,
+        Camera,
+        Remaining[Farthest],
+        SafeWidth,
+        PixelHeight,
+        Effect
+      );
+      Remaining := Remaining.Slice(
+        0,
+        Farthest
+      ).Concat(Remaining.Slice(Farthest + 1, (Remaining.Length() - Farthest) - 1));
     end;
   end while;
 
-  Pixels := DrawSwing(Pixels, SafeWidth, PixelHeight, Effect);
-  var Cells: array of TuiCell := [];
+  Pixels := Sprites.DrawSwing(Pixels, SafeWidth, PixelHeight, Effect);
+  var Cells: array of Tui.TuiCell := [];
   for Y: integer := 0 to SafeHeight - 1 do
     begin
       for X: integer := 0 to SafeWidth - 1 do
         begin
-          Cells.Push(HalfBlockCell(Pixels[((2 * Y) * SafeWidth) + X], Pixels[(((2 * Y) + 1) * SafeWidth) +
-                                                                             X]));
+          Cells.PushInPlace(
+            PixelOps.HalfBlockCell(
+              Pixels[((2 * Y) * SafeWidth) + X], Pixels[
+                (((2 * Y) + 1) * SafeWidth) +
+                X
+              ]
+            )
+          );
         end;
       end for;
     end;
   end for;
 
-  return TuiCellGrid.Create(SafeWidth, SafeHeight, Cells);
+  return Tui.TuiCellGrid.Create(SafeWidth, SafeHeight, Cells);
 end function;
 
 // Renders walls, floor, and upright sprites at two pixels per terminal cell.
-public function RenderFirstPersonGrid(Value: FirstPersonVisibleState; Width: integer; Height: integer): TuiCellGrid;
+public function RenderFirstPersonGrid(Value: Protocol.FirstPersonVisibleState; Width: integer; Height: integer): Tui.TuiCellGrid;
 begin
-  return ComposeFirstPersonGrid(Value, RenderFirstPersonScene(Value, Width, Height), NoFirstPersonEffect());
+  return ComposeFirstPersonGrid(
+    Value,
+    RenderFirstPersonScene(Value, Width, Height),
+    Sprites.NoFirstPersonEffect()
+  );
 end function;
 end unit;
