@@ -1,7 +1,7 @@
 // Verifies handshake, state transfer, movement, and disconnect over loopback TCP.
 program DungeonServerLoopbackTest;
 
-uses Dungeon.Test.Catalog as CatalogUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Routes as Routes, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as Hostiles, Dungeon.Interior as Interior, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Interaction as Interaction, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as Placement, Dungeon.World as World, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+uses Dungeon.Test.Catalog as CatalogUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Routes as Routes, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Interaction as Interaction, Dungeon.Items as ItemRules, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
 function TestConfig(WorldsRoot: string): ConfigUnit.ServerConfig;
 begin
@@ -108,7 +108,7 @@ procedure EnsureWorldRoot(Config: ConfigUnit.ServerConfig);
 begin
   Test.AssertTrue(EnsureDirectory('.temp-data'));
   Test.AssertTrue(EnsureDirectory(Config.WorldsRoot));
-  const Fixture: World.WorldSession := World.OpenWorld(
+  const Fixture: WorldUnit.WorldSession := WorldUnit.OpenWorld(
     Config.WorldsRoot,
     Config.WorldId,
     Config.WorldSeed,
@@ -130,7 +130,7 @@ begin
   const WorldsRoot: string := '.temp-data/server-loopback-' + Conv.IntToStr(Time.TimestampMillis());
   const Config: ConfigUnit.ServerConfig := TestConfig(WorldsRoot);
   EnsureWorldRoot(Config);
-  const Metadata: Terrain.WorldMetadata := Placement.NewWorldMetadata(
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
     Config.WorldId,
     Config.WorldSeed,
     4
@@ -330,7 +330,7 @@ begin
       when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
         panic('expected undiscovered exploration-map window');
     end case;
-    const InspectionWorld: World.WorldSession := World.OpenWorld(
+    const InspectionWorld: WorldUnit.WorldSession := WorldUnit.OpenWorld(
       WorldsRoot,
       Config.WorldId,
       Config.WorldSeed,
@@ -339,7 +339,7 @@ begin
     ).Unwrap();
     Test.AssertFalse(
       Fs.Exists(
-        World.WorldChunkPath(
+        WorldUnit.WorldChunkPath(
           InspectionWorld,
           Coordinates.ChunkCoordinate(
             X := Coordinates.ChunkForCoordinate(FarOriginX),
@@ -441,9 +441,9 @@ begin
     const EnteredRead: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
     Reader := EnteredRead.Reader;
     // Entry: the generated 31 by 21 spawn dungeon, at its start facing east with the exit behind.
-    const Map: Interior.InteriorMap := Routes.SpawnDungeonMap(Metadata);
+    const Map: InteriorUnit.InteriorMap := Routes.SpawnDungeonMap(Metadata);
     var Avoid: array of Coordinates.InteriorPosition := [];
-    for Hostile: Hostiles.HostilePlacement in Map.Hostiles do
+    for Hostile: HostileRules.HostilePlacement in Map.Hostiles do
       begin
         Avoid.PushInPlace(Hostile.Position);
       end;
@@ -468,7 +468,7 @@ begin
         );
         Test.AssertEquals('v', Entered.KnowledgeRows[Lateral.Y][Lateral.X]);
         Test.AssertEquals(
-          Interior.InteriorCellCode(Interior.InteriorCellAt(Map, Lateral).Unwrap()),
+          InteriorUnit.InteriorCellCode(InteriorUnit.InteriorCellAt(Map, Lateral).Unwrap()),
           Entered.Rows[Lateral.Y][Lateral.X]
         );
       end;
@@ -498,7 +498,7 @@ begin
     end case;
     // Walk up to the coin, inspect it from the field before, then step onto it and pick it up.
     const CoinField: Coordinates.InteriorPosition := Map.Items[0].Position;
-    const CoinId: string := Items.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 0);
+    const CoinId: string := ItemRules.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 0);
     const CoinRoute: array of Fixtures.RouteMove := Fixtures.RouteTo(
       Map,
       Routes.VisiblePose(Entered),
@@ -520,8 +520,8 @@ begin
     Reader := Answer.Reader;
     case Answer.Message of
       when Protocol.ServerMessage.Interaction(const Title, const Message):
-        Test.AssertEquals(Items.AncientCoinName, Title);
-        Test.AssertEquals(Items.AncientCoinDescription, Message);
+        Test.AssertEquals(ItemRules.AncientCoinName, Title);
+        Test.AssertEquals(ItemRules.AncientCoinDescription, Message);
       when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
         panic('expected item inspection before pickup');
     end case;
@@ -543,7 +543,7 @@ begin
     View := RequireFirstPerson(RequireState(Answer.Message));
     Test.AssertEquals(1, View.Inventory.Length());
     Test.AssertEquals(CoinId, View.Inventory[0].Id);
-    Test.AssertEquals(Items.AncientCoinName, View.Inventory[0].Name);
+    Test.AssertEquals(ItemRules.AncientCoinName, View.Inventory[0].Name);
     Test.AssertEquals('.', View.Rows[CoinField.Y][CoinField.X]);
     // The coin is gone from the field: picking up again finds no second item at the player's feet.
     Test.AssertFalse('Pick up' in View.Status);
@@ -596,7 +596,7 @@ begin
         );
         Answer := Ask(Client, Reader, Protocol.ClientMessage.StepFirstPerson(Direction), Token);
         Reader := Answer.Reader;
-        if Interior.InteriorCellAt(Map, Side).Unwrap() = Interior.InteriorCellKind.Wall then
+        if InteriorUnit.InteriorCellAt(Map, Side).Unwrap() = InteriorUnit.InteriorCellKind.Wall then
           begin
             case Answer.Message of
               when Protocol.ServerMessage.Rejected(const Code, const Message):
@@ -618,8 +618,8 @@ begin
     // Turn until a wall stands ahead: it offers no interaction and blocks a step.
     var Turns: integer := 0;
     while (
-      Interior.InteriorCellAt(Map, Routes.FieldAhead(View)).Unwrap() <>
-      Interior.InteriorCellKind.Wall
+      InteriorUnit.InteriorCellAt(Map, Routes.FieldAhead(View)).Unwrap() <>
+      InteriorUnit.InteriorCellKind.Wall
     ) and (Turns < 4) do
       begin
         Answer := Ask(
@@ -635,8 +635,8 @@ begin
     end while;
 
     Test.AssertTrue(
-      Interior.InteriorCellAt(Map, Routes.FieldAhead(View)).Unwrap() =
-      Interior.InteriorCellKind.Wall
+      InteriorUnit.InteriorCellAt(Map, Routes.FieldAhead(View)).Unwrap() =
+      InteriorUnit.InteriorCellKind.Wall
     );
     Answer := Ask(Client, Reader, Protocol.ClientMessage.Interact, Token);
     Reader := Answer.Reader;
@@ -934,7 +934,7 @@ begin
         Test.AssertEquals(Metadata.SpawnEntrance.Y, MapValue.WorldY);
         Test.AssertEquals(1, MapValue.Inventory.Length());
         Test.AssertEquals(
-          Items.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 0),
+          ItemRules.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 0),
           MapValue.Inventory[0].Id
         );
       when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
@@ -987,7 +987,7 @@ begin
     Test.AssertTrue(Net.Close(OutdoorRestartClient).Unwrap());
     Test.AssertTrue(Tasks.Wait(OutdoorRestartTask).Unwrap());
     Test.AssertTrue(Net.CloseListener(OutdoorRestartListener).Unwrap());
-    const SavedWorld: World.WorldSession := World.OpenWorld(
+    const SavedWorld: WorldUnit.WorldSession := WorldUnit.OpenWorld(
       Config.WorldsRoot,
       Config.WorldId,
       Config.WorldSeed,

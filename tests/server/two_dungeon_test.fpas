@@ -2,7 +2,7 @@
 // A deliberately edited but valid stored level proves that revisits read the file, not the generator.
 program TwoDungeonTest;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as Interior, Dungeon.Interior.Generation as Generation, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as Placement, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Math as Math, Std.Net as Net, Std.Path as Path, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Items as ItemRules, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as PlacementRules, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Math as Math, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
 // A second entrance site reachable on foot from the spawn entrance.
 type SecondSite = record
@@ -86,7 +86,7 @@ end function;
 
 // Picks an inner wall field next to a floor field, too far from the start to affect the sight rule.
 // Opening it keeps the level structurally valid but makes it differ from generated output.
-function EditableWall(Map: Interior.InteriorMap): array of Coordinates.InteriorPosition;
+function EditableWall(Map: InteriorUnit.InteriorMap): array of Coordinates.InteriorPosition;
 begin
   for Y: integer := 2 to Map.Height - 3 do
     begin
@@ -98,9 +98,12 @@ begin
             Y := Y + 1
           );
           if (
-            (Interior.InteriorCellAt(Map, Wall).Unwrap() = Interior.InteriorCellKind.Wall)
+            (InteriorUnit.InteriorCellAt(Map, Wall).Unwrap() = InteriorUnit.InteriorCellKind.Wall)
             and
-            (Interior.InteriorCellAt(Map, Below).Unwrap() = Interior.InteriorCellKind.Floor)
+            (
+              InteriorUnit.InteriorCellAt(Map, Below).Unwrap() =
+              InteriorUnit.InteriorCellKind.Floor
+            )
           )
             and
             ((Chebyshev(Wall, Map.Start) > 8) and (Chebyshev(Below, Map.Start) > 8))
@@ -117,7 +120,7 @@ begin
   panic('no editable wall in the second dungeon');
 end function;
 
-function RowsJson(Map: Interior.InteriorMap): string;
+function RowsJson(Map: InteriorUnit.InteriorMap): string;
 begin
   var Text: string := '"rows":[';
   for Y: integer := 0 to Map.Height - 1 do
@@ -125,7 +128,7 @@ begin
       var Row: string := '';
       for X: integer := 0 to Map.Width - 1 do
         begin
-          Row := Row + Interior.InteriorCellCode(Map.Cells[(Y * Map.Width) + X]);
+          Row := Row + InteriorUnit.InteriorCellCode(Map.Cells[(Y * Map.Width) + X]);
         end;
       end for;
 
@@ -145,7 +148,7 @@ end function;
 function ItemCount(State: GameState.GameState; Id: string): integer;
 begin
   var Count: integer := 0;
-  for Item: Items.GameItem in State.Items do
+  for Item: ItemRules.GameItem in State.Items do
     begin
       if Item.Id = Id then
         begin
@@ -169,21 +172,21 @@ begin
     Config.DungeonRegionChunks,
     Config.ChunkCacheLimit
   ).Unwrap();
-  const Metadata: Terrain.WorldMetadata := Placement.NewWorldMetadata(
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
     Config.WorldId,
     Config.WorldSeed,
     1
   ).Unwrap();
-  const First: Interior.InteriorMap := Routes.SpawnDungeonMap(Metadata);
+  const First: InteriorUnit.InteriorMap := Routes.SpawnDungeonMap(Metadata);
   const Second: SecondSite := FindSecondSite(Metadata);
   const SecondId: string := Identities.DungeonAreaId(Metadata, Second.Region);
-  const SecondMap: Interior.InteriorMap := Generation.GenerateDungeon(
+  const SecondMap: InteriorUnit.InteriorMap := Generation.GenerateDungeon(
     Metadata.Seed,
     Second.Region.X,
     Second.Region.Y,
     SecondId
   ).Unwrap();
-  const Coin: Items.ItemPlacement := First.Items[0];
+  const Coin: ItemRules.ItemPlacement := First.Items[0];
   const Edit: array of Coordinates.InteriorPosition := EditableWall(SecondMap);
   const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(
     Tasks.CreateCancellationSource()
@@ -249,18 +252,18 @@ begin
     1,
     32
   ).Unwrap();
-  const SecondPath: string := Path.Join([
+  const SecondPath: string := PathOps.Join([
     World.Directory,
     'dungeons',
     (Conv.IntToStr(Second.Region.X) + '_') + Conv.IntToStr(Second.Region.Y),
     '0.json'
   ]);
-  var Edited: Interior.InteriorMap := SecondMap;
-  Edited.Cells[(Edit[0].Y * Edited.Width) + Edit[0].X] := Interior.InteriorCellKind.Floor;
+  var Edited: InteriorUnit.InteriorMap := SecondMap;
+  Edited.Cells[(Edit[0].Y * Edited.Width) + Edit[0].X] := InteriorUnit.InteriorCellKind.Floor;
   const Stored: string := Fs.ReadText(SecondPath).Unwrap();
   Test.AssertTrue(RowsJson(SecondMap) in Stored);
   const EditedText: string := Stored.Replace(RowsJson(SecondMap), RowsJson(Edited));
-  Test.AssertTrue((Encoding.DecodeLevel(EditedText, World.Metadata, SecondId) is Ok(_)));
+  Test.AssertTrue(Encoding.DecodeLevel(EditedText, World.Metadata, SecondId) is Ok(_));
   Test.AssertTrue(Fs.WriteTextAtomic(SecondPath, EditedText).Unwrap());
   // After a restart, loading shows the edited field: the stored level is used, not regenerated.
   scope

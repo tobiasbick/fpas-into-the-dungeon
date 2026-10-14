@@ -1,7 +1,7 @@
 // The authoritative game state: creation, validation, and read-only queries of its parts.
 unit Dungeon.GameState;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as Hostiles, Dungeon.Interior as Interior, Dungeon.Items as ItemRules, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
 
 // Full health of a new player character; health never exceeds it.
 public const PlayerMaximumHealth: integer := 20;
@@ -12,7 +12,7 @@ public const MaximumInventoryItems: integer := 64;
 // The caller retains validated geometry; pure rules never load or generate it.
 public type AreaView = record
   public Metadata: Terrain.WorldMetadata;
-  public Interior: option of Interior.InteriorMap;
+  public Interior: option of InteriorUnit.InteriorMap;
 end record;
 
 // Authoritative player state retained by the server for one session.
@@ -30,7 +30,7 @@ public type GameState = record
   // Current player health, from 1 through PlayerMaximumHealth while a game is active.
   public Health: integer;
   // Every opponent of the world, including destroyed ones.
-  public Hostiles: array of Hostiles.GameHostile;
+  public Hostiles: array of HostileRules.GameHostile;
   // Dice generator state in 0 until RandomStateModulus; advancing it makes fights reproducible.
   public RandomState: integer;
 end record;
@@ -49,7 +49,7 @@ public function StandingHostileAt(State: GameState; AreaId: string; Position: Co
 begin
   for Index: integer := 0 to State.Hostiles.Length() - 1 do
     begin
-      const Hostile: Hostiles.GameHostile := State.Hostiles[Index];
+      const Hostile: HostileRules.GameHostile := State.Hostiles[Index];
       if ((Hostile.Health > 0) and (Hostile.AreaId = AreaId))
         and
         Coordinates.SamePosition(Hostile.Position, Position)
@@ -110,7 +110,7 @@ begin
 end function;
 
 // Overlays currently present dynamic objects on static interior geometry.
-public function InteriorVisibleCodeForState(Map: Interior.InteriorMap; State: GameState; Position: Coordinates.InteriorPosition): result of (string, string);
+public function InteriorVisibleCodeForState(Map: InteriorUnit.InteriorMap; State: GameState; Position: Coordinates.InteriorPosition): result of (string, string);
 begin
   if StandingHostileAt(State, State.AreaId, Position) >= 0 then
     begin
@@ -136,7 +136,7 @@ begin
     end;
   end for;
 
-  return Interior.InteriorVisibleCode(Map, Position);
+  return InteriorUnit.InteriorVisibleCode(Map, Position);
 end function;
 
 // Returns the outdoor coordinate only when the player currently occupies an outdoor area.
@@ -196,7 +196,7 @@ end function;
 
 // Returns the supplied current dungeon map, rejecting absent or mismatched geometry.
 // Geometry must already be validated by its owner; this helper performs no loading.
-public function CurrentInterior(View: AreaView; State: GameState): result of (Interior.InteriorMap, string);
+public function CurrentInterior(View: AreaView; State: GameState): result of (InteriorUnit.InteriorMap, string);
 begin
   if State.Area <> Coordinates.AreaKind.Dungeon then
     begin
@@ -362,14 +362,14 @@ begin
 
   for Index: integer := 0 to State.Hostiles.Length() - 1 do
     begin
-      const Hostile: Hostiles.GameHostile := State.Hostiles[Index];
+      const Hostile: HostileRules.GameHostile := State.Hostiles[Index];
       if (Hostile.Id = '') or not HasVisitedArea(State, Hostile.AreaId) then
         begin
           return Error('opponent identity or area is invalid');
         end;
       end if;
 
-      if (Hostile.Health < 0) or (Hostile.Health > Hostiles.HostileMaximumHealth(Hostile.Kind)) then
+      if (Hostile.Health < 0) or (Hostile.Health > HostileRules.HostileMaximumHealth(Hostile.Kind)) then
         begin
           return Error('opponent health is outside its range');
         end;
@@ -511,9 +511,9 @@ begin
       end case;
     end;
   end if;
-  const Map: Interior.InteriorMap := try CurrentInterior(View, State);
+  const Map: InteriorUnit.InteriorMap := try CurrentInterior(View, State);
   const Pose: Coordinates.FirstPersonPose := try FirstPersonPlayerPose(State);
-  if try Interior.InteriorCellAt(Map, Pose.Position) = Interior.InteriorCellKind.Wall then
+  if try InteriorUnit.InteriorCellAt(Map, Pose.Position) = InteriorUnit.InteriorCellKind.Wall then
     begin
       return Error('first-person player position must be traversable');
     end;
@@ -525,7 +525,9 @@ begin
         when ItemRules.ItemLocation.InInterior(const AreaId, const Position):
           if AreaId = State.AreaId then
             begin
-              if try Interior.InteriorCellAt(Map, Position) <> Interior.InteriorCellKind.Floor then
+              if try InteriorUnit.InteriorCellAt(Map, Position) <>
+                InteriorUnit.InteriorCellKind.Floor
+              then
                 begin
                   return Error('interior item must occupy an ordinary floor field');
                 end;
@@ -538,11 +540,13 @@ begin
     end;
   end for;
 
-  for Hostile: Hostiles.GameHostile in State.Hostiles do
+  for Hostile: HostileRules.GameHostile in State.Hostiles do
     begin
       if Hostile.AreaId = State.AreaId then
         begin
-          if try Interior.InteriorCellAt(Map, Hostile.Position) = Interior.InteriorCellKind.Wall then
+          if try InteriorUnit.InteriorCellAt(Map, Hostile.Position) =
+            InteriorUnit.InteriorCellKind.Wall
+          then
             begin
               return Error('opponent must occupy a traversable field');
             end;
