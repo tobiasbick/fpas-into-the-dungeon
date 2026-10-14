@@ -1,0 +1,395 @@
+// Full-terminal dashboard panels, severity colors and the isolated settings overlay.
+unit Dungeon.Server.Console.View;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Server.Logging as Logging, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Std.Conv as Conv, Std.Tui as Tui;
+
+function Fixed(Element: Tui.TuiElement; Width: integer; Height: integer): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeLayout(
+    Tui.TuiLayoutSettings.Default().WithFixedWidth(Width).WithFixedHeight(Height),
+    Element
+  );
+end function;
+
+// Only fixed ASCII chrome is converted to cells; arbitrary diagnostic text uses native labels.
+function Colored(Text: string; Role: Tui.TuiStyleRole): Tui.TuiElement;
+begin
+  var Cells: array of Tui.TuiCell := [];
+  for Index: integer := 0 to Text.Length() - 1 do
+    Cells.PushInPlace(Tui.TuiCell.Create(Text[Index], Role));
+  end for;
+
+  return Tui.TuiElementBuilders.MakeCellGrid(Tui.TuiCellGrid.Create(Text.Length(), 1, Cells));
+end function;
+
+function Pair(Name: string; Value: string): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeRowSpaced(
+    [
+      Colored(Name, Tui.TuiStyleRole.Disabled),
+      Tui.TuiElementBuilders.MakeLabel(LogUnit.SingleLine(Value))
+    ], 1
+  );
+end function;
+
+function SizedPanel(Title: string; Items: array of Tui.TuiElement; Width: integer; Height: integer): Tui.TuiElement;
+begin
+  return Fixed(
+    Tui.TuiElementBuilders.MakePanel(
+      Title,
+      [Fixed(Tui.TuiElementBuilders.MakeColumn(Items), Width - 2, Height - 2)]
+    ),
+    Width,
+    Height
+  );
+end function;
+
+function ConnectionText(State: ModelUnit.ConsoleModel): string;
+begin
+  if State.Connected then
+    return 'Connected';
+  end if;
+
+  return 'Not connected';
+end function;
+
+function ServerPanel(State: ModelUnit.ConsoleModel; Width: integer; Height: integer): Tui.TuiElement;
+begin
+  var Players: string := '0 / 1';
+  if State.Connected then
+    Players := '1 / 1';
+  end if;
+
+  return SizedPanel(
+    'SERVER', [
+      Pair('Status   ', State.ListenerStatus),
+      Pair('Port     ', Conv.IntToStr(State.Port)),
+      Pair('Uptime   ', LogUnit.UptimeText(State.Uptime)),
+      Pair('Players  ', Players),
+      Pair('Protocol ', Conv.IntToStr(Protocol.ProtocolVersion))
+    ], Width, Height
+  );
+end function;
+
+function SessionPanel(State: ModelUnit.ConsoleModel; Width: integer; Height: integer): Tui.TuiElement;
+begin
+  var World: string := '-';
+  var Area: string := '-';
+  var Progress: string := '-';
+  var Saved: string := '-';
+  var ProgressRole: Tui.TuiStyleRole := Tui.TuiStyleRole.Disabled;
+  case State.Dashboard of
+    when Some(const Status):
+      World := Status.WorldId;
+      if World = '' then
+        World := 'Not selected';
+      end if;
+
+      Area := Status.Area;
+      if Status.Active then
+        Progress := 'Saved';
+        ProgressRole := Tui.TuiStyleRole.GaugeFill;
+        if Status.Dirty then
+          Progress := 'Unsaved';
+          ProgressRole := Tui.TuiStyleRole.Warning;
+        end if;
+      end if;
+
+      Saved := LogUnit.ClockText(Status.LastSavedAt);
+    when None:
+      null;
+  end case;
+  var ConnectedRole: Tui.TuiStyleRole := Tui.TuiStyleRole.Disabled;
+  if State.Connected then
+    ConnectedRole := Tui.TuiStyleRole.GaugeFill;
+  end if;
+
+  return SizedPanel(
+    'SESSION', [
+      Tui.TuiElementBuilders.MakeRowSpaced(
+        [
+          Colored('Player    ', Tui.TuiStyleRole.Disabled),
+          Colored(ConnectionText(State), ConnectedRole)
+        ],
+        1
+      ),
+      Pair('World     ', World), Pair('Area      ', Area),
+      Tui.TuiElementBuilders.MakeRowSpaced(
+        [Colored('Progress  ', Tui.TuiStyleRole.Disabled), Colored(Progress, ProgressRole)],
+        1
+      ),
+      Pair('Last save ', Saved)
+    ], Width, Height
+  );
+end function;
+
+function WorldPanel(State: ModelUnit.ConsoleModel; Width: integer; Height: integer): Tui.TuiElement;
+begin
+  var Items: array of Tui.TuiElement := [Tui.TuiElementBuilders.MakeLabel('No world selected')];
+  case State.Dashboard of
+    when Some(const Status):
+      if Status.WorldId <> '' then
+        var Save: string := 'None';
+        if Status.SavePresent then
+          Save := 'Present';
+        end if;
+
+        Items := [
+          Pair('ID        ', Status.WorldId), Pair('Seed      ', Conv.IntToStr(Status.Seed)),
+          Pair('Entrances ', Conv.IntToStr(Status.RegionChunks) + ' chunks'),
+          Pair('Save      ', Save), Pair('Generator ', Conv.IntToStr(Status.Generator))
+        ];
+      end if;
+    when None:
+      null;
+  end case;
+
+  return SizedPanel('WORLD', Items, Width, Height);
+end function;
+
+function FilterButton(State: ModelUnit.ConsoleModel; Filter: LogUnit.LogFilter; Id: integer; Text: string): Tui.TuiElement;
+begin
+  var LabelText: string := Text;
+  if State.History.Filter = Filter then
+    LabelText := '[' + Text + ']';
+  end if;
+
+  return Tui.TuiElementBuilders.MakeButton(
+    Tui.TuiControlId.Create(Id),
+    LabelText,
+    Tui.TuiAction.Create(Id)
+  );
+end function;
+
+function Scrollbar(Count: integer; Offset: integer; Rows: integer): Tui.TuiElement;
+begin
+  var Thumb: integer := Rows;
+  var Position: integer := 0;
+  if Count > Rows then
+    Thumb := Rows * Rows div Count;
+    if Thumb < 1 then
+      Thumb := 1;
+    end if;
+
+    Position := Offset * (Rows - Thumb) div (Count - Rows);
+  end if;
+  var Cells: array of Tui.TuiCell := [];
+  for Index: integer := 0 to Rows - 1 do
+    if (Index >= Position) and (Index < Position + Thumb) then
+      Cells.PushInPlace(Tui.TuiCell.Create('█', Tui.TuiStyleRole.Accent));
+    else
+      Cells.PushInPlace(Tui.TuiCell.Create('│', Tui.TuiStyleRole.Disabled));
+    end if;
+  end for;
+
+  return Tui.TuiElementBuilders.MakeCellGrid(Tui.TuiCellGrid.Create(1, Rows, Cells));
+end function;
+
+function LogPanel(State: ModelUnit.ConsoleModel; Layout: LayoutUnit.DashboardLayout): Tui.TuiElement;
+begin
+  const History: LogUnit.LogHistory := LogUnit.ResolveOffset(State.History, Layout.LogRows);
+  const Entries := LogUnit.Matching(History);
+  var Lines: array of Tui.TuiElement := [];
+  for Value: Logging.ServerLogEvent in Entries do
+    var Level: string := 'INFO ';
+    var Role: Tui.TuiStyleRole := Tui.TuiStyleRole.Accent;
+    case LogUnit.Severity(Value) of
+      when LogUnit.LogFilter.Errors:
+        Level := 'ERROR';
+        Role := Tui.TuiStyleRole.Failure;
+      when LogUnit.LogFilter.Warnings:
+        Level := 'WARN ';
+        Role := Tui.TuiStyleRole.Warning;
+      when LogUnit.LogFilter.All, LogUnit.LogFilter.Info:
+        null;
+    end case;
+
+    Lines.PushInPlace(
+      Tui.TuiElementBuilders.MakeRowSpaced(
+        [
+          Colored(LogUnit.ClockText(Value.Timestamp), Tui.TuiStyleRole.Disabled),
+          Colored(Level, Role),
+          Tui.TuiElementBuilders.MakeLabel(Value.Text)
+        ], 2
+      )
+    );
+  end for;
+
+  if Entries.Length() = 0 then
+    Lines.PushInPlace(Tui.TuiElementBuilders.MakeLabel('No matching log entries'));
+  end if;
+  var Follow: string := 'Paused - End resumes following';
+  if History.Follow then
+    Follow := 'Following newest events';
+  end if;
+  const Toolbar := Tui.TuiElementBuilders.MakeRowSpaced(
+    [
+      FilterButton(State, LogUnit.LogFilter.All, 30, 'All'),
+      FilterButton(State, LogUnit.LogFilter.Info, 31, 'Info'),
+      FilterButton(State, LogUnit.LogFilter.Warnings, 32, 'Warnings'),
+      FilterButton(State, LogUnit.LogFilter.Errors, 33, 'Errors')
+    ], 1
+  );
+  const Scroll := Tui.TuiElementBuilders.MakeScroll(
+    Tui.TuiControlId.Create(20),
+    Tui.TuiPoint.Create(0, History.Offset), Tui.TuiAction.Create(20),
+    Tui.TuiElementBuilders.MakeColumn(Lines)
+  );
+  return Fixed(
+    Tui.TuiElementBuilders.MakePanel(
+      'LIVE LOG / UTC', [
+        Tui.TuiElementBuilders.MakeColumn([
+          Fixed(Toolbar, Layout.Width - 2, 1),
+          Fixed(Colored(Follow, Tui.TuiStyleRole.Disabled), Layout.Width - 2, 1),
+          Fixed(Colored('TIME      LEVEL   EVENT', Tui.TuiStyleRole.Disabled), Layout.Width - 2, 1),
+          Tui.TuiElementBuilders.MakeRow([
+            Fixed(Scroll, Layout.Width - 3, Layout.LogRows),
+            Scrollbar(Entries.Length(), History.Offset, Layout.LogRows)
+          ])
+        ])
+      ]
+    ), Layout.Width, Layout.LogHeight
+  );
+end function;
+
+function Settings(State: ModelUnit.ConsoleModel): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeOverlay(
+    'Defaults for new worlds', [
+      Tui.TuiElementBuilders.MakeColumn([
+        Tui.TuiElementBuilders.MakeLabel('Seed: -2147483648 through 2147483647'),
+        Tui.TuiElementBuilders.MakeInput(
+          Tui.TuiControlId.Create(10),
+          State.SeedText,
+          State.SeedCaret,
+          Tui.TuiAction.Create(10)
+        ),
+        Tui.TuiElementBuilders.MakeLabel('Entrance region: 1 through 16 chunks'),
+        Tui.TuiElementBuilders.MakeInput(
+          Tui.TuiControlId.Create(11),
+          State.RegionText,
+          State.RegionCaret,
+          Tui.TuiAction.Create(11)
+        ),
+        Tui.TuiElementBuilders.MakeLabel(State.SettingsError),
+        Tui.TuiElementBuilders.MakeButton(
+          Tui.TuiControlId.Create(2),
+          'Save defaults',
+          Tui.TuiAction.Create(2)
+        ),
+        Tui.TuiElementBuilders.MakeButton(
+          Tui.TuiControlId.Create(3),
+          'Cancel',
+          Tui.TuiAction.Create(3)
+        )
+      ])
+    ]
+  );
+end function;
+
+function Header(State: ModelUnit.ConsoleModel; Width: integer): Tui.TuiElement;
+begin
+  if Width < 60 then
+    return Colored('Dungeon server', Tui.TuiStyleRole.Accent);
+  end if;
+  var Status: string := 'RUNNING';
+  var Role := Tui.TuiStyleRole.GaugeFill;
+  if State.ListenerStatus = 'Starting server' then
+    Status := 'STARTING';
+    Role := Tui.TuiStyleRole.Warning;
+  end if;
+
+  if State.ListenerStatus = 'Stopped' then
+    Status := 'STOPPED';
+    Role := Tui.TuiStyleRole.Failure;
+  end if;
+
+  return Tui.TuiElementBuilders.MakeRow([
+    Fixed(Colored('INTO THE DUNGEON / Dungeon server', Tui.TuiStyleRole.Accent), Width - 8, 1),
+    Colored(Status, Role)
+  ]);
+end function;
+
+// Uses native panels/scroll routing and clips safely even at synthetic zero sizes.
+public function ViewDashboard(State: ModelUnit.ConsoleModel): Tui.TuiElement;
+begin
+  const Layout := LayoutUnit.ResolveLayout(State.Width, State.Height);
+  if (Layout.Width < 4) or (Layout.Height < 4) then
+    return Tui.TuiElementBuilders.MakeDesktop(
+      None,
+      [Tui.TuiElementBuilders.MakeLabel('Dungeon server')]
+    );
+  end if;
+  var Summary: Tui.TuiElement := Tui.TuiElementBuilders.MakeEmpty();
+  if Layout.Compact then
+    Summary := Fixed(
+      Tui.TuiElementBuilders.MakePanel(
+        'SERVER / SESSION / WORLD',
+        [Pair(ConnectionText(State), State.Status)]
+      ),
+      Layout.Width,
+      Layout.SummaryHeight
+    );
+  elsif Layout.Wide then
+    const Left: integer := (Layout.Width - 2) * 3 div 10;
+    const Right: integer := Left;
+    const Middle: integer := Layout.Width - Left - Right - 2;
+    Summary := Tui.TuiElementBuilders.MakeRowSpaced(
+      [
+        ServerPanel(State, Left, Layout.SummaryHeight),
+        SessionPanel(State, Middle, Layout.SummaryHeight),
+        WorldPanel(State, Right, Layout.SummaryHeight)
+      ], 1
+    );
+  else
+    Summary := Tui.TuiElementBuilders.MakeColumn([
+      ServerPanel(State, Layout.Width, 8), SessionPanel(State, Layout.Width, 8),
+      WorldPanel(State, Layout.Width, 8)
+    ]);
+  end if;
+  const Footer := Tui.TuiElementBuilders.MakeColumn([
+    Tui.TuiElementBuilders.MakeLabel('Tab Controls  Up/Down Scroll  End Follow  F3 Filter'),
+    Tui.TuiElementBuilders.MakeRowSpaced(
+      [
+        Tui.TuiElementBuilders.MakeButton(
+          Tui.TuiControlId.Create(1),
+          'Settings (F2)',
+          Tui.TuiAction.Create(1)
+        ),
+        Tui.TuiElementBuilders.MakeButton(
+          Tui.TuiControlId.Create(4),
+          'Stop server (Alt+X)',
+          Tui.TuiAction.Create(4)
+        )
+      ], 2
+    )
+  ]);
+  var Items: array of Tui.TuiElement := [
+    Fixed(
+      Tui.TuiElementBuilders.MakeColumn([
+        Fixed(Header(State, Layout.Width), Layout.Width, 1),
+        Summary, LogPanel(State, Layout), Fixed(Footer, Layout.Width, 2)
+      ]), Layout.Width, Layout.Height
+    )
+  ];
+  if State.SettingsOpen then
+    Items.PushInPlace(Settings(State));
+  end if;
+  var Focus: option of Tui.TuiControlId := None;
+  if State.FocusedControl > 0 then
+    Focus := Some(Tui.TuiControlId.Create(State.FocusedControl));
+  end if;
+
+  return Tui.TuiElementBuilders.MakeDesktop(Focus, Items);
+end function;
+
+// Cyan titles and restrained accents retain the game's dark Tui palette.
+public function DashboardPalette(): Tui.TuiPalette;
+begin
+  const Cyan := Tui.TuiStyle.FromColors(
+    Tui.TuiColor.FromRgb(70, 205, 225),
+    Tui.TuiColor.FromRgb(12, 17, 24)
+  );
+  return Tui.TuiPalette.Default() with Title := Cyan; Accent := Cyan; end with;
+end function;
+end unit;

@@ -68,7 +68,7 @@ intact across selection, failed operations, and start over. Run
 `fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` before handing back.
 Do not commit the new 14s implementation or push without another request.
 
-## Final verification
+## World-management verification (2026-10-06)
 
 - World catalog, protocol, client model/terminal input, console settings/status,
   real TCP lifecycle/reconnect, real client adapter and listener admission tests
@@ -128,6 +128,88 @@ ended the session for the day. The remaining symptoms have not yet been isolated
 The passing automated tests do not close this review. Keep 14s in review and
 retain this plan.
 
-- [ ] Reproduce and describe the remaining issues from the user's terminal test.
-- [ ] Correct the confirmed causes and add focused regression coverage.
+On 2026-10-14 the user identified the centered console dialog as the remaining
+presentation issue and approved the dashboard shown in the design preview.
+
+- [x] Reproduce and describe the remaining issues from the user's terminal test.
+- [x] Correct the confirmed causes and add focused regression coverage.
 - [ ] Repeat the terminal check and obtain the user's acceptance.
+
+## Dashboard implementation (approved 2026-10-14)
+
+Replace the centered console menu with the approved full-terminal dashboard.
+Keep protocol 14, world format 3, generator 6, save format 7 and configuration
+unchanged. FPAS is being edited concurrently by another agent: use an ignored
+game-local compiler/library snapshot for verification, and never write to FPAS.
+
+The server supplies typed session snapshots, separately from diagnostic text.
+Show real listener state/port, monotonic uptime, connection count, selected world,
+active area, unsaved progress, original seed/entrance region/generator, save-file
+presence and the last successful save observed in this connection. Earlier save
+times are unknown, never invented. UTC timestamps label the bounded live log.
+Log history is 128 entries; severities are Info, Warning and Error. Filters do
+not change history. Scrolling away pauses following; End or reaching the newest page resumes. Buffer eviction
+preserves the retained scroll anchor. Settings remain an overlay with existing
+atomic validation/storage. F2 opens settings, F3 cycles filters, Alt+X stops.
+At wide sizes the three summaries form one row; narrow sizes stack them, and
+short sizes use a compact summary to retain a usable log and footer.
+
+Intended layout, all within the existing server project:
+
+- Modify `Logging.fpas`: timestamped diagnostics and typed status payloads.
+- Add `Diagnostics.fpas`: project authoritative session snapshots and publish
+  them without parsing log strings or generating/loading world data.
+- Modify `Server.fpas`, `Session.fpas`, `Worlds.fpas`: publish committed status
+  and retain successful save time; rejected actions keep prior state.
+- Modify `Console.Model.fpas`: status, bounded log, filter and viewport state.
+- Add `Console.Log.fpas`, `Console.Layout.fpas`, `Console.View.fpas` and
+  `Console.Input.fpas`: focused history, responsive panels and keyboard handling.
+- Keep `Console.fpas` as the listener/background lifecycle entry point.
+- Add focused model, headless keyboard/layout and real TCP diagnostic tests;
+  update the existing console regression and docs.
+
+Ordered steps and completion proof:
+
+- [x] 1. Typed authoritative diagnostics and save timestamps, with positive,
+  rejected-operation, unselected/disconnected and save-failure coverage.
+- [x] 2. Bounded timestamped log, filters, clamped scrolling/follow and eviction
+  tests, including empty/unknown/long text and invalid offsets.
+- [x] 3. Full-terminal responsive panels, colors, keyboard routing and settings,
+  with actual headless input tests at wide, narrow, short and zero-size limits.
+- [x] 4. Real TCP event flow, formatting/checking and complete workspace suite;
+  synchronize product/architecture/README/roadmap and retain user acceptance.
+
+Dashboard verification covers three added test programs and the extended console
+regression:
+
+- `dashboard_model_test`: all filters, retained history, exact capacity and
+  eviction under paused/filtering views, unknown kinds, empty history, negative
+  and oversized offsets, Unicode/control characters, UTC/day boundaries, long
+  uptime, invalid tick values, full/closed queues, typed snapshots and disconnect.
+- `dashboard_ui_test`: the actual keyboard router (Tab, arrows, End, F2/F3 and
+  Escape), filter colors, native scroll viewport, full-width panel borders,
+  Unicode text, stale controls, modal isolation, long/invalid editor inputs,
+  wide/stacked/compact and 0x0 layouts, listener failure while settings are open,
+  and ignored failures belonging to another task.
+- `server_dashboard_network_test`: a real listener, missing selection, creation
+  at seed/region bounds, entry into a generated dungeon, actual save-file
+  presence, failed storage and overwrite rejection preserving dirty/time state,
+  observed successful saves, same/different-world selection, reconnect/load,
+  disconnect and owned listener shutdown.
+- `server_console_test`: existing atomic settings validation/storage preservation
+  plus an actual returned startup error. The console listener reports ordinary
+  `Result.Error` explicitly instead of relying on task-failure notifications.
+
+The host initializes the dashboard from the actual terminal dimensions and port.
+The renderer's exported test surface was inspected visually; this checks the
+implemented native TUI, with synthetic example values. Product acceptance of
+the running dashboard is still pending.
+
+Final dashboard verification on 2026-10-15: all 15 changed FPAS sources pass
+`fpas fmt --check`; `fpas check` passes for the full workspace; the complete
+`fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace` run passes **68/68
+programs, zero failures**. All commands used the ignored game-local release
+compiler/library snapshot with `--std-lib`; TCP tests ran outside the sandbox's
+socket restriction. No files were changed in the concurrently edited FPAS
+repository. This is the final result after adding both task-failure and ordinary
+returned-error startup coverage, and supersedes intermediate development failures.

@@ -1,15 +1,22 @@
 // Pure console presentation state plus explicit atomic server-default settings updates.
 unit Dungeon.Server.Console.Model;
 
-uses Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Logging as Logging, Std.Conv as Conv;
+uses Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Logging as Logging, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Std.Conv as Conv;
 
 // Retain a bounded history independent of incoming event frequency.
-public const MaximumConsoleLines: integer := 128;
+public const MaximumConsoleLines: integer := LogUnit.MaximumLogEntries;
 
 // The console edits creation defaults, never metadata of an existing world.
 public type ConsoleModel = record
   public ConfigPath: string;
-  public Lines: array of string;
+  public History: LogUnit.LogHistory;
+  // Typed authoritative state; absent while no player is connected.
+  public Dashboard: option of Logging.ServerDashboardStatus;
+  public ListenerStatus: string;
+  public Port: integer := 4040;
+  public Width: integer := 100;
+  public Height: integer := 26;
+  public Uptime: integer := 0;
   public Status: string;
   public Connected: boolean;
   public SettingsOpen: boolean;
@@ -30,10 +37,10 @@ begin
   const Region: string := Conv.IntToStr(Settings.DungeonRegionChunks);
   return ConsoleModel(
     ConfigPath := ConfigPath,
-    Lines := [],
+    History := LogUnit.EmptyHistory(), Dashboard := None, ListenerStatus := 'Starting server',
     Status := 'Starting server',
     Connected := false,
-    FocusedControl := 1,
+    FocusedControl := 20,
     SettingsOpen := false,
     Seed := Settings.Seed,
     RegionChunks := Settings.DungeonRegionChunks,
@@ -49,28 +56,43 @@ end function;
 public function ApplyConsoleLog(State: ConsoleModel; Value: Logging.ServerLogEvent): ConsoleModel;
 begin
   var Next: ConsoleModel := State;
-  var Lines: array of string := State.Lines.Concat([(Value.Kind + ': ') + Value.Text]);
-  if Lines.Length() > MaximumConsoleLines then
-    Lines := Lines.Slice(Lines.Length() - MaximumConsoleLines, MaximumConsoleLines);
-  end if;
+  Next.History := LogUnit.Append(
+    State.History,
+    Value,
+    LayoutUnit.ResolveLayout(State.Width, State.Height).LogRows
+  );
+  case Value.Snapshot of
+    when Some(const Dashboard):
+      Next.Dashboard := Some(Dashboard);
+      Next.Connected := true;
+    when None:
+      null;
+  end case;
 
-  Next.Lines := Lines;
   if Value.Kind = 'connected' then
     Next.Connected := true;
     Next.Status := Value.Text;
   end if;
 
   if Value.Kind = 'world' then
-    Next.Connected := true;
     Next.Status := Value.Text;
   end if;
 
   if Value.Kind = 'disconnected' then
     Next.Connected := false;
+    Next.Dashboard := None;
     Next.Status := 'Listening; no player connected';
   end if;
 
+  if Value.Kind = 'stopped' then
+    Next.ListenerStatus := 'Stopped';
+    Next.Status := 'Stopped';
+    Next.Connected := false;
+    Next.Dashboard := None;
+  end if;
+
   if Value.Kind = 'status' then
+    Next.ListenerStatus := Value.Text;
     Next.Status := Value.Text;
   end if;
 
@@ -105,7 +127,7 @@ begin
                   end;
                 when Ok(const Written):
                   begin
-                    return State with Seed := Seed; RegionChunks := RegionChunks; SettingsError := ''; SettingsOpen := false; FocusedControl := 1; end with;
+                    return State with Seed := Seed; RegionChunks := RegionChunks; SettingsError := ''; SettingsOpen := false; FocusedControl := 20; end with;
                   end;
               end case;
             end;

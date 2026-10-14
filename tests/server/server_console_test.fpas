@@ -1,7 +1,7 @@
 // Console log/status bounds and validated, non-destructive atomic creation-default updates.
 program ServerConsoleTest;
 
-uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Logging as Logging, Dungeon.World as WorldUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
+uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Logging as Logging, Dungeon.Server.Config as ConfigUnit, Dungeon.World as WorldUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
 
 function StaticUpdate(State: ModelUnit.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
 begin
@@ -54,8 +54,8 @@ begin
     );
   end for;
 
-  Test.AssertEquals(ModelUnit.MaximumConsoleLines, Model.Lines.Length());
-  Test.AssertEquals('rejected: 150', Model.Lines[ModelUnit.MaximumConsoleLines - 1]);
+  Test.AssertEquals(ModelUnit.MaximumConsoleLines, Model.History.Entries.Length());
+  Test.AssertEquals('150', Model.History.Entries[ModelUnit.MaximumConsoleLines - 1].Text);
   Model := ModelUnit.ApplyConsoleLog(
     Model,
     Logging.ServerLogEvent(Kind := 'disconnected', Text := 'Player disconnected')
@@ -123,4 +123,33 @@ begin
     -2147483648,
     RuntimeData.ReadServerDefaults(Runtime.Paths.ServerConfig).Unwrap().Seed
   );
+  // A normal Result.Error from startup must be surfaced independently of BackgroundFailed.
+  const FailedEvents: channel of Logging.ServerLogEvent := Tasks.CreateChannel(4);
+  const InvalidConfig := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := Some(FailedEvents),
+    WorldsRoot := Root + '-invalid', WorldId := 'main', WorldSeed := 12345,
+    DungeonRegionChunks := 4, ChunkCacheLimit := 32, MaximumViewWidth := 0, MaximumViewHeight := 24
+  );
+  const Stop := Tasks.CreateCancellationSource();
+  Test.AssertTrue(
+    ConsoleUnit.RunConsoleListener(
+      '127.0.0.1',
+      4040,
+      InvalidConfig,
+      Tasks.GetCancellationToken(Stop)
+    ) is Error(_)
+  );
+  const Stopped := Tasks.Receive(FailedEvents).Unwrap();
+  const Failure := Tasks.Receive(FailedEvents).Unwrap();
+  Test.AssertEquals('stopped', Stopped.Kind);
+  Test.AssertEquals('error', Failure.Kind);
+  Test.AssertTrue(Failure.Text <> '');
+  var FailedModel := ModelUnit.NewConsoleModel(Runtime.Paths.ServerConfig, Runtime.World);
+  FailedModel := ModelUnit.ApplyConsoleLog(FailedModel, Stopped);
+  FailedModel := ModelUnit.ApplyConsoleLog(FailedModel, Failure);
+  Test.AssertEquals('Stopped', FailedModel.Status);
+  Test.AssertEquals('Stopped', FailedModel.ListenerStatus);
+  Test.AssertFalse(FailedModel.Connected);
+  Test.AssertEquals(2, FailedModel.History.Entries.Length());
+  discard Tasks.CloseChannel(FailedEvents);
 end.

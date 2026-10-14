@@ -81,7 +81,9 @@ asks before discarding unsaved progress.
 fpas run apps/server/server.fpasprj -- --console
 ```
 
-The optional server console shows live logs/status and edits creation defaults
+The optional [server dashboard](docs/product/server-console.md) fills the terminal
+with Server, Session and World panels and a timestamped, scrollable live log.
+F3 cycles log filters; End resumes following; F2 edits creation defaults
 in `server.toml`. Seed values are signed 32-bit integers; entrance regions are
 1 through 16 chunks wide. Existing worlds retain their original parameters.
 The server admits one connected player at a time.

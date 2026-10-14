@@ -1,34 +1,60 @@
 // Bounded live server log events shared by headless operation and the optional console.
 unit Dungeon.Server.Logging;
 
-uses Std.Console as Console, Std.Tasks as Tasks;
+uses Std.Console as Console, Std.Tasks as Tasks, Std.Time as Time;
 
-// Kind is status, connected, disconnected, world, rejected, or error; text is display-only.
+// Authoritative diagnostic snapshot; no mutable gameplay or storage resources cross this seam.
+public type ServerDashboardStatus = record
+  public WorldId: string;
+  public Seed: integer;
+  public RegionChunks: integer;
+  public Generator: integer;
+  public Area: string;
+  public Active: boolean;
+  public Dirty: boolean;
+  // Presence is deliberately separate from compatibility; diagnostics never validate saves.
+  public SavePresent: boolean;
+  // UTC time of a successful save observed in this connection; zero means unknown.
+  public LastSavedAt: integer;
+end record;
+
+// Kind is status, connected, disconnected, world, rejected, error, stopped or snapshot.
+// Snapshot events carry typed state and never enter textual log history.
 public type ServerLogEvent = record
   public Kind: string;
   public Text: string;
+  // UTC emission time; zero is allowed for synthetic/legacy events.
+  public Timestamp: integer := 0;
+  public Snapshot: option of ServerDashboardStatus := None;
 end record;
 
-// Logging never blocks play: retain the newest events if the bounded console queue is full.
-public procedure LogServer(Logs: option of channel of ServerLogEvent; Kind: string; Text: string);
+// Sends a diagnostic without blocking; a full queue drops its oldest event.
+public procedure PublishServerEvent(Logs: option of channel of ServerLogEvent; Value: ServerLogEvent);
 begin
   case Logs of
     when None:
-      begin
-        Console.WriteLn((Kind + ': ') + Text);
-      end;
+      if Value.Snapshot is None then
+        Console.WriteLn((Value.Kind + ': ') + Value.Text);
+      end if;
     when Some(const Queue):
-      begin
-        case Tasks.TrySend(Queue, ServerLogEvent(Kind := Kind, Text := Text)) of
-          when Ok(const Queued):
-            if not Queued then
-              discard Tasks.TryReceive(Queue);
-              discard Tasks.TrySend(Queue, ServerLogEvent(Kind := Kind, Text := Text));
-            end if;
-          when Error(_):
-            null;
-        end case;
-      end;
+      case Tasks.TrySend(Queue, Value) of
+        when Ok(const Queued):
+          if not Queued then
+            discard Tasks.TryReceive(Queue);
+            discard Tasks.TrySend(Queue, Value);
+          end if;
+        when Error(_):
+          null;
+      end case;
   end case;
+end procedure;
+
+// Emits timestamped text through the same bounded non-blocking delivery policy.
+public procedure LogServer(Logs: option of channel of ServerLogEvent; Kind: string; Text: string);
+begin
+  PublishServerEvent(
+    Logs,
+    ServerLogEvent(Kind := Kind, Text := Text, Timestamp := Time.TimestampMillis())
+  );
 end procedure;
 end unit;

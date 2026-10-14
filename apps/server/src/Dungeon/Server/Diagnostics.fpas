@@ -1,0 +1,51 @@
+// Projects committed session facts into console snapshots without reading save contents.
+unit Dungeon.Server.Diagnostics;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Server.Logging as Logging, Dungeon.Server.Session as SessionUnit, Dungeon.World.Savegame as Savegame, Std.Fs as Fs, Std.Tasks as Tasks;
+
+// Snapshot creation performs only a save-file presence check; it never loads or generates data.
+public function SessionStatus(Session: SessionUnit.ServerSession): Logging.ServerDashboardStatus;
+begin
+  var Status: Logging.ServerDashboardStatus := Logging.ServerDashboardStatus(
+    WorldId := '', Seed := 0, RegionChunks := 0, Generator := 0,
+    Area := 'World selection', Active := false, Dirty := false,
+    SavePresent := false, LastSavedAt := 0
+  );
+  if not Session.WorldSelected then
+    return Status;
+  end if;
+
+  Status.WorldId := Session.World.Metadata.Id;
+  Status.Seed := Session.World.Metadata.Seed;
+  Status.RegionChunks := Session.World.Metadata.DungeonRegionChunks;
+  Status.Generator := Session.World.Metadata.GeneratorVersion;
+  Status.SavePresent := Fs.IsFile(Savegame.SaveGamePath(Session.World));
+  Status.LastSavedAt := Session.LastSavedAt;
+  case Session.State of
+    when Some(const State):
+      Status.Active := true;
+      Status.Dirty := Session.Dirty;
+      if State.Area = Coordinates.AreaKind.Dungeon then
+        Status.Area := Identities.GeneratedDungeonLabel;
+      else
+        Status.Area := Session.World.Metadata.OutdoorAreaLabel;
+      end if;
+    when None:
+      null;
+  end case;
+
+  return Status;
+end function;
+
+// Publishes accepted session facts separately from text; headless mode has no extra output.
+public procedure PublishSessionStatus(Logs: option of channel of Logging.ServerLogEvent; Session: SessionUnit.ServerSession);
+begin
+  if Logs is Some(_) then
+    Logging.PublishServerEvent(
+      Logs, Logging.ServerLogEvent(
+        Kind := 'snapshot', Text := '', Snapshot := Some(SessionStatus(Session))
+      )
+    );
+  end if;
+end procedure;
+end unit;

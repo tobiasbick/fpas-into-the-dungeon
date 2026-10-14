@@ -1,0 +1,284 @@
+// Real headless keyboard routing, responsive panels, modal guards and small-terminal clipping.
+program DashboardUiTest;
+
+uses Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Dungeon.Server.Console.View as ViewUnit, Dungeon.Server.Logging as Logging, Dungeon.RuntimeData as RuntimeData, Std.Console as Console, Std.Conv as Conv, Std.Fs as Fs, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Contains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Y: integer := 0 to Snapshot.Height - 1 do
+    if Text in Snapshot.LineAt(Y) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function Key(Kind: Tui.TuiKeyKind): Console.KeyEvent;
+begin
+  return Console.KeyEvent(
+    kind := Kind,
+    ch := '',
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+end function;
+
+function Press(App: Tui.TuiApplication; Model: ModelUnit.ConsoleModel; Kind: Tui.TuiKeyKind): ModelUnit.ConsoleModel;
+begin
+  App.InjectKeyForTest(Key(Kind));
+  return App.RunIterations(
+    Model,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+end function;
+
+begin
+  const Settings := RuntimeData.ServerWorldConfig(
+    Id := 'main',
+    Seed := 12345,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 64,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 120
+  );
+  var Model := ModelUnit.NewConsoleModel('', Settings) with Width := 144; Height := 45; Port := 4040; Uptime := 754000; end with;
+
+  Model := ModelUnit.ApplyConsoleLog(
+    Model,
+    Logging.ServerLogEvent(Kind := 'status', Text := 'Listening', Timestamp := 72000000)
+  );
+  const Dashboard := Logging.ServerDashboardStatus(
+    WorldId := 'main', Seed := 12345, RegionChunks := 4, Generator := 6,
+    Area := 'Forgotten dungeon', Active := true, Dirty := true, SavePresent := true,
+    LastSavedAt := 72489000
+  );
+  Model := ModelUnit.ApplyConsoleLog(
+    Model,
+    Logging.ServerLogEvent(Kind := 'snapshot', Text := '', Snapshot := Some(Dashboard))
+  );
+  for Index: integer := 0 to 90 do
+    var Kind: string := 'world';
+    if Index mod 7 = 1 then
+      Kind := 'rejected';
+    end if;
+
+    if Index mod 7 = 2 then
+      Kind := 'error';
+    end if;
+
+    Model := ModelUnit.ApplyConsoleLog(
+      Model,
+      Logging.ServerLogEvent(
+        Kind := Kind,
+        Text := 'Event ' + Conv.IntToStr(Index),
+        Timestamp := 72000000 + Index * 1000
+      )
+    );
+  end for;
+
+  Model := ModelUnit.ApplyConsoleLog(
+    Model,
+    Logging.ServerLogEvent(Kind := 'world', Text := 'Unicode München 界 é', Timestamp := 72200000)
+  );
+  const App := Tui.TuiApplication.OpenForTestWithPalette(
+    Tui.TuiSize.Create(144, 45),
+    ViewUnit.DashboardPalette()
+  );
+  Model := App.RunIterations(
+    Model,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  var Screen := App.SurfaceSnapshot();
+  for Title: string in [
+    'SERVER',
+    'SESSION',
+    'WORLD',
+    'LIVE LOG / UTC',
+    'Forgotten dungeon',
+    'Unsaved',
+    'Event 90',
+    'Unicode München',
+    'Settings (F2)',
+    'Stop server (Alt+X)'
+  ] do
+    Test.AssertTrue(Contains(Screen, Title));
+  end for;
+
+  Test.AssertTrue('RUNNING' in Screen.LineAt(0));
+  Test.AssertTrue(Screen.CellAt(41, 3).Glyph = '│');
+  Test.AssertTrue(Screen.CellAt(142, 13).Glyph = '│');
+  Test.AssertTrue('SERVER' in Screen.LineAt(1));
+  Test.AssertTrue('SESSION' in Screen.LineAt(1));
+  Test.AssertTrue('WORLD' in Screen.LineAt(1));
+  Test.AssertTrue('Stop server' in Screen.LineAt(44));
+  // Retain an actual runtime rendering for visual review, not a hand-drawn mock.
+  var Text: string := '';
+  for Y: integer := 0 to Screen.Height - 1 do
+    Text := Text + Screen.LineAt(Y) + string.Chr(10);
+  end for;
+
+  discard Fs.WriteText('.temp-data/dashboard-preview.txt', Text).Unwrap();
+  var Colors: string := '';
+  for Cell: Tui.TuiCell in Screen.Cells do
+    const Style: Tui.TuiStyle := case Cell.ConcreteStyle of
+      when Some(const Value): Value;
+      when None: ViewUnit.DashboardPalette().ForRole(Cell.Role);
+    end case;
+    Colors := Colors + Conv.IntToStr(Style.Foreground.Red) + ',' +
+      Conv.IntToStr(Style.Foreground.Green) + ',' + Conv.IntToStr(Style.Foreground.Blue) + ';' +
+      Conv.IntToStr(Style.Background.Red) + ',' + Conv.IntToStr(Style.Background.Green) + ',' +
+      Conv.IntToStr(Style.Background.Blue) + string.Chr(10);
+  end for;
+
+  discard Fs.WriteText('.temp-data/dashboard-preview-colors.txt', Colors).Unwrap();
+  Model := Press(App, Model, Tui.TuiKeyKind.Up);
+  Test.AssertFalse(Model.History.Follow);
+  const Offset := Model.History.Offset;
+  Model := ModelUnit.ApplyConsoleLog(
+    Model,
+    Logging.ServerLogEvent(Kind := 'world', Text := 'Paused new event', Timestamp := 72200000)
+  );
+  Test.AssertEquals(Offset, Model.History.Offset);
+  Model := Press(App, Model, Tui.TuiKeyKind.EndKey);
+  Test.AssertTrue(Model.History.Follow);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Paused new event'));
+  Model := Press(App, Model, Tui.TuiKeyKind.F3);
+  Test.AssertTrue(Model.History.Filter = LogUnit.LogFilter.Info);
+  Model := Press(App, Model, Tui.TuiKeyKind.F3);
+  Test.AssertTrue(Model.History.Filter = LogUnit.LogFilter.Warnings);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'WARN'));
+  Test.AssertFalse(Contains(App.SurfaceSnapshot(), 'ERROR'));
+  Model := Press(App, Model, Tui.TuiKeyKind.F2);
+  Test.AssertTrue(Model.SettingsOpen);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Defaults for new worlds'));
+  const Filter := Model.History.Filter;
+  Model := Press(App, Model, Tui.TuiKeyKind.F3);
+  Test.AssertTrue(Model.History.Filter = Filter);
+  Model := Press(App, Model, Tui.TuiKeyKind.Escape);
+  Test.AssertFalse(Model.SettingsOpen);
+  Model := Press(App, Model, Tui.TuiKeyKind.Tab);
+  Test.AssertTrue(Model.FocusedControl <> 20);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  const OldSeed := Model.SeedText;
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model,
+    Tui.TuiMsg.TextChanged(Tui.TuiControlId.Create(10), Tui.TuiAction.Create(10), '999', 3),
+    Cmd
+  );
+  Test.AssertEquals(OldSeed, Model.SeedText);
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model,
+    Tui.TuiMsg.Action(Tui.TuiControlId.Create(30), Tui.TuiAction.Create(33)),
+    Cmd
+  );
+  Test.AssertTrue(Model.History.Filter = Filter);
+  const OldOffset := Model.History.Offset;
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model,
+    Tui.TuiMsg.ScrollChanged(
+      Tui.TuiControlId.Create(99),
+      Tui.TuiAction.Create(20),
+      Tui.TuiPoint.Create(0, 0)
+    ),
+    Cmd
+  );
+  Test.AssertEquals(OldOffset, Model.History.Offset);
+  Model := ConsoleUnit.UpdateServerConsole(Model, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.F2)), Cmd);
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model,
+    Tui.TuiMsg.TextChanged(Tui.TuiControlId.Create(10), Tui.TuiAction.Create(10), 'abc', -1),
+    Cmd
+  );
+  Test.AssertEquals(OldSeed, Model.SeedText);
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model,
+    Tui.TuiMsg.TextChanged(
+      Tui.TuiControlId.Create(10),
+      Tui.TuiAction.Create(10),
+      'x'.RepeatStr(33),
+      33
+    ),
+    Cmd
+  );
+  Test.AssertEquals(OldSeed, Model.SeedText);
+  App.Close();
+  const BeforeFailure := Model.ListenerStatus;
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model,
+    Tui.TuiMsg.BackgroundFailed(99, Tasks.TaskFailureKind.RuntimeError, 'ignored task', 0, 0, 0),
+    Cmd
+  );
+  Test.AssertEquals(BeforeFailure, Model.ListenerStatus);
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model,
+    Tui.TuiMsg.BackgroundFailed(
+      1,
+      Tasks.TaskFailureKind.RuntimeError,
+      'Port already in use',
+      0,
+      0,
+      0
+    ), Cmd
+  );
+  Test.AssertEquals('Stopped', Model.ListenerStatus);
+  Test.AssertEquals('Stopped', Model.Status);
+  Test.AssertFalse(Model.Connected);
+  Test.AssertTrue(Model.Dashboard is None);
+  Test.AssertEquals(
+    'Port already in use',
+    Model.History.Entries[Model.History.Entries.Length() - 1].Text
+  );
+  Test.AssertTrue(Model.SettingsOpen);
+  Model := ConsoleUnit.UpdateServerConsole(Model, Tui.TuiMsg.QuitRequested, Cmd);
+  const StoppedApp := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(144, 45));
+  Model := StoppedApp.RunIterations(
+    Model,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  Test.AssertTrue(Contains(StoppedApp.SurfaceSnapshot(), 'STOPPED'));
+  Test.AssertTrue(Contains(StoppedApp.SurfaceSnapshot(), 'Not connected'));
+  StoppedApp.Close();
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(80, 40),
+    Tui.TuiSize.Create(99, 32),
+    Tui.TuiSize.Create(100, 18),
+    Tui.TuiSize.Create(80, 24),
+    Tui.TuiSize.Create(40, 12),
+    Tui.TuiSize.Create(4, 4),
+    Tui.TuiSize.Create(1, 1),
+    Tui.TuiSize.Create(0, 0)
+  ] do
+    const Tiny := Tui.TuiApplication.OpenForTest(Size);
+    var Small := ConsoleUnit.UpdateServerConsole(
+      Model with SettingsOpen := false; FocusedControl := 20; end with,
+      Tui.TuiMsg.Resize(Size),
+      Cmd
+    );
+    Small := Tiny.RunIterations(
+      Small,
+      ConsoleUnit.UpdateServerConsole,
+      ConsoleUnit.ViewServerConsole,
+      0,
+      0
+    );
+    Test.AssertEquals(Size.Width, Tiny.SurfaceSnapshot().Width);
+    if Size.Width >= 40 then
+      Test.AssertTrue(Contains(Tiny.SurfaceSnapshot(), 'LIVE LOG'));
+      Test.AssertTrue(Contains(Tiny.SurfaceSnapshot(), 'Stop server'));
+    end if;
+
+    Tiny.Close();
+  end for;
+end.

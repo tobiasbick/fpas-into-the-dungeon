@@ -372,12 +372,11 @@ server-owned. The stage is split so each slice stays reviewable: 14a builds the
 infrastructure, 14s adds world management and the server console, 14b adds
 contents, then 13b adds progression before 14c adds deeper levels.
 
-### 14a. Generated dungeons — IN REVIEW
+### 14a. Generated dungeons — DONE
 
 - [x] Design entrance sites, the area view, the dungeon generator, and
   persistence before implementation in
-  [generated dungeons](architecture/generated-dungeons.md), with a step-by-step
-  [implementation plan](plans/14a-generated-dungeons.md).
+  [generated dungeons](architecture/generated-dungeons.md).
   The [level storage contract](architecture/dungeon-level-storage.md) fixes
   file schema, final interfaces, error classes, and transition ordering.
 - [x] Place at most one ordinary deterministic entrance per entrance region on
@@ -425,12 +424,11 @@ contents, then 13b adds progression before 14c adds deeper levels.
 - [x] Correct false dark screen-edge fields by including partly visible fields
   at the sight cone's edges. Cover all four facings and multiple terminal widths;
   the user confirmed the rendering in the running game on 2026-10-06.
-- [ ] Review the generated-dungeon slice with the user and obtain explicit
+- [x] Review the generated-dungeon slice with the user and obtain explicit
   acceptance.
 
 The rendering correction passed `fpas check` and the complete workspace suite
-(56/56 tests). Its visual review is complete; final acceptance of the complete
-14a slice is still pending.
+(56/56 tests). The user accepted the complete 14a slice on 2026-10-14.
 
 Dungeon names, further opponent kinds, loot tables, and consumables belong to
 14b; stairs and deeper levels to 14c.
@@ -456,8 +454,10 @@ Dungeon names, further opponent kinds, loot tables, and consumables belong to
   incompatible selection leaves world selection available and shows the
   reason; storage I/O failures are reported separately, never treated as a
   missing world. The server still admits only one player at a time.
-- [x] `dungeon-server --console` shows a live log (connections, created and loaded
-  worlds, rejected requests, errors), a status line, and a settings view. The
+- [x] `dungeon-server --console` fills the terminal with Server, Session and World
+  panels, a bounded UTC live log (connections, created and loaded worlds,
+  rejected requests, errors), severity filters, scrolling/follow and shortcuts.
+  Typed server snapshots provide real session and save status. The
   settings view edits the server defaults such as the entrance region size and
   later the LLM connection; it validates each value and writes `server.toml`.
   World parameters changed there apply to new worlds only. Without `--console`
@@ -470,12 +470,18 @@ Implementation and verification are tracked in
 seeds and entrance regions of 1 through 16 chunks. Catalogs are strict bounded
 pages with a transport byte budget; inspecting them never generates content.
 Formatting and workspace checking pass; the complete workspace suite passed
-65/65 test programs with positive, negative, and edge-case coverage on
-2026-10-06. The start-menu backdrop is retained for the current terminal size,
+68/68 test programs with positive, negative, and edge-case coverage on
+2026-10-15. The start-menu backdrop is retained for the current terminal size,
 so focus navigation no longer regenerates it; the regression covers resize and
 return from gameplay. The feature remains in review until accepted.
-The user's latest terminal test on 2026-10-06 still found unresolved behavior;
-reproduction and correction are the next steps recorded in the plan.
+The user approved a full-terminal dashboard on 2026-10-14; its implementation
+was verified on 2026-10-15. It replaces the
+centered menu with Server, Session and World panels, a large timestamped,
+scrollable/filterable live log, and a shortcut footer. Settings remain an
+overlay. Typed server snapshots supply real status; responsive layouts and
+positive, negative and boundary tests are tracked in the 14s plan. Startup
+errors, failed saves, reconnects, native keyboard routing and very small windows
+are covered. Terminal acceptance of the running dashboard remains open.
 
 ### 14b. Dungeon contents — LATER
 

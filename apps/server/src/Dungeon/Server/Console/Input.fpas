@@ -1,0 +1,171 @@
+// Dashboard control validation, log navigation and modal settings input.
+unit Dungeon.Server.Console.Input;
+
+uses Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Conv as Conv, Std.Time as Time, Std.Tui as Tui;
+
+function OpenSettings(State: ModelUnit.ConsoleModel): ModelUnit.ConsoleModel;
+begin
+  const Seed := Conv.IntToStr(State.Seed);
+  const Region := Conv.IntToStr(State.RegionChunks);
+  return State with SettingsOpen := true; FocusedControl := 10; SettingsError := ''; SeedText := Seed; SeedCaret := Seed.Length(); RegionText := Region; RegionCaret := Region.Length(); end with;
+end function;
+
+// Ignores stale/invalid control events and keeps dashboard commands outside the settings modal.
+public function UpdateDashboard(State: ModelUnit.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
+begin
+  Cmd.Set(Tui.TuiCmd.NoCommand);
+  const Rows := LayoutUnit.ResolveLayout(State.Width, State.Height).LogRows;
+  case Msg of
+    when Tui.TuiMsg.Started:
+      Cmd.RequestTick(1000);
+    when Tui.TuiMsg.Tick(const Delta):
+      Cmd.RequestTick(1000);
+      if (Delta >= 0) and (Delta <= 9223372036854775807 - State.Uptime) then
+        return State with Uptime := State.Uptime + Delta; end with;
+      end if;
+    when Tui.TuiMsg.Resize(const Size):
+      const Layout := LayoutUnit.ResolveLayout(Size.Width, Size.Height);
+      return State with Width := Layout.Width; Height := Layout.Height; History := LogUnit.ResolveOffset(
+        State.History,
+        Layout.LogRows
+      ); end with;
+    when Tui.TuiMsg.FocusChanged(const Previous, const Current):
+      case Current of
+        when Some(const Id):
+          if State.SettingsOpen then
+            if (Id.Value = 10) or (Id.Value = 11) or (Id.Value = 2) or (Id.Value = 3) then
+              return State with FocusedControl := Id.Value; end with;
+            end if;
+          else
+            if (Id.Value = 20) or ((Id.Value >= 30) and (Id.Value <= 33)) or (Id.Value = 1)
+              or
+              (Id.Value = 4)
+            then
+              return State with FocusedControl := Id.Value; end with;
+            end if;
+          end if;
+        when None:
+          null;
+      end case;
+    when Tui.TuiMsg.Action(const Source, const Action):
+      if Source.Value <> Action.Value then
+        return State;
+      end if;
+
+      if State.SettingsOpen then
+        if Action.Value = 2 then
+          return ModelUnit.StoreConsoleSettings(State);
+        end if;
+
+        if Action.Value = 3 then
+          return State with SettingsOpen := false; FocusedControl := 20; end with;
+        end if;
+      else
+        if Action.Value = 1 then
+          return OpenSettings(State);
+        end if;
+
+        if Action.Value = 4 then
+          Cmd.Set(Tui.TuiCmd.Quit);
+        end if;
+
+        if (Action.Value >= 30) and (Action.Value <= 33) then
+          var Filter := LogUnit.LogFilter.All;
+          if Action.Value = 31 then
+            Filter := LogUnit.LogFilter.Info;
+          end if;
+
+          if Action.Value = 32 then
+            Filter := LogUnit.LogFilter.Warnings;
+          end if;
+
+          if Action.Value = 33 then
+            Filter := LogUnit.LogFilter.Errors;
+          end if;
+
+          return State with History := LogUnit.ChangeFilter(State.History, Filter, Rows); end with;
+        end if;
+      end if;
+    when Tui.TuiMsg.ScrollChanged(const Source, const Action, const Offset):
+      if not State.SettingsOpen and (Source.Value = 20) and (Action.Value = 20) and (Offset.X = 0) then
+        var History := LogUnit.Scroll(State.History, Offset.Y, Rows);
+        const Latest := LogUnit.FollowLatest(History, Rows);
+        if History.Offset = Latest.Offset then
+          History := Latest;
+        end if;
+
+        return State with History := History; end with;
+      end if;
+    when Tui.TuiMsg.TextChanged(const Source, const Action, const Text, const Caret):
+      if not State.SettingsOpen or (Text.Length() > 32) or (Caret < 0) or (Caret > Text.Length())
+        or
+        (Source.Value <> Action.Value)
+      then
+        return State;
+      end if;
+
+      if Source.Value = 10 then
+        return State with SeedText := Text; SeedCaret := Caret; end with;
+      end if;
+
+      if Source.Value = 11 then
+        return State with RegionText := Text; RegionCaret := Caret; end with;
+      end if;
+    when Tui.TuiMsg.Key(const Key):
+      const KeyEvent: Console.KeyEvent := Key;
+      if (KeyEvent.kind = Tui.TuiKeyKind.Character)
+        and
+        (
+          (KeyEvent.ctrl and ((KeyEvent.ch = 'c') or (KeyEvent.ch = 'C')))
+          or
+          (KeyEvent.alt and ((KeyEvent.ch = 'x') or (KeyEvent.ch = 'X')))
+        )
+      then
+        Cmd.Set(Tui.TuiCmd.Quit);
+      end if;
+
+      if State.SettingsOpen then
+        if KeyEvent.kind = Tui.TuiKeyKind.Escape then
+          return State with SettingsOpen := false; FocusedControl := 20; end with;
+        end if;
+      else
+        if KeyEvent.kind = Tui.TuiKeyKind.F2 then
+          return OpenSettings(State);
+        end if;
+
+        if KeyEvent.kind = Tui.TuiKeyKind.F3 then
+          return State with History := LogUnit.ChangeFilter(
+            State.History,
+            LogUnit.NextFilter(State.History.Filter),
+            Rows
+          ); end with;
+        end if;
+
+        if KeyEvent.kind = Tui.TuiKeyKind.EndKey then
+          return State with History := LogUnit.FollowLatest(State.History, Rows); end with;
+        end if;
+      end if;
+    when Tui.TuiMsg.BackgroundFailed(const Id, const Kind, const Message, const Code, const Line, const Column):
+      if Id = 1 then
+        return ModelUnit.ApplyConsoleLog(
+          State with ListenerStatus := 'Stopped'; Status := 'Stopped'; Connected := false; Dashboard := None; end with,
+          Logging.ServerLogEvent(
+            Kind := 'error',
+            Text := Message,
+            Timestamp := Time.TimestampMillis()
+          )
+        );
+      end if;
+    when Tui.TuiMsg.QuitRequested:
+      if State.SettingsOpen then
+        return State with SettingsOpen := false; FocusedControl := 20; end with;
+      end if;
+
+      Cmd.Set(Tui.TuiCmd.Quit);
+    when Tui.TuiMsg.Pointer(_), Tui.TuiMsg.TextAreaChanged(_, _, _, _, _), Tui.TuiMsg.CheckChanged(_, _, _), Tui.TuiMsg.SelectionChanged(_, _, _), Tui.TuiMsg.MenuChanged(_, _, _):
+      null;
+  end case;
+
+  return State;
+end function;
+end unit;

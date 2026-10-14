@@ -71,7 +71,13 @@ these projects.
   replies, turn and transition commits (`Replies`), message handling
   (`Handling`), and the mapping of typed storage failures to stable rejection
   codes (`Failures`), world lifecycle (`Worlds`), bounded diagnostics (`Logging`)
-  and optional console/settings (`Console`, `Console.Model`). `Session` retains
+  and optional dashboard/settings (`Console`). `Diagnostics` projects committed
+  session facts into typed snapshots, separately from timestamped log text.
+  The console submodules own presentation/settings state (`Model`), bounded log
+  filtering and scroll anchors (`Log`), responsive dimensions (`Layout`), native
+  panels and settings overlays (`View`), and validated keyboard events (`Input`).
+  The facade owns only the cancellable listener subscription and event inbox.
+  `Session` retains
   the current interior map and builds area views from it. Entry opens the target
   level through the world layer; loading
   installs the already validated view returned by the world layer.
@@ -186,4 +192,6 @@ and ownership rules.
   the canonical spatial terminology and presentation rules. The
   [client UI](../product/client-ui.md) document defines the shared terminal
   presentation and interaction shell.
+- The [server console](../product/server-console.md) describes the optional
+  full-terminal administration dashboard, log controls and creation defaults.
 - `docs/architecture` describes the system structure and module interfaces.
