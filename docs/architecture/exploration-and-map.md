@@ -43,10 +43,12 @@ sent. A rejected action changes neither discovery nor current visibility.
 
 Outdoor sight is a Euclidean circle with radius eight world fields. Terrain
 does not occlude it. Interior sight has a maximum range of eight fields and a
-90-degree cardinal forward field of view, plus the two immediately adjacent
-lateral fields. The lateral exception makes junctions readable from the
-rearward rendering eye; it does not reveal fields farther sideways or behind
-the player. Line of sight includes the first blocking
+90-degree cardinal forward field of view. The angular bounds include a field
+whose edge overlaps the projection, even when its center lies outside the
+cone. This needs a one-field margin at either forward cone edge for the
+rearward rendering eye and includes the two immediate lateral neighbors.
+Fields farther sideways on the player's row or behind the player remain
+hidden. Range and wall occlusion still apply. Line of sight includes the first blocking
 wall and excludes fields behind it. Currently visible fields are derived and
 are never persisted.
 
@@ -55,7 +57,7 @@ center ray along a corridor can enter a nearer wall cell even though the next
 cell's corridor-facing surface is visible. Each exposed, player-facing side
 is tested at its midpoint and near its corners with bounded grid DDA rays;
 intervening walls and closed grid-corner contacts block those rays. The
-existing range and facing limits still apply. Traversable fields retain their
+range and field-extent facing limits still apply. Traversable fields retain their
 line-of-sight test, so revealing a wall face does not reveal the room behind it.
 
 ## Projection and information boundary
@@ -69,7 +71,7 @@ The first-person renderer uses only `v` geometry. Both `r` and `u` stop
 wall rays and floor samples as dark fog: remembered walls and objects cannot
 extend current sight beyond the server's visibility mask. Discovery remains
 available on the exploration map and is not erased by this presentation rule.
-Dynamic item and NPC codes occur only in currently visible fields. A remembered
+Dynamic item and opponent codes occur only in currently visible fields. A remembered
 field projects its static floor or wall instead, so discovery does not claim
 that an object or character is still present.
 
@@ -110,14 +112,14 @@ never becomes a movement or transition intention.
 
 ## Persistence
 
-Savegame format 6 stores accumulated discovery in the authoritative game
-snapshot together with item and NPC state. Outdoor masks are records containing signed
+Savegame format 7 stores accumulated discovery in the authoritative game
+snapshot together with item state. Outdoor masks are records containing signed
 `chunk_x`, `chunk_y`, and exactly 128 strings of 128 `0` or `1` characters. Interior records contain
 `area_id`, `width`, `height`, and exactly one equally sized `0`/`1` row per
 field row. Missing, extra, duplicate, unordered, empty, malformed, unknown, or
 wrong-sized records invalidate the complete save.
 
-There is no legacy reader or migration. An obsolete or invalid development
-save follows the existing removal path and only the selected world's
-`saves/default.json` is deleted. Explicit atomic saving is the only operation
-that persists newly discovered fields.
+There is no legacy reader or migration. An obsolete or invalid save is reported
+and preserved unchanged. Replacing an existing save requires explicit overwrite
+confirmation. Explicit atomic saving is the only operation that persists newly
+discovered fields.

@@ -8,7 +8,8 @@ the client and server executable and tested.
 stage contains a completed substage and explicitly deferred later work. `NEXT`
 is the only stage that should be detailed enough for immediate implementation.
 `LATER` gives an ordering direction and may change as the project teaches us
-more. `OPEN` marks a question that has not been decided.
+more. `IN REVIEW` means implementation is complete and final user acceptance
+is pending. `OPEN` marks a question that has not been decided.
 
 ## 1. Project foundation — DONE
 
@@ -94,6 +95,9 @@ real-process smoke tests cover the complete path. See
 The current presentation checkpoint uses one rearward rendering eye and a
 90-degree horizontal projection for both near and distant walls. Immediate
 lateral fields are visible so junctions can be read without moving or turning.
+Visibility also includes partly projected fields along the forward cone edges,
+preventing false dark slabs at the screen margins. Range and wall occlusion
+still apply; fields behind the player and farther sideways stay hidden.
 This changes presentation, not grid-based movement or interaction reach.
 
 ## 7. Persistent game state — DONE
@@ -107,7 +111,7 @@ preferences.
 
 This stage is complete when outdoor and first-person state survive a server
 restart with exact position, facing, area identity, and return location;
-invalid development saves are removed without touching other world data; and
+invalid saves are classified and preserved without touching other world data; and
 unit, protocol, headless-TUI, restart, and real-process tests pass. A database
 is introduced only if concrete access or recovery requirements make the
 file-based approach insufficient.
@@ -254,7 +258,7 @@ fixed blocking field in the initial dungeon.
 
 The implemented slice uses protocol version 10 and savegame format 4. It uses
 ordinary Functional Pascal data and functions rather than a scripting system.
-See [NPCs and simple dialogue](architecture/npcs-and-dialogue.md).
+Stage 14a removed this dialogue feature; stage 15 will restore NPCs and dialogue in settlements.
 
 Moving NPCs, schedules, quests, general dialogue scripting, free-text input,
 branching world effects, and LLM-generated behavior remain outside this phase.
@@ -357,16 +361,193 @@ to make it meaningful. The preferred direction is learning by doing, as in
 Dungeon Master: the character improves in what it actually does, which suits a
 game without class selection at the start.
 
-## 14. Generated game content — LATER
+Implement this slice after 14b and before 14c, so progression can be balanced
+against several opponent kinds before deeper, harder levels are introduced.
+
+## 14. Generated game content — NEXT
 
 Expand beyond the fixed initial dungeon with generated interiors, dungeons,
 locations, and their contents. Generation remains deterministic and
-server-owned.
+server-owned. The stage is split so each slice stays reviewable: 14a builds the
+infrastructure, 14s adds world management and the server console, 14b adds
+contents, then 13b adds progression before 14c adds deeper levels.
+
+### 14a. Generated dungeons — DONE
+
+- [x] Design entrance sites, the area view, the dungeon generator, and
+  persistence before implementation in
+  [generated dungeons](architecture/generated-dungeons.md).
+  The [level storage contract](architecture/dungeon-level-storage.md) fixes
+  file schema, final interfaces, error classes, and transition ordering.
+- [x] Place at most one ordinary deterministic entrance per entrance region on
+  walkable land, replacing the spawn region's candidate with its guaranteed
+  entrance three steps from spawn. This special entrance may cross a region
+  border and remains assigned to the spawn region. Entrances appear on the map
+  once revealed. Raise the world generator version to 6.
+- [x] Make the entrance region size a world parameter: default from
+  `server.toml` (4 chunks), stored in the world metadata at creation.
+- [x] Remove the hand-authored initial dungeon, its tablet, Mara, and the
+  complete dialogue feature until stage 15; heal one health point per outdoor
+  step instead. Raise the protocol version to 13.
+- [x] Resolve interior maps by area identity; pass an area view with the
+  resolved map to the rules and keep the current area's map in the server
+  session.
+- [x] Generate a 31 by 21 rooms-and-corridors dungeon from the world seed and
+  the entrance region, with one or two restless skeletons far from the start
+  and the coin, sword, and jerkin in room corners.
+- [x] Validate generated maps (connectivity, exit, room count, floor share, no
+  opponent in sight of the start); retry with derived seeds; pin a fingerprint
+  of fixed regions; measure the generation time.
+- [x] Generate each dungeon's level on first entry and atomically store its
+  immutable geometry and original placements as versioned world data. Load
+  that file on revisits; keep the current map in memory. Invalid files fail
+  without replacement; missing files referenced by a save fail without deleting
+  the save. Do not regenerate levels during save/load validation.
+- [x] Materialize opponents and items on entry in the current game and persist
+  mutable state and visited areas only through explicit saving. Validate item
+  origins separately from current locations in savegame format 7. Starting
+  over or loading an earlier save keeps the immutable level files.
+- [x] Limit carried and equipped items together to 64; reject pickup when full
+  without changing state. Allow dropping carried items on an empty ordinary
+  dungeon floor field and picking them up again, including in another dungeon.
+  Persist their locations without duplicating their original placements.
+- [x] Return the player to the entrance they used when leaving a generated
+  dungeon.
+- [x] Cover entrance placement, generator determinism and validation,
+  materialization, persistence, and a complete TCP visit to a generated
+  dungeon.
+- [x] Measure complete save and load operations with 1, 10, and 100 visited
+  dungeons, including reading and validating stored levels; report timings and
+  peak memory. Measure first-time generation and storage separately.
+- [x] Synchronize architecture, product terminology, persistence, and roadmap
+  documentation.
+- [x] Correct false dark screen-edge fields by including partly visible fields
+  at the sight cone's edges. Cover all four facings and multiple terminal widths;
+  the user confirmed the rendering in the running game on 2026-10-06.
+- [x] Review the generated-dungeon slice with the user and obtain explicit
+  acceptance.
+
+The rendering correction passed `fpas check` and the complete workspace suite
+(56/56 tests). The user accepted the complete 14a slice on 2026-10-14.
+
+Dungeon names, further opponent kinds, loot tables, and consumables belong to
+14b; stairs and deeper levels to 14c.
+
+### 14s. World management and server console — DONE
+
+- [x] The server supplies defaults and allowed ranges for world parameters (seed,
+  entrance region size, later more); the client's new-world dialog shows them
+  and may override them within the ranges. The server validates and creates a
+  new world with its own identity; earlier worlds are kept.
+- [x] Separate `Create world`, `Continue`, and `Start over` actions. Continue loads
+  the selected world's last explicit save when world format, generator, and
+  savegame versions match the running server. A compatible world without a
+  save can be started at its spawn. Start over begins a fresh game in the same
+  world; its earlier save remains until an explicitly confirmed overwrite.
+- [x] List existing worlds with parameters and save status. Incompatible worlds
+  remain visible with an instruction to delete or recreate them; do not migrate
+  or delete them automatically. Client-side deletion is deferred.
+- [x] Returning to world selection with unsaved progress requires confirmation to
+  discard it or cancellation; never save implicitly. Prepare and validate the
+  selected world before installing it as the active session world.
+- [x] `world_id` in `server.toml` preselects a world at server start. A missing or
+  incompatible selection leaves world selection available and shows the
+  reason; storage I/O failures are reported separately, never treated as a
+  missing world. The server still admits only one player at a time.
+- [x] `dungeon-server --console` fills the terminal with Server, Session and World
+  panels, a bounded UTC live log (connections, created and loaded worlds,
+  rejected requests, errors), severity filters, scrolling/follow and shortcuts.
+  Typed server snapshots provide real session and save status. The
+  settings view edits the server defaults such as the entrance region size and
+  later the LLM connection; it validates each value and writes `server.toml`.
+  World parameters changed there apply to new worlds only. Without `--console`
+  the server stays headless.
+- [x] Uses protocol 14; world format 3, generator 6 and save format 7 remain
+  unchanged.
+
+New worlds accept signed 32-bit seeds and entrance regions of 1 through 16
+chunks. Catalogs are strict bounded pages with a transport byte budget;
+inspecting them never generates content.
+Formatting and workspace checking pass; the complete workspace suite passed
+68/68 test programs with positive, negative, and edge-case coverage on
+2026-10-15. The start-menu backdrop is retained for the current terminal size,
+so focus navigation no longer regenerates it; the regression covers resize and
+return from gameplay.
+
+The user approved a full-terminal dashboard on 2026-10-14; its implementation
+was verified on 2026-10-15. It replaces the
+centered menu with Server, Session and World panels, a large timestamped,
+scrollable/filterable live log, and a shortcut footer. Settings remain an
+overlay. Typed server snapshots supply real status; responsive layouts and
+positive, negative and boundary tests cover the dashboard. Startup
+errors, failed saves, reconnects, native keyboard routing and very small windows
+are covered. The user accepted the running server console on 2026-10-15,
+closing the final terminal review for 14s. See the
+[server console documentation](product/server-console.md) for operation and
+controls.
+
+### 14b. Dungeon contents — NEXT
+
+The [14b implementation plan](plans/14b-dungeon-contents.md) fixes twelve small,
+ordered checkpoints with positive, negative and edge-case tests. It adds stored,
+deterministic dungeon names, a Giant rat alongside the Restless skeleton,
+generated floor finds and a Healing potion. Opponent death drops remain deferred.
+
+- [x] Recheck the baseline and prepare independent regression fixtures and
+  deterministic combat vectors (14b checkpoint 01). On 2026-10-15, formatting,
+  all 20 project checks and the final complete suite passed (68/68 programs).
+  This baseline checkpoint left gameplay and format versions unchanged.
+- [x] Generate and store a bounded dungeon name; use it in the game, exploration
+  map and server dashboard without regeneration during rendering or load.
+  Checkpoint 02 passed formatting, all 20 project checks and the complete
+  workspace suite (70/70 programs) on 2026-10-15, with positive, negative and
+  boundary coverage. Current generator is 7 and level format 2; protocol 14,
+  world format 3 and save format 7 remain unchanged. Checkpoint 03 is next.
+- [ ] Support both opponent kinds through rules, strict storage/wire mappings,
+  Fog of War, sprites and kind-correct combat/death animation.
+- [ ] Keep coin, sword and jerkin; guarantee one potion and roll two optional
+  floor-find slots with stable original identities, including empty slot gaps.
+- [ ] Use a carried potion from inventory to heal up to six health points before
+  the opponents act once. Reject use at full health or of an invalid item without
+  changing state, dice, time or unsaved-progress status.
+- [ ] Persist consumed potion records and prove cross-area drop/pickup/use,
+  explicit save/load, reconnect, revisit and Start over without duplication.
+- [ ] Use protocol 15, generator 7, level format 2 and save format 8; keep world
+  format 3 and runtime settings unchanged. Preserve incompatible files and report
+  why their worlds/saves cannot continue; do not migrate or delete them.
+- [ ] Cover pure rules, stored formats, protocol rejection, real keyboard input
+  and TCP play; run complete verification and obtain explicit user acceptance.
+
+Generated loot has stable identities derived from its source and is created
+only once. Persist consumed items as consumed rather than deleting their
+identities, so loading or revisiting cannot restore them. Validate item origins
+separately from current locations or consumed state. Using a consumable costs
+one turn when successful; rejected use changes nothing. Outdoor step healing
+remains available; consumables provide healing inside a dungeon. Revise the
+savegame, protocol, and generator versions where their contracts change.
+
+### 14c. Dungeon levels — LATER
+
+Stairs between levels and deeper, harder levels of a generated dungeon.
+
+Implement after 13b. Each level is a separate area with an identity derived
+from the dungeon and level index. Generate and permanently store its immutable
+layout and original placements on first visit, then materialize its game state.
+Revisits load the same level file; deeper unvisited levels remain ungenerated.
+Paired stairs have deterministic destination areas, landing fields, and facing;
+travel works in both directions and retains each level's state. Only leaving
+the top level returns to the outdoor entrance. An area transition need not
+change view family. Replace the assumption of a single interior-to-outdoor
+return with explicit stair links, and cover multi-level save/load and revisits.
+Choose the initial finite depth and difficulty curve when detailing this slice.
 
 ## 15. Broader world simulation — LATER
 
 Settlements, changing world state, time, weather, and other simulation systems
 will be split further when their first concrete gameplay requirement is known.
+The first settlement slice restores NPCs and deterministic dialogue removed in
+14a, including interaction, presentation, persistence, and end-to-end coverage.
+It does not depend on LLM integration.
 
 ## 16. Multiplayer behavior — LATER
 

@@ -1,0 +1,468 @@
+// Deterministic generated dungeon layouts: rooms, corridors, endpoints, opponents, and items.
+unit Dungeon.Interior.Generation;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Content as Content, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Items as ItemRules, Dungeon.Random as Random, Std.Math as Math;
+
+const RoomPlacementTries: integer := 40;
+const MaximumRooms: integer := 8;
+const MinimumRooms: integer := 4;
+const GenerationAttempts: integer := 16;
+
+// Rectangular floor area of one placed room; X and Y name its top-left field.
+type GeneratedRoom = record
+  X: integer;
+  Y: integer;
+  Width: integer;
+  Height: integer;
+end record;
+
+// Layout under construction and the generator state that produced it.
+type Layout = record
+  State: integer;
+  Cells: array of InteriorUnit.InteriorCellKind;
+  Rooms: array of GeneratedRoom;
+end record;
+
+function FieldIndex(Position: Coordinates.InteriorPosition): integer;
+begin
+  return (Position.Y * Validation.GeneratedDungeonWidth) + Position.X;
+end function;
+
+function RoomCenter(Room: GeneratedRoom): Coordinates.InteriorPosition;
+begin
+  return Coordinates.InteriorPosition(
+    X := Room.X + (Room.Width div 2),
+    Y := Room.Y + (Room.Height div 2)
+  );
+end function;
+
+// Rooms keep at least one wall between them: the candidate grown by one field must not overlap.
+function RoomsTouch(Candidate: GeneratedRoom; Other: GeneratedRoom): boolean;
+begin
+  return (
+    (Candidate.X - 1 < Other.X + Other.Width) and (Other.X < (Candidate.X + Candidate.Width) + 1)
+  )
+    and
+    (
+      (Candidate.Y - 1 < Other.Y + Other.Height)
+      and
+      (Other.Y < (Candidate.Y + Candidate.Height) + 1)
+    );
+end function;
+
+function PlaceRooms(Start: Layout): Layout;
+begin
+  var State: integer := Start.State;
+  var Cells: array of InteriorUnit.InteriorCellKind := Start.Cells;
+  var Rooms: array of GeneratedRoom := Start.Rooms;
+  var Tries: integer := 0;
+  while (Tries < RoomPlacementTries) and (Rooms.Length() < MaximumRooms) do
+    begin
+      Tries := Tries + 1;
+      const WidthDraw: Random.RandomDraw := Random.DrawBelow(State, 5);
+      const HeightDraw: Random.RandomDraw := Random.DrawBelow(WidthDraw.State, 3);
+      const RoomWidth: integer := 3 + WidthDraw.Value;
+      const RoomHeight: integer := 3 + HeightDraw.Value;
+      // The room spans X .. X + RoomWidth - 1 and must leave the outer wall intact.
+      const XDraw: Random.RandomDraw := Random.DrawBelow(
+        HeightDraw.State,
+        (Validation.GeneratedDungeonWidth - 1) - RoomWidth
+      );
+      const YDraw: Random.RandomDraw := Random.DrawBelow(
+        XDraw.State,
+        (Validation.GeneratedDungeonHeight - 1) - RoomHeight
+      );
+      State := YDraw.State;
+      const Candidate: GeneratedRoom := GeneratedRoom(
+        X := 1 + XDraw.Value,
+        Y := 1 + YDraw.Value,
+        Width := RoomWidth,
+        Height := RoomHeight
+      );
+      var Free: boolean := true;
+      for Other: GeneratedRoom in Rooms do
+        begin
+          if RoomsTouch(Candidate, Other) then
+            begin
+              Free := false;
+            end;
+          end if;
+        end;
+      end for;
+
+      if Free then
+        begin
+          for Y: integer := Candidate.Y to (Candidate.Y + Candidate.Height) - 1 do
+            begin
+              for X: integer := Candidate.X to (Candidate.X + Candidate.Width) - 1 do
+                begin
+                  Cells[(Y * Validation.GeneratedDungeonWidth) + X] := InteriorUnit.InteriorCellKind.Floor;
+                end;
+              end for;
+            end;
+          end for;
+
+          Rooms.PushInPlace(Candidate);
+        end;
+      end if;
+    end;
+  end while;
+
+  return Layout(State := State, Cells := Cells, Rooms := Rooms);
+end function;
+
+function CarveHorizontal(Cells: array of InteriorUnit.InteriorCellKind; FromX: integer; ToX: integer; Y: integer): array of InteriorUnit.InteriorCellKind;
+begin
+  var Carved: array of InteriorUnit.InteriorCellKind := Cells;
+  for X: integer := Math.Min(FromX, ToX) to Math.Max(FromX, ToX) do
+    begin
+      Carved[(Y * Validation.GeneratedDungeonWidth) + X] := InteriorUnit.InteriorCellKind.Floor;
+    end;
+  end for;
+
+  return Carved;
+end function;
+
+function CarveVertical(Cells: array of InteriorUnit.InteriorCellKind; X: integer; FromY: integer; ToY: integer): array of InteriorUnit.InteriorCellKind;
+begin
+  var Carved: array of InteriorUnit.InteriorCellKind := Cells;
+  for Y: integer := Math.Min(FromY, ToY) to Math.Max(FromY, ToY) do
+    begin
+      Carved[(Y * Validation.GeneratedDungeonWidth) + X] := InteriorUnit.InteriorCellKind.Floor;
+    end;
+  end for;
+
+  return Carved;
+end function;
+
+// Carves an L-shaped corridor between two room centers; one draw selects the first leg.
+function ConnectRooms(Start: Layout; FromRoom: integer; ToRoom: integer): Layout;
+begin
+  const From: Coordinates.InteriorPosition := RoomCenter(Start.Rooms[FromRoom]);
+  const Target: Coordinates.InteriorPosition := RoomCenter(Start.Rooms[ToRoom]);
+  const Orientation: Random.RandomDraw := Random.DrawBelow(Start.State, 2);
+  var Current: Layout := Start;
+  Current.State := Orientation.State;
+  if Orientation.Value = 0 then
+    begin
+      Current.Cells := CarveHorizontal(Current.Cells, From.X, Target.X, From.Y);
+      Current.Cells := CarveVertical(Current.Cells, Target.X, From.Y, Target.Y);
+    end;
+  else
+    begin
+      Current.Cells := CarveVertical(Current.Cells, From.X, From.Y, Target.Y);
+      Current.Cells := CarveHorizontal(Current.Cells, From.X, Target.X, Target.Y);
+    end;
+  end if;
+
+  return Current;
+end function;
+
+function ConnectAllRooms(Start: Layout): Layout;
+begin
+  var Current: Layout := Start;
+  for Index: integer := 1 to Current.Rooms.Length() - 1 do
+    begin
+      Current := ConnectRooms(Current, Index - 1, Index);
+    end;
+  end for;
+  const CountDraw: Random.RandomDraw := Random.DrawBelow(Current.State, 2);
+  Current.State := CountDraw.State;
+  for Extra: integer := 1 to 1 + CountDraw.Value do
+    begin
+      const FirstDraw: Random.RandomDraw := Random.DrawBelow(Current.State, Current.Rooms.Length());
+      const SecondDraw: Random.RandomDraw := Random.DrawBelow(
+        FirstDraw.State,
+        Current.Rooms.Length()
+      );
+      Current.State := SecondDraw.State;
+      if FirstDraw.Value <> SecondDraw.Value then
+        begin
+          Current := ConnectRooms(Current, FirstDraw.Value, SecondDraw.Value);
+        end;
+      end if;
+    end;
+  end for;
+
+  return Current;
+end function;
+
+// Breadth-first walking distance from Start to every field; walls and unreachable fields stay -1.
+function WalkingDistances(Cells: array of InteriorUnit.InteriorCellKind; Start: Coordinates.InteriorPosition): array of integer;
+begin
+  var Distances: array of integer := array.Fill(-1, Cells.Length());
+  var Queue: array of Coordinates.InteriorPosition := [Start];
+  Distances[FieldIndex(Start)] := 0;
+  var ReadIndex: integer := 0;
+  const Offsets: array of Coordinates.InteriorPosition := [
+    Coordinates.InteriorPosition(X := 0, Y := -1),
+    Coordinates.InteriorPosition(X := 1, Y := 0),
+    Coordinates.InteriorPosition(X := 0, Y := 1),
+    Coordinates.InteriorPosition(X := -1, Y := 0)
+  ];
+  while ReadIndex < Queue.Length() do
+    begin
+      const Current: Coordinates.InteriorPosition := Queue[ReadIndex];
+      ReadIndex := ReadIndex + 1;
+      for Offset: Coordinates.InteriorPosition in Offsets do
+        begin
+          const Candidate: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+            X := Current.X + Offset.X, Y := Current.Y +
+            Offset.Y
+          );
+          // Generated rooms and corridors never touch the outer wall, so neighbors stay inside.
+          const Index: integer := FieldIndex(Candidate);
+          if (Cells[Index] <> InteriorUnit.InteriorCellKind.Wall) and (Distances[Index] < 0) then
+            begin
+              Distances[Index] := Distances[FieldIndex(Current)] + 1;
+              Queue.PushInPlace(Candidate);
+            end;
+          end if;
+        end;
+      end for;
+    end;
+  end while;
+
+  return Distances;
+end function;
+
+// Orders the rooms except the exit room by center walking distance, farthest first, ties by index.
+function RoomsFarthestFirst(Rooms: array of GeneratedRoom; Distances: array of integer): array of integer;
+begin
+  var Order: array of integer := [];
+  for Index: integer := 1 to Rooms.Length() - 1 do
+    begin
+      const Distance: integer := Distances[FieldIndex(RoomCenter(Rooms[Index]))];
+      var Sorted: array of integer := [];
+      var Inserted: boolean := false;
+      for Existing: integer in Order do
+        begin
+          if not Inserted and (Distances[FieldIndex(RoomCenter(Rooms[Existing]))] < Distance) then
+            begin
+              Sorted.PushInPlace(Index);
+              Inserted := true;
+            end;
+          end if;
+
+          Sorted.PushInPlace(Existing);
+        end;
+      end for;
+
+      if not Inserted then
+        begin
+          Sorted.PushInPlace(Index);
+        end;
+      end if;
+
+      Order := Sorted;
+    end;
+  end for;
+
+  return Order;
+end function;
+
+function HostilePlacements(
+  AreaId: string;
+  Rooms: array of GeneratedRoom;
+  Order: array of integer;
+  Count: integer
+): array of HostileRules.HostilePlacement;
+begin
+  var Placements: array of HostileRules.HostilePlacement := [];
+  for Index: integer := 0 to Math.Min(Count, Order.Length()) - 1 do
+    begin
+      Placements.PushInPlace(
+        HostileRules.HostilePlacement(
+          Id := HostileRules.HostilePlacementId(AreaId, Index),
+          Kind := HostileRules.HostileKind.RestlessSkeleton,
+          Position := RoomCenter(Rooms[Order[Index]])
+        )
+      );
+    end;
+  end for;
+
+  return Placements;
+end function;
+
+function HoldsHostile(Room: GeneratedRoom; Hostiles: array of HostileRules.HostilePlacement): boolean;
+begin
+  for Hostile: HostileRules.HostilePlacement in Hostiles do
+    begin
+      if Coordinates.SamePosition(Hostile.Position, RoomCenter(Room)) then
+        begin
+          return true;
+        end;
+      end if;
+    end;
+  end for;
+
+  return false;
+end function;
+
+function CornerIsFree(Corner: Coordinates.InteriorPosition; Map: InteriorUnit.InteriorMap; Items: array of ItemRules.ItemPlacement): boolean;
+begin
+  if Coordinates.SamePosition(Corner, Map.Exit) or Coordinates.SamePosition(Corner, Map.Start) then
+    begin
+      return false;
+    end;
+  end if;
+
+  for Hostile: HostileRules.HostilePlacement in Map.Hostiles do
+    begin
+      if Coordinates.SamePosition(Corner, Hostile.Position) then
+        begin
+          return false;
+        end;
+      end if;
+    end;
+  end for;
+
+  for Item: ItemRules.ItemPlacement in Items do
+    begin
+      if Coordinates.SamePosition(Corner, Item.Position) then
+        begin
+          return false;
+        end;
+      end if;
+    end;
+  end for;
+
+  return true;
+end function;
+
+// Places coin, sword, and jerkin on free room corners, preferring rooms without exit or opponent.
+function ItemPlacements(Map: InteriorUnit.InteriorMap; Rooms: array of GeneratedRoom): array of ItemRules.ItemPlacement;
+begin
+  const Kinds: array of ItemRules.ItemKind := [
+    ItemRules.ItemKind.AncientCoin,
+    ItemRules.ItemKind.RustyShortSword,
+    ItemRules.ItemKind.LeatherJerkin
+  ];
+  var Preferred: array of GeneratedRoom := [];
+  var Others: array of GeneratedRoom := [Rooms[0]];
+  for Index: integer := 1 to Rooms.Length() - 1 do
+    begin
+      if HoldsHostile(Rooms[Index], Map.Hostiles) then
+        begin
+          Others.PushInPlace(Rooms[Index]);
+        end;
+      else
+        begin
+          Preferred.PushInPlace(Rooms[Index]);
+        end;
+      end if;
+    end;
+  end for;
+  var Corners: array of Coordinates.InteriorPosition := [];
+  for Room: GeneratedRoom in Preferred.Concat(Others) do
+    begin
+      const Left: integer := Room.X;
+      const Right: integer := (Room.X + Room.Width) - 1;
+      const Top: integer := Room.Y;
+      const Bottom: integer := (Room.Y + Room.Height) - 1;
+      Corners.PushInPlace(Coordinates.InteriorPosition(X := Left, Y := Top));
+      Corners.PushInPlace(Coordinates.InteriorPosition(X := Right, Y := Top));
+      Corners.PushInPlace(Coordinates.InteriorPosition(X := Left, Y := Bottom));
+      Corners.PushInPlace(Coordinates.InteriorPosition(X := Right, Y := Bottom));
+    end;
+  end for;
+  var Items: array of ItemRules.ItemPlacement := [];
+  for Corner: Coordinates.InteriorPosition in Corners do
+    begin
+      if (Items.Length() < Kinds.Length()) and CornerIsFree(Corner, Map, Items) then
+        begin
+          const Index: integer := Items.Length();
+          Items.PushInPlace(
+            ItemRules.ItemPlacement(
+              ItemId := ItemRules.ItemPlacementId(Map.AreaId, Index),
+              Kind := Kinds[Index],
+              Position := Corner
+            )
+          );
+        end;
+      end if;
+    end;
+  end for;
+
+  return Items;
+end function;
+
+// Builds one candidate layout from an attempt seed and applies every acceptance rule.
+function GenerateAttempt(AttemptSeed: integer; AreaId: string; DisplayName: string): result of (InteriorUnit.InteriorMap, string);
+begin
+  const Empty: Layout := Layout(
+    State := AttemptSeed, Cells := array.Fill(
+      InteriorUnit.InteriorCellKind.Wall, Validation.GeneratedDungeonWidth *
+      Validation.GeneratedDungeonHeight
+    ), Rooms := []
+  );
+  const Placed: Layout := PlaceRooms(Empty);
+  if Placed.Rooms.Length() < MinimumRooms then
+    begin
+      return Error('generated dungeon has too few rooms');
+    end;
+  end if;
+  const Connected: Layout := ConnectAllRooms(Placed);
+  const FirstRoom: GeneratedRoom := Connected.Rooms[0];
+  const Exit: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+    X := FirstRoom.X,
+    Y := FirstRoom.Y
+  );
+  const Start: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+    X := FirstRoom.X + 1,
+    Y := FirstRoom.Y
+  );
+  var Cells: array of InteriorUnit.InteriorCellKind := Connected.Cells;
+  Cells[FieldIndex(Exit)] := InteriorUnit.InteriorCellKind.ExitField;
+  const CountDraw: Random.RandomDraw := Random.DrawBelow(Connected.State, 2);
+  const Order: array of integer := RoomsFarthestFirst(
+    Connected.Rooms,
+    WalkingDistances(Cells, Start)
+  );
+  var Map: InteriorUnit.InteriorMap := InteriorUnit.InteriorMap(
+    AreaId := AreaId, DisplayName := DisplayName, Width := Validation.GeneratedDungeonWidth,
+    Height := Validation.GeneratedDungeonHeight, Cells := Cells, Start := Start,
+    StartFacing := Coordinates.FacingDirection.East, Exit := Exit, Items := [],
+    Hostiles := HostilePlacements(
+      AreaId, Connected.Rooms, Order, 1 +
+      CountDraw.Value
+    )
+  );
+  Map.Items := ItemPlacements(Map, Connected.Rooms);
+  return Validation.ValidateGeneratedDungeon(Map);
+end function;
+
+// Generates the dungeon of one entrance region as a pure function of seed and region.
+// Up to 16 attempts with derived seeds run in order; the first accepted layout wins.
+// An error after all attempts is a generator defect, not a player-facing condition.
+public function GenerateDungeon(Seed: integer; RegionX: integer; RegionY: integer; AreaId: string): result of (InteriorUnit.InteriorMap, string);
+begin
+  const DisplayName: string := Content.DungeonName(Seed, RegionX, RegionY);
+  var LastError: string := 'generated dungeon was not attempted';
+  for Attempt: integer := 0 to GenerationAttempts - 1 do
+    begin
+      const AttemptSeed: integer := Coordinates.PositiveModulo(
+        (
+          (
+            (Coordinates.PositiveModulo(Seed, Random.RandomStateModulus) * 7919) +
+            (RegionX * 104729)
+          ) + (RegionY * 1299709)
+        ) +
+        (Attempt * 15485863), Random.RandomStateModulus
+      );
+      case GenerateAttempt(AttemptSeed, AreaId, DisplayName) of
+        when Ok(const Map):
+          begin
+            return Ok(Map);
+          end;
+        when Error(const Message):
+          begin
+            LastError := Message;
+          end;
+      end case;
+    end;
+  end for;
+
+  return Error('dungeon generation failed after 16 attempts: ' + LastError);
+end function;
+end unit;

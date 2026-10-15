@@ -1,0 +1,195 @@
+// Verifies independent fixture identities, state ownership, valid/invalid poses and origins, and routes.
+program FixturesTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Std.Test as Test;
+
+// Plays a route with the real movement rules and returns the reached pose.
+function Follow(State: GameState.GameState; Moves: array of Fixtures.RouteMove): Coordinates.FirstPersonPose;
+begin
+  var Current: GameState.GameState := State;
+  for Move: Fixtures.RouteMove in Moves do
+    begin
+      case Move of
+        when Fixtures.RouteMove.RouteTurnLeft:
+          begin
+            Current := Movement.TurnFirstPerson(
+              Fixtures.FixtureAreaView(Current),
+              Current,
+              Coordinates.RelativeTurn.TurnLeft
+            ).Unwrap();
+          end;
+        when Fixtures.RouteMove.RouteTurnRight:
+          begin
+            Current := Movement.TurnFirstPerson(
+              Fixtures.FixtureAreaView(Current),
+              Current,
+              Coordinates.RelativeTurn.TurnRight
+            ).Unwrap();
+          end;
+        when Fixtures.RouteMove.RouteForward:
+          begin
+            Current := Movement.StepFirstPerson(
+              Fixtures.FixtureAreaView(Current),
+              Current,
+              Coordinates.RelativeStep.Forward
+            ).Unwrap();
+          end;
+      end case;
+    end;
+  end for;
+
+  return GameState.FirstPersonPlayerPose(Current).Unwrap();
+end function;
+
+begin
+  const Metadata: Terrain.WorldMetadata := Fixtures.FixtureMetadata();
+  const Map: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMap();
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(Map) is Ok(_));
+  // The fixture map stands in for the spawn entrance's dungeon of the fixture world.
+  Test.AssertEquals(Fixtures.FixtureAreaId(), Map.AreaId);
+  Test.AssertTrue(
+    Identities.ParseDungeonAreaId(Metadata, Map.AreaId).Unwrap() =
+    Entrances.RegionOf(Metadata, Metadata.Spawn)
+  );
+  Test.AssertEquals(11, Map.Width);
+  Test.AssertEquals(9, Map.Height);
+  Test.AssertEquals(3, Map.Items.Length());
+  Test.AssertEquals(Map.AreaId + ':item:0', Map.Items[0].ItemId);
+  Test.AssertEquals(Map.AreaId + ':item:1', Map.Items[1].ItemId);
+  Test.AssertEquals(Map.AreaId + ':item:2', Map.Items[2].ItemId);
+  Test.AssertEquals(Map.AreaId + ':hostile:0', Map.Hostiles[0].Id);
+  const State: GameState.GameState := Fixtures.FixtureDungeonState(Map.Start, Map.StartFacing);
+  Test.AssertTrue(State.Area = Coordinates.AreaKind.Dungeon);
+  Test.AssertEquals(Map.AreaId, State.AreaId);
+  Test.AssertTrue(
+    State.Player =
+    Coordinates.PlayerPosition.FirstPerson(
+      Coordinates.FirstPersonPose(Position := Map.Start, Facing := Map.StartFacing)
+    )
+  );
+  Test.AssertTrue(
+    State.ReturnLocation =
+    Coordinates.ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.SpawnEntrance)
+  );
+  Test.AssertEquals(GameState.PlayerMaximumHealth, State.Health);
+  Test.AssertEquals(GameState.InitialRandomState(Metadata.Seed), State.RandomState);
+  Test.AssertEquals(0, State.Exploration.InteriorAreas.Length());
+  Test.AssertEquals(0, State.Exploration.OutdoorChunks.Length());
+  for Index: integer := 0 to Map.Items.Length() - 1 do
+    begin
+      Test.AssertEquals(Map.Items[Index].ItemId, State.Items[Index].Id);
+      Test.AssertTrue(Map.Items[Index].Kind = State.Items[Index].Kind);
+      Test.AssertTrue(
+        State.Items[Index].Location =
+        ItemRules.ItemLocation.InInterior(Map.AreaId, Map.Items[Index].Position)
+      );
+    end;
+  end for;
+
+  Test.AssertEquals(Map.Hostiles[0].Id, State.Hostiles[0].Id);
+  Test.AssertEquals(Map.AreaId, State.Hostiles[0].AreaId);
+  Test.AssertTrue(Map.Hostiles[0].Position = State.Hostiles[0].Position);
+  Test.AssertEquals(
+    HostileRules.HostileMaximumHealth(Map.Hostiles[0].Kind),
+    State.Hostiles[0].Health
+  );
+  Test.AssertFalse(State.Hostiles[0].Alerted);
+  const View: GameState.AreaView := Fixtures.FixtureAreaView(State);
+  Test.AssertTrue(View.Metadata = Metadata);
+  Test.AssertEquals(Map.AreaId, View.Interior.Unwrap().AreaId);
+  const Outdoor: GameState.GameState := State with Area := Coordinates.AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.Spawn
+  ); ReturnLocation := Coordinates.ReturnLocation.NoReturnLocation; end with;
+
+  Test.AssertTrue(Fixtures.FixtureAreaView(Outdoor).Interior is None);
+  // Repeated discovery is inert; even a single changed discovery bit makes states differ.
+  for Revealed: GameState.GameState in [
+    Exploration.RevealCurrentArea(View, State).Unwrap(),
+    Exploration.RevealCurrentArea(Fixtures.FixtureAreaView(Outdoor), Outdoor).Unwrap()
+  ] do
+    const RevealedView: GameState.AreaView := Fixtures.FixtureAreaView(Revealed);
+    Test.AssertTrue(
+      States.SameState(
+        Revealed, Exploration.RevealCurrentArea(RevealedView, Revealed).Unwrap()
+      )
+    );
+    var DifferentDiscovery: GameState.GameState := Revealed;
+    if Revealed.Area = Coordinates.AreaKind.Dungeon then
+      DifferentDiscovery.Exploration.InteriorAreas[0].Fields[0] := not Revealed.Exploration.InteriorAreas[
+        0
+      ].Fields[0];
+    else
+      DifferentDiscovery.Exploration.OutdoorChunks[0].Fields[0] := not Revealed.Exploration.OutdoorChunks[
+        0
+      ].Fields[0];
+    end if;
+
+    Test.AssertFalse(States.SameState(Revealed, DifferentDiscovery));
+  end for;
+  // Mutating one test state must not alter the next independently built fixture.
+  var Changed: GameState.GameState := State;
+  Changed.Items[0] := Changed.Items[0] with Location := ItemRules.ItemLocation.CarriedByPlayer; end with;
+  const Fresh: GameState.GameState := Fixtures.FixtureDungeonState(
+    Map.Exit,
+    Coordinates.FacingDirection.North
+  );
+  Test.AssertTrue(Fresh.Items[0].Location = State.Items[0].Location);
+  Test.AssertTrue(
+    Fresh.Player =
+    Coordinates.PlayerPosition.FirstPerson(
+      Coordinates.FirstPersonPose(
+        Position := Map.Exit,
+        Facing := Coordinates.FacingDirection.North
+      )
+    )
+  );
+  // Routes reach their target with legal moves, around the standing skeleton when asked to.
+  const StartPose: Coordinates.FirstPersonPose := Coordinates.FirstPersonPose(
+    Position := Map.Start,
+    Facing := Map.StartFacing
+  );
+  Test.AssertEquals(0, Fixtures.RouteTo(Map, StartPose, Map.Start, []).Length());
+  Test.AssertTrue(
+    Follow(State, Fixtures.RouteTo(Map, StartPose, Map.Exit, [Map.Hostiles[0].Position])).Position =
+    Map.Exit
+  );
+  Test.AssertTrue(
+    Follow(
+      State,
+      Fixtures.RouteTo(Map, StartPose, Map.Items[2].Position, [Map.Hostiles[0].Position])
+    ).Position =
+    Map.Items[2].Position
+  );
+  // A single field behind the player needs two turns and one step: from west of the start back onto it.
+  const Behind: array of Fixtures.RouteMove := Fixtures.RouteTo(
+    Map, Coordinates.FirstPersonPose(
+      Position := Coordinates.InteriorPosition(
+        X := Map.Start.X -
+        1, Y := Map.Start.Y
+      ), Facing := Coordinates.FacingDirection.West
+    ), Map.Start, []
+  );
+  Test.AssertEquals(3, Behind.Length());
+  // Builders intentionally permit invalid poses for tests; authoritative validation rejects them.
+  for InvalidPosition: Coordinates.InteriorPosition in [
+    Coordinates.InteriorPosition(X := -1, Y := Map.Start.Y),
+    Coordinates.InteriorPosition(X := Map.Width, Y := Map.Start.Y),
+    Coordinates.InteriorPosition(X := 0, Y := 0)
+  ] do
+    const InvalidPose: GameState.GameState := Fixtures.FixtureDungeonState(
+      InvalidPosition, Map.StartFacing
+    );
+    Test.AssertTrue(GameState.ValidateGameState(View, InvalidPose) is Error(_));
+    Test.AssertTrue(Areas.ValidateSavedGame(Metadata, InvalidPose, [Map]) is Error(_));
+  end for;
+  // A canonical-looking origin still has to match an actual placement in the supplied map.
+  var UnknownOrigin: GameState.GameState := State;
+  UnknownOrigin.Items[0] := UnknownOrigin.Items[0] with Id := Map.AreaId + ':item:999'; end with;
+
+  Test.AssertTrue(Areas.ValidateSaveShape(Metadata, UnknownOrigin) is Ok(_));
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, UnknownOrigin, [Map]) is Error(_));
+  Test.AssertFalse(States.SameState(State, UnknownOrigin));
+  Test.AssertTrue(
+    States.SameState(Fixtures.FixtureDungeonState(Map.Start, Map.StartFacing), State)
+  );
+end.

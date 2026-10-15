@@ -1,317 +1,427 @@
 // The game screen: primary map or first-person view, sidebar panels, messages, and status line.
 unit Dungeon.Client.Ui.GameView;
 
-uses
-  Dungeon.Client.Ui.Layout, Dungeon.Client.Ui.MapCells, Dungeon.Client.Ui.Playback,
-  Dungeon.Client.Animation, Dungeon.Client.Character, Dungeon.Client.Model, Dungeon.Client.Raycast,
-  Dungeon.Protocol, Std.Arrays, Std.Conv, Std.Str, Std.Tui;
+uses Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.MapCells as MapCells, Dungeon.Client.Ui.Playback as Playback, Dungeon.Client.Animation as AnimationUnit, Dungeon.Client.Character as Character, Dungeon.Client.Model as Model, Dungeon.Client.Raycast as Raycast, Dungeon.Protocol as Protocol, Std.Conv as Conv, Std.Tui as Tui;
 
-function ViewMap(State: ClientModel): TuiElement;
+function ViewMap(State: Model.ClientModel): Tui.TuiElement;
 begin
-  mutable var Elements: array of TuiElement := [];
+  var Elements: array of Tui.TuiElement := [];
   if State.HasVisibleState then
-  begin
-    Std.Arrays.Push(Elements, TuiElementBuilders.MakeCellGrid(MapGrid(State)))
-  end
+    begin
+      Elements.PushInPlace(Tui.TuiElementBuilders.MakeCellGrid(MapCells.MapGrid(State)));
+    end;
   else
-  begin
-    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('Waiting for world...'))
-  end;
+    begin
+      Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Waiting for world...'));
+    end;
+  end if;
 
-  return TuiElementBuilders.MakePanel('World', [TuiElementBuilders.MakeColumn(Elements)])
-end;
+  return Tui.TuiElementBuilders.MakePanel('World', [Tui.TuiElementBuilders.MakeColumn(Elements)]);
+end function;
 
 // Tints the outermost ring of the first-person image red after the character was hit.
-function WithDamageFrame(Grid: TuiCellGrid): TuiCellGrid;
+function WithDamageFrame(Grid: Tui.TuiCellGrid): Tui.TuiCellGrid;
 begin
-  mutable var Framed: TuiCellGrid := Grid;
+  var Framed: Tui.TuiCellGrid := Grid;
   for Y: integer := 0 to Grid.Height - 1 do
-  begin
-    for X: integer := 0 to Grid.Width - 1 do
     begin
-      if (((X = 0) or (Y = 0)) or (X = Grid.Width - 1)) or (Y = Grid.Height - 1) then
-      begin
-        Framed.Cells[(Y * Grid.Width) + X] := ColoredCell(' ', 255, 255, 255, 150, 18, 18)
-      end
-    end
-  end;
+      for X: integer := 0 to Grid.Width - 1 do
+        begin
+          if (((X = 0) or (Y = 0)) or (X = Grid.Width - 1)) or (Y = Grid.Height - 1) then
+            begin
+              Framed.Cells[(Y * Grid.Width) + X] := MapCells.ColoredCell(
+                ' ',
+                255,
+                255,
+                255,
+                150,
+                18,
+                18
+              );
+            end;
+          end if;
+        end;
+      end for;
+    end;
+  end for;
 
-  return Framed
-end;
+  return Framed;
+end function;
 
-function ViewFirstPerson(State: ClientModel): TuiElement;
+function ViewFirstPerson(State: Model.ClientModel): Tui.TuiElement;
 begin
-  var Viewport: WorldViewport := DesiredWorldViewport(State);
-  var Value: FirstPersonVisibleState := FirstPersonFromModel(State);
-  var Frame: AnimationFrame := AnimationFrameAt(State.Animation);
-  mutable var Grid: TuiCellGrid := TuiCellGrid.Create(0, 0, []);
+  const Viewport: Layout.WorldViewport := Layout.DesiredWorldViewport(State);
+  const Value: Protocol.FirstPersonVisibleState := Playback.FirstPersonFromModel(State);
+  const Frame: AnimationUnit.AnimationFrame := AnimationUnit.AnimationFrameAt(State.Animation);
+  var Grid: Tui.TuiCellGrid := Tui.TuiCellGrid.Create(0, 0, []);
   // Animation frames reuse the walls rendered at their start while the size is unchanged.
-  if (State.Animation.Active and (State.AnimationScene.Width = Viewport.Width)) and
-     (State.AnimationScene.Height = Viewport.Height) then
-  begin
-    Grid := ComposeFirstPersonGrid(Value, State.AnimationScene, Frame.Effect)
-  end
+  if (State.Animation.Active and (State.AnimationScene.Width = Viewport.Width))
+    and
+    (State.AnimationScene.Height = Viewport.Height)
+  then
+    begin
+      Grid := Raycast.ComposeFirstPersonGrid(Value, State.AnimationScene, Frame.Effect);
+    end;
   else
-  begin
-    Grid := ComposeFirstPersonGrid(Value, RenderFirstPersonScene(Value, Viewport.Width, Viewport.Height), Frame.Effect)
-  end;
+    begin
+      Grid := Raycast.ComposeFirstPersonGrid(
+        Value,
+        Raycast.RenderFirstPersonScene(Value, Viewport.Width, Viewport.Height),
+        Frame.Effect
+      );
+    end;
+  end if;
 
   if State.DamageTaken and Frame.ShowDamageFrame then
-  begin
-    Grid := WithDamageFrame(Grid)
-  end;
-
-  Grid := PaintAnimationText(Grid, Frame);
-  // Fallback only: the docked sidebar owns hints while visible.
-  if (((((Grid.Width > 0) and (Grid.Height > 0)) and (State.PrimaryStatus <> '')) and not (State.ContextPanelVisible and ContextCanDock(State))) and (State.Overlay <> ClientOverlay.ContextOverlay)) and
-     (State.PrimaryStatus <> 'Nothing in reach') then
-  begin
-    for X: integer := 0 to Grid.Width - 1 do
     begin
-      mutable var Glyph: string := ' ';
-      if X < Std.Str.Length(State.PrimaryStatus) then
-      begin
-        Glyph := Std.Str.CharAt(State.PrimaryStatus, X)
-      end;
+      Grid := WithDamageFrame(Grid);
+    end;
+  end if;
 
-      Grid.Cells[(Grid.Height - 1) * Grid.Width + X] := ColoredCell(Glyph, 255, 220, 96, 18, 21, 25)
-    end
-  end;
+  Grid := AnimationUnit.PaintAnimationText(Grid, Frame);
+  // Fallback only: the docked sidebar owns hints while visible.
+  if (
+    (
+      (((Grid.Width > 0) and (Grid.Height > 0)) and (State.PrimaryStatus <> ''))
+      and
+      not (State.ContextPanelVisible and Layout.ContextCanDock(State))
+    ) and (State.Overlay <> Model.ClientOverlay.ContextOverlay)
+  )
+    and
+    (State.PrimaryStatus <> 'Nothing in reach')
+  then
+    begin
+      for X: integer := 0 to Grid.Width - 1 do
+        begin
+          var Glyph: string := ' ';
+          if X < State.PrimaryStatus.Length() then
+            begin
+              Glyph := State.PrimaryStatus[X];
+            end;
+          end if;
 
-  return TuiElementBuilders.MakePanel(State.PrimaryTitle, [TuiElementBuilders.MakeCellGrid(Grid)])
-end;
+          Grid.Cells[(Grid.Height - 1) * Grid.Width + X] := MapCells.ColoredCell(
+            Glyph,
+            255,
+            220,
+            96,
+            18,
+            21,
+            25
+          );
+        end;
+      end for;
+    end;
+  end if;
 
-function ViewPrimary(State: ClientModel): TuiElement;
+  return Tui.TuiElementBuilders.MakePanel(
+    State.PrimaryTitle,
+    [Tui.TuiElementBuilders.MakeCellGrid(Grid)]
+  );
+end function;
+
+function ViewPrimary(State: Model.ClientModel): Tui.TuiElement;
 begin
-  if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
-  begin
-    return ViewFirstPerson(State)
-  end;
+  if State.HasVisibleState and (State.View = Protocol.ViewKind.FirstPerson) then
+    begin
+      return ViewFirstPerson(State);
+    end;
+  end if;
 
-  return ViewMap(State)
-end;
+  return ViewMap(State);
+end function;
 
-function FacingLabel(Value: FirstPersonFacing): string;
+function FacingLabel(Value: Protocol.FirstPersonFacing): string;
 begin
   case Value of
-    FirstPersonFacing.North:
-    begin
-      return 'north'
-    end;
-    FirstPersonFacing.East:
-    begin
-      return 'east'
-    end;
-    FirstPersonFacing.South:
-    begin
-      return 'south'
-    end;
-    FirstPersonFacing.West:
-    begin
-      return 'west'
-    end
-  end
-end;
+    when Protocol.FirstPersonFacing.North:
+      begin
+        return 'north';
+      end;
+    when Protocol.FirstPersonFacing.East:
+      begin
+        return 'east';
+      end;
+    when Protocol.FirstPersonFacing.South:
+      begin
+        return 'south';
+      end;
+    when Protocol.FirstPersonFacing.West:
+      begin
+        return 'west';
+      end;
+  end case;
+end function;
 
 // Health as numbers plus an eight-segment bar that fits the narrowest docked sidebar.
 // Any remaining health shows at least one segment; before the first projection it is unknown.
-function HealthLabel(State: ClientModel): string;
+function HealthLabel(State: Model.ClientModel): string;
 begin
   if State.MaxHealth <= 0 then
-  begin
-    return 'Health unknown'
-  end;
-  var Filled: integer := (((State.Health * 8) + State.MaxHealth) - 1) div State.MaxHealth;
-  return ((((('Health ' + IntToStr(State.Health)) + '/') + IntToStr(State.MaxHealth)) + ' ') + Std.Str.RepeatStr('█', Filled)) +
-         Std.Str.RepeatStr('░', 8 - Filled)
-end;
+    begin
+      return 'Health unknown';
+    end;
+  end if;
+  const Filled: integer := (((State.Health * 8) + State.MaxHealth) - 1) div State.MaxHealth;
+  return (
+    (((('Health ' + Conv.IntToStr(State.Health)) + '/') + Conv.IntToStr(State.MaxHealth)) + ' ') +
+    '█'.RepeatStr(Filled)
+  ) +
+    '░'.RepeatStr(8 - Filled);
+end function;
 
-function ViewContext(State: ClientModel): TuiElement;
+function ViewContext(State: Model.ClientModel): Tui.TuiElement;
 begin
-  mutable var Position: string := 'Not available';
-  mutable var Location: string := 'Outdoor region';
+  var Position: string := 'Not available';
+  var Location: string := 'Outdoor region';
   if State.HasVisibleState then
-  begin
-    if State.View = ViewKind.Map then
     begin
-      Position := (IntToStr(State.WorldX) + ', ') + IntToStr(State.WorldY)
-    end
-    else
-    begin
-      Location := State.PrimaryTitle;
-      Position := (((IntToStr(State.PlayerX) + ', ') + IntToStr(State.PlayerY)) + ' facing ') +
-                  FacingLabel(State.FirstPersonFacing)
-    end
-  end;
-  mutable var Elements: array of TuiElement := [
-                                                 TuiElementBuilders.MakeLabel('Character'),
-                                                 TuiElementBuilders.MakeLabel(HealthLabel(State)),
-                                                 TuiElementBuilders.MakeLabel(''),
-                                                 TuiElementBuilders.MakeLabel('Location'),
-                                                 TuiElementBuilders.MakeLabel(Location),
-                                                 TuiElementBuilders.MakeLabel('Position: ' + Position),
-                                                 TuiElementBuilders.MakeLabel(''),
-                                                 TuiElementBuilders.MakeLabel('Equipment')
-                                               ];
+      if State.View = Protocol.ViewKind.Map then
+        begin
+          Position := (Conv.IntToStr(State.WorldX) + ', ') + Conv.IntToStr(State.WorldY);
+        end;
+      else
+        begin
+          Location := State.PrimaryTitle;
+          Position := (
+            ((Conv.IntToStr(State.PlayerX) + ', ') + Conv.IntToStr(State.PlayerY)) + ' facing '
+          ) +
+            FacingLabel(State.FirstPersonFacing);
+        end;
+      end if;
+    end;
+  end if;
+  var Elements: array of Tui.TuiElement := [
+    Tui.TuiElementBuilders.MakeLabel('Character'),
+    Tui.TuiElementBuilders.MakeLabel(HealthLabel(State)),
+    Tui.TuiElementBuilders.MakeLabel(''),
+    Tui.TuiElementBuilders.MakeLabel('Location'),
+    Tui.TuiElementBuilders.MakeLabel(Location),
+    Tui.TuiElementBuilders.MakeLabel('Position: ' + Position),
+    Tui.TuiElementBuilders.MakeLabel(''),
+    Tui.TuiElementBuilders.MakeLabel('Equipment')
+  ];
   // Worn and carried lines together never exceed the item count plus one, which the dock budget covers.
-  for Line: string in EquipmentLines(State.Inventory) do
-  begin
-    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Line))
-  end;
-
-  Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(''));
-  Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('Quick inventory'));
-  var Carried: array of string := CarriedItemNames(State.Inventory);
-  if Std.Arrays.Length(Carried) = 0 then
-  begin
-    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('Empty'))
-  end
-  else
-  begin
-    for Name: string in Carried do
+  for Line: string in Character.EquipmentLines(State.Inventory) do
     begin
-      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Name))
-    end
-  end;
+      Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
+    end;
+  end for;
 
-  return TuiElementBuilders.MakeColumn(Elements)
-end;
+  Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(''));
+  Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Quick inventory'));
+  const Carried: array of string := Character.CarriedItemNames(State.Inventory);
+  if Carried.Length() = 0 then
+    begin
+      Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Empty'));
+    end;
+  else
+    begin
+      for Name: string in Carried do
+        begin
+          Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Name));
+        end;
+      end for;
+    end;
+  end if;
+
+  return Tui.TuiElementBuilders.MakeColumn(Elements);
+end function;
 
 // Renders the message history, newest last, or a placeholder when it is empty.
-public function ViewMessages(State: ClientModel): TuiElement;
+public function ViewMessages(State: Model.ClientModel): Tui.TuiElement;
 begin
-  mutable var Elements: array of TuiElement := [];
-  if Std.Arrays.Length(State.Messages) = 0 then
-  begin
-    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('No messages'))
-  end
-  else
-  begin
-    for Message: string in State.Messages do
+  var Elements: array of Tui.TuiElement := [];
+  if State.Messages.Length() = 0 then
     begin
-      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(Message))
-    end
-  end;
-
-  return TuiElementBuilders.MakeColumn(Elements)
-end;
-
-function ViewDockedMessages(State: ClientModel): TuiElement;
-begin
-  mutable var Elements: array of TuiElement := [];
-  if Std.Arrays.Length(State.Messages) = 0 then
-  begin
-    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel('No messages'))
-  end;
-
-  if Std.Arrays.Length(State.Messages) > 0 then
-  begin
-    mutable var Start: integer := Std.Arrays.Length(State.Messages) - DockedMessageLines;
-    if Start < 0 then
-    begin
-      Start := 0
+      Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel('No messages'));
     end;
-
-    for Index: integer := Start to Std.Arrays.Length(State.Messages) - 1 do
+  else
     begin
-      Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(State.Messages[Index]))
-    end
-  end;
+      for Message: string in State.Messages do
+        begin
+          Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Message));
+        end;
+      end for;
+    end;
+  end if;
 
-  while Std.Arrays.Length(Elements) < DockedMessageLines do
-  begin
-    Std.Arrays.Push(Elements, TuiElementBuilders.MakeLabel(''))
-  end;
+  return Tui.TuiElementBuilders.MakeColumn(Elements);
+end function;
 
-  return TuiElementBuilders.MakeColumn(Elements)
-end;
-
-function Expanding(Stretch: integer): TuiLayoutSettings;
+function ViewDockedMessages(State: Model.ClientModel): Tui.TuiElement;
 begin
-  return TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Expanding(), TuiAlignment.Fill(), Stretch)
-end;
+  var Elements: array of Tui.TuiElement := [];
+  if State.Messages.Length() = 0 then
+    begin
+      Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel('No messages'));
+    end;
+  end if;
+
+  if State.Messages.Length() > 0 then
+    begin
+      var Start: integer := State.Messages.Length() - Layout.DockedMessageLines;
+      if Start < 0 then
+        begin
+          Start := 0;
+        end;
+      end if;
+
+      for Index: integer := Start to State.Messages.Length() - 1 do
+        begin
+          Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(State.Messages[Index]));
+        end;
+      end for;
+    end;
+  end if;
+
+  while Elements.Length() < Layout.DockedMessageLines do
+    begin
+      Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(''));
+    end;
+  end while;
+
+  return Tui.TuiElementBuilders.MakeColumn(Elements);
+end function;
+
+function Expanding(Stretch: integer): Tui.TuiLayoutSettings;
+begin
+  return Tui.TuiLayoutSettings.Create(
+    Tui.TuiMargins.Uniform(0),
+    Tui.TuiSizePolicy.Expanding(),
+    Tui.TuiAlignment.Fill(),
+    Stretch
+  );
+end function;
 
 // A stable upper panel keeps interaction feedback separate from character data.
 // Text remains server-provided; this view never derives item or interaction rules.
-public function ViewSidebar(State: ClientModel): TuiElement;
+public function ViewSidebar(State: Model.ClientModel): Tui.TuiElement;
 begin
-  mutable var Width: integer := (State.ViewportWidth - PrimaryTerminalWidth(State)) - 2;
-  if not ContextCanDock(State) then
-  begin
-    Width := State.ViewportWidth - 8
-  end;
+  var Width: integer := (State.ViewportWidth - Layout.PrimaryTerminalWidth(State)) - 2;
+  if not Layout.ContextCanDock(State) then
+    begin
+      Width := State.ViewportWidth - 8;
+    end;
+  end if;
 
   if Width > 64 then
-  begin
-    Width := 64
-  end;
-  mutable var Text: string := 'Nothing in reach';
-  if (State.HasVisibleState and (State.View = ViewKind.FirstPerson)) and (State.PrimaryStatus <> '') then
-  begin
-    Text := State.PrimaryStatus
-  end;
-  var Lines: array of string := WrappedLines(Text, Width);
-  mutable var Labels: array of TuiElement := [];
-  for I: integer := 0 to EnvironmentPanelHeight - 3 do
-  begin
-    mutable var Line: string := '';
-    if I < Std.Arrays.Length(Lines) then
     begin
-      Line := Lines[I]
+      Width := 64;
     end;
+  end if;
+  var Text: string := 'Nothing in reach';
+  if (State.HasVisibleState and (State.View = Protocol.ViewKind.FirstPerson))
+    and
+    (State.PrimaryStatus <> '')
+  then
+    begin
+      Text := State.PrimaryStatus;
+    end;
+  end if;
+  const Lines: array of string := Layout.WrappedLines(Text, Width);
+  var Labels: array of Tui.TuiElement := [];
+  for I: integer := 0 to Layout.EnvironmentPanelHeight - 3 do
+    begin
+      var Line: string := '';
+      if I < Lines.Length() then
+        begin
+          Line := Lines[I];
+        end;
+      end if;
 
-    Std.Arrays.Push(Labels, TuiElementBuilders.MakeLabel(Line))
-  end;
-  var Settings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
-                                       .WithFixedHeight(EnvironmentPanelHeight);
-  return TuiElementBuilders.MakeColumn([
-                                         TuiElementBuilders.MakeLayout(Settings, TuiElementBuilders.MakePanel('Environment', [
-                                                                                                                               TuiElementBuilders.MakeColumn(Labels)
-                                                                                                                             ])),
-                                         TuiElementBuilders.MakeLayout(Expanding(1), TuiElementBuilders.MakePanel('Context', [
-                                                                                                                               ViewContext(State)
-                                                                                                                             ]))
-                                       ])
-end;
+      Labels.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
+    end;
+  end for;
+  const Settings: Tui.TuiLayoutSettings := Tui.TuiLayoutSettings.Create(
+    Tui.TuiMargins.Uniform(0),
+    Tui.TuiSizePolicy.Create(Tui.TuiSizePolicyKind.Expanding, Tui.TuiSizePolicyKind.Fixed),
+    Tui.TuiAlignment.Fill(),
+    1
+  ).WithFixedHeight(Layout.EnvironmentPanelHeight);
+  return Tui.TuiElementBuilders.MakeColumn([
+    Tui.TuiElementBuilders.MakeLayout(
+      Settings, Tui.TuiElementBuilders.MakePanel(
+        'Environment', [
+          Tui.TuiElementBuilders.MakeColumn(Labels)
+        ]
+      )
+    ),
+    Tui.TuiElementBuilders.MakeLayout(
+      Expanding(1), Tui.TuiElementBuilders.MakePanel(
+        'Context', [
+          ViewContext(State)
+        ]
+      )
+    )
+  ]);
+end function;
 
-function GameStatusItems(State: ClientModel): array of TuiStatusItem;
+function GameStatusItems(State: Model.ClientModel): array of Tui.TuiStatusItem;
 begin
   return [
-           TuiStatusItemBuilders.MakeKeyHint('ctrl-p', '|'),
-           TuiStatusItemBuilders.MakeHint(State.Status)
-         ]
-end;
+    Tui.TuiStatusItemBuilders.MakeKeyHint('ctrl-p', '|'),
+    Tui.TuiStatusItemBuilders.MakeHint(State.Status)
+  ];
+end function;
 
 // Renders the game screen: primary view, docked panels, and the status line.
-public function ViewGameShell(State: ClientModel): TuiElement;
+public function ViewGameShell(State: Model.ClientModel): Tui.TuiElement;
 begin
-  mutable var PrimarySettings: TuiLayoutSettings := Expanding(2);
-  if State.ContextPanelVisible and ContextCanDock(State) then
-  begin
-    PrimarySettings := PrimarySettings.WithFixedWidth(PrimaryTerminalWidth(State))
-  end;
-  var Primary: TuiElement := TuiElementBuilders.MakeLayout(PrimarySettings, ViewPrimary(State));
-  mutable var MainRow: TuiElement := TuiElementBuilders.MakeRow([Primary]);
-  if State.ContextPanelVisible and ContextCanDock(State) then
-  begin
-    MainRow := TuiElementBuilders.MakeRow([
-                                            Primary,
-                                            TuiElementBuilders.MakeLayout(Expanding(1), ViewSidebar(State))
-                                          ])
-  end;
-  mutable var Rows: array of TuiElement := [TuiElementBuilders.MakeLayout(Expanding(1), MainRow)];
-  if State.MessagePanelVisible and MessagesCanDock(State) then
-  begin
-    var MessageSettings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
-                                                .WithFixedHeight(MessagePanelHeight);
-    Std.Arrays.Push(Rows, TuiElementBuilders.MakeLayout(MessageSettings, TuiElementBuilders.MakePanel('Messages', [
-                                                                                                                    ViewDockedMessages(State)
-                                                                                                                  ])))
-  end;
-  var StatusSettings: TuiLayoutSettings := TuiLayoutSettings.Create(TuiMargins.Uniform(0), TuiSizePolicy.Create(TuiSizePolicyKind.Expanding, TuiSizePolicyKind.Fixed), TuiAlignment.Fill(), 1)
-                                             .WithFixedHeight(StatusPanelHeight);
-  Std.Arrays.Push(Rows, TuiElementBuilders.MakeLayout(StatusSettings, TuiElementBuilders.MakePanel('Status', [
-                                                                                                               TuiElementBuilders.MakeStatusLine(GameStatusItems(State))
-                                                                                                             ])));
-  return TuiElementBuilders.MakeColumn(Rows)
-end;
+  var PrimarySettings: Tui.TuiLayoutSettings := Expanding(2);
+  if State.ContextPanelVisible and Layout.ContextCanDock(State) then
+    begin
+      PrimarySettings := PrimarySettings.WithFixedWidth(Layout.PrimaryTerminalWidth(State));
+    end;
+  end if;
+  const Primary: Tui.TuiElement := Tui.TuiElementBuilders.MakeLayout(
+    PrimarySettings,
+    ViewPrimary(State)
+  );
+  var MainRow: Tui.TuiElement := Tui.TuiElementBuilders.MakeRow([Primary]);
+  if State.ContextPanelVisible and Layout.ContextCanDock(State) then
+    begin
+      MainRow := Tui.TuiElementBuilders.MakeRow([
+        Primary,
+        Tui.TuiElementBuilders.MakeLayout(Expanding(1), ViewSidebar(State))
+      ]);
+    end;
+  end if;
+  var Rows: array of Tui.TuiElement := [Tui.TuiElementBuilders.MakeLayout(Expanding(1), MainRow)];
+  if State.MessagePanelVisible and Layout.MessagesCanDock(State) then
+    begin
+      const MessageSettings: Tui.TuiLayoutSettings := Tui.TuiLayoutSettings.Create(
+        Tui.TuiMargins.Uniform(0),
+        Tui.TuiSizePolicy.Create(Tui.TuiSizePolicyKind.Expanding, Tui.TuiSizePolicyKind.Fixed),
+        Tui.TuiAlignment.Fill(),
+        1
+      ).WithFixedHeight(Layout.MessagePanelHeight);
+      Rows.PushInPlace(
+        Tui.TuiElementBuilders.MakeLayout(
+          MessageSettings, Tui.TuiElementBuilders.MakePanel(
+            'Messages', [
+              ViewDockedMessages(State)
+            ]
+          )
+        )
+      );
+    end;
+  end if;
+  const StatusSettings: Tui.TuiLayoutSettings := Tui.TuiLayoutSettings.Create(
+    Tui.TuiMargins.Uniform(0),
+    Tui.TuiSizePolicy.Create(Tui.TuiSizePolicyKind.Expanding, Tui.TuiSizePolicyKind.Fixed),
+    Tui.TuiAlignment.Fill(),
+    1
+  ).WithFixedHeight(Layout.StatusPanelHeight);
+  Rows.PushInPlace(
+    Tui.TuiElementBuilders.MakeLayout(
+      StatusSettings, Tui.TuiElementBuilders.MakePanel(
+        'Status', [
+          Tui.TuiElementBuilders.MakeStatusLine(GameStatusItems(State))
+        ]
+      )
+    )
+  );
+  return Tui.TuiElementBuilders.MakeColumn(Rows);
+end function;
+end unit;

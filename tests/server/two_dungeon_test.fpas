@@ -1,0 +1,321 @@
+// Carries an item between two generated dungeons over TCP, across a server restart, and back again.
+// A deliberately edited but valid stored level proves that revisits read the file, not the generator.
+program TwoDungeonTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Items as ItemRules, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as PlacementRules, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Math as Math, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+// A second entrance site reachable on foot from the spawn entrance.
+type SecondSite = record
+  Region: Entrances.RegionCoordinate;
+  Site: Coordinates.WorldPosition;
+  Route: array of Coordinates.WorldPosition;
+end record;
+
+function TestConfig(WorldsRoot: string): ConfigUnit.ServerConfig;
+begin
+  return ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := WorldsRoot,
+    WorldId := 'two-dungeons',
+    WorldSeed := 9462,
+    DungeonRegionChunks := 1,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 120
+  );
+end function;
+
+function ServeOne(ListenerValue: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Client: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Configured: boolean := try Net.SetTimeout(Client, 120000);
+  const Outcome: result of (boolean, string) := Server.ServeConnection(Client, Config, Token);
+  const Closed: boolean := try Net.Close(Client);
+  return Outcome;
+end function;
+
+// Finds the nearest other entrance site, ring by ring around the spawn region, reachable on foot.
+function FindSecondSite(Metadata: Terrain.WorldMetadata): SecondSite;
+begin
+  const Spawn: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  for Ring: integer := 1 to 4 do
+    begin
+      for DeltaY: integer := - Ring to Ring do
+        begin
+          for DeltaX: integer := - Ring to Ring do
+            begin
+              if Math.Max(Math.Abs(DeltaX), Math.Abs(DeltaY)) = Ring then
+                begin
+                  const Region: Entrances.RegionCoordinate := Entrances.RegionCoordinate(
+                    X := Spawn.X + DeltaX, Y := Spawn.Y +
+                    DeltaY
+                  );
+                  case Entrances.EntranceSite(Metadata, Region) of
+                    when Some(const Site):
+                      const Route: array of Coordinates.WorldPosition := Routes.OutdoorRoute(
+                        Metadata,
+                        Metadata.SpawnEntrance,
+                        Site,
+                        16
+                      );
+                      if Route.Length() > 0 then
+                        begin
+                          return SecondSite(Region := Region, Site := Site, Route := Route);
+                        end;
+                      end if;
+                    when None:
+                      null;
+                  end case;
+                end;
+              end if;
+            end;
+          end for;
+        end;
+      end for;
+    end;
+  end for;
+
+  panic('no second entrance site is reachable near the spawn');
+end function;
+
+function Chebyshev(Left: Coordinates.InteriorPosition; Right: Coordinates.InteriorPosition): integer;
+begin
+  return Math.Max(Math.Abs(Left.X - Right.X), Math.Abs(Left.Y - Right.Y));
+end function;
+
+// Picks an inner wall field next to a floor field, too far from the start to affect the sight rule.
+// Opening it keeps the level structurally valid but makes it differ from generated output.
+function EditableWall(Map: InteriorUnit.InteriorMap): array of Coordinates.InteriorPosition;
+begin
+  for Y: integer := 2 to Map.Height - 3 do
+    begin
+      for X: integer := 2 to Map.Width - 3 do
+        begin
+          const Wall: Coordinates.InteriorPosition := Coordinates.InteriorPosition(X := X, Y := Y);
+          const Below: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+            X := X,
+            Y := Y + 1
+          );
+          if (
+            (InteriorUnit.InteriorCellAt(Map, Wall).Unwrap() = InteriorUnit.InteriorCellKind.Wall)
+            and
+            (
+              InteriorUnit.InteriorCellAt(Map, Below).Unwrap() =
+              InteriorUnit.InteriorCellKind.Floor
+            )
+          )
+            and
+            ((Chebyshev(Wall, Map.Start) > 8) and (Chebyshev(Below, Map.Start) > 8))
+          then
+            begin
+              return [Wall, Below];
+            end;
+          end if;
+        end;
+      end for;
+    end;
+  end for;
+
+  panic('no editable wall in the second dungeon');
+end function;
+
+function RowsJson(Map: InteriorUnit.InteriorMap): string;
+begin
+  var Text: string := '"rows":[';
+  for Y: integer := 0 to Map.Height - 1 do
+    begin
+      var Row: string := '';
+      for X: integer := 0 to Map.Width - 1 do
+        begin
+          Row := Row + InteriorUnit.InteriorCellCode(Map.Cells[(Y * Map.Width) + X]);
+        end;
+      end for;
+
+      if Y > 0 then
+        begin
+          Text := Text + ',';
+        end;
+      end if;
+
+      Text := ((Text + '"') + Row) + '"';
+    end;
+  end for;
+
+  return Text + ']';
+end function;
+
+function ItemCount(State: GameState.GameState; Id: string): integer;
+begin
+  var Count: integer := 0;
+  for Item: ItemRules.GameItem in State.Items do
+    begin
+      if Item.Id = Id then
+        begin
+          Count := Count + 1;
+        end;
+      end if;
+    end;
+  end for;
+
+  return Count;
+end function;
+
+begin
+  const WorldsRoot: string := '.temp-data/two-dungeons-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(WorldsRoot).Unwrap());
+  const Config: ConfigUnit.ServerConfig := TestConfig(WorldsRoot);
+  const Fixture: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    Config.WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    Config.DungeonRegionChunks,
+    Config.ChunkCacheLimit
+  ).Unwrap();
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    Config.WorldId,
+    Config.WorldSeed,
+    1
+  ).Unwrap();
+  const First: InteriorUnit.InteriorMap := Routes.SpawnDungeonMap(Metadata);
+  const Second: SecondSite := FindSecondSite(Metadata);
+  const SecondId: string := Identities.DungeonAreaId(Metadata, Second.Region);
+  const SecondMap: InteriorUnit.InteriorMap := Generation.GenerateDungeon(
+    Metadata.Seed,
+    Second.Region.X,
+    Second.Region.Y,
+    SecondId
+  ).Unwrap();
+  const Coin: ItemRules.ItemPlacement := First.Items[0];
+  const Edit: array of Coordinates.InteriorPosition := EditableWall(SecondMap);
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(
+    Tasks.CreateCancellationSource()
+  );
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port: integer := Net.ListenerLocalAddress(ListenerValue).Unwrap().Port;
+  // First session: take the coin in the spawn dungeon, walk to the second dungeon, drop it there.
+  scope
+    const FirstServer: task of result of (boolean, string) := go ServeOne(
+      ListenerValue,
+      Config,
+      Token
+    );
+    var Client: Wire.WireClient := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.StartNewGame,
+      Token
+    );
+    Client := Wire.Exchange(
+      Wire.WalkOutdoors(Client, Metadata.SpawnEntrance, Token),
+      Protocol.ClientMessage.Interact,
+      Token
+    );
+    Client := Wire.WalkTo(Client, First, Coin.Position, Token).Unwrap();
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Test.AssertEquals(Coin.ItemId, Wire.FirstPersonOf(Client).Inventory[0].Id);
+    Client := Wire.WalkTo(Client, First, First.Exit, Token).Unwrap();
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Client := Wire.Exchange(
+      Wire.WalkOutdoorRoute(Client, Second.Route, Token),
+      Protocol.ClientMessage.Interact,
+      Token
+    );
+    Test.AssertEquals(SecondMap.Start.X, Wire.FirstPersonOf(Client).PlayerX);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.DropItem(Coin.ItemId), Token);
+    Test.AssertEquals(0, Wire.FirstPersonOf(Client).Inventory.Length());
+    // Stand next to the wall that will be edited, facing it, and save there.
+    Client := Wire.WalkTo(Client, SecondMap, Edit[1], Token).Unwrap();
+    var Turns: integer := 0;
+    while (not Coordinates.SamePosition(Routes.FieldAhead(Wire.FirstPersonOf(Client)), Edit[0]))
+      and
+      (Turns < 4) do
+      begin
+        Client := Wire.Exchange(
+          Client,
+          Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Right),
+          Token
+        );
+        Turns := Turns + 1;
+      end;
+    end while;
+
+    Test.AssertEquals('#', Wire.FirstPersonOf(Client).Rows[Edit[0].Y][Edit[0].X]);
+    Wire.RequireSaved(Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token));
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(FirstServer).Unwrap());
+  end scope;
+  // Edit the stored second level: still valid, but no longer the generator's output.
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    1,
+    32
+  ).Unwrap();
+  const SecondPath: string := PathOps.Join([
+    World.Directory,
+    'dungeons',
+    (Conv.IntToStr(Second.Region.X) + '_') + Conv.IntToStr(Second.Region.Y),
+    '0.json'
+  ]);
+  var Edited: InteriorUnit.InteriorMap := SecondMap;
+  Edited.Cells[(Edit[0].Y * Edited.Width) + Edit[0].X] := InteriorUnit.InteriorCellKind.Floor;
+  const Stored: string := Fs.ReadText(SecondPath).Unwrap();
+  Test.AssertTrue(RowsJson(SecondMap) in Stored);
+  const EditedText: string := Stored.Replace(RowsJson(SecondMap), RowsJson(Edited));
+  Test.AssertTrue(Encoding.DecodeLevel(EditedText, World.Metadata, SecondId) is Ok(_));
+  Test.AssertTrue(Fs.WriteTextAtomic(SecondPath, EditedText).Unwrap());
+  // After a restart, loading shows the edited field: the stored level is used, not regenerated.
+  scope
+    const SecondServer: task of result of (boolean, string) := go ServeOne(
+      ListenerValue,
+      Config,
+      Token
+    );
+    var Client: Wire.WireClient := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.LoadGame,
+      Token
+    );
+    Test.AssertEquals('.', Wire.FirstPersonOf(Client).Rows[Edit[0].Y][Edit[0].X]);
+    // The dropped coin lies once at the drop field and can be picked up again.
+    Client := Wire.WalkTo(Client, Edited, SecondMap.Start, Token).Unwrap();
+    Test.AssertEquals(
+      'At your feet: Ancient coin — Enter: Pick up',
+      Wire.FirstPersonOf(Client).Status
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Test.AssertEquals(Coin.ItemId, Wire.FirstPersonOf(Client).Inventory[0].Id);
+    // Revisit the spawn dungeon with the coin; its origin field stays empty.
+    Client := Wire.WalkTo(Client, Edited, SecondMap.Exit, Token).Unwrap();
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    var Back: array of Coordinates.WorldPosition := Routes.OutdoorRoute(
+      Metadata,
+      Second.Site,
+      Metadata.SpawnEntrance,
+      16
+    );
+    Client := Wire.Exchange(
+      Wire.WalkOutdoorRoute(Client, Back, Token),
+      Protocol.ClientMessage.Interact,
+      Token
+    );
+    Test.AssertEquals(First.Start.X, Wire.FirstPersonOf(Client).PlayerX);
+    Client := Wire.WalkTo(Client, First, Coin.Position, Token).Unwrap();
+    Test.AssertFalse('Pick up' in Wire.FirstPersonOf(Client).Status);
+    Wire.RequireSaved(Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token));
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(SecondServer).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+  const Saved: GameState.GameState := Levels.DecodeStoredSave(
+    World,
+    Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap()
+  ).Unwrap();
+  Test.AssertEquals(2, Saved.VisitedAreas.Length());
+  Test.AssertEquals(1, ItemCount(Saved, Coin.ItemId));
+  Test.AssertEquals(First.Items.Length() + SecondMap.Items.Length(), Saved.Items.Length());
+  Test.AssertEquals(1, GameState.InventoryItems(Saved).Length());
+  Test.AssertEquals(EditedText, Fs.ReadText(SecondPath).Unwrap());
+end.

@@ -1,0 +1,173 @@
+// Positive, negative and boundary coverage for log retention, filters, clocks and typed status.
+program DashboardModelTest;
+
+uses Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Layout as LayoutUnit, Dungeon.Server.Console.Input as InputUnit, Dungeon.Server.Logging as Logging, Dungeon.RuntimeData as RuntimeData, Std.Conv as Conv, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+begin
+  var History := LogUnit.EmptyHistory();
+  Test.AssertEquals(0, LogUnit.Matching(History).Length());
+  History := LogUnit.Scroll(History, -9223372036854775808, 0);
+  Test.AssertEquals(0, History.Offset);
+  Test.AssertFalse(History.Follow);
+  History := LogUnit.FollowLatest(History, 0);
+  for Index: integer := 0 to 19 do
+    var Kind: string := 'status';
+    if Index mod 3 = 1 then
+      Kind := 'rejected';
+    end if;
+
+    if Index mod 3 = 2 then
+      Kind := 'error';
+    end if;
+
+    History := LogUnit.Append(
+      History,
+      Logging.ServerLogEvent(Kind := Kind, Text := Conv.IntToStr(Index), Timestamp := 1000 + Index),
+      5
+    );
+  end for;
+
+  Test.AssertEquals(15, History.Offset);
+  Test.AssertTrue(History.Follow);
+  for Filter: LogUnit.LogFilter in [
+    LogUnit.LogFilter.Info,
+    LogUnit.LogFilter.Warnings,
+    LogUnit.LogFilter.Errors
+  ] do
+    History := LogUnit.ChangeFilter(History, Filter, 5);
+    Test.AssertEquals(20, History.Entries.Length());
+    for Entry: Logging.ServerLogEvent in LogUnit.Matching(History) do
+      Test.AssertTrue(LogUnit.Severity(Entry) = Filter);
+    end for;
+  end for;
+
+  Test.AssertTrue(LogUnit.NextFilter(LogUnit.LogFilter.Errors) = LogUnit.LogFilter.All);
+  History := LogUnit.ChangeFilter(History, LogUnit.LogFilter.All, 5);
+  History := LogUnit.Scroll(History, 6, 5);
+  History := LogUnit.Append(
+    History,
+    Logging.ServerLogEvent(Kind := 'custom', Text := 'unknown info'),
+    5
+  );
+  Test.AssertEquals(6, History.Offset);
+  Test.AssertFalse(History.Follow);
+  Test.AssertTrue(LogUnit.Severity(History.Entries[20]) = LogUnit.LogFilter.Info);
+  History := LogUnit.Scroll(History, 9223372036854775807, -1);
+  Test.AssertEquals(20, History.Offset);
+  History := LogUnit.EmptyHistory();
+  for Index: integer := 0 to LogUnit.MaximumLogEntries - 1 do
+    History := LogUnit.Append(
+      History,
+      Logging.ServerLogEvent(Kind := 'status', Text := Conv.IntToStr(Index)),
+      5
+    );
+  end for;
+
+  History := LogUnit.Scroll(History, 10, 5);
+  const Anchor := LogUnit.Matching(History)[History.Offset].Text;
+  History := LogUnit.Append(History, Logging.ServerLogEvent(Kind := 'error', Text := 'new'), 5);
+  Test.AssertEquals(128, History.Entries.Length());
+  Test.AssertEquals(9, History.Offset);
+  Test.AssertEquals(Anchor, LogUnit.Matching(History)[History.Offset].Text);
+  History := LogUnit.ChangeFilter(History, LogUnit.LogFilter.Errors, 5);
+  History := LogUnit.Scroll(History, 0, 5);
+  History := LogUnit.Append(History, Logging.ServerLogEvent(Kind := 'status', Text := 'hidden'), 5);
+  Test.AssertEquals(0, History.Offset);
+  Test.AssertEquals(1, LogUnit.Matching(History).Length());
+  History := LogUnit.ChangeFilter(History, LogUnit.LogFilter.Warnings, 5);
+  Test.AssertEquals(0, LogUnit.Matching(History).Length());
+  History := LogUnit.Append(
+    History,
+    Logging.ServerLogEvent(Kind := 'snapshot', Text := 'must not appear'),
+    5
+  );
+  Test.AssertEquals(128, History.Entries.Length());
+  History := LogUnit.EmptyHistory();
+  History := LogUnit.Append(
+    History,
+    Logging.ServerLogEvent(Kind := 'status', Text := 'hidden oldest'),
+    5
+  );
+  for Index: integer := 1 to 127 do
+    History := LogUnit.Append(
+      History,
+      Logging.ServerLogEvent(Kind := 'error', Text := Conv.IntToStr(Index)),
+      5
+    );
+  end for;
+
+  History := LogUnit.ChangeFilter(History, LogUnit.LogFilter.Errors, 5);
+  History := LogUnit.Scroll(History, 10, 5);
+  const FilteredAnchor := LogUnit.Matching(History)[History.Offset].Text;
+  History := LogUnit.Append(History, Logging.ServerLogEvent(Kind := 'error', Text := '128'), 5);
+  Test.AssertEquals(10, History.Offset);
+  Test.AssertEquals(FilteredAnchor, LogUnit.Matching(History)[History.Offset].Text);
+  History := LogUnit.Append(History, Logging.ServerLogEvent(Kind := 'error', Text := '129'), 5);
+  Test.AssertEquals(9, History.Offset);
+  Test.AssertEquals(FilteredAnchor, LogUnit.Matching(History)[History.Offset].Text);
+  const Queue: channel of Logging.ServerLogEvent := Tasks.CreateChannel(1);
+  Logging.LogServer(Some(Queue), 'status', 'first');
+  Logging.LogServer(Some(Queue), 'error', 'newest');
+  const Queued := Tasks.Receive(Queue).Unwrap();
+  Test.AssertEquals('newest', Queued.Text);
+  Test.AssertTrue(Queued.Timestamp > 0);
+  discard Tasks.CloseChannel(Queue);
+  Logging.LogServer(Some(Queue), 'status', 'closed channel is harmless');
+  Test.AssertEquals(256, LogUnit.SingleLine('x'.RepeatStr(400)).Length());
+  Test.AssertEquals(
+    'a b c ',
+    LogUnit.SingleLine('a' + string.Chr(10) + 'b' + string.Chr(9) + 'c' + string.Chr(13))
+  );
+  Test.AssertEquals('x  y', LogUnit.SingleLine('x' + string.Chr(127) + string.Chr(159) + 'y'));
+  Test.AssertEquals(' [31m', LogUnit.SingleLine(string.Chr(27) + '[31m'));
+  Test.AssertEquals('Unicode: München', LogUnit.SingleLine('Unicode: München'));
+  Test.AssertEquals('--:--:--', LogUnit.ClockText(-1));
+  Test.AssertEquals('--:--:--', LogUnit.ClockText(0));
+  Test.AssertEquals('01:02:03', LogUnit.ClockText(3723000));
+  Test.AssertEquals('00:00:00', LogUnit.ClockText(86400000));
+  Test.AssertEquals('00:00:00', LogUnit.UptimeText(-1));
+  Test.AssertEquals('25:00:00', LogUnit.UptimeText(90000000));
+  const Layout := LayoutUnit.ResolveLayout(-10, -20);
+  Test.AssertEquals(0, Layout.Width);
+  Test.AssertEquals(0, Layout.Height);
+  Test.AssertEquals(1, Layout.LogRows);
+  Test.AssertTrue(LayoutUnit.ResolveLayout(100, 18).Wide);
+  Test.AssertTrue(LayoutUnit.ResolveLayout(99, 31).Compact);
+  Test.AssertFalse(LayoutUnit.ResolveLayout(99, 32).Compact);
+  var Model := ModelUnit.NewConsoleModel(
+    '',
+    RuntimeData.ServerWorldConfig(
+      Id := 'main',
+      Seed := 12345,
+      DungeonRegionChunks := 4,
+      ChunkCacheLimit := 64,
+      MaximumViewWidth := 240,
+      MaximumViewHeight := 120
+    )
+  );
+  const Snapshot := Logging.ServerDashboardStatus(
+    WorldId := 'main', Seed := 12345, RegionChunks := 4,
+    Generator := 6, Area := 'Forgotten dungeon', Active := true, Dirty := true, SavePresent := true,
+    LastSavedAt := 123456
+  );
+  Model := ModelUnit.ApplyConsoleLog(
+    Model,
+    Logging.ServerLogEvent(Kind := 'snapshot', Text := '', Snapshot := Some(Snapshot))
+  );
+  Test.AssertTrue(Model.Connected);
+  Test.AssertEquals(0, Model.History.Entries.Length());
+  Test.AssertTrue(Model.Dashboard.Unwrap() = Snapshot);
+  Model := ModelUnit.ApplyConsoleLog(
+    Model,
+    Logging.ServerLogEvent(Kind := 'disconnected', Text := 'Player disconnected')
+  );
+  Test.AssertFalse(Model.Connected);
+  Test.AssertTrue(Model.Dashboard is None);
+  Test.AssertEquals(1, Model.History.Entries.Length());
+  const Cmd := Tui.TuiCmdOutput.Create();
+  Model := InputUnit.UpdateDashboard(Model, Tui.TuiMsg.Tick(-1), Cmd);
+  Test.AssertEquals(0, Model.Uptime);
+  Model.Uptime := 9223372036854775800;
+  Model := InputUnit.UpdateDashboard(Model, Tui.TuiMsg.Tick(100), Cmd);
+  Test.AssertEquals(9223372036854775800, Model.Uptime);
+end.

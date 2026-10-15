@@ -1,0 +1,123 @@
+// Pure area views, first-visit materialization, and full placement validation.
+unit Dungeon.Areas;
+
+uses Dungeon.Areas.Validation as Validation, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain;
+
+// Requires no map outdoors and a matching validated map in a dungeon.
+// Returns the supplied geometry unchanged; performs no loading or generation.
+public function AreaViewFor(Metadata: Terrain.WorldMetadata; State: GameState.GameState; Map: option of InteriorUnit.InteriorMap): result of (GameState.AreaView, string);
+begin
+  if State.Area = Coordinates.AreaKind.OutdoorRegion then
+    begin
+      if State.AreaId <> Metadata.OutdoorAreaId then
+        begin
+          return Error('outdoor area identity does not match the selected world');
+        end;
+      end if;
+
+      case Map of
+        when Some(const Value):
+          begin
+            return Error('outdoor area view must not contain an interior map');
+          end;
+        when None:
+          begin
+            return Ok(GameState.AreaView(Metadata := Metadata, Interior := None));
+          end;
+      end case;
+    end;
+  end if;
+
+  if State.Area = Coordinates.AreaKind.Dungeon then
+    begin
+      case Map of
+        when Some(const Value):
+          begin
+            if (State.AreaId = '') or (Value.AreaId <> State.AreaId) then
+              begin
+                return Error('interior map identity does not match the current area');
+              end;
+            end if;
+
+            return Ok(GameState.AreaView(Metadata := Metadata, Interior := Some(Value)));
+          end;
+        when None:
+          begin
+            return Error('dungeon area view requires the current interior map');
+          end;
+      end case;
+    end;
+  end if;
+
+  return Error('area view is unavailable for the current area kind');
+end function;
+
+// Adds validated placements once per game, preserving all mutable state on revisits.
+// State and Map must be valid; the caller validates the resulting transition before installation.
+public function MaterializeArea(State: GameState.GameState; Map: InteriorUnit.InteriorMap): GameState.GameState;
+begin
+  if GameState.HasVisitedArea(State, Map.AreaId) then
+    begin
+      return State;
+    end;
+  end if;
+  var Visited: array of string := State.VisitedAreas;
+  var Items: array of ItemRules.GameItem := State.Items;
+  var Hostiles: array of HostileRules.GameHostile := State.Hostiles;
+  Visited.PushInPlace(Map.AreaId);
+  for Index: integer := Visited.Length() - 1 downto 1 do
+    begin
+      if Model.StringComesBefore(Visited[Index], Visited[Index - 1]) then
+        begin
+          const Previous: string := Visited[Index - 1];
+          Visited[Index - 1] := Visited[Index];
+          Visited[Index] := Previous;
+        end;
+      end if;
+    end;
+  end for;
+
+  for Placement: ItemRules.ItemPlacement in Map.Items do
+    begin
+      Items.PushInPlace(
+        ItemRules.GameItem(
+          Id := Placement.ItemId,
+          Kind := Placement.Kind,
+          Location := ItemRules.ItemLocation.InInterior(Map.AreaId, Placement.Position)
+        )
+      );
+    end;
+  end for;
+
+  for Placement: HostileRules.HostilePlacement in Map.Hostiles do
+    begin
+      Hostiles.PushInPlace(
+        HostileRules.GameHostile(
+          Id := Placement.Id,
+          Kind := Placement.Kind,
+          AreaId := Map.AreaId,
+          Position := Placement.Position,
+          Health := HostileRules.HostileMaximumHealth(Placement.Kind),
+          Alerted := false
+        )
+      );
+    end;
+  end for;
+
+  return State with VisitedAreas := Visited; Items := Items; Hostiles := Hostiles; end with;
+end function;
+
+// Validates one supplied map per visited area and all entity origins and destinations.
+// Does not load or generate geometry; the current view reuses its supplied map.
+public function ValidateSavedGame(Metadata: Terrain.WorldMetadata; State: GameState.GameState; Maps: array of InteriorUnit.InteriorMap): result of (GameState.GameState, string);
+begin
+  return Validation.ValidateSavedAreas(Metadata, State, Maps);
+end function;
+
+// Checks a decoded save without any map: state shape and canonical area and placement identities.
+// This is only the first phase of loading; ValidateSavedGame performs the full check.
+public function ValidateSaveShape(Metadata: Terrain.WorldMetadata; State: GameState.GameState): result of (GameState.GameState, string);
+begin
+  return Validation.ValidateSaveShape(Metadata, State);
+end function;
+end unit;

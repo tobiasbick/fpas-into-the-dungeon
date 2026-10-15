@@ -1,32 +1,31 @@
 // Verifies three-state map styling, overlay controls, serialized panning, and compact rendering.
 program DungeonExplorationMapUiTest;
 
-uses
-  Dungeon.Client, Dungeon.Protocol, Dungeon.RuntimeData, Std.Arrays, Std.Options, Std.Results,
-  Std.Str, Std.Task, Std.Test, Std.Tui;
+uses Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
 
-function MakeKey(Kind: TuiKeyKind; Character: string): TuiKeyEvent;
+function MakeKey(Kind: Tui.TuiKeyKind; Character: string): Tui.TuiKeyEvent;
 begin
-  return record
-    kind := Kind;
-    ch := Character;
-    shift := false;
-    ctrl := false;
-    alt := false;
-    meta := false;
-  end
-end;
+  return Tui.TuiKeyEvent(
+    kind := Kind,
+    ch := Character,
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+end function;
 
 function UniformRows(Width: integer; Height: integer; Code: string): array of string;
 begin
-  mutable var Rows: array of string := [];
+  var Rows: array of string := [];
   for Y: integer := 0 to Height - 1 do
-  begin
-    Std.Arrays.Push(Rows, Std.Str.RepeatStr(Code, Width))
-  end;
+    begin
+      Rows.PushInPlace(Code.RepeatStr(Width));
+    end;
+  end for;
 
-  return Rows
-end;
+  return Rows;
+end function;
 
 function MapResponse(
   OriginX: integer;
@@ -36,356 +35,421 @@ function MapResponse(
   PlayerX: integer;
   PlayerY: integer;
   PlayerInWindow: boolean
-): ExplorationMapState;
+): Protocol.ExplorationMapState;
 begin
-  mutable var KnowledgeRows: array of string := UniformRows(Width, Height, 'r');
+  var KnowledgeRows: array of string := UniformRows(Width, Height, 'r');
   if PlayerInWindow then
-  begin
-    var LocalX: integer := PlayerX - OriginX;
-    var LocalY: integer := PlayerY - OriginY;
-    KnowledgeRows[LocalY] := Std.Str.SetCharAt(KnowledgeRows[LocalY], LocalX, 'v')
-  end;
+    begin
+      const LocalX: integer := PlayerX - OriginX;
+      const LocalY: integer := PlayerY - OriginY;
+      KnowledgeRows[LocalY] := KnowledgeRows[LocalY].SetCharAt(LocalX, 'v');
+    end;
+  end if;
 
-  return record
-    View := ViewKind.Map;
-    LabelText := 'Outdoor region';
-    OriginX := OriginX;
-    OriginY := OriginY;
-    Width := Width;
-    Height := Height;
-    Rows := UniformRows(Width, Height, 'g');
-    KnowledgeRows := KnowledgeRows;
-    PlayerWorldX := PlayerX;
-    PlayerWorldY := PlayerY;
-    PlayerInWindow := PlayerInWindow;
-  end
-end;
+  return Protocol.ExplorationMapState(
+    View := Protocol.ViewKind.Map,
+    LabelText := 'Outdoor region',
+    OriginX := OriginX,
+    OriginY := OriginY,
+    Width := Width,
+    Height := Height,
+    Rows := UniformRows(Width, Height, 'g'),
+    KnowledgeRows := KnowledgeRows,
+    PlayerWorldX := PlayerX,
+    PlayerWorldY := PlayerY,
+    PlayerInWindow := PlayerInWindow
+  );
+end function;
 
-function SurfaceContains(Surface: TuiSurfaceSnapshot; Text: string): boolean;
+function SurfaceContains(Surface: Tui.TuiSurfaceSnapshot; Text: string): boolean;
 begin
   for Y: integer := 0 to Surface.Height - 1 do
-  begin
-    if Std.Str.Contains(Surface.LineAt(Y), Text) then
     begin
-      return true
-    end
-  end;
+      if Text in Surface.LineAt(Y) then
+        begin
+          return true;
+        end;
+      end if;
+    end;
+  end for;
 
-  return false
-end;
+  return false;
+end function;
 
-function CountGlyph(Surface: TuiSurfaceSnapshot; Glyph: string): integer;
+function CountGlyph(Surface: Tui.TuiSurfaceSnapshot; Glyph: string): integer;
 begin
-  mutable var Count: integer := 0;
+  var Count: integer := 0;
   for Y: integer := 0 to Surface.Height - 1 do
-  begin
-    for X: integer := 0 to Surface.Width - 1 do
     begin
-      if Surface.CellAt(X, Y).Glyph = Glyph then
-      begin
-        Count := Count + 1
-      end
-    end
-  end;
+      for X: integer := 0 to Surface.Width - 1 do
+        begin
+          if Surface.CellAt(X, Y).Glyph = Glyph then
+            begin
+              Count := Count + 1;
+            end;
+          end if;
+        end;
+      end for;
+    end;
+  end for;
 
-  return Count
-end;
+  return Count;
+end function;
 
 begin
-  var Requests: channel of ClientMessage := CreateChannel(4);
-  var Events: channel of ClientEvent := CreateChannel(4);
-  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
-  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(4);
+  var Model: ClientUnit.ClientModel := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
   Model.ViewportWidth := 30;
   Model.ViewportHeight := 12;
-  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.MapState(record
-    OriginX := 9;
-    OriginY := 20;
-    Width := 3;
-    Height := 1;
-    Rows := ['?ge'];
-    KnowledgeRows := ['urv'];
-    PlayerX := 2;
-    PlayerY := 0;
-    WorldX := 11;
-    WorldY := 20;
-    Inventory := [];
-    Health := 20;
-    MaxHealth := 20;
-    Character := [];
-  end)), Cmd);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.Viewport(Width, Height):
-    begin
-    end
-    else
-    begin
-      panic('expected initial viewport synchronization')
-    end
-  end;
+  Model := ClientUnit.UpdateClientEvent(
+    Model, ClientUnit.ClientEvent.State(
+      Protocol.VisibleState.MapState(
+        Protocol.MapVisibleState(
+          OriginX := 9, OriginY := 20, Width := 3, Height := 1, Rows := [
+            '?ge'
+          ], KnowledgeRows := [
+            'urv'
+          ], PlayerX := 2, PlayerY := 0, WorldX := 11, WorldY := 20, Inventory := [], Health := 20,
+          MaxHealth := 20, Character := []
+        )
+      )
+    ), Cmd
+  );
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.Viewport(const Width, const Height):
+      null;
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected initial viewport synchronization');
+  end case;
 
   Model.Pending := false;
-  mutable var WideModel: ClientModel := Model;
+  var WideModel: ClientUnit.ClientModel := Model;
   WideModel.ViewportWidth := 100;
   WideModel.ViewportHeight := 40;
   WideModel.MapRequestPending := false;
-  WideModel := UpdateClient(WideModel, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      AssertEquals(76, Width);
-      AssertEquals(26, Height)
-    end
-    else
-    begin
-      panic('expected proportionally inset exploration-map request')
-    end
-  end;
-  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(30, 12));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertEquals(' ', App.SurfaceSnapshot().CellAt(1, 1).Glyph);
-  AssertEquals(9, Std.Options.Unwrap(App.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle)
-                    .Background
-                    .Red);
-  var Remembered: TuiStyle := Std.Options.Unwrap(App.SurfaceSnapshot().CellAt(3, 1).ConcreteStyle);
-  AssertFalse(Remembered.Dim);
-  AssertEquals(20, Remembered.Background.Red);
-  AssertEquals(46, Remembered.Background.Green);
-  AssertEquals(26, Remembered.Background.Blue);
-  AssertEquals(68, Remembered.Foreground.Red);
-  AssertEquals(93, Remembered.Foreground.Green);
-  AssertEquals(55, Remembered.Foreground.Blue);
-  AssertEquals('●', App.SurfaceSnapshot().CellAt(5, 1).Glyph);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.ExplorationMapOverlay);
-  AssertTrue(Model.MapRequestPending);
-  AssertEquals(-2, Model.MapDesiredOriginX);
-  AssertEquals(17, Model.MapDesiredOriginY);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      AssertEquals(-2, OriginX);
-      AssertEquals(17, OriginY);
-      AssertEquals(26, Width);
-      AssertEquals(6, Height)
-    end
-    else
-    begin
-      panic('expected centered exploration-map request')
-    end
-  end;
+  WideModel := ClientUnit.UpdateClient(
+    WideModel,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+      Test.AssertEquals(76, Width);
+      Test.AssertEquals(26, Height);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected proportionally inset exploration-map request');
+  end case;
+  const App: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(30, 12));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertEquals(' ', App.SurfaceSnapshot().CellAt(1, 1).Glyph);
+  Test.AssertEquals(9, App.SurfaceSnapshot().CellAt(1, 1).ConcreteStyle.Unwrap().Background.Red);
+  const Remembered: Tui.TuiStyle := App.SurfaceSnapshot().CellAt(3, 1).ConcreteStyle.Unwrap();
+  Test.AssertFalse(Remembered.Dim);
+  Test.AssertEquals(20, Remembered.Background.Red);
+  Test.AssertEquals(46, Remembered.Background.Green);
+  Test.AssertEquals(26, Remembered.Background.Blue);
+  Test.AssertEquals(68, Remembered.Foreground.Red);
+  Test.AssertEquals(93, Remembered.Foreground.Green);
+  Test.AssertEquals(55, Remembered.Foreground.Blue);
+  Test.AssertEquals('●', App.SurfaceSnapshot().CellAt(5, 1).Glyph);
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.ExplorationMapOverlay);
+  Test.AssertTrue(Model.MapRequestPending);
+  Test.AssertEquals(-2, Model.MapDesiredOriginX);
+  Test.AssertEquals(17, Model.MapDesiredOriginY);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+      Test.AssertEquals(-2, OriginX);
+      Test.AssertEquals(17, OriginY);
+      Test.AssertEquals(26, Width);
+      Test.AssertEquals(6, Height);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected centered exploration-map request');
+  end case;
 
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'w')), Cmd);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Right, '')), Cmd);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Down, '')), Cmd);
-  AssertEquals(-1, Model.MapDesiredOriginX);
-  AssertEquals(17, Model.MapDesiredOriginY);
-  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
-  Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(-2, 17, 26, 6, 11, 20, true)), Cmd);
-  AssertTrue(Model.MapRequestPending);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      AssertEquals(-1, OriginX);
-      AssertEquals(17, OriginY)
-    end
-    else
-    begin
-      panic('expected one coalesced latest map request')
-    end
-  end;
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'w')),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Right, '')), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Down, '')), Cmd);
+  Test.AssertEquals(-1, Model.MapDesiredOriginX);
+  Test.AssertEquals(17, Model.MapDesiredOriginY);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.ExplorationMap(MapResponse(-2, 17, 26, 6, 11, 20, true)),
+    Cmd
+  );
+  Test.AssertTrue(Model.MapRequestPending);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+      Test.AssertEquals(-1, OriginX);
+      Test.AssertEquals(17, OriginY);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected one coalesced latest map request');
+  end case;
 
-  Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(-1, 17, 26, 6, 11, 20, true)), Cmd);
-  AssertFalse(Model.MapRequestPending);
-  AssertTrue(Model.MapHasState);
-  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.ExplorationMap(MapResponse(-1, 17, 26, 6, 11, 20, true)),
+    Cmd
+  );
+  Test.AssertFalse(Model.MapRequestPending);
+  Test.AssertTrue(Model.MapHasState);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
   // Resize and Home must keep the received dimensions until replacement arrives.
-  mutable var Resized: ClientModel := Model;
+  var Resized: ClientUnit.ClientModel := Model;
   Resized.Pending := true;
-  Resized := UpdateClient(Resized, TuiMsg.Resize(TuiSize.Create(100, 40)), Cmd);
-  Resized := UpdateClient(Resized, TuiMsg.Key(MakeKey(TuiKeyKind.Home, '')), Cmd);
-  AssertEquals(26, Resized.MapWidth);
-  AssertEquals(6, Resized.MapHeight);
-  AssertEquals(76, Resized.MapDesiredWidth);
-  AssertEquals(26, Resized.MapDesiredHeight);
-  Resized := App.RunIterations(Resized, UpdateClient, ViewClient, 0, 0);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OX, OY, W, H):
-    begin
-      Resized := UpdateClientEvent(Resized, ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)), Cmd)
-    end
-    else
-    begin
-      panic('expected resized map request')
-    end
-  end;
+  Resized := ClientUnit.UpdateClient(Resized, Tui.TuiMsg.Resize(Tui.TuiSize.Create(100, 40)), Cmd);
+  Resized := ClientUnit.UpdateClient(
+    Resized,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Home, '')),
+    Cmd
+  );
+  Test.AssertEquals(26, Resized.MapWidth);
+  Test.AssertEquals(6, Resized.MapHeight);
+  Test.AssertEquals(76, Resized.MapDesiredWidth);
+  Test.AssertEquals(26, Resized.MapDesiredHeight);
+  Resized := App.RunIterations(Resized, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OX, const OY, const W, const H):
+      Resized := ClientUnit.UpdateClientEvent(
+        Resized,
+        ClientUnit.ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)),
+        Cmd
+      );
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected resized map request');
+  end case;
 
-  AssertEquals(76, Resized.MapWidth);
-  AssertEquals(26, Resized.MapHeight);
+  Test.AssertEquals(76, Resized.MapWidth);
+  Test.AssertEquals(26, Resized.MapHeight);
   // Closing and reopening cannot reset a live request or enqueue another one.
-  mutable var Reopened: ClientModel := Model;
-  Reopened := UpdateClient(Reopened, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'd')), Cmd);
-  var Outstanding: ClientMessage := Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0));
-  Reopened := UpdateClient(Reopened, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  Reopened := UpdateClient(Reopened, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  AssertTrue(Reopened.MapRequestPending);
-  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
+  var Reopened: ClientUnit.ClientModel := Model;
+  Reopened := ClientUnit.UpdateClient(
+    Reopened,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'd')),
+    Cmd
+  );
+  const Outstanding: Protocol.ClientMessage := Tasks.ReceiveWithTimeout(Requests, 0).Unwrap();
+  Reopened := ClientUnit.UpdateClient(
+    Reopened,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  Reopened := ClientUnit.UpdateClient(
+    Reopened,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  Test.AssertTrue(Reopened.MapRequestPending);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
   case Outstanding of
-    ClientMessage.ExplorationMap(OX, OY, W, H):
-    begin
-      Reopened := UpdateClientEvent(Reopened, ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)), Cmd)
-    end
-    else
-    begin
-      panic('expected outstanding map request')
-    end
-  end;
+    when Protocol.ClientMessage.ExplorationMap(const OX, const OY, const W, const H):
+      Reopened := ClientUnit.UpdateClientEvent(
+        Reopened,
+        ClientUnit.ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)),
+        Cmd
+      );
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected outstanding map request');
+  end case;
 
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OX, OY, W, H):
-    begin
-      Reopened := UpdateClientEvent(Reopened, ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)), Cmd)
-    end
-    else
-    begin
-      panic('expected one coalesced reopen request')
-    end
-  end;
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OX, const OY, const W, const H):
+      Reopened := ClientUnit.UpdateClientEvent(
+        Reopened,
+        ClientUnit.ClientEvent.ExplorationMap(MapResponse(OX, OY, W, H, 11, 20, true)),
+        Cmd
+      );
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected one coalesced reopen request');
+  end case;
 
-  AssertFalse(Reopened.MapRequestPending);
-  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(SurfaceContains(App.SurfaceSnapshot(), 'Map - Outdoor region'));
-  AssertEquals(1, CountGlyph(App.SurfaceSnapshot(), '●'));
+  Test.AssertFalse(Reopened.MapRequestPending);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertTrue(SurfaceContains(App.SurfaceSnapshot(), 'Map - Outdoor region'));
+  Test.AssertEquals(1, CountGlyph(App.SurfaceSnapshot(), '●'));
   // Pending updates must not move or resize the already displayed map overlay.
-  var ReadySurface: TuiSurfaceSnapshot := App.SurfaceSnapshot();
-  mutable var Updating: ClientModel := Model;
+  const ReadySurface: Tui.TuiSurfaceSnapshot := App.SurfaceSnapshot();
+  var Updating: ClientUnit.ClientModel := Model;
   Updating.MapRequestPending := true;
   Updating.Status := 'Updating map...';
-  Updating := App.RunIterations(Updating, UpdateClient, ViewClient, 0, 0);
+  Updating := App.RunIterations(Updating, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
   for Y: integer := 0 to ReadySurface.Height - 4 do
-  begin
-    AssertEquals(ReadySurface.LineAt(Y), App.SurfaceSnapshot().LineAt(Y))
-  end;
+    begin
+      Test.AssertEquals(ReadySurface.LineAt(Y), App.SurfaceSnapshot().LineAt(Y));
+    end;
+  end for;
 
-  Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(-1, 17, 26, 6, 100, 100, false)), Cmd);
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertEquals(0, CountGlyph(App.SurfaceSnapshot(), '●'));
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Home, '')), Cmd);
-  AssertEquals(-2, Model.MapDesiredOriginX);
-  AssertEquals(17, Model.MapDesiredOriginY);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      AssertEquals(-2, OriginX);
-      AssertEquals(17, OriginY)
-    end
-    else
-    begin
-      panic('expected recentered map request')
-    end
-  end;
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.ExplorationMap(MapResponse(-1, 17, 26, 6, 100, 100, false)),
+    Cmd
+  );
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertEquals(0, CountGlyph(App.SurfaceSnapshot(), '●'));
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Home, '')), Cmd);
+  Test.AssertEquals(-2, Model.MapDesiredOriginX);
+  Test.AssertEquals(17, Model.MapDesiredOriginY);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+      Test.AssertEquals(-2, OriginX);
+      Test.AssertEquals(17, OriginY);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected recentered map request');
+  end case;
   // A rejection of another intention must not resolve the in-flight map request.
-  var OtherRejection: ClientModel := UpdateClientEvent(Model, ClientEvent.Rejected('movement_rejected', 'Blocked.'), Cmd);
-  AssertTrue(OtherRejection.MapRequestPending);
-  Model := UpdateClientEvent(Model, ClientEvent.MapRejected('map_failed', 'Map unavailable.'), Cmd);
-  AssertFalse(Model.MapRequestPending);
-  AssertTrue(Model.MapHasState);
-  AssertEquals('Map unavailable.', Model.Status);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Escape, '')), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.ExplorationMapOverlay);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(MapResponse(OriginX, OriginY, Width, Height, 11, 20, true)), Cmd)
-    end
-    else
-    begin
-      panic('expected map request before M closes the overlay')
-    end
-  end;
+  const OtherRejection: ClientUnit.ClientModel := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Rejected('movement_rejected', 'Blocked.'),
+    Cmd
+  );
+  Test.AssertTrue(OtherRejection.MapRequestPending);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.MapRejected('map_failed', 'Map unavailable.'),
+    Cmd
+  );
+  Test.AssertFalse(Model.MapRequestPending);
+  Test.AssertTrue(Model.MapHasState);
+  Test.AssertEquals('Map unavailable.', Model.Status);
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Escape, '')), Cmd);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.ExplorationMapOverlay);
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+      Model := ClientUnit.UpdateClientEvent(
+        Model,
+        ClientUnit.ClientEvent.ExplorationMap(
+          MapResponse(OriginX, OriginY, Width, Height, 11, 20, true)
+        ),
+        Cmd
+      );
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected map request before M closes the overlay');
+  end case;
 
-  Model := UpdateClientEvent(Model, ClientEvent.State(VisibleState.FirstPersonState(record
-    Title := 'Interior';
-    Status := 'Explore.';
-    Width := 3;
-    Height := 3;
-    Rows := ['###', '#.#', '###'];
-    KnowledgeRows := ['vvv', 'vvv', 'vvv'];
-    PlayerX := 1;
-    PlayerY := 1;
-    Facing := FirstPersonFacing.North;
-    Inventory := [];
-    Health := 20;
-    MaxHealth := 20;
-    Character := [];
-    CombatLog := [];
-    CombatEvents := [];
-  end)), Cmd);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.Viewport(Width, Height):
-    begin
-    end
-    else
-    begin
-      panic('expected first-person viewport synchronization')
-    end
-  end;
+  Model := ClientUnit.UpdateClientEvent(
+    Model, ClientUnit.ClientEvent.State(
+      Protocol.VisibleState.FirstPersonState(
+        Protocol.FirstPersonVisibleState(
+          Title := 'Interior', Status := 'Explore.', Width := 3, Height := 3, Rows := [
+            '###',
+            '#.#',
+            '###'
+          ], KnowledgeRows := [
+            'vvv',
+            'vvv',
+            'vvv'
+          ], PlayerX := 1, PlayerY := 1, Facing := Protocol.FirstPersonFacing.North,
+          Inventory := [], Health := 20, MaxHealth := 20, Character := [], CombatLog := [],
+          CombatEvents := []
+        )
+      )
+    ), Cmd
+  );
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.Viewport(const Width, const Height):
+      null;
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected first-person viewport synchronization');
+  end case;
 
   Model.Pending := false;
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.ExplorationMapOverlay);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      AssertEquals(-12, OriginX);
-      AssertEquals(-2, OriginY)
-    end
-    else
-    begin
-      panic('expected centered interior map request')
-    end
-  end;
-  var InteriorMapWidth: integer := Model.MapDesiredWidth;
-  var InteriorMapHeight: integer := Model.MapDesiredHeight;
-  mutable var InteriorRows: array of string := UniformRows(InteriorMapWidth, InteriorMapHeight, '.');
-  mutable var InteriorKnowledge: array of string := UniformRows(InteriorMapWidth, InteriorMapHeight, 'r');
-  InteriorRows[2] := Std.Str.SetCharAt(InteriorRows[2], 21, 't');
-  InteriorRows[3] := Std.Str.SetCharAt(InteriorRows[3], 14, 'i');
-  InteriorKnowledge[3] := Std.Str.SetCharAt(InteriorKnowledge[3], 13, 'v');
-  Model := UpdateClientEvent(Model, ClientEvent.ExplorationMap(record
-    View := ViewKind.FirstPerson;
-    LabelText := 'Initial dungeon';
-    OriginX := -12;
-    OriginY := -2;
-    Width := InteriorMapWidth;
-    Height := InteriorMapHeight;
-    Rows := InteriorRows;
-    KnowledgeRows := InteriorKnowledge;
-    PlayerWorldX := 1;
-    PlayerWorldY := 1;
-    PlayerInWindow := true;
-  end), Cmd);
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(CountGlyph(App.SurfaceSnapshot(), '▣') > 0);
-  AssertTrue(CountGlyph(App.SurfaceSnapshot(), '●') > 1);
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.ExplorationMapOverlay);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
+      Test.AssertEquals(-12, OriginX);
+      Test.AssertEquals(-2, OriginY);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected centered interior map request');
+  end case;
+  const InteriorMapWidth: integer := Model.MapDesiredWidth;
+  const InteriorMapHeight: integer := Model.MapDesiredHeight;
+  var InteriorRows: array of string := UniformRows(InteriorMapWidth, InteriorMapHeight, '.');
+  var InteriorKnowledge: array of string := UniformRows(InteriorMapWidth, InteriorMapHeight, 'r');
+  InteriorRows[2] := InteriorRows[2].SetCharAt(21, '#');
+  InteriorRows[3] := InteriorRows[3].SetCharAt(14, 'i');
+  InteriorKnowledge[3] := InteriorKnowledge[3].SetCharAt(13, 'v');
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.ExplorationMap(
+      Protocol.ExplorationMapState(
+        View := Protocol.ViewKind.FirstPerson,
+        LabelText := 'Initial dungeon',
+        OriginX := -12,
+        OriginY := -2,
+        Width := InteriorMapWidth,
+        Height := InteriorMapHeight,
+        Rows := InteriorRows,
+        KnowledgeRows := InteriorKnowledge,
+        PlayerWorldX := 1,
+        PlayerWorldY := 1,
+        PlayerInWindow := true
+      )
+    ),
+    Cmd
+  );
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertTrue(CountGlyph(App.SurfaceSnapshot(), '█') > 0);
+  Test.AssertTrue(CountGlyph(App.SurfaceSnapshot(), '●') > 1);
   App.Close();
   Model.ViewportWidth := 10;
   Model.ViewportHeight := 5;
-  var TinyApp: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(10, 5));
-  Model := TinyApp.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertEquals(10, TinyApp.SurfaceSnapshot().Width);
-  AssertEquals(5, TinyApp.SurfaceSnapshot().Height);
-  Model := UpdateClient(Model, TuiMsg.Key(MakeKey(TuiKeyKind.Escape, '')), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  const TinyApp: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(10, 5));
+  Model := TinyApp.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertEquals(10, TinyApp.SurfaceSnapshot().Width);
+  Test.AssertEquals(5, TinyApp.SurfaceSnapshot().Height);
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Escape, '')), Cmd);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
   TinyApp.Close();
-  mutable var Offline: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
-  Offline := UpdateClient(Offline, TuiMsg.Key(MakeKey(TuiKeyKind.Character, 'm')), Cmd);
-  AssertTrue(Offline.Overlay = ClientOverlay.NoOverlay);
-  CloseChannel(Requests);
-  CloseChannel(Events)
+  var Offline: ClientUnit.ClientModel := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  Offline := ClientUnit.UpdateClient(
+    Offline,
+    Tui.TuiMsg.Key(MakeKey(Tui.TuiKeyKind.Character, 'm')),
+    Cmd
+  );
+  Test.AssertTrue(Offline.Overlay = ClientUnit.ClientOverlay.NoOverlay);
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
 end.

@@ -7,14 +7,20 @@ persisted without adding a general loot, equipment, or scripting system.
 ## Authoritative model
 
 `libs/game` owns every item. An item has a stable ID, a kind, and exactly one
-location. The current model permits the fixed Ancient coin either at field
-`8,1` in the initial dungeon or in the player's inventory. Validation requires
-exactly one coin with the expected identity and rejects missing, duplicate,
-unknown, or misplaced item state.
+location. Every generated dungeon places an Ancient coin, a Rusty short sword,
+and a Leather jerkin on room corners, named `<area>:item:0` to `:2`.
+Full validation permits an item's current location on an ordinary floor field
+of any visited dungeon or in the player's inventory, while requiring its
+original placement identity and kind. The interaction loop supports pickup; the
+drop intention lays a carried item back on the floor (see below). Validation
+requires exactly one item per placement of every visited dungeon and rejects
+missing, duplicate, unknown, or invalid floor-item state. A floor item must lie on an
+ordinary floor field, never on a wall or the exit.
 
-Starting a new game always creates the coin at its initial dungeon field. Area
-transitions and movement preserve its state. The client never creates, moves,
-or owns items.
+Starting a new game creates no dungeon items. First entry materializes a
+dungeon's items at their placements. Further transitions and movement preserve
+its state, including after save/load. The client never creates, moves, or owns
+items.
 
 ## Interaction
 
@@ -30,6 +36,23 @@ directly ahead:
 No action menu or scripting layer is required for this fixed rule. Future
 interactions may introduce a more general mechanism only when their concrete
 requirements justify it.
+
+## Capacity and dropping
+
+Carried and worn items together fill at most `MaximumInventoryItems` (64)
+entries, the same bound as the protocol's visible inventory. A full inventory
+rejects pickup without changing state or time, and the hint reads
+`At your feet: <item> — inventory full`. State validation rejects more than 64
+carried or worn items.
+
+The `drop_item` intention (inventory overlay, `D`) lays the selected carried item
+on the player's occupied ordinary dungeon floor field. It is a turn action like
+wearing gear: an adjacent opponent acts afterwards, and a successful drop logs
+`You drop the <item>.` The server rejects unknown items, worn items, items lying
+on the floor, dropping outdoors or on the exit, and a field that already holds
+an item; a rejection changes neither state nor time. The item keeps its identity
+and kind, so the existing floor-item projection, inspection, pickup, and save
+format apply unchanged. See [generated dungeons](generated-dungeons.md).
 
 ## Protocol and presentation
 
@@ -61,7 +84,7 @@ narrow-screen overlay; no new preference or configuration schema is introduced.
 
 ## Persistence
 
-Savegame format 6 stores the complete item array alongside player, return, and
+Savegame format 7 stores the complete item array alongside player, return, and
 exploration state. Each location is an explicit variant: an interior area and
 field, or carried by the player. Loading validates the full state before it can
 replace the active game. Format 3 and all other obsolete schemas are rejected
@@ -70,12 +93,12 @@ and removed according to the current-version-only configuration and save policy.
 An explicit save is the only persistence boundary. Disconnecting, reconnecting,
 or rendering cannot change item ownership. Saving and loading a carried coin
 must preserve exactly one carried coin; starting a new game must restore
-exactly one coin to the dungeon without altering an existing save until the
-next explicit save.
+exactly one coin on the new game's first dungeon entry without altering an
+existing save until the next explicit save.
 
 ## Deferred scope
 
-Dropping, using, stacking, capacity limits, random loot, containers, shops, and
-an economy remain outside Phase 10. Stage 13a adds further item kinds, several
+Using, stacking, random loot, containers, shops, and an economy remain outside
+Phase 10; dropping and the capacity limit follow the section above. Stage 13a adds further item kinds, several
 item placements per interior, and wearing items; see
 [equipment and character values](equipment.md).

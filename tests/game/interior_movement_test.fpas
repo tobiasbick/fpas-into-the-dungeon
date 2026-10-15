@@ -1,128 +1,336 @@
 // Verifies fixed interior geometry, one-field relative movement, turns, collision, and exit rules.
 program DungeonInteriorMovementTest;
 
-uses
-  Dungeon.Coordinates, Dungeon.Exploration.Model, Dungeon.GameState, Dungeon.Interior,
-  Dungeon.Interior.InitialDungeon, Dungeon.Movement, Dungeon.Terrain, Dungeon.Terrain.Placement,
-  Std.Arrays, Std.Results, Std.Test;
+uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Test as Test;
 
-function DungeonState(Metadata: WorldMetadata; Position: InteriorPosition; Facing: FacingDirection): GameState;
+function DungeonState(Metadata: Terrain.WorldMetadata; Position: Coordinates.InteriorPosition; Facing: Coordinates.FacingDirection): GameState.GameState;
 begin
-  return record
-    Area := AreaKind.Dungeon;
-    AreaId := Metadata.DungeonAreaId;
-    Player := PlayerPosition.FirstPerson(record
-    Position := Position;
-    Facing := Facing;
-  end);
-    ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance);
-    Exploration := EmptyExploration();
-    Items := NewGame(Metadata).Items;
-    Npc := NewGame(Metadata).Npc;
-    Health := NewGame(Metadata).Health;
-    Hostiles := NewGame(Metadata).Hostiles;
-    RandomState := NewGame(Metadata).RandomState;
-  end
-end;
+  return GameState.GameState(
+    VisitedAreas := [Fixtures.SpawnDungeonAreaId(Metadata)],
+    Area := Coordinates.AreaKind.Dungeon,
+    AreaId := Fixtures.SpawnDungeonAreaId(Metadata),
+    Player := Coordinates.PlayerPosition.FirstPerson(
+      Coordinates.FirstPersonPose(Position := Position, Facing := Facing)
+    ),
+    ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+      Metadata.OutdoorAreaId,
+      Metadata.SpawnEntrance
+    ),
+    Exploration := Model.EmptyExploration(),
+    Items := Fixtures.MaterializedFixtureState(Metadata).Items,
+    Health := Fixtures.MaterializedFixtureState(Metadata).Health,
+    Hostiles := Fixtures.MaterializedFixtureState(Metadata).Hostiles,
+    RandomState := Fixtures.MaterializedFixtureState(Metadata).RandomState
+  );
+end function;
 
 procedure AssertStep(
-  Metadata: WorldMetadata;
-  Position: InteriorPosition;
-  Facing: FacingDirection;
-  Step: RelativeStep;
+  Metadata: Terrain.WorldMetadata;
+  Position: Coordinates.InteriorPosition;
+  Facing: Coordinates.FacingDirection;
+  Step: Coordinates.RelativeStep;
   ExpectedX: integer;
   ExpectedY: integer
 );
 begin
-  var Before: GameState := DungeonState(Metadata, Position, Facing);
-  var After: GameState := Unwrap(StepFirstPerson(Metadata, Before, Step));
-  var Pose: FirstPersonPose := Unwrap(FirstPersonPlayerPose(After));
-  AssertEquals(ExpectedX, Pose.Position.X);
-  AssertEquals(ExpectedY, Pose.Position.Y);
-  AssertTrue(Pose.Facing = Facing)
-end;
+  const Before: GameState.GameState := DungeonState(Metadata, Position, Facing);
+  const After: GameState.GameState := Movement.StepFirstPerson(
+    Fixtures.FixtureViewFor(Metadata, Before),
+    Before,
+    Step
+  ).Unwrap();
+  const Pose: Coordinates.FirstPersonPose := GameState.FirstPersonPlayerPose(After).Unwrap();
+  Test.AssertEquals(ExpectedX, Pose.Position.X);
+  Test.AssertEquals(ExpectedY, Pose.Position.Y);
+  Test.AssertTrue(Pose.Facing = Facing);
+end procedure;
 
 procedure AssertTurn(
-  Metadata: WorldMetadata;
-  Facing: FacingDirection;
-  Turn: RelativeTurn;
-  Expected: FacingDirection
+  Metadata: Terrain.WorldMetadata;
+  Facing: Coordinates.FacingDirection;
+  Turn: Coordinates.RelativeTurn;
+  Expected: Coordinates.FacingDirection
 );
 begin
-  var Position: InteriorPosition := record
-    X := 9;
-    Y := 1;
-  end;
-  var After: GameState := Unwrap(TurnFirstPerson(Metadata, DungeonState(Metadata, Position, Facing), Turn));
-  var Pose: FirstPersonPose := Unwrap(FirstPersonPlayerPose(After));
-  AssertEquals(Position.X, Pose.Position.X);
-  AssertEquals(Position.Y, Pose.Position.Y);
-  AssertTrue(Pose.Facing = Expected)
-end;
+  const Position: Coordinates.InteriorPosition := Coordinates.InteriorPosition(X := 9, Y := 1);
+  const After: GameState.GameState := Movement.TurnFirstPerson(
+    Fixtures.FixtureViewFor(Metadata, DungeonState(Metadata, Position, Facing)),
+    DungeonState(Metadata, Position, Facing),
+    Turn
+  ).Unwrap();
+  const Pose: Coordinates.FirstPersonPose := GameState.FirstPersonPlayerPose(After).Unwrap();
+  Test.AssertEquals(Position.X, Pose.Position.X);
+  Test.AssertEquals(Position.Y, Pose.Position.Y);
+  Test.AssertTrue(Pose.Facing = Expected);
+end procedure;
 
 begin
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('interior-test', 12345));
-  var Map: InteriorMap := Unwrap(InitialDungeonMap());
-  AssertEquals(11, Map.Width);
-  AssertEquals(9, Map.Height);
-  AssertEquals(Map.Width * Map.Height, Std.Arrays.Length(Map.Cells));
-  AssertTrue(Unwrap(InteriorCellAt(Map, Map.Start)) = InteriorCellKind.Floor);
-  AssertTrue(Unwrap(InteriorCellAt(Map, Map.Exit)) = InteriorCellKind.ExitField);
-  AssertTrue(IsOk(ValidateInteriorMap(Map)));
-  var Horizontal: InteriorPosition := record
-    X := 5;
-    Y := 1;
-  end;
-  var Vertical: InteriorPosition := record
-    X := 9;
-    Y := 3;
-  end;
-
-  AssertStep(Metadata, Vertical, FacingDirection.North, RelativeStep.Forward, 9, 2);
-  AssertStep(Metadata, Vertical, FacingDirection.North, RelativeStep.Backward, 9, 4);
-  AssertStep(Metadata, Horizontal, FacingDirection.East, RelativeStep.Forward, 6, 1);
-  AssertStep(Metadata, Horizontal, FacingDirection.East, RelativeStep.Backward, 4, 1);
-  AssertStep(Metadata, Vertical, FacingDirection.South, RelativeStep.Forward, 9, 4);
-  AssertStep(Metadata, Vertical, FacingDirection.South, RelativeStep.Backward, 9, 2);
-  AssertStep(Metadata, Horizontal, FacingDirection.West, RelativeStep.Forward, 4, 1);
-  AssertStep(Metadata, Horizontal, FacingDirection.West, RelativeStep.Backward, 6, 1);
-  AssertStep(Metadata, Horizontal, FacingDirection.North, RelativeStep.Left, 4, 1);
-  AssertStep(Metadata, Horizontal, FacingDirection.North, RelativeStep.Right, 6, 1);
-  AssertStep(Metadata, Vertical, FacingDirection.East, RelativeStep.Left, 9, 2);
-  AssertStep(Metadata, Vertical, FacingDirection.East, RelativeStep.Right, 9, 4);
-  AssertStep(Metadata, Horizontal, FacingDirection.South, RelativeStep.Left, 6, 1);
-  AssertStep(Metadata, Horizontal, FacingDirection.South, RelativeStep.Right, 4, 1);
-  AssertStep(Metadata, Vertical, FacingDirection.West, RelativeStep.Left, 9, 4);
-  AssertStep(Metadata, Vertical, FacingDirection.West, RelativeStep.Right, 9, 2);
-  AssertTurn(Metadata, FacingDirection.North, RelativeTurn.TurnLeft, FacingDirection.West);
-  AssertTurn(Metadata, FacingDirection.West, RelativeTurn.TurnLeft, FacingDirection.South);
-  AssertTurn(Metadata, FacingDirection.South, RelativeTurn.TurnLeft, FacingDirection.East);
-  AssertTurn(Metadata, FacingDirection.East, RelativeTurn.TurnLeft, FacingDirection.North);
-  AssertTurn(Metadata, FacingDirection.North, RelativeTurn.TurnRight, FacingDirection.East);
-  AssertTurn(Metadata, FacingDirection.East, RelativeTurn.TurnRight, FacingDirection.South);
-  AssertTurn(Metadata, FacingDirection.South, RelativeTurn.TurnRight, FacingDirection.West);
-  AssertTurn(Metadata, FacingDirection.West, RelativeTurn.TurnRight, FacingDirection.North);
-  var Blocked: GameState := DungeonState(Metadata, Map.Start, FacingDirection.North);
-  AssertTrue(IsError(StepFirstPerson(Metadata, Blocked, RelativeStep.Forward)));
-  var Unchanged: FirstPersonPose := Unwrap(FirstPersonPlayerPose(Blocked));
-  AssertEquals(Map.Start.X, Unchanged.Position.X);
-  AssertEquals(Map.Start.Y, Unchanged.Position.Y);
-  AssertTrue(Unchanged.Facing = FacingDirection.North);
-  AssertTrue(IsError(StepFirstPerson(Metadata, NewGame(Metadata), RelativeStep.Forward)));
-  AssertTrue(IsError(TurnFirstPerson(Metadata, NewGame(Metadata), RelativeTurn.TurnLeft)));
-  AssertTrue(IsError(ActivateAreaTransition(Metadata, DungeonState(Metadata, Map.Start, Map.StartFacing))));
-  AssertTrue(IsOk(ActivateAreaTransition(Metadata, DungeonState(Metadata, Map.Exit, FacingDirection.West))));
-  mutable var WrongShape: InteriorMap := Map;
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    'interior-test',
+    12345,
+    4
+  ).Unwrap();
+  const Map: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMapFor(
+    Fixtures.SpawnDungeonAreaId(Metadata)
+  );
+  Test.AssertEquals(11, Map.Width);
+  Test.AssertEquals(9, Map.Height);
+  Test.AssertEquals(Map.Width * Map.Height, Map.Cells.Length());
+  Test.AssertTrue(
+    InteriorUnit.InteriorCellAt(Map, Map.Start).Unwrap() = InteriorUnit.InteriorCellKind.Floor
+  );
+  Test.AssertTrue(
+    InteriorUnit.InteriorCellAt(Map, Map.Exit).Unwrap() = InteriorUnit.InteriorCellKind.ExitField
+  );
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(Map) is Ok(_));
+  const Horizontal: Coordinates.InteriorPosition := Coordinates.InteriorPosition(X := 5, Y := 1);
+  const Vertical: Coordinates.InteriorPosition := Coordinates.InteriorPosition(X := 9, Y := 3);
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.North,
+    Coordinates.RelativeStep.Forward,
+    9,
+    2
+  );
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.North,
+    Coordinates.RelativeStep.Backward,
+    9,
+    4
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.East,
+    Coordinates.RelativeStep.Forward,
+    6,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.East,
+    Coordinates.RelativeStep.Backward,
+    4,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.South,
+    Coordinates.RelativeStep.Forward,
+    9,
+    4
+  );
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.South,
+    Coordinates.RelativeStep.Backward,
+    9,
+    2
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.West,
+    Coordinates.RelativeStep.Forward,
+    4,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.West,
+    Coordinates.RelativeStep.Backward,
+    6,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Coordinates.InteriorPosition(X := 2, Y := 1),
+    Coordinates.FacingDirection.West,
+    Coordinates.RelativeStep.Forward,
+    1,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.North,
+    Coordinates.RelativeStep.Left,
+    4,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.North,
+    Coordinates.RelativeStep.Right,
+    6,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.East,
+    Coordinates.RelativeStep.Left,
+    9,
+    2
+  );
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.East,
+    Coordinates.RelativeStep.Right,
+    9,
+    4
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.South,
+    Coordinates.RelativeStep.Left,
+    6,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Horizontal,
+    Coordinates.FacingDirection.South,
+    Coordinates.RelativeStep.Right,
+    4,
+    1
+  );
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.West,
+    Coordinates.RelativeStep.Left,
+    9,
+    4
+  );
+  AssertStep(
+    Metadata,
+    Vertical,
+    Coordinates.FacingDirection.West,
+    Coordinates.RelativeStep.Right,
+    9,
+    2
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.North,
+    Coordinates.RelativeTurn.TurnLeft,
+    Coordinates.FacingDirection.West
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.West,
+    Coordinates.RelativeTurn.TurnLeft,
+    Coordinates.FacingDirection.South
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.South,
+    Coordinates.RelativeTurn.TurnLeft,
+    Coordinates.FacingDirection.East
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.East,
+    Coordinates.RelativeTurn.TurnLeft,
+    Coordinates.FacingDirection.North
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.North,
+    Coordinates.RelativeTurn.TurnRight,
+    Coordinates.FacingDirection.East
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.East,
+    Coordinates.RelativeTurn.TurnRight,
+    Coordinates.FacingDirection.South
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.South,
+    Coordinates.RelativeTurn.TurnRight,
+    Coordinates.FacingDirection.West
+  );
+  AssertTurn(
+    Metadata,
+    Coordinates.FacingDirection.West,
+    Coordinates.RelativeTurn.TurnRight,
+    Coordinates.FacingDirection.North
+  );
+  const Blocked: GameState.GameState := DungeonState(
+    Metadata,
+    Map.Start,
+    Coordinates.FacingDirection.North
+  );
+  Test.AssertTrue(
+    (
+      Movement.StepFirstPerson(
+        Fixtures.FixtureViewFor(Metadata, Blocked),
+        Blocked,
+        Coordinates.RelativeStep.Forward
+      ) is Error(_)
+    )
+  );
+  const Unchanged: Coordinates.FirstPersonPose := GameState.FirstPersonPlayerPose(Blocked).Unwrap();
+  Test.AssertEquals(Map.Start.X, Unchanged.Position.X);
+  Test.AssertEquals(Map.Start.Y, Unchanged.Position.Y);
+  Test.AssertTrue(Unchanged.Facing = Coordinates.FacingDirection.North);
+  Test.AssertTrue(
+    (
+      Movement.StepFirstPerson(
+        Fixtures.FixtureViewFor(Metadata, Fixtures.MaterializedFixtureState(Metadata)),
+        Fixtures.MaterializedFixtureState(Metadata),
+        Coordinates.RelativeStep.Forward
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Movement.TurnFirstPerson(
+        Fixtures.FixtureViewFor(Metadata, Fixtures.MaterializedFixtureState(Metadata)),
+        Fixtures.MaterializedFixtureState(Metadata),
+        Coordinates.RelativeTurn.TurnLeft
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Fixtures.ActivateFixtureTransition(
+        Metadata,
+        DungeonState(Metadata, Map.Start, Map.StartFacing)
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Fixtures.ActivateFixtureTransition(
+        Metadata,
+        DungeonState(Metadata, Map.Exit, Coordinates.FacingDirection.West)
+      ) is Ok(_)
+    )
+  );
+  var WrongShape: InteriorUnit.InteriorMap := Map;
   WrongShape.Cells := [];
-  AssertTrue(IsError(ValidateInteriorMap(WrongShape)));
-  mutable var DuplicateExit: InteriorMap := Map;
-  DuplicateExit.Cells[Map.Start.Y * Map.Width + Map.Start.X] := InteriorCellKind.ExitField;
-  AssertTrue(IsError(ValidateInteriorMap(DuplicateExit)));
-  mutable var Disconnected: InteriorMap := Map;
-  Disconnected.Cells[0] := InteriorCellKind.Floor;
-  AssertTrue(IsError(ValidateInteriorMap(Disconnected)));
-  AssertTrue(IsError(InteriorCellAt(Map, record
-    X := -1;
-    Y := 0;
-  end)))
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(WrongShape) is Error(_));
+  var DuplicateExit: InteriorUnit.InteriorMap := Map;
+  DuplicateExit.Cells[Map.Start.Y * Map.Width + Map.Start.X] := InteriorUnit.InteriorCellKind.ExitField;
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(DuplicateExit) is Error(_));
+  var Disconnected: InteriorUnit.InteriorMap := Map;
+  Disconnected.Cells[0] := InteriorUnit.InteriorCellKind.Floor;
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(Disconnected) is Error(_));
+  Test.AssertTrue(
+    (InteriorUnit.InteriorCellAt(Map, Coordinates.InteriorPosition(X := -1, Y := 0)) is Error(_))
+  );
 end.

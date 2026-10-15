@@ -1,0 +1,95 @@
+// Verifies strict stored names, read/revisit/load preservation, and missing or invalid level failures.
+program DungeonNameStorageTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Catalog as Catalog, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Test as Test, Std.Time as Time;
+
+begin
+  const Root := '.temp-data/name-storage-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'named', 12345, 4, 16).Unwrap();
+  const Metadata := World.Metadata;
+  const Region := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  const AreaId := Identities.DungeonAreaId(Metadata, Region);
+  const Path := World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' +
+    Conv.IntToStr(Region.Y) + '/0.json';
+  const AtEntrance := GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SpawnEntrance
+  ); end with;
+  const Generated := Interiors.OpenLevelForEntry(World, AtEntrance, AreaId).Unwrap();
+  const Original := Fs.ReadText(Path).Unwrap();
+  Test.AssertEquals(Generated.DisplayName, Interiors.ReadLevel(World, AreaId).Unwrap().DisplayName);
+  Test.AssertEquals(Original, Fs.ReadText(Path).Unwrap());
+  // A structurally valid stored name is authoritative, even when it differs from the generator's name.
+  const Map := Generated with DisplayName := 'S'.RepeatStr(64); end with;
+  const Stored := Encoding.EncodeLevel(Metadata, Map);
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Stored).Unwrap());
+  Test.AssertEquals(Map.DisplayName, Interiors.ReadLevel(World, AreaId).Unwrap().DisplayName);
+  Test.AssertEquals(
+    Map.DisplayName,
+    Interiors.OpenLevelForEntry(World, AtEntrance, AreaId).Unwrap().DisplayName
+  );
+  const Entry := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := Metadata, Interior := None), AtEntrance, Some(Map)
+  ).Unwrap();
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Entry.State).Unwrap());
+  const SaveText := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(_, const View):
+      Test.AssertEquals(Map.DisplayName, View.Interior.Unwrap().DisplayName);
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('expected a named interior after loading');
+  end case;
+
+  Test.AssertEquals(Stored, Fs.ReadText(Path).Unwrap());
+  const NameField := '"name":' + Json.Stringify(Json.JsonValue.String(Map.DisplayName));
+  for Broken: string in [
+    Stored.Replace(NameField + ',', ''),
+    Stored.Replace(NameField, NameField + ',' + NameField),
+    Stored.Replace(NameField, NameField + ',"unknown_name":true'),
+    Stored.Replace(NameField, '"name":null'),
+    Stored.Replace(NameField, '"name":7'),
+    Stored.Replace(NameField, '"name":true'),
+    Stored.Replace(NameField, '"name":[]'),
+    Stored.Replace(NameField, '"name":{}'),
+    Stored.Replace(NameField, '"name":""'),
+    Stored.Replace(NameField, '"name":" "'),
+    Stored.Replace(NameField, '"name":" leading"'),
+    Stored.Replace(NameField, '"name":"trailing "'),
+    Stored.Replace(NameField, '"name":"bad\u0000name"'),
+    Stored.Replace(NameField, '"name":"bad\u001fname"'),
+    Stored.Replace(NameField, '"name":"bad\u007fname"'),
+    Stored.Replace(NameField, '"name":"bad ä"'),
+    Stored.Replace(NameField, '"name":' + Json.Stringify(Json.JsonValue.String('S'.RepeatStr(65)))),
+    Stored.Replace('"format_version":2', '"format_version":1'),
+    Stored.Replace('"generator_version":7', '"generator_version":6'),
+    Stored.Replace('"area_id":"' + AreaId + '"', '"area_id":"other:dungeon:0:0"')
+  ] do
+    Test.AssertTrue(Broken <> Stored);
+    Test.AssertTrue(Encoding.DecodeLevel(Broken, Metadata, AreaId) is Error(_));
+    Test.AssertTrue(Fs.WriteTextAtomic(Path, Broken).Unwrap());
+    Test.AssertTrue(Interiors.ReadLevel(World, AreaId) is Error(_));
+    Test.AssertTrue(Interiors.OpenLevelForEntry(World, AtEntrance, AreaId) is Error(_));
+    Test.AssertEquals(Broken, Fs.ReadText(Path).Unwrap());
+    Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  end for;
+
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Stored).Unwrap());
+  Test.AssertTrue(Fs.DeleteFile(Path).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World) is Error(_));
+  Test.AssertTrue(Interiors.ReadVisitedLevels(World, Entry.State) is Error(_));
+  Test.AssertTrue(
+    Interiors.OpenLevelForEntry(World, AtEntrance with VisitedAreas := [AreaId]; end with, AreaId) is Error(_)
+  );
+  Test.AssertFalse(Fs.Exists(Path));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  const MetadataPath := WorldUnit.WorldMetadataPath(World);
+  const CurrentMetadata := Fs.ReadText(MetadataPath).Unwrap();
+  const LegacyMetadata := CurrentMetadata.Replace('"generator_version":7', '"generator_version":6');
+  Test.AssertTrue(CurrentMetadata <> LegacyMetadata);
+  Test.AssertTrue(Fs.WriteTextAtomic(MetadataPath, LegacyMetadata).Unwrap());
+  const Summary := Catalog.InspectWorld(Root, Metadata.Id, 16);
+  Test.AssertEquals('incompatible', Summary.Status);
+  Test.AssertTrue(Summary.Reason.Length() > 0);
+  Test.AssertEquals(LegacyMetadata, Fs.ReadText(MetadataPath).Unwrap());
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+end.

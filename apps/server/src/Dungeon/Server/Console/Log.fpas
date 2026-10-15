@@ -1,0 +1,192 @@
+// Bounded UTC log history with severity filtering and stable paused scroll anchors.
+unit Dungeon.Server.Console.Log;
+
+uses Dungeon.Server.Logging as Logging, Std.Conv as Conv;
+
+// Shared retention and single-line text bounds keep dashboard work finite.
+public const MaximumLogEntries: integer := 128;
+// Caps display-only text before native labels paint untrusted diagnostic messages.
+public const MaximumLogText: integer := 256;
+
+// Filter changes preserve the underlying chronological history.
+public type LogFilter = enum
+  All;
+  Info;
+  Warnings;
+  Errors;
+end enum;
+
+// Offset counts matching entries; Follow pins the viewport to their newest page.
+public type LogHistory = record
+  public Entries: array of Logging.ServerLogEvent;
+  public Filter: LogFilter;
+  public Offset: integer;
+  public Follow: boolean;
+end record;
+
+// Starts with an empty history following all severities.
+public function EmptyHistory(): LogHistory;
+begin
+  return LogHistory(Entries := [], Filter := LogFilter.All, Offset := 0, Follow := true);
+end function;
+
+// Maps unknown diagnostic kinds to Info; snapshots are excluded before appending.
+public function Severity(Value: Logging.ServerLogEvent): LogFilter;
+begin
+  if Value.Kind = 'error' then
+    return LogFilter.Errors;
+  end if;
+
+  if Value.Kind = 'rejected' then
+    return LogFilter.Warnings;
+  end if;
+
+  return LogFilter.Info;
+end function;
+
+// Selects retained entries without changing their order or dropping hidden history.
+public function Matching(History: LogHistory): array of Logging.ServerLogEvent;
+begin
+  var Entries: array of Logging.ServerLogEvent := [];
+  for Value: Logging.ServerLogEvent in History.Entries do
+    if (History.Filter = LogFilter.All) or (Severity(Value) = History.Filter) then
+      Entries.PushInPlace(Value);
+    end if;
+  end for;
+
+  return Entries;
+end function;
+
+// Clamps offsets to the last complete page; non-positive page sizes use one row.
+public function ResolveOffset(History: LogHistory; Rows: integer): LogHistory;
+begin
+  var Page: integer := Rows;
+  if Page < 1 then
+    Page := 1;
+  end if;
+  var Last: integer := Matching(History).Length() - Page;
+  if Last < 0 then
+    Last := 0;
+  end if;
+  var Offset: integer := History.Offset;
+  if History.Follow or (Offset > Last) then
+    Offset := Last;
+  end if;
+
+  if Offset < 0 then
+    Offset := 0;
+  end if;
+
+  return History with Offset := Offset; end with;
+end function;
+
+// Removes terminal controls and caps untrusted diagnostics without splitting into extra rows.
+public function SingleLine(Text: string): string;
+begin
+  var ResultText: string := '';
+  var Length: integer := Text.Length();
+  if Length > MaximumLogText then
+    Length := MaximumLogText;
+  end if;
+
+  for Index: integer := 0 to Length - 1 do
+    const Glyph: string := Text[Index];
+    if (Glyph < ' ') or ((Glyph >= string.Chr(127)) and (Glyph <= string.Chr(159))) then
+      ResultText := ResultText + ' ';
+    else
+      ResultText := ResultText + Glyph;
+    end if;
+  end for;
+
+  return ResultText;
+end function;
+
+// Appends text only, preserving the retained anchor when the oldest matching entry is evicted.
+public function Append(History: LogHistory; Value: Logging.ServerLogEvent; Rows: integer): LogHistory;
+begin
+  if (Value.Snapshot is Some(_)) or (Value.Kind = 'snapshot') then
+    return History;
+  end if;
+  var Next: LogHistory := History;
+  Next.Entries.PushInPlace(
+    Value with Text := SingleLine(Value.Text); Kind := SingleLine(Value.Kind); end with
+  );
+  if Next.Entries.Length() > MaximumLogEntries then
+    const Oldest: Logging.ServerLogEvent := Next.Entries[0];
+    Next.Entries := Next.Entries.Slice(1, MaximumLogEntries);
+    if not Next.Follow and ((Next.Filter = LogFilter.All) or (Severity(Oldest) = Next.Filter))
+      and
+      (Next.Offset > 0)
+    then
+      Next.Offset := Next.Offset - 1;
+    end if;
+  end if;
+
+  return ResolveOffset(Next, Rows);
+end function;
+
+// User scrolling pauses following even at the last page; End explicitly resumes it.
+public function Scroll(History: LogHistory; Offset: integer; Rows: integer): LogHistory;
+begin
+  return ResolveOffset(History with Offset := Offset; Follow := false; end with, Rows);
+end function;
+
+// Resumes following and immediately shows the newest matching page.
+public function FollowLatest(History: LogHistory; Rows: integer): LogHistory;
+begin
+  return ResolveOffset(History with Follow := true; end with, Rows);
+end function;
+
+// Starts a new filter at its newest page; old diagnostic entries remain retained.
+public function ChangeFilter(History: LogHistory; Filter: LogFilter; Rows: integer): LogHistory;
+begin
+  return ResolveOffset(History with Filter := Filter; Follow := true; end with, Rows);
+end function;
+
+// Cycles the four visible filters in toolbar order.
+public function NextFilter(Filter: LogFilter): LogFilter;
+begin
+  case Filter of
+    when LogFilter.All:
+      return LogFilter.Info;
+    when LogFilter.Info:
+      return LogFilter.Warnings;
+    when LogFilter.Warnings:
+      return LogFilter.Errors;
+    when LogFilter.Errors:
+      return LogFilter.All;
+  end case;
+end function;
+
+function TwoDigits(Value: integer): string;
+begin
+  if Value < 10 then
+    return '0' + Conv.IntToStr(Value);
+  end if;
+
+  return Conv.IntToStr(Value);
+end function;
+
+// Formats UTC emission time; zero/negative synthetic times remain explicitly unknown.
+public function ClockText(Timestamp: integer): string;
+begin
+  if Timestamp <= 0 then
+    return '--:--:--';
+  end if;
+  const Seconds: integer := (Timestamp div 1000) mod 86400;
+  return TwoDigits(Seconds div 3600) + ':' + TwoDigits((Seconds div 60) mod 60) + ':' +
+    TwoDigits(Seconds mod 60);
+end function;
+
+// Formats elapsed monotonic time, including durations longer than a day.
+public function UptimeText(Milliseconds: integer): string;
+begin
+  var Seconds: integer := Milliseconds div 1000;
+  if Seconds < 0 then
+    Seconds := 0;
+  end if;
+
+  return TwoDigits(Seconds div 3600) + ':' + TwoDigits((Seconds div 60) mod 60) + ':' +
+    TwoDigits(Seconds mod 60);
+end function;
+end unit;

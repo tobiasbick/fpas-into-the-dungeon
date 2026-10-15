@@ -1,105 +1,158 @@
 // Verifies structured errors for invalid handshake and framing inputs.
 program DungeonServerContractTest;
 
-uses
-  Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
-  Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config, Std.Arrays, Std.Net,
-  Std.Net.Utf8, Std.Results, Std.Str, Std.Task, Std.Test;
+uses Dungeon.GameState as GameState, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks, Std.Test as Test;
 
-function TestConfig(): ServerConfig;
+function TestConfig(): ConfigUnit.ServerConfig;
 begin
-  return record
-    WorldsRoot := '.temp-data/server-worlds-v3';
-    WorldId := 'contract';
-    WorldSeed := 12345;
-    ChunkCacheLimit := 16;
-    MaximumViewWidth := 40;
-    MaximumViewHeight := 20;
-  end
-end;
+  return ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := '.temp-data/server-worlds-v3',
+    WorldId := 'contract',
+    WorldSeed := 12345,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 16,
+    MaximumViewWidth := 40,
+    MaximumViewHeight := 20
+  );
+end function;
 
-function ServeOne(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
+function ServeOne(ListenerValue: Net.Listener; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
-  var Configured: boolean := try SetTimeout(Client, 2000);
-  var Outcome: result of boolean, string := ServeConnection(Client, TestConfig(), Token);
-  var Closed: boolean := try Close(Client);
-  return Outcome
-end;
+  const Client: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Configured: boolean := try Net.SetTimeout(Client, 2000);
+  const Outcome: result of (boolean, string) := Server.ServeConnection(Client, TestConfig(), Token);
+  const Closed: boolean := try Net.Close(Client);
+  return Outcome;
+end function;
 
-function SendAll(ConnectionValue: Connection; Text: string): result of boolean, string;
+function SendAll(ConnectionValue: Net.Connection; Text: string): result of (boolean, string);
 begin
-  var Bytes: array of integer := Std.Net.Utf8.Encode(Text);
-  mutable var Offset: integer := 0;
-  while Offset < Std.Arrays.Length(Bytes) do
-  begin
-    var Remaining: array of integer := Std.Arrays.Slice(Bytes, Offset, Std.Arrays.Length(Bytes) -
-                                                                       Offset);
-    var Written: integer := try SendBytes(ConnectionValue, Remaining);
-    if Written <= 0 then
+  const Bytes: array of integer := Utf8.Encode(Text);
+  var Offset: integer := 0;
+  while Offset < Bytes.Length() do
     begin
-      return Error('connection stopped while writing contract input')
+      const Remaining: array of integer := Bytes.Slice(Offset, Bytes.Length() - Offset);
+      const Written: integer := try Net.SendBytes(ConnectionValue, Remaining);
+      if Written <= 0 then
+        begin
+          return Error('connection stopped while writing contract input');
+        end;
+      end if;
+
+      Offset := Offset + Written;
     end;
+  end while;
 
-    Offset := Offset + Written
-  end;
+  return Ok(true);
+end function;
 
-  return Ok(true)
-end;
-
-function FirstResponse(Text: string): ServerMessage;
+function FirstResponse(Text: string): Protocol.ServerMessage;
 begin
-  var ListenerValue: Listener := Std.Results.Unwrap(Listen('127.0.0.1', 0));
-  var Address: NetworkAddress := Std.Results.Unwrap(ListenerLocalAddress(ListenerValue));
-  var Source: CancellationSource := CreateCancellationSource();
-  var Token: CancellationToken := GetCancellationToken(Source);
-  var ServerTask: task := go ServeOne(ListenerValue, Token);
-  var Client: Connection := Std.Results.Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Std.Results.Unwrap(SetTimeout(Client, 2000)));
-  AssertTrue(Std.Results.Unwrap(SendAll(Client, Text + Std.Str.Chr(10))));
-  var Reader: LineReader := NewLineReader(Client);
-  var Response: LineRead := Std.Results.Unwrap(ReadLine(Reader, Token));
-  var Message: ServerMessage := Std.Results.Unwrap(DecodeServer(Response.Line));
-  AssertTrue(Std.Results.Unwrap(Close(Client)));
-  AssertTrue(Std.Results.Unwrap(Std.Task.Wait(ServerTask)));
-  AssertTrue(Std.Results.Unwrap(CloseListener(ListenerValue)));
-  return Message
-end;
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeOne(ListenerValue, Token);
+    const Client: Net.Connection := Net.Connect('127.0.0.1', Address.Port, 5000).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(Client, 2000).Unwrap());
+    Test.AssertTrue(SendAll(Client, Text + string.Chr(10)).Unwrap());
+    const Reader: Transport.LineReader := Transport.NewLineReader(Client);
+    const Response: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    const Message: Protocol.ServerMessage := ServerMessages.DecodeServer(Response.Line).Unwrap();
+    Test.AssertTrue(Net.Close(Client).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+    Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+    return Message;
+  end scope;
+end function;
 
-procedure AssertErrorCode(Message: ServerMessage; ExpectedCode: string);
+procedure AssertErrorCode(Message: Protocol.ServerMessage; ExpectedCode: string);
 begin
   case Message of
-    ServerMessage.ErrorMessage(Code, Text):
-    begin
-      AssertEquals(ExpectedCode, Code)
-    end
-    else
-    begin
-      panic('expected structured server error')
-    end
-  end
-end;
+    when Protocol.ServerMessage.ErrorMessage(const Code, const Text):
+      Test.AssertEquals(ExpectedCode, Code);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _):
+      panic('expected structured server error');
+  end case;
+end procedure;
 
 begin
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.Hello(ProtocolVersion + 1, 20, 10))), 'unsupported_version');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.Hello(ProtocolVersion - 1, 20, 10))), 'unsupported_version');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.Hello(ProtocolVersion, 0, 10))), 'invalid_viewport');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.StartNewGame)), 'expected_hello');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.LoadGame)), 'expected_hello');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.SaveGame)), 'expected_hello');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.Move(1, 0))), 'expected_hello');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward))), 'expected_hello');
-  AssertErrorCode(FirstResponse(EncodeClient(ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left))), 'expected_hello');
+  // The independent protocol bound must agree with the game's inventory capacity.
+  Test.AssertEquals(Protocol.MaximumVisibleInventoryItems, GameState.MaximumInventoryItems);
+  // Generated placement identities must always fit the visible inventory text bound.
+  Test.AssertEquals(
+    Protocol.MaximumVisibleInventoryTextLength,
+    Validation.MaximumPlacementIdLength
+  );
+  AssertErrorCode(
+    FirstResponse(
+      ClientMessages.EncodeClient(
+        Protocol.ClientMessage.Hello(Protocol.ProtocolVersion + 1, 20, 10)
+      )
+    ),
+    'unsupported_version'
+  );
+  AssertErrorCode(
+    FirstResponse(
+      ClientMessages.EncodeClient(
+        Protocol.ClientMessage.Hello(Protocol.ProtocolVersion - 1, 20, 10)
+      )
+    ),
+    'unsupported_version'
+  );
+  AssertErrorCode(
+    FirstResponse(
+      ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 0, 10))
+    ),
+    'invalid_viewport'
+  );
+  AssertErrorCode(
+    FirstResponse(ClientMessages.EncodeClient(Protocol.ClientMessage.StartNewGame)),
+    'expected_hello'
+  );
+  AssertErrorCode(
+    FirstResponse(ClientMessages.EncodeClient(Protocol.ClientMessage.LoadGame)),
+    'expected_hello'
+  );
+  AssertErrorCode(
+    FirstResponse(ClientMessages.EncodeClient(Protocol.ClientMessage.SaveGame)),
+    'expected_hello'
+  );
+  AssertErrorCode(
+    FirstResponse(ClientMessages.EncodeClient(Protocol.ClientMessage.Move(1, 0))),
+    'expected_hello'
+  );
+  AssertErrorCode(
+    FirstResponse(
+      ClientMessages.EncodeClient(
+        Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Forward)
+      )
+    ),
+    'expected_hello'
+  );
+  AssertErrorCode(
+    FirstResponse(
+      ClientMessages.EncodeClient(
+        Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Left)
+      )
+    ),
+    'expected_hello'
+  );
   AssertErrorCode(FirstResponse('{not-json'), 'invalid_message');
-  AssertErrorCode(FirstResponse(Std.Str.RepeatStr('x', MaximumLineBytes + 1)), 'line_too_long');
-  var UndersizedCache: ServerConfig := record
-    WorldsRoot := '.temp-data/server-worlds-v3';
-    WorldId := 'contract';
-    WorldSeed := 12345;
-    ChunkCacheLimit := 9;
-    MaximumViewWidth := 240;
-    MaximumViewHeight := 120;
-  end;
-
-  AssertTrue(IsError(RunServer('127.0.0.1', 4040, UndersizedCache)))
+  AssertErrorCode(FirstResponse('x'.RepeatStr(Protocol.MaximumLineBytes + 1)), 'line_too_long');
+  const UndersizedCache: ConfigUnit.ServerConfig := ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := '.temp-data/server-worlds-v3',
+    WorldId := 'contract',
+    WorldSeed := 12345,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 9,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 120
+  );
+  Test.AssertTrue(Server.RunServer('127.0.0.1', 4040, UndersizedCache) is Error(_));
 end.

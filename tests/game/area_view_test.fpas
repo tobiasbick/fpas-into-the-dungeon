@@ -1,0 +1,147 @@
+// Verifies identity-bearing maps and caller-supplied current-area views.
+program AreaViewTest;
+
+uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Hostiles as HostileRules, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Test as Test;
+
+procedure AssertSameMap(Expected: InteriorUnit.InteriorMap; Actual: InteriorUnit.InteriorMap);
+begin
+  Test.AssertEquals(Expected.AreaId, Actual.AreaId);
+  Test.AssertEquals(Expected.DisplayName, Actual.DisplayName);
+  Test.AssertEquals(Expected.Width, Actual.Width);
+  Test.AssertEquals(Expected.Height, Actual.Height);
+  Test.AssertTrue(Expected.Start = Actual.Start);
+  Test.AssertTrue(Expected.Exit = Actual.Exit);
+  Test.AssertTrue(Expected.StartFacing = Actual.StartFacing);
+  Test.AssertEquals(Expected.Cells.Length(), Actual.Cells.Length());
+  for Index: integer := 0 to Expected.Cells.Length() - 1 do
+    begin
+      Test.AssertTrue(Expected.Cells[Index] = Actual.Cells[Index]);
+    end;
+  end for;
+
+  Test.AssertEquals(Expected.Items.Length(), Actual.Items.Length());
+  for Index: integer := 0 to Expected.Items.Length() - 1 do
+    begin
+      Test.AssertTrue(Expected.Items[Index] = Actual.Items[Index]);
+    end;
+  end for;
+
+  Test.AssertEquals(Expected.Hostiles.Length(), Actual.Hostiles.Length());
+  for Index: integer := 0 to Expected.Hostiles.Length() - 1 do
+    begin
+      Test.AssertTrue(Expected.Hostiles[Index] = Actual.Hostiles[Index]);
+    end;
+  end for;
+end procedure;
+
+// Compares geometry and placement kinds and fields; placement identities are area-scoped and may differ.
+procedure AssertSameLayout(Expected: InteriorUnit.InteriorMap; Actual: InteriorUnit.InteriorMap);
+begin
+  Test.AssertEquals(Expected.Width, Actual.Width);
+  Test.AssertEquals(Expected.Height, Actual.Height);
+  Test.AssertTrue(Expected.Start = Actual.Start);
+  Test.AssertTrue(Expected.Exit = Actual.Exit);
+  Test.AssertTrue(Expected.StartFacing = Actual.StartFacing);
+  Test.AssertEquals(Expected.Cells.Length(), Actual.Cells.Length());
+  for Index: integer := 0 to Expected.Cells.Length() - 1 do
+    begin
+      Test.AssertTrue(Expected.Cells[Index] = Actual.Cells[Index]);
+    end;
+  end for;
+
+  Test.AssertEquals(Expected.Items.Length(), Actual.Items.Length());
+  for Index: integer := 0 to Expected.Items.Length() - 1 do
+    begin
+      Test.AssertTrue(Expected.Items[Index].Kind = Actual.Items[Index].Kind);
+      Test.AssertTrue(Expected.Items[Index].Position = Actual.Items[Index].Position);
+      Test.AssertEquals(
+        ItemRules.ItemPlacementId(Expected.AreaId, Index),
+        Expected.Items[Index].ItemId
+      );
+      Test.AssertEquals(
+        ItemRules.ItemPlacementId(Actual.AreaId, Index),
+        Actual.Items[Index].ItemId
+      );
+    end;
+  end for;
+
+  Test.AssertEquals(Expected.Hostiles.Length(), Actual.Hostiles.Length());
+  for Index: integer := 0 to Expected.Hostiles.Length() - 1 do
+    begin
+      Test.AssertTrue(Expected.Hostiles[Index].Kind = Actual.Hostiles[Index].Kind);
+      Test.AssertTrue(Expected.Hostiles[Index].Position = Actual.Hostiles[Index].Position);
+      Test.AssertEquals(
+        HostileRules.HostilePlacementId(Expected.AreaId, Index),
+        Expected.Hostiles[Index].Id
+      );
+      Test.AssertEquals(
+        HostileRules.HostilePlacementId(Actual.AreaId, Index),
+        Actual.Hostiles[Index].Id
+      );
+    end;
+  end for;
+end procedure;
+
+begin
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    'area-view-test',
+    12345,
+    4
+  ).Unwrap();
+  const OtherMetadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    'other-view-test',
+    12345,
+    4
+  ).Unwrap();
+  const Map: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMapFor(
+    Fixtures.SpawnDungeonAreaId(Metadata)
+  );
+  const OtherMap: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMapFor(
+    Fixtures.SpawnDungeonAreaId(OtherMetadata)
+  );
+  Test.AssertEquals(Fixtures.SpawnDungeonAreaId(Metadata), Map.AreaId);
+  Test.AssertEquals(Fixtures.SpawnDungeonAreaId(OtherMetadata), OtherMap.AreaId);
+  Test.AssertTrue(Map.AreaId <> OtherMap.AreaId);
+  AssertSameLayout(Map, OtherMap);
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(Map with AreaId := ''; end with) is Error(_));
+  const Outdoor: GameState.GameState := GameState.NewGame(Metadata);
+  const OutdoorView: GameState.AreaView := Areas.AreaViewFor(Metadata, Outdoor, None).Unwrap();
+  Test.AssertTrue(OutdoorView.Metadata = Metadata);
+  Test.AssertTrue(OutdoorView.Interior is None);
+  Test.AssertTrue(Areas.AreaViewFor(Metadata, Outdoor, Some(Map)) is Error(_));
+  Test.AssertTrue(Areas.AreaViewFor(OtherMetadata, Outdoor, None) is Error(_));
+  const Dungeon: GameState.GameState := Outdoor with Area := Coordinates.AreaKind.Dungeon; AreaId := Map.AreaId; end with;
+  const DungeonView: GameState.AreaView := Areas.AreaViewFor(Metadata, Dungeon, Some(Map)).Unwrap();
+  Test.AssertTrue(DungeonView.Metadata = Metadata);
+  AssertSameMap(Map, DungeonView.Interior.Unwrap());
+  Test.AssertTrue(Areas.AreaViewFor(Metadata, Dungeon, None) is Error(_));
+  Test.AssertTrue(Areas.AreaViewFor(Metadata, Dungeon, Some(OtherMap)) is Error(_));
+  Test.AssertTrue(
+    (
+      Areas.AreaViewFor(
+        Metadata,
+        Dungeon with AreaId := ''; end with,
+        Some(Map with AreaId := ''; end with)
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Areas.AreaViewFor(
+        Metadata,
+        Outdoor with Area := Coordinates.AreaKind.Settlement; end with,
+        None
+      ) is Error(_)
+    )
+  );
+  // A supplied map is retained rather than reconstructed from the fixed layout.
+  const Custom: InteriorUnit.InteriorMap := InteriorUnit.ValidateInteriorMap(
+    Map with Hostiles := []; end with
+  ).Unwrap();
+  const CustomView: GameState.AreaView := Areas.AreaViewFor(
+    Metadata,
+    Dungeon,
+    Some(Custom)
+  ).Unwrap();
+  AssertSameMap(Custom, CustomView.Interior.Unwrap());
+end.

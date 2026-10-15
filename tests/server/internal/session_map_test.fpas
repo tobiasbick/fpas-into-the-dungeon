@@ -1,0 +1,206 @@
+// Verifies retained server geometry across projection, viewport changes, turns, and defeat.
+program SessionMapTest;
+
+uses Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Diagnostics as Diagnostics, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Terrain as Terrain, Dungeon.Test.Fixtures as Fixtures, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+
+function Receive(Client: Net.Connection; Token: Tasks.CancellationToken): Protocol.ServerMessage;
+begin
+  const Response: Transport.LineRead := Transport.ReadLine(
+    Transport.NewLineReader(Client),
+    Token
+  ).Unwrap();
+  return ServerMessages.DecodeServer(Response.Line).Unwrap();
+end function;
+
+procedure AssertProjectedExit(Value: Protocol.VisibleState);
+begin
+  case Value of
+    when Protocol.VisibleState.FirstPersonState(const Fields):
+      Test.AssertEquals('Retained lantern vault', Fields.Title);
+      Test.AssertEquals('x', Fields.Rows[2][8]);
+      Test.AssertEquals('Press Enter to return to the outdoor region.', Fields.Status);
+    when Protocol.VisibleState.MapState(_):
+      panic('expected the retained interior projection');
+  end case;
+end procedure;
+
+begin
+  const Metadata: Terrain.WorldMetadata := Fixtures.FixtureMetadata();
+  var Map: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMap();
+  Map.Cells[Map.Exit.Y * Map.Width + Map.Exit.X] := InteriorUnit.InteriorCellKind.Floor;
+  Map.Cells[2 * Map.Width + 8] := InteriorUnit.InteriorCellKind.ExitField;
+  Map.Exit := Coordinates.InteriorPosition(X := 8, Y := 2);
+  Map.DisplayName := 'Retained lantern vault';
+  Map := InteriorUnit.ValidateInteriorMap(Map).Unwrap();
+  const State: GameState.GameState := Fixtures.FixtureDungeonState(
+    Map.Exit,
+    Coordinates.FacingDirection.West
+  );
+  const World: WorldUnit.WorldSession := WorldUnit.WorldSession(
+    Directory := '.temp-data/unused-session-map',
+    Metadata := Metadata,
+    Cache := [],
+    Clock := 0,
+    CacheLimit := 32
+  );
+  const Session: SessionUnit.ServerSession := SessionUnit.ServerSession(
+    World := World,
+    WorldSelected := true,
+    Dirty := false,
+    State := Some(State),
+    Interior := Some(Map),
+    Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12),
+    Finished := false
+  );
+  Test.AssertEquals(Map.DisplayName, Diagnostics.SessionStatus(Session).Area);
+  const View: GameState.AreaView := SessionUnit.SessionAreaView(Session, State).Unwrap();
+  Test.AssertTrue(View.Interior.Unwrap().Exit = Map.Exit);
+  const Projected: ProjectionUnit.SessionProjection := ProjectionUnit.ProjectSession(
+    World,
+    View,
+    State,
+    Session.Viewport,
+    ProjectionUnit.NoTurnReport()
+  ).Unwrap();
+  AssertProjectedExit(Projected.State);
+  const Overlay: Protocol.ExplorationMapState := ProjectionUnit.ProjectExplorationMap(
+    State,
+    View,
+    0,
+    0,
+    Map.Width,
+    Map.Height
+  ).Unwrap();
+  Test.AssertEquals('x', Overlay.Rows[2][8]);
+  Test.AssertEquals(Map.DisplayName, Overlay.LabelText);
+  Test.AssertTrue(
+    (SessionUnit.SessionAreaView(Session with Interior := None; end with, State) is Error(_))
+  );
+  Test.AssertTrue(
+    (
+      SessionUnit.SessionAreaView(
+        Session with Interior := Some(Map with AreaId := 'wrong-area'; end with); end with,
+        State
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      ProjectionUnit.ProjectSession(
+        World,
+        GameState.AreaView(Metadata := Metadata, Interior := None),
+        State,
+        Session.Viewport,
+        ProjectionUnit.NoTurnReport()
+      ) is Error(_)
+    )
+  );
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  const Client: Net.Connection := Net.Connect('127.0.0.1', Address.Port, 2000).Unwrap();
+  const Server: Net.Connection := Net.Accept(ListenerValue).Unwrap();
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+  Test.AssertTrue(Net.SetTimeout(Client, 2000).Unwrap());
+  Test.AssertTrue(Net.SetTimeout(Server, 2000).Unwrap());
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  const Config: ConfigUnit.ServerConfig := ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := '.temp-data/unused-session-map',
+    WorldId := Metadata.Id,
+    WorldSeed := Metadata.Seed,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 80,
+    MaximumViewHeight := 24
+  );
+  const Resized: SessionUnit.ServerSession := Handling.HandleSessionMessage(
+    Session,
+    Protocol.ClientMessage.Viewport(40, 20),
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  Test.AssertEquals(40, Resized.Viewport.Width);
+  Test.AssertTrue(Resized.Interior.Unwrap().Exit = Map.Exit);
+  case Receive(Client, Token) of
+    when Protocol.ServerMessage.State(const Fields):
+      AssertProjectedExit(Fields);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('viewport update must project the retained map');
+  end case;
+  const Committed: SessionUnit.ServerSession := Replies.CommitState(
+    Resized,
+    State,
+    Server,
+    Token
+  ).Unwrap();
+  Test.AssertTrue(Committed.Interior.Unwrap().Exit = Map.Exit);
+  case Receive(Client, Token) of
+    when Protocol.ServerMessage.State(const Fields):
+      AssertProjectedExit(Fields);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('accepted state must retain the supplied map');
+  end case;
+  const Waited: SessionUnit.ServerSession := Replies.PlayTurn(
+    Committed,
+    Combat.TurnAction.Wait,
+    'wait_rejected',
+    Server,
+    Token,
+    None
+  ).Unwrap();
+  Test.AssertTrue(Waited.Interior.Unwrap().Exit = Map.Exit);
+  case Receive(Client, Token) of
+    when Protocol.ServerMessage.State(const Fields):
+      AssertProjectedExit(Fields);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('a turn must retain the supplied map');
+  end case;
+  // Find a deterministic fatal opponent turn; assert the complete session cleanup.
+  var Fatal: GameState.GameState := State with Health := 1; end with;
+
+  Fatal.Hostiles[0] := Fatal.Hostiles[0] with Position := Coordinates.InteriorPosition(
+    X := 7,
+    Y := 2
+  ); Alerted := true; end with;
+  var Found: boolean := false;
+  for Seed: integer := 0 to 100 do
+    begin
+      if not Found then
+        begin
+          Fatal := Fatal with RandomState := Seed; end with;
+
+          case Combat.ResolveTurn(View, Fatal, Combat.TurnAction.Wait).Unwrap() of
+            when Combat.TurnOutcome.Defeated(const Log):
+              Found := true;
+            when Combat.TurnOutcome.Continued(_, _, _):
+              null;
+          end case;
+        end;
+      end if;
+    end;
+  end for;
+
+  Test.AssertTrue(Found);
+  const Defeated: SessionUnit.ServerSession := Replies.PlayTurn(
+    Committed with State := Some(Fatal); end with,
+    Combat.TurnAction.Wait,
+    'wait_rejected',
+    Server,
+    Token,
+    None
+  ).Unwrap();
+  Test.AssertTrue(Defeated.State is None);
+  Test.AssertTrue(Defeated.Interior is None);
+  case Receive(Client, Token) of
+    when Protocol.ServerMessage.Defeated(const Text):
+      Test.AssertTrue(Text.Length() > 0);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('fatal turn must send defeat');
+  end case;
+
+  Test.AssertTrue(Net.Close(Server).Unwrap());
+  Test.AssertTrue(Net.Close(Client).Unwrap());
+end.

@@ -45,14 +45,20 @@ Each selected world is stored below the runtime data root:
 ```text
 worlds/<world-id>/
 ├── world.json
-└── chunks/
-    └── x_<signed-x>/
-        └── y_<signed-y>.json
+├── chunks/
+│   └── x_<signed-x>/
+│       └── y_<signed-y>.json
+├── dungeons/
+│   └── <rx>_<ry>/
+│       └── 0.json
+└── saves/
+    └── default.json
 ```
 
-World format version `2` records the id, seed, generator version, chunk size,
-spawn coordinate, stable outdoor and dungeon identities and labels, and the
-initial entrance identity, coordinate, and target in `world.json`. A chunk file
+World format version `3` records the id, seed, generator version, chunk size,
+spawn coordinate, the outdoor identity and label, the spawn entrance, and the
+entrance region size (`dungeon_region_chunks`) in `world.json`. Level files of
+generated dungeons are described in [level storage](dungeon-level-storage.md). A chunk file
 records its format version, world id, coordinates, and three 128-row layers.
 Each row uses one compact character per cell for base terrain, feature, or water
 classification.
@@ -69,7 +75,7 @@ atomic write wins.
 
 ## Generation and visible cells
 
-Generator version 5 evaluates several smooth deterministic integer fields from
+Generator version 6 evaluates several smooth deterministic integer fields from
 the seed and absolute world coordinate. Very broad and regional noise establish
 continentalness; regional elevation and coast detail shape land and water at
 smaller scales. A ridge transform raises narrow connected land bands above sea
@@ -87,9 +93,10 @@ generated, temperate, non-mountainous spawn whose surrounding 17 by 17 cells
 are traversable. Trees or forest are present within the initial visible area,
 and another generated landscape is reachable within 512 horizontal and 256
 vertical cells. It also requires a clear natural entrance candidate connected
-by exactly three traversable cardinal steps. Generation composes only the
-selected entrance feature over that cell and otherwise never overwrites terrain
-around the spawn.
+by exactly three traversable cardinal steps: the spawn entrance. Generation
+composes entrance features only over the spawn entrance and the clear entrance
+sites of [entrance regions](generated-dungeons.md) and otherwise never
+overwrites terrain.
 
 The `dungeon-world-preview` tool samples final terrain or continentalness,
 land, elevation, ruggedness, moisture, vegetation, lake-shape, and land-bridge

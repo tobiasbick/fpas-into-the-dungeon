@@ -1,0 +1,317 @@
+// TCP test helpers for whole play sessions: exchanges, state checks, entrance walks, routes, and fights.
+unit Dungeon.Test.Wire;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Terrain as Terrain, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Routes as Routes, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+
+// One connected test client: its connection, the reader after the last response, and that response.
+public type WireClient = record
+  public Connection: Net.Connection;
+  public Reader: Transport.LineReader;
+  public Last: Protocol.ServerMessage;
+end record;
+
+// Connects to a test server on the loopback interface and completes the handshake.
+public function ConnectClient(Port: integer; Token: Tasks.CancellationToken): WireClient;
+begin
+  const ConnectionValue: Net.Connection := Net.Connect('127.0.0.1', Port, 5000).Unwrap();
+  Test.AssertTrue(Net.SetTimeout(ConnectionValue, 120000).Unwrap());
+  Test.AssertTrue(
+    Transport.WriteLine(
+      ConnectionValue,
+      ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 20, 10)),
+      Token
+    ).Unwrap()
+  );
+  const Welcome: Transport.LineRead := Transport.ReadLine(
+    Transport.NewLineReader(ConnectionValue),
+    Token
+  ).Unwrap();
+  return WireClient(
+    Connection := ConnectionValue,
+    Reader := Welcome.Reader,
+    Last := ServerMessages.DecodeServer(Welcome.Line).Unwrap()
+  );
+end function;
+
+// Sends one intention and records the single response.
+public function Exchange(Client: WireClient; Message: Protocol.ClientMessage; Token: Tasks.CancellationToken): WireClient;
+begin
+  Test.AssertTrue(
+    Transport.WriteLine(Client.Connection, ClientMessages.EncodeClient(Message), Token).Unwrap()
+  );
+  const Response: Transport.LineRead := Transport.ReadLine(Client.Reader, Token).Unwrap();
+  return Client with Reader := Response.Reader; Last := ServerMessages.DecodeServer(
+    Response.Line
+  ).Unwrap(); end with;
+end function;
+
+// Returns the last response as a first-person projection.
+public function FirstPersonOf(Client: WireClient): Protocol.FirstPersonVisibleState;
+begin
+  case Client.Last of
+    when Protocol.ServerMessage.State(const Value):
+      case Value of
+        when Protocol.VisibleState.FirstPersonState(const Fields):
+          return Fields;
+        when Protocol.VisibleState.MapState(_):
+          panic('expected a first-person state');
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a state message, got ' + ServerMessages.EncodeServer(Client.Last));
+  end case;
+end function;
+
+// Returns the last response as a map projection.
+public function MapOf(Client: WireClient): Protocol.MapVisibleState;
+begin
+  case Client.Last of
+    when Protocol.ServerMessage.State(const Value):
+      case Value of
+        when Protocol.VisibleState.MapState(const Fields):
+          return Fields;
+        when Protocol.VisibleState.FirstPersonState(_):
+          panic('expected a map state');
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a state message, got ' + ServerMessages.EncodeServer(Client.Last));
+  end case;
+end function;
+
+// Requires that the last response confirmed a save.
+public procedure RequireSaved(Client: WireClient);
+begin
+  if Client.Last is Protocol.ServerMessage.SaveCompleted then
+    begin
+      null;
+    end;
+  else
+    begin
+      panic('expected save completion');
+    end;
+  end if;
+end procedure;
+
+// Walks the outdoor player cardinally onto Target, x first, then y; every step must succeed.
+public function WalkOutdoors(Client: WireClient; Target: Coordinates.WorldPosition; Token: Tasks.CancellationToken): WireClient;
+begin
+  var Current: WireClient := Client;
+  var Position: Protocol.MapVisibleState := MapOf(Current);
+  while (Position.WorldX <> Target.X) or (Position.WorldY <> Target.Y) do
+    begin
+      var DeltaX: integer := 0;
+      var DeltaY: integer := 0;
+      if Position.WorldX < Target.X then
+        begin
+          DeltaX := 1;
+        end;
+      else
+        if Position.WorldX > Target.X then
+          begin
+            DeltaX := -1;
+          end;
+        else
+          if Position.WorldY < Target.Y then
+            begin
+              DeltaY := 1;
+            end;
+          else
+            begin
+              DeltaY := -1;
+            end;
+          end if;
+        end if;
+      end if;
+
+      Current := Exchange(Current, Protocol.ClientMessage.Move(DeltaX, DeltaY), Token);
+      Position := MapOf(Current);
+    end;
+  end while;
+
+  return Current;
+end function;
+
+// Walks an outdoor route of adjacent fields; every step must succeed.
+public function WalkOutdoorRoute(
+  Client: WireClient;
+  Route: array of Coordinates.WorldPosition;
+  Token: Tasks.CancellationToken
+): WireClient;
+begin
+  var Current: WireClient := Client;
+  for Field: Coordinates.WorldPosition in Route do
+    begin
+      const Position: Protocol.MapVisibleState := MapOf(Current);
+      Current := Exchange(
+        Current, Protocol.ClientMessage.Move(
+          Field.X - Position.WorldX, Field.Y -
+          Position.WorldY
+        ), Token
+      );
+      Test.AssertEquals(Field.X, MapOf(Current).WorldX);
+      Test.AssertEquals(Field.Y, MapOf(Current).WorldY);
+    end;
+  end for;
+
+  return Current;
+end function;
+
+// Sends a route's intentions in order; each must yield a first-person state.
+public function WalkRoute(Client: WireClient; Moves: array of Fixtures.RouteMove; Token: Tasks.CancellationToken): WireClient;
+begin
+  var Current: WireClient := Client;
+  for Move: Fixtures.RouteMove in Moves do
+    begin
+      Current := Exchange(Current, Routes.RouteMessage(Move), Token);
+      const Checked: Protocol.FirstPersonVisibleState := FirstPersonOf(Current);
+    end;
+  end for;
+
+  return Current;
+end function;
+
+// Approaches the opponent resting at Origin until it stands directly ahead, waiting for an
+// alerted opponent to close in. Panics when it never comes into reach.
+public function FaceOpponent(
+  Client: WireClient;
+  Map: InteriorUnit.InteriorMap;
+  Origin: Coordinates.InteriorPosition;
+  Token: Tasks.CancellationToken
+): WireClient;
+begin
+  var Current: WireClient := Client;
+  var View: Protocol.FirstPersonVisibleState := FirstPersonOf(Current);
+  for Move: Fixtures.RouteMove in Fixtures.RouteTo(Map, Routes.VisiblePose(View), Origin, []) do
+    begin
+      if not Routes.HostileAhead(View) then
+        begin
+          if not (
+            (Move = Fixtures.RouteMove.RouteForward)
+            and
+            Coordinates.SamePosition(Routes.FieldAhead(View), Origin)
+          )
+          then
+            begin
+              Current := Exchange(Current, Routes.RouteMessage(Move), Token);
+              View := FirstPersonOf(Current);
+            end;
+          end if;
+        end;
+      end if;
+    end;
+  end for;
+  var Waited: integer := 0;
+  while (not Routes.HostileAhead(View)) and (Waited < 8) do
+    begin
+      Current := Exchange(Current, Protocol.ClientMessage.Wait, Token);
+      View := FirstPersonOf(Current);
+      Waited := Waited + 1;
+    end;
+  end while;
+
+  Test.AssertTrue(Routes.HostileAhead(View));
+  return Current;
+end function;
+
+// Attacks the opponent ahead until it is destroyed; returns false when the player falls instead.
+public function FightAhead(Client: WireClient; Token: Tasks.CancellationToken): result of (WireClient, string);
+begin
+  var Current: WireClient := Client;
+  for Blow: integer := 1 to 80 do
+    begin
+      Current := Exchange(Current, Protocol.ClientMessage.Attack, Token);
+      case Current.Last of
+        when Protocol.ServerMessage.Defeated(const Summary):
+          return Error('the player fell: ' + Summary);
+        when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+          for Entry: Protocol.VisibleCombatEvent in FirstPersonOf(Current).CombatEvents do
+            begin
+              if Entry.Kind = Protocol.VisibleCombatEventKind.HostileDefeated then
+                begin
+                  return Ok(Current);
+                end;
+              end if;
+            end;
+          end for;
+      end case;
+    end;
+  end for;
+
+  return Error('the fight did not end');
+end function;
+
+// Walks to Target, replanning after every move around visible opponents. When no way past them
+// remains, fights an opponent standing ahead or turns to look for one. Fails when the player falls.
+public function WalkTo(
+  Client: WireClient;
+  Map: InteriorUnit.InteriorMap;
+  Target: Coordinates.InteriorPosition;
+  Token: Tasks.CancellationToken
+): result of (WireClient, string);
+begin
+  var Current: WireClient := Client;
+  var View: Protocol.FirstPersonVisibleState := FirstPersonOf(Current);
+  for Attempt: integer := 1 to 400 do
+    begin
+      const Pose: Coordinates.FirstPersonPose := Routes.VisiblePose(View);
+      if Coordinates.SamePosition(Pose.Position, Target) then
+        begin
+          return Ok(Current);
+        end;
+      end if;
+
+      case Fixtures.TryRouteTo(Map, Pose, Target, Routes.VisibleHostiles(View)) of
+        when Ok(const Moves):
+          Current := Exchange(Current, Routes.RouteMessage(Moves[0]), Token);
+        when Error(_):
+          if Routes.HostileAhead(View) then
+            begin
+              Current := try FightAhead(Current, Token);
+            end;
+          else
+            begin
+              Current := Exchange(
+                Current,
+                Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Right),
+                Token
+              );
+            end;
+          end if;
+      end case;
+
+      case Current.Last of
+        when Protocol.ServerMessage.State(const Value):
+          begin
+            View := FirstPersonOf(Current);
+          end;
+        when Protocol.ServerMessage.Rejected(const Code, const Message):
+          begin
+            // Blocked by an opponent that was not visible yet: wait one turn to see it.
+            Current := Exchange(Current, Protocol.ClientMessage.Wait, Token);
+            View := FirstPersonOf(Current);
+          end;
+        when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+          begin
+            return Error(
+              'unexpected response while walking: ' + ServerMessages.EncodeServer(Current.Last)
+            );
+          end;
+      end case;
+    end;
+  end for;
+
+  return Error('target not reached');
+end function;
+
+// Disconnects and closes the client connection.
+public procedure CloseClient(Client: WireClient; Token: Tasks.CancellationToken);
+begin
+  Test.AssertTrue(
+    Transport.WriteLine(
+      Client.Connection,
+      ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+      Token
+    ).Unwrap()
+  );
+  Test.AssertTrue(Net.Close(Client.Connection).Unwrap());
+end procedure;
+end unit;

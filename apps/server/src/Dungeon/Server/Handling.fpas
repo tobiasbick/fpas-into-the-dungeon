@@ -1,253 +1,364 @@
 // Applies one decoded client message to a session after the handshake.
 unit Dungeon.Server.Handling;
 
-uses
-  Dungeon.Server.Config, Dungeon.Server.Mapping, Dungeon.Server.Projection, Dungeon.Server.Replies,
-  Dungeon.Server.Session, Dungeon.Combat, Dungeon.Dialogue, Dungeon.GameState, Dungeon.Interaction,
-  Dungeon.Movement, Dungeon.Protocol, Dungeon.World, Dungeon.World.Savegame, Std.Net, Std.Options,
-  Std.Task;
+uses Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Logging as Logging, Dungeon.Server.Failures as FailuresUnit, Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Console as Console, Std.Net as Net, Std.Tasks as Tasks;
+
+function RejectLogged(
+  Config: ConfigUnit.ServerConfig;
+  ConnectionValue: Net.Connection;
+  Code: string;
+  Reason: string;
+  Token: Tasks.CancellationToken
+): result of (boolean, string);
+begin
+  Logging.LogServer(Config.Logs, 'rejected', (Code + ': ') + Reason);
+  return Replies.Reject(ConnectionValue, Code, Reason, Token);
+end function;
+
+// Sends a classified rejection for a typed failure and logs its detailed reason on the server.
+function RejectFailure(
+  ConnectionValue: Net.Connection;
+  Rejection: FailuresUnit.FailureRejection;
+  Detail: string;
+  Config: ConfigUnit.ServerConfig;
+  Token: Tasks.CancellationToken
+): result of (boolean, string);
+begin
+  Logging.LogServer(Config.Logs, 'error', (Rejection.Code + ': ') + Detail);
+  return RejectLogged(Config, ConnectionValue, Rejection.Code, Rejection.Message, Token);
+end function;
+
+// Opens the target level of an entry (or none for an exit) and applies the pure transition.
+// Storage failures are rejected with their class; the session stays unchanged.
+function HandleTransition(
+  Session: SessionUnit.ServerSession;
+  View: GameState.AreaView;
+  State: GameState.GameState;
+  TargetAreaId: string;
+  Config: ConfigUnit.ServerConfig;
+  ConnectionValue: Net.Connection;
+  Token: Tasks.CancellationToken
+): result of (SessionUnit.ServerSession, string);
+begin
+  var TargetMap: option of InteriorUnit.InteriorMap := None;
+  if State.Area = Coordinates.AreaKind.OutdoorRegion then
+    begin
+      case Interiors.OpenLevelForEntry(Session.World, State, TargetAreaId) of
+        when Ok(const Map):
+          begin
+            TargetMap := Some(Map);
+          end;
+        when Error(const Failure):
+          begin
+            const Sent: boolean := try RejectFailure(
+              ConnectionValue,
+              FailuresUnit.LevelRejection(Session.World.Metadata.Id, Failure),
+              FailuresUnit.LevelFailureReason(Failure),
+              Config,
+              Token
+            );
+            return Ok(Session);
+          end;
+      end case;
+    end;
+  end if;
+
+  case Movement.ActivateAreaTransition(View, State, TargetMap) of
+    when Ok(const Transition):
+      begin
+        return Replies.CommitTransition(Session, Transition, ConnectionValue, Token);
+      end;
+    when Error(const Reason):
+      begin
+        const Sent: boolean := try RejectLogged(
+          Config,
+          ConnectionValue,
+          'interaction_rejected',
+          Reason,
+          Token
+        );
+        return Ok(Session);
+      end;
+  end case;
+end function;
 
 // Applies one decoded client message after the handshake; Finished requests connection close.
 public function HandleSessionMessage(
-  Session: ServerSession;
-  Message: ClientMessage;
-  ConnectionValue: Connection;
-  Config: ServerConfig;
-  Token: CancellationToken
-): result of ServerSession, string;
+  Session: SessionUnit.ServerSession;
+  Message: Protocol.ClientMessage;
+  ConnectionValue: Net.Connection;
+  Config: ConfigUnit.ServerConfig;
+  Token: Tasks.CancellationToken
+): result of (SessionUnit.ServerSession, string);
 begin
-  var HasState: boolean := Std.Options.IsSome(Session.State);
-  var DialogueActive: boolean := Std.Options.IsSome(Session.ActiveDialogueNpcId);
-  if not HasState and RequiresActiveSession(Message) then
-  begin
-    var Sent: boolean := try Reject(ConnectionValue, 'session_not_started', 'Start or load a game first.', Token);
-    return Ok(Session)
-  end;
-
-  if DialogueActive and not AllowedWhileDialogueActive(Message) then
-  begin
-    var Sent: boolean := try Reject(ConnectionValue, 'dialogue_active', 'End the active dialogue before taking another action.', Token);
-    return Ok(Session)
-  end;
-
-  if not DialogueActive and RequiresActiveDialogue(Message) then
-  begin
-    var Sent: boolean := try Reject(ConnectionValue, 'dialogue_not_active', 'No dialogue is active.', Token);
-    return Ok(Session)
-  end;
-  mutable var Next: ServerSession := Session;
+  case try Worlds.HandleWorldMessage(Session, Message, ConnectionValue, Config, Token) of
+    when Some(const Handled):
+      begin
+        return Ok(Handled);
+      end;
+    when None:
+      begin
+        null;
+      end;
+  end case;
+  const HasState: boolean := (Session.State is Some(_));
+  if not HasState and SessionUnit.RequiresActiveSession(Message) then
+    begin
+      const Sent: boolean := try RejectLogged(
+        Config,
+        ConnectionValue,
+        'session_not_started',
+        'Start or load a game first.',
+        Token
+      );
+      return Ok(Session);
+    end;
+  end if;
+  var Next: SessionUnit.ServerSession := Session;
   case Message of
-    ClientMessage.Disconnect:
-    begin
-      Next.Finished := true
-    end;
-    ClientMessage.Hello(Version, Width, Height):
-    begin
-      var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ErrorMessage('unexpected_hello', 'The session is already established'), Token);
-      Next.Finished := true
-    end;
-    ClientMessage.StartNewGame:
-    begin
-      if HasState then
+    when Protocol.ClientMessage.Disconnect:
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token)
-      end
-      else
+        Next.Finished := true;
+      end;
+    when Protocol.ClientMessage.Hello(const Version, const Width, const Height):
       begin
-        return CommitState(Session, NewGame(Session.World.Metadata), ConnectionValue, Token)
-      end
-    end;
-    ClientMessage.LoadGame:
-    begin
-      if HasState then
+        const Sent: boolean := try Replies.SendMessage(
+          ConnectionValue,
+          Protocol.ServerMessage.ErrorMessage(
+            'unexpected_hello',
+            'The session is already established'
+          ),
+          Token
+        );
+        Next.Finished := true;
+      end;
+    when Protocol.ClientMessage.Viewport(const Width, const Height):
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'session_already_started', 'A game session is already active.', Token)
-      end
-      else
+        case SessionUnit.ResolveViewport(Width, Height, Config) of
+          when Ok(const Value):
+            begin
+              Next.Viewport := Value;
+              const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
+              Next.World := try Replies.SendProjection(
+                ConnectionValue,
+                Session.World,
+                try SessionUnit.SessionAreaView(Session, State),
+                State,
+                Value,
+                ProjectionUnit.NoTurnReport(),
+                Token
+              );
+            end;
+          when Error(const Reason):
+            begin
+              const Sent: boolean := try RejectLogged(
+                Config,
+                ConnectionValue,
+                'invalid_viewport',
+                Reason,
+                Token
+              );
+            end;
+        end case;
+      end;
+    when Protocol.ClientMessage.ExplorationMap(const OriginX, const OriginY, const Width, const Height):
       begin
-        case LoadSaveGame(Session.World) of
-          Error(Reason):
+        if (Width > Config.MaximumViewWidth) or (Height > Config.MaximumViewHeight) then
           begin
-            var Sent: boolean := try Reject(ConnectionValue, 'load_failed', Reason, Token)
+            const Sent: boolean := try RejectLogged(
+              Config,
+              ConnectionValue,
+              'invalid_map_window',
+              'Exploration map dimensions exceed server limits.',
+              Token
+            );
           end;
-          Ok(LoadedSave):
+        else
           begin
-            case LoadedSave of
-              SaveGameLoad.Missing:
-              begin
-                var Sent: boolean := try Reject(ConnectionValue, 'save_unavailable', 'No saved game is available for this world.', Token)
-              end;
-              SaveGameLoad.InvalidRemoved(Reason):
-              begin
-                var Sent: boolean := try Reject(ConnectionValue, 'save_removed', 'Invalid saved game was removed. Start a new game.', Token)
-              end;
-              SaveGameLoad.Loaded(SavedState):
-              begin
-                return CommitState(Session, SavedState, ConnectionValue, Token)
-              end
-            end
-          end
-        end
-      end
-    end;
-    ClientMessage.SaveGame:
-    begin
-      case WriteSaveGame(Session.World, try RequireActiveState(Session.State)) of
-        Ok(Written):
-        begin
-          var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.SaveCompleted, Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'save_failed', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.Viewport(Width, Height):
-    begin
-      case ResolveViewport(Width, Height, Config) of
-        Ok(Value):
-        begin
-          Next.Viewport := Value;
-          Next.World := try SendProjection(ConnectionValue, Session.World, try RequireActiveState(Session.State), Value, NoTurnReport(), Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'invalid_viewport', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.ExplorationMap(OriginX, OriginY, Width, Height):
-    begin
-      if (Width > Config.MaximumViewWidth) or (Height > Config.MaximumViewHeight) then
+            const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
+            const MapValue: Protocol.ExplorationMapState := try ProjectionUnit.ProjectExplorationMap(
+              State,
+              try SessionUnit.SessionAreaView(Session, State),
+              OriginX,
+              OriginY,
+              Width,
+              Height
+            );
+            const Sent: boolean := try Replies.SendMessage(
+              ConnectionValue,
+              Protocol.ServerMessage.ExplorationMap(MapValue),
+              Token
+            );
+          end;
+        end if;
+      end;
+    when Protocol.ClientMessage.Move(const DeltaX, const DeltaY):
       begin
-        var Sent: boolean := try Reject(ConnectionValue, 'invalid_map_window', 'Exploration map dimensions exceed server limits.', Token)
-      end
-      else
+        case WorldUnit.MoveInWorld(
+          Session.World,
+          try SessionUnit.RequireActiveState(Session.State),
+          DeltaX,
+          DeltaY
+        ) of
+          when Ok(const Moved):
+            begin
+              Next.World := Moved.World;
+              return Replies.CommitState(Next, Moved.State, ConnectionValue, Token);
+            end;
+          when Error(const Reason):
+            begin
+              const Sent: boolean := try RejectLogged(
+                Config,
+                ConnectionValue,
+                'movement_rejected',
+                Reason,
+                Token
+              );
+            end;
+        end case;
+      end;
+    when Protocol.ClientMessage.StepFirstPerson(const Direction):
       begin
-        var MapValue: ExplorationMapState := try ProjectExplorationMap(try RequireActiveState(Session.State), Session.World.Metadata, OriginX, OriginY, Width, Height);
-        var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.ExplorationMap(MapValue), Token)
-      end
-    end;
-    ClientMessage.Move(DeltaX, DeltaY):
-    begin
-      case MoveInWorld(Session.World, try RequireActiveState(Session.State), DeltaX, DeltaY) of
-        Ok(Moved):
-        begin
-          Next.World := Moved.World;
-          return CommitState(Next, Moved.State, ConnectionValue, Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'movement_rejected', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.StepFirstPerson(Direction):
-    begin
-      return PlayTurn(Session, TurnAction.Step(GameStep(Direction)), 'movement_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Attack:
-    begin
-      return PlayTurn(Session, TurnAction.Attack, 'attack_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Wait:
-    begin
-      return PlayTurn(Session, TurnAction.Wait, 'wait_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Equip(ItemId):
-    begin
-      return PlayTurn(Session, TurnAction.Equip(ItemId), 'equip_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.Unequip(ItemId):
-    begin
-      return PlayTurn(Session, TurnAction.Unequip(ItemId), 'equip_rejected', ConnectionValue, Token)
-    end;
-    ClientMessage.TurnFirstPerson(Direction):
-    begin
-      case Dungeon.Movement.TurnFirstPerson(Session.World.Metadata, try RequireActiveState(Session.State), GameTurn(Direction)) of
-        Ok(Turned):
-        begin
-          return CommitState(Session, Turned, ConnectionValue, Token)
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'turn_rejected', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.Interact:
-    begin
-      case Dungeon.Interaction.Interact(Session.World.Metadata, try RequireActiveState(Session.State)) of
-        Ok(Outcome):
-        begin
-          case Outcome of
-            InteractionOutcome.Transitioned(Transitioned):
+        return Replies.PlayTurn(
+          Session,
+          Combat.TurnAction.Step(Mapping.GameStep(Direction)),
+          'movement_rejected',
+          ConnectionValue,
+          Token,
+          Config.Logs
+        );
+      end;
+    when Protocol.ClientMessage.Attack:
+      begin
+        return Replies.PlayTurn(
+          Session,
+          Combat.TurnAction.Attack,
+          'attack_rejected',
+          ConnectionValue,
+          Token,
+          Config.Logs
+        );
+      end;
+    when Protocol.ClientMessage.Wait:
+      begin
+        return Replies.PlayTurn(
+          Session,
+          Combat.TurnAction.Wait,
+          'wait_rejected',
+          ConnectionValue,
+          Token,
+          Config.Logs
+        );
+      end;
+    when Protocol.ClientMessage.Equip(const ItemId):
+      begin
+        return Replies.PlayTurn(
+          Session,
+          Combat.TurnAction.Equip(ItemId),
+          'equip_rejected',
+          ConnectionValue,
+          Token,
+          Config.Logs
+        );
+      end;
+    when Protocol.ClientMessage.Unequip(const ItemId):
+      begin
+        return Replies.PlayTurn(
+          Session,
+          Combat.TurnAction.Unequip(ItemId),
+          'equip_rejected',
+          ConnectionValue,
+          Token,
+          Config.Logs
+        );
+      end;
+    when Protocol.ClientMessage.DropItem(const ItemId):
+      begin
+        return Replies.PlayTurn(
+          Session,
+          Combat.TurnAction.Drop(ItemId),
+          'drop_rejected',
+          ConnectionValue,
+          Token,
+          Config.Logs
+        );
+      end;
+    when Protocol.ClientMessage.TurnFirstPerson(const Direction):
+      begin
+        const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
+        case Movement.TurnFirstPerson(
+          try SessionUnit.SessionAreaView(Session, State),
+          State,
+          Mapping.GameTurn(Direction)
+        ) of
+          when Ok(const Turned):
             begin
-              return CommitState(Session, Transitioned, ConnectionValue, Token)
+              return Replies.CommitState(Session, Turned, ConnectionValue, Token);
             end;
-            InteractionOutcome.StateChanged(Changed):
+          when Error(const Reason):
             begin
-              return CommitState(Session, Changed, ConnectionValue, Token)
+              const Sent: boolean := try RejectLogged(
+                Config,
+                ConnectionValue,
+                'turn_rejected',
+                Reason,
+                Token
+              );
             end;
-            InteractionOutcome.Described(Title, Text):
+        end case;
+      end;
+    when Protocol.ClientMessage.Interact:
+      begin
+        const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
+        const View: GameState.AreaView := try SessionUnit.SessionAreaView(Session, State);
+        case Interaction.Interact(View, State) of
+          when Ok(const Outcome):
             begin
-              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Interaction(Title, Text), Token)
+              case Outcome of
+                when Interaction.InteractionOutcome.TransitionRequested(const TargetAreaId):
+                  begin
+                    return HandleTransition(
+                      Session,
+                      View,
+                      State,
+                      TargetAreaId,
+                      Config,
+                      ConnectionValue,
+                      Token
+                    );
+                  end;
+                when Interaction.InteractionOutcome.StateChanged(const Changed):
+                  begin
+                    return Replies.CommitState(Session, Changed, ConnectionValue, Token);
+                  end;
+                when Interaction.InteractionOutcome.Described(const Title, const Text):
+                  begin
+                    const Sent: boolean := try Replies.SendMessage(
+                      ConnectionValue,
+                      Protocol.ServerMessage.Interaction(Title, Text),
+                      Token
+                    );
+                  end;
+              end case;
             end;
-            InteractionOutcome.DialogueStarted(Changed, Dialogue):
+          when Error(const Reason):
             begin
-              Next.State := Some(Changed);
-              Next.ActiveDialogueNpcId := Some(Dialogue.NpcId);
-              var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Dialogue(ProjectDialogue(Dialogue)), Token)
-            end
-          end
-        end;
-        Error(Reason):
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token)
-        end
-      end
-    end;
-    ClientMessage.DialogueChoice(ChoiceId):
-    begin
-      case Session.ActiveDialogueNpcId of
-        Some(NpcId):
-        begin
-          case ResolveNpcDialogueChoice(Session.World.Metadata, try RequireActiveState(Session.State), NpcId, ChoiceId) of
-            Ok(DialogueResult):
-            begin
-              case DialogueResult of
-                DialogueOutcome.Continued(Changed, Dialogue):
-                begin
-                  Next.State := Some(Changed);
-                  var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.Dialogue(ProjectDialogue(Dialogue)), Token)
-                end;
-                DialogueOutcome.Ended(Changed):
-                begin
-                  Next.State := Some(Changed);
-                  Next.ActiveDialogueNpcId := None;
-                  var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.DialogueEnded, Token)
-                end
-              end
+              const Sent: boolean := try RejectLogged(
+                Config,
+                ConnectionValue,
+                'interaction_rejected',
+                Reason,
+                Token
+              );
             end;
-            Error(Reason):
-            begin
-              var Sent: boolean := try Reject(ConnectionValue, 'dialogue_choice_rejected', Reason, Token)
-            end
-          end
-        end;
-        None:
-        begin
-          var Sent: boolean := try Reject(ConnectionValue, 'dialogue_not_active', 'No dialogue is active.', Token)
-        end
-      end
-    end;
-    ClientMessage.EndDialogue:
-    begin
-      Next.ActiveDialogueNpcId := None;
-      var Sent: boolean := try SendMessage(ConnectionValue, ServerMessage.DialogueEnded, Token)
-    end
-  end;
+        end case;
+      end;
+    when Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _):
+      begin
+        null;
+      end;
+  end case;
 
-  return Ok(Next)
-end;
+  return Ok(Next);
+end function;
+end unit;

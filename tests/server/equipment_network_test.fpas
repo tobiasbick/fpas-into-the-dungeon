@@ -1,337 +1,418 @@
 // Verifies equipment over TCP: pickup, wearing a weapon, rejections, character lines, and armed combat events.
 program DungeonEquipmentNetworkTest;
 
-uses
-  Dungeon.Items, Dungeon.Protocol, Dungeon.Protocol.ClientMessages, Dungeon.Protocol.ServerMessages,
-  Dungeon.Protocol.Transport, Dungeon.Server, Dungeon.Server.Config, Dungeon.Terrain,
-  Dungeon.Terrain.Placement, Std.Arrays, Std.Conv, Std.Fs, Std.Net, Std.Results, Std.Str, Std.Task,
-  Std.Test, Std.Time;
+uses Dungeon.World as WorldUnit, Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Routes as Routes, Dungeon.Items as ItemRules, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
-type
-  ExchangeResult = record
-    Reader: LineReader;
-    Message: ServerMessage;
-  end;
+type ExchangeResult = record
+  Reader: Transport.LineReader;
+  Message: Protocol.ServerMessage;
+end record;
 
-function TestConfig(WorldsRoot: string): ServerConfig;
+function TestConfig(WorldsRoot: string): ConfigUnit.ServerConfig;
 begin
-  return record
-    WorldsRoot := WorldsRoot;
-    WorldId := 'equipment-network';
-    WorldSeed := 9462;
-    ChunkCacheLimit := 32;
-    MaximumViewWidth := 240;
-    MaximumViewHeight := 120;
-  end
-end;
+  return ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := WorldsRoot,
+    WorldId := 'equipment-network',
+    WorldSeed := 9462,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 120
+  );
+end function;
 
-function ServeOne(ListenerValue: Listener; Config: ServerConfig; Token: CancellationToken): result of boolean, string;
+function ServeOne(ListenerValue: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  var Client: Connection := try AcceptWithCancellation(ListenerValue, Token);
-  var Configured: boolean := try SetTimeout(Client, 30000);
-  var Outcome: result of boolean, string := ServeConnection(Client, Config, Token);
-  var Closed: boolean := try Close(Client);
-  return Outcome
-end;
+  const Client: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Configured: boolean := try Net.SetTimeout(Client, 30000);
+  const Outcome: result of (boolean, string) := Server.ServeConnection(Client, Config, Token);
+  const Closed: boolean := try Net.Close(Client);
+  return Outcome;
+end function;
 
 function Exchange(
-  Client: Connection;
-  Reader: LineReader;
-  Message: ClientMessage;
-  Token: CancellationToken
+  Client: Net.Connection;
+  Reader: Transport.LineReader;
+  Message: Protocol.ClientMessage;
+  Token: Tasks.CancellationToken
 ): ExchangeResult;
 begin
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(Message), Token)));
-  var LineValue: LineRead := Unwrap(ReadLine(Reader, Token));
-  return record
-    Reader := LineValue.Reader;
-    Message := Unwrap(DecodeServer(LineValue.Line));
-  end
-end;
+  Test.AssertTrue(
+    Transport.WriteLine(Client, ClientMessages.EncodeClient(Message), Token).Unwrap()
+  );
+  const LineValue: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+  return ExchangeResult(
+    Reader := LineValue.Reader,
+    Message := ServerMessages.DecodeServer(LineValue.Line).Unwrap()
+  );
+end function;
 
-function RequireFirstPerson(Message: ServerMessage): FirstPersonVisibleState;
+function RequireFirstPerson(Message: Protocol.ServerMessage): Protocol.FirstPersonVisibleState;
 begin
   case Message of
-    ServerMessage.State(Value):
-    begin
+    when Protocol.ServerMessage.State(const Value):
       case Value of
-        VisibleState.FirstPersonState(FirstPersonValue):
-        begin
-          return FirstPersonValue
-        end
-        else
-        begin
-          panic('expected first-person visible state')
-        end
-      end
-    end
-    else
-    begin
-      panic('expected first-person state')
-    end
-  end
-end;
+        when Protocol.VisibleState.FirstPersonState(const FirstPersonValue):
+          return FirstPersonValue;
+        when Protocol.VisibleState.MapState(_):
+          panic('expected first-person visible state');
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected first-person state');
+  end case;
+end function;
 
-function RequireMap(Message: ServerMessage): MapVisibleState;
+function RequireMap(Message: Protocol.ServerMessage): Protocol.MapVisibleState;
 begin
   case Message of
-    ServerMessage.State(Value):
-    begin
+    when Protocol.ServerMessage.State(const Value):
       case Value of
-        VisibleState.MapState(MapValue):
-        begin
-          return MapValue
-        end
-        else
-        begin
-          panic('expected map visible state')
-        end
-      end
-    end
-    else
-    begin
-      panic('expected map state')
-    end
-  end
-end;
+        when Protocol.VisibleState.MapState(const MapValue):
+          return MapValue;
+        when Protocol.VisibleState.FirstPersonState(_):
+          panic('expected map visible state');
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected map state');
+  end case;
+end function;
 
-procedure AssertRejected(Message: ServerMessage; ExpectedCode: string);
+procedure AssertRejected(Message: Protocol.ServerMessage; ExpectedCode: string);
 begin
   case Message of
-    ServerMessage.Rejected(Code, Text):
-    begin
-      AssertEquals(ExpectedCode, Code);
-      AssertFalse(Text = '')
-    end
-    else
-    begin
-      panic('expected rejected server message')
-    end
-  end
-end;
+    when Protocol.ServerMessage.Rejected(const Code, const Text):
+      Test.AssertEquals(ExpectedCode, Code);
+      Test.AssertFalse(Text = '');
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected rejected server message');
+  end case;
+end procedure;
 
 function LogContains(Log: array of string; Text: string): boolean;
 begin
   for Entry: string in Log do
-  begin
-    if Std.Str.Contains(Entry, Text) then
     begin
-      return true
-    end
-  end;
+      if Text in Entry then
+        begin
+          return true;
+        end;
+      end if;
+    end;
+  end for;
 
-  return false
-end;
+  return false;
+end function;
 
-function LineValue(Lines: array of VisibleCharacterValue; Label: string): string;
+function LineValue(Lines: array of Protocol.VisibleCharacterValue; Label: string): string;
 begin
-  for Line: VisibleCharacterValue in Lines do
-  begin
-    if Line.Label = Label then
+  for Line: Protocol.VisibleCharacterValue in Lines do
     begin
-      return Line.Value
-    end
-  end;
+      if Line.Label = Label then
+        begin
+          return Line.Value;
+        end;
+      end if;
+    end;
+  end for;
 
-  return ''
-end;
+  return '';
+end function;
 
-function LineSource(Lines: array of VisibleCharacterValue; Label: string): string;
+function LineSource(Lines: array of Protocol.VisibleCharacterValue; Label: string): string;
 begin
-  for Line: VisibleCharacterValue in Lines do
-  begin
-    if Line.Label = Label then
+  for Line: Protocol.VisibleCharacterValue in Lines do
     begin
-      return Line.Source
-    end
-  end;
+      if Line.Label = Label then
+        begin
+          return Line.Source;
+        end;
+      end if;
+    end;
+  end for;
 
-  return ''
-end;
+  return '';
+end function;
 
-// Sends forward steps (0), left turns (1), and right turns (2) and returns the last response.
+// Sends a route's intentions in order and returns the last response.
 function Walk(
-  Client: Connection;
-  Reader: LineReader;
-  Moves: array of integer;
-  Token: CancellationToken
+  Client: Net.Connection;
+  Reader: Transport.LineReader;
+  Moves: array of Fixtures.RouteMove;
+  Token: Tasks.CancellationToken
 ): ExchangeResult;
 begin
-  mutable var Response: ExchangeResult := record
-    Reader := Reader;
-    Message := ServerMessage.SaveCompleted;
-  end;
+  var Response: ExchangeResult := ExchangeResult(
+    Reader := Reader,
+    Message := Protocol.ServerMessage.SaveCompleted
+  );
+  for Move: Fixtures.RouteMove in Moves do
+    begin
+      Response := Exchange(Client, Response.Reader, Routes.RouteMessage(Move), Token);
+    end;
+  end for;
 
-  for Move: integer in Moves do
-  begin
-    if Move = 0 then
-    begin
-      Response := Exchange(Client, Response.Reader, ClientMessage.StepFirstPerson(FirstPersonStepDirection.Forward), Token)
-    end
-    else if Move = 1 then
-    begin
-      Response := Exchange(Client, Response.Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Left), Token)
-    end
-    else
-    begin
-      Response := Exchange(Client, Response.Reader, ClientMessage.TurnFirstPerson(FirstPersonTurnDirection.Right), Token)
-    end
-  end;
-
-  return Response
-end;
+  return Response;
+end function;
 
 begin
-  var WorldsRoot: string := '.temp-data/equipment-network-' + IntToStr(TimestampMillis());
-  AssertTrue(Unwrap(Std.Fs.CreateDirAll(WorldsRoot)));
-  var Config: ServerConfig := TestConfig(WorldsRoot);
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata(Config.WorldId, Config.WorldSeed));
-  var Source: CancellationSource := CreateCancellationSource();
-  var Token: CancellationToken := GetCancellationToken(Source);
-  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
-  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
-  var ServerTask: task := go ServeOne(ListenerValue, Config, Token);
-  var Client: Connection := Unwrap(Connect('127.0.0.1', Address.Port, 5000));
-  AssertTrue(Unwrap(SetTimeout(Client, 120000)));
-  mutable var Reader: LineReader := NewLineReader(Client);
-  mutable var Response: ExchangeResult := Exchange(Client, Reader, ClientMessage.Hello(ProtocolVersion, 13, 9), Token);
-  Reader := Response.Reader;
-  Response := Exchange(Client, Reader, ClientMessage.StartNewGame, Token);
-  Reader := Response.Reader;
-  var Outdoor: MapVisibleState := RequireMap(Response.Message);
-  // The character sheet arrives with every state: unarmed d3 and no armor.
-  AssertEquals('Unarmed', LineSource(Outdoor.Character, 'Damage'));
-  AssertEquals('d3', LineValue(Outdoor.Character, 'Damage'));
-  AssertEquals('0', LineValue(Outdoor.Character, 'Armor'));
-  // Nothing is carried yet, so nothing can be worn.
-  Response := Exchange(Client, Reader, ClientMessage.Equip(RustyShortSwordId), Token);
-  Reader := Response.Reader;
-  AssertRejected(Response.Message, 'equip_rejected');
-  mutable var CurrentX: integer := Outdoor.WorldX;
-  mutable var CurrentY: integer := Outdoor.WorldY;
-  for Step: integer := 1 to 3 do
-  begin
-    mutable var DeltaX: integer := 0;
-    mutable var DeltaY: integer := 0;
-    if CurrentX < Metadata.Entrance.X then
-    begin
-      DeltaX := 1
-    end
-    else if CurrentX > Metadata.Entrance.X then
-    begin
-      DeltaX := -1
-    end
-    else if CurrentY < Metadata.Entrance.Y then
-    begin
-      DeltaY := 1
-    end
-    else if CurrentY > Metadata.Entrance.Y then
-    begin
-      DeltaY := -1
-    end;
-
-    if (DeltaX <> 0) or (DeltaY <> 0) then
-    begin
-      Response := Exchange(Client, Reader, ClientMessage.Move(DeltaX, DeltaY), Token);
-      Reader := Response.Reader;
-      CurrentX := RequireMap(Response.Message).WorldX;
-      CurrentY := RequireMap(Response.Message).WorldY
-    end
-  end;
-
-  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
-  Reader := Response.Reader;
-  AssertEquals(9, RequireFirstPerson(Response.Message).PlayerX);
-  // The sword lies in the middle passage: two steps west, then south.
-  Response := Walk(Client, Reader, [0, 0, 1, 0, 0, 0], Token);
-  Reader := Response.Reader;
-  var OnSword: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-  AssertEquals(7, OnSword.PlayerX);
-  AssertEquals(4, OnSword.PlayerY);
-  AssertTrue(Std.Str.Contains(OnSword.Status, 'Rusty short sword'));
-  Response := Exchange(Client, Reader, ClientMessage.Interact, Token);
-  Reader := Response.Reader;
-  var Carrying: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-  AssertEquals(1, Std.Arrays.Length(Carrying.Inventory));
-  AssertEquals(RustyShortSwordId, Carrying.Inventory[0].Id);
-  AssertTrue(Carrying.Inventory[0].Slot = VisibleItemSlot.Weapon);
-  AssertFalse(Carrying.Inventory[0].Equipped);
-  // Wearing it takes a turn, is logged, and changes the projected damage.
-  Response := Exchange(Client, Reader, ClientMessage.Equip(RustyShortSwordId), Token);
-  Reader := Response.Reader;
-  var Armed: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-  AssertTrue(Armed.Inventory[0].Equipped);
-  AssertTrue(LogContains(Armed.CombatLog, 'You wield the rusty short sword.'));
-  AssertEquals('d6+1', LineValue(Armed.Character, 'Damage'));
-  AssertEquals(RustyShortSwordName, LineSource(Armed.Character, 'Damage'));
-  Response := Exchange(Client, Reader, ClientMessage.Equip(RustyShortSwordId), Token);
-  Reader := Response.Reader;
-  AssertRejected(Response.Message, 'equip_rejected');
-  Response := Exchange(Client, Reader, ClientMessage.Equip(InitialDungeonItemId), Token);
-  Reader := Response.Reader;
-  AssertRejected(Response.Message, 'equip_rejected');
-  // On through the inner passage: south, west, north up to (5, 3), then face west.
-  Response := Walk(Client, Reader, [0, 2, 0, 0, 2, 0, 0, 1], Token);
-  Reader := Response.Reader;
-  mutable var View: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-  AssertEquals(5, View.PlayerX);
-  AssertEquals(3, View.PlayerY);
-  mutable var Waited: integer := 0;
-  while (Std.Str.CharAt(View.Rows[3], 4) <> InteriorHostileCode) and (Waited < 6) do
-  begin
-    Response := Exchange(Client, Reader, ClientMessage.Wait, Token);
+  const WorldsRoot: string := '.temp-data/equipment-network-' +
+    Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(WorldsRoot).Unwrap());
+  const Config: ConfigUnit.ServerConfig := TestConfig(WorldsRoot);
+  const Fixture: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    Config.WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    Config.DungeonRegionChunks,
+    Config.ChunkCacheLimit
+  ).Unwrap();
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    Config.WorldId,
+    Config.WorldSeed,
+    4
+  ).Unwrap();
+  // Placement order of generated dungeons: coin, sword, jerkin.
+  const Map: InteriorUnit.InteriorMap := Routes.SpawnDungeonMap(Metadata);
+  const Skeleton: Coordinates.InteriorPosition := Map.Hostiles[0].Position;
+  const CoinId: string := ItemRules.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 0);
+  const SwordId: string := ItemRules.ItemPlacementId(Fixtures.SpawnDungeonAreaId(Metadata), 1);
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeOne(
+      ListenerValue,
+      Config,
+      Token
+    );
+    const Client: Net.Connection := Net.Connect('127.0.0.1', Address.Port, 5000).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(Client, 120000).Unwrap());
+    var Reader: Transport.LineReader := Transport.NewLineReader(Client);
+    var Response: ExchangeResult := Exchange(
+      Client,
+      Reader,
+      Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 13, 9),
+      Token
+    );
     Reader := Response.Reader;
-    View := RequireFirstPerson(Response.Message);
-    Waited := Waited + 1
-  end;
-
-  AssertEquals(InteriorHostileCode, Std.Str.CharAt(View.Rows[3], 4));
-  // Every blow reports a structured event; armed hits deal 2 to 7.
-  mutable var Finished: boolean := false;
-  mutable var Blows: integer := 0;
-  mutable var SawHitEvent: boolean := false;
-  while (not Finished) and (Blows < 60) do
-  begin
-    Response := Exchange(Client, Reader, ClientMessage.Attack, Token);
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.StartNewGame, Token);
     Reader := Response.Reader;
-    Blows := Blows + 1;
-    case Response.Message of
-      ServerMessage.Defeated(Summary):
+    const Outdoor: Protocol.MapVisibleState := RequireMap(Response.Message);
+    // The character sheet arrives with every state: unarmed d3 and no armor.
+    Test.AssertEquals('Unarmed', LineSource(Outdoor.Character, 'Damage'));
+    Test.AssertEquals('d3', LineValue(Outdoor.Character, 'Damage'));
+    Test.AssertEquals('0', LineValue(Outdoor.Character, 'Armor'));
+    // Nothing is carried yet, so nothing can be worn.
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Equip(SwordId), Token);
+    Reader := Response.Reader;
+    AssertRejected(Response.Message, 'equip_rejected');
+    var CurrentX: integer := Outdoor.WorldX;
+    var CurrentY: integer := Outdoor.WorldY;
+    for Step: integer := 1 to 3 do
       begin
-        Finished := true
-      end;
-      ServerMessage.State(Value):
-      begin
-        var Fighting: FirstPersonVisibleState := RequireFirstPerson(Response.Message);
-        AssertTrue(Std.Arrays.Length(Fighting.CombatEvents) > 0);
-        var First: VisibleCombatEvent := Fighting.CombatEvents[0];
-        AssertTrue((First.Kind = VisibleCombatEventKind.PlayerHit) or
-                   (First.Kind = VisibleCombatEventKind.PlayerMiss));
-        if First.Kind = VisibleCombatEventKind.PlayerHit then
-        begin
-          AssertTrue((First.Amount >= 2) and (First.Amount <= 7));
-          SawHitEvent := true
-        end;
-
-        for Entry: VisibleCombatEvent in Fighting.CombatEvents do
-        begin
-          if Entry.Kind = VisibleCombatEventKind.HostileDefeated then
+        var DeltaX: integer := 0;
+        var DeltaY: integer := 0;
+        if CurrentX < Metadata.SpawnEntrance.X then
           begin
-            Finished := true
-          end
-        end
-      end
-      else
-      begin
-        panic('expected a state or defeat after an attack')
-      end
-    end
-  end;
+            DeltaX := 1;
+          end;
+        else
+          if CurrentX > Metadata.SpawnEntrance.X then
+            begin
+              DeltaX := -1;
+            end;
+          else
+            if CurrentY < Metadata.SpawnEntrance.Y then
+              begin
+                DeltaY := 1;
+              end;
+            else
+              if CurrentY > Metadata.SpawnEntrance.Y then
+                begin
+                  DeltaY := -1;
+                end;
+              end if;
+            end if;
+          end if;
+        end if;
 
-  AssertTrue(Finished);
-  AssertTrue(SawHitEvent);
-  AssertTrue(Unwrap(WriteLine(Client, EncodeClient(ClientMessage.Disconnect), Token)));
-  AssertTrue(Unwrap(Std.Task.Wait(ServerTask)));
-  AssertTrue(Unwrap(Close(Client)));
-  AssertTrue(Unwrap(CloseListener(ListenerValue)))
+        if (DeltaX <> 0) or (DeltaY <> 0) then
+          begin
+            Response := Exchange(
+              Client,
+              Reader,
+              Protocol.ClientMessage.Move(DeltaX, DeltaY),
+              Token
+            );
+            Reader := Response.Reader;
+            CurrentX := RequireMap(Response.Message).WorldX;
+            CurrentY := RequireMap(Response.Message).WorldY;
+          end;
+        end if;
+      end;
+    end for;
+
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Interact, Token);
+    Reader := Response.Reader;
+    const Entered: Protocol.FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+    Test.AssertEquals(Map.Start.X, Entered.PlayerX);
+    // Walk to the sword's corner, around the resting skeleton.
+    const SwordField: Coordinates.InteriorPosition := Map.Items[1].Position;
+    Response := Walk(
+      Client,
+      Reader,
+      Fixtures.RouteTo(Map, Routes.VisiblePose(Entered), SwordField, [Skeleton]),
+      Token
+    );
+    Reader := Response.Reader;
+    const OnSword: Protocol.FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+    Test.AssertEquals(SwordField.X, OnSword.PlayerX);
+    Test.AssertEquals(SwordField.Y, OnSword.PlayerY);
+    Test.AssertTrue('Rusty short sword' in OnSword.Status);
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Interact, Token);
+    Reader := Response.Reader;
+    const Carrying: Protocol.FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+    Test.AssertEquals(1, Carrying.Inventory.Length());
+    Test.AssertEquals(SwordId, Carrying.Inventory[0].Id);
+    Test.AssertTrue(Carrying.Inventory[0].Slot = Protocol.VisibleItemSlot.Weapon);
+    Test.AssertFalse(Carrying.Inventory[0].Equipped);
+    // Wearing it takes a turn, is logged, and changes the projected damage.
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Equip(SwordId), Token);
+    Reader := Response.Reader;
+    const Armed: Protocol.FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+    Test.AssertTrue(Armed.Inventory[0].Equipped);
+    Test.AssertTrue(LogContains(Armed.CombatLog, 'You wield the rusty short sword.'));
+    Test.AssertEquals('d6+1', LineValue(Armed.Character, 'Damage'));
+    Test.AssertEquals(ItemRules.RustyShortSwordName, LineSource(Armed.Character, 'Damage'));
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Equip(SwordId), Token);
+    Reader := Response.Reader;
+    AssertRejected(Response.Message, 'equip_rejected');
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Equip(CoinId), Token);
+    Reader := Response.Reader;
+    AssertRejected(Response.Message, 'equip_rejected');
+    // A worn item cannot be dropped; once carried it lies on the occupied field and can be picked up again.
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.DropItem(SwordId), Token);
+    Reader := Response.Reader;
+    AssertRejected(Response.Message, 'drop_rejected');
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Unequip(SwordId), Token);
+    Reader := Response.Reader;
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.DropItem(SwordId), Token);
+    Reader := Response.Reader;
+    const Dropped: Protocol.FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+    Test.AssertEquals(0, Dropped.Inventory.Length());
+    Test.AssertTrue(LogContains(Dropped.CombatLog, 'You drop the rusty short sword.'));
+    Test.AssertTrue('Pick up' in Dropped.Status);
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.DropItem(SwordId), Token);
+    Reader := Response.Reader;
+    AssertRejected(Response.Message, 'drop_rejected');
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Interact, Token);
+    Reader := Response.Reader;
+    const Retrieved: Protocol.FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+    Test.AssertEquals(1, Retrieved.Inventory.Length());
+    Test.AssertEquals(SwordId, Retrieved.Inventory[0].Id);
+    Test.AssertFalse(Retrieved.Inventory[0].Equipped);
+    Response := Exchange(Client, Reader, Protocol.ClientMessage.Equip(SwordId), Token);
+    Reader := Response.Reader;
+    Test.AssertTrue(RequireFirstPerson(Response.Message).Inventory[0].Equipped);
+    // On to the skeleton until it stands ahead; waiting lets an alerted skeleton close in.
+    var View: Protocol.FirstPersonVisibleState := RequireFirstPerson(Response.Message);
+    for Move: Fixtures.RouteMove in Fixtures.RouteTo(Map, Routes.VisiblePose(View), Skeleton, []) do
+      begin
+        if not Routes.HostileAhead(View) then
+          begin
+            if not (
+              (Move = Fixtures.RouteMove.RouteForward)
+              and
+              Coordinates.SamePosition(Routes.FieldAhead(View), Skeleton)
+            )
+            then
+              begin
+                Response := Exchange(Client, Reader, Routes.RouteMessage(Move), Token);
+                Reader := Response.Reader;
+                View := RequireFirstPerson(Response.Message);
+              end;
+            end if;
+          end;
+        end if;
+      end;
+    end for;
+    var Waited: integer := 0;
+    while (not Routes.HostileAhead(View)) and (Waited < 8) do
+      begin
+        Response := Exchange(Client, Reader, Protocol.ClientMessage.Wait, Token);
+        Reader := Response.Reader;
+        View := RequireFirstPerson(Response.Message);
+        Waited := Waited + 1;
+      end;
+    end while;
+
+    Test.AssertTrue(Routes.HostileAhead(View));
+    // Every blow reports a structured event; armed hits deal 2 to 7.
+    var Finished: boolean := false;
+    var Blows: integer := 0;
+    var SawHitEvent: boolean := false;
+    while (not Finished) and (Blows < 60) do
+      begin
+        Response := Exchange(Client, Reader, Protocol.ClientMessage.Attack, Token);
+        Reader := Response.Reader;
+        Blows := Blows + 1;
+        case Response.Message of
+          when Protocol.ServerMessage.Defeated(const Summary):
+            begin
+              Finished := true;
+            end;
+          when Protocol.ServerMessage.State(const Value):
+            begin
+              const Fighting: Protocol.FirstPersonVisibleState := RequireFirstPerson(
+                Response.Message
+              );
+              Test.AssertTrue(Fighting.CombatEvents.Length() > 0);
+              const First: Protocol.VisibleCombatEvent := Fighting.CombatEvents[0];
+              Test.AssertTrue(
+                (First.Kind = Protocol.VisibleCombatEventKind.PlayerHit)
+                or
+                (First.Kind = Protocol.VisibleCombatEventKind.PlayerMiss)
+              );
+              if First.Kind = Protocol.VisibleCombatEventKind.PlayerHit then
+                begin
+                  Test.AssertTrue((First.Amount >= 2) and (First.Amount <= 7));
+                  SawHitEvent := true;
+                end;
+              end if;
+
+              for Entry: Protocol.VisibleCombatEvent in Fighting.CombatEvents do
+                begin
+                  if Entry.Kind = Protocol.VisibleCombatEventKind.HostileDefeated then
+                    begin
+                      Finished := true;
+                    end;
+                  end if;
+                end;
+              end for;
+            end;
+          when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+            begin
+              panic('expected a state or defeat after an attack');
+            end;
+        end case;
+      end;
+    end while;
+
+    Test.AssertTrue(Finished);
+    Test.AssertTrue(SawHitEvent);
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+    Test.AssertTrue(Net.Close(Client).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
 end.

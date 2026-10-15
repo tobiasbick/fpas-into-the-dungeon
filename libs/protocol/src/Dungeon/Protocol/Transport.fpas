@@ -1,100 +1,111 @@
 // LF-delimited UTF-8 framing over a Functional Pascal TCP connection.
 unit Dungeon.Protocol.Transport;
 
-uses Dungeon.Protocol, Std.Arrays, Std.Net, Std.Net.Utf8, Std.Task;
+uses Dungeon.Protocol as Protocol, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
 
-public const
-  // Exact error returned when a frame exceeds MaximumLineBytes; servers answer it with line_too_long.
-  LineTooLongError: string := 'protocol line exceeds 64 KiB';
+// Exact error returned when a frame exceeds MaximumLineBytes; servers answer it with line_too_long.
+public const LineTooLongError: string := 'protocol line exceeds 64 KiB';
 
-public type
-  // Carries a connection and unread bytes across immutable framing calls.
-  LineReader = record
-    public ConnectionValue: Connection;
-    public Buffer: array of integer;
-  end;
-  // Couples a decoded line with the reader state required for the next read.
-  LineRead = record
-    public Line: string;
-    public Reader: LineReader;
-  end;
+// Carries a connection and unread bytes across immutable framing calls.
+public type LineReader = record
+  public ConnectionValue: Net.Connection;
+  public Buffer: array of integer;
+end record;
+
+// Couples a decoded line with the reader state required for the next read.
+public type LineRead = record
+  public Line: string;
+  public Reader: LineReader;
+end record;
 
 // Starts line framing with no retained bytes.
-public function NewLineReader(ConnectionValue: Connection): LineReader;
+public function NewLineReader(ConnectionValue: Net.Connection): LineReader;
 begin
-  return record
-    ConnectionValue := ConnectionValue;
-    Buffer := [];
-  end
-end;
+  return LineReader(ConnectionValue := ConnectionValue, Buffer := []);
+end function;
 
 function LineFeedIndex(Bytes: array of integer): integer;
 begin
   for Index: integer := 0 to Bytes.Length() - 1 do
-  begin
-    if Bytes[Index] = 10 then
     begin
-      return Index
-    end
-  end;
+      if Bytes[Index] = 10 then
+        begin
+          return Index;
+        end;
+      end if;
+    end;
+  end for;
 
-  return -1
-end;
+  return -1;
+end function;
 
 // Reads one complete line while retaining bytes belonging to the next line.
-public function ReadLine(Reader: LineReader; Token: CancellationToken): result of LineRead, string;
+public function ReadLine(Reader: LineReader; Token: Tasks.CancellationToken): result of (LineRead, string);
 begin
-  mutable var Next: LineReader := Reader;
-  mutable var LineEnd: integer := LineFeedIndex(Next.Buffer);
+  var Next: LineReader := Reader;
+  var LineEnd: integer := LineFeedIndex(Next.Buffer);
   while LineEnd < 0 do
-  begin
-    if Next.Buffer.Length() > MaximumLineBytes then
     begin
-      return Error(LineTooLongError)
+      if Next.Buffer.Length() > Protocol.MaximumLineBytes then
+        begin
+          return Error(LineTooLongError);
+        end;
+      end if;
+      const Part: array of integer := try Net.ReceiveBytesWithCancellation(
+        Next.ConnectionValue,
+        4096,
+        Token
+      );
+      if Part.Length() = 0 then
+        begin
+          return Error('connection closed');
+        end;
+      end if;
+
+      Next.Buffer := Next.Buffer.Concat(Part);
+      LineEnd := LineFeedIndex(Next.Buffer);
     end;
-    var Part: array of integer := try ReceiveBytesWithCancellation(Next.ConnectionValue, 4096, Token);
-    if Part.Length() = 0 then
+  end while;
+
+  if LineEnd > Protocol.MaximumLineBytes then
     begin
-      return Error('connection closed')
+      return Error(LineTooLongError);
     end;
-
-    Next.Buffer := Next.Buffer.Concat(Part);
-    LineEnd := LineFeedIndex(Next.Buffer)
-  end;
-
-  if LineEnd > MaximumLineBytes then
-  begin
-    return Error(LineTooLongError)
-  end;
-  var LineBytes: array of integer := Next.Buffer.Slice(0, LineEnd);
-  var RemainingStart: integer := LineEnd + 1;
+  end if;
+  const LineBytes: array of integer := Next.Buffer.Slice(0, LineEnd);
+  const RemainingStart: integer := LineEnd + 1;
   Next.Buffer := Next.Buffer.Slice(RemainingStart, Next.Buffer.Length() - RemainingStart);
-  return Ok(record
-    Line := try Std.Net.Utf8.Decode(LineBytes);
-    Reader := Next;
-  end)
-end;
+  return Ok(LineRead(Line := try Utf8.Decode(LineBytes), Reader := Next));
+end function;
 
 // Writes one complete LF-delimited line, including partial-write handling.
-public function WriteLine(ConnectionValue: Connection; Text: string; Token: CancellationToken): result of boolean, string;
+public function WriteLine(ConnectionValue: Net.Connection; Text: string; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  var Bytes: array of integer := Std.Net.Utf8.Encode(Text + #10);
-  if Bytes.Length() - 1 > MaximumLineBytes then
-  begin
-    return Error(LineTooLongError)
-  end;
-  mutable var Offset: integer := 0;
-  while Offset < Bytes.Length() do
-  begin
-    var Remaining: array of integer := Bytes.Slice(Offset, Bytes.Length() - Offset);
-    var Written: integer := try SendBytesWithCancellation(ConnectionValue, Remaining, Token);
-    if Written <= 0 then
+  const Bytes: array of integer := Utf8.Encode(Text + #10);
+  if Bytes.Length() - 1 > Protocol.MaximumLineBytes then
     begin
-      return Error('connection stopped while writing')
+      return Error(LineTooLongError);
     end;
+  end if;
+  var Offset: integer := 0;
+  while Offset < Bytes.Length() do
+    begin
+      const Remaining: array of integer := Bytes.Slice(Offset, Bytes.Length() - Offset);
+      const Written: integer := try Net.SendBytesWithCancellation(
+        ConnectionValue,
+        Remaining,
+        Token
+      );
+      if Written <= 0 then
+        begin
+          return Error('connection stopped while writing');
+        end;
+      end if;
 
-    Offset := Offset + Written
-  end;
+      Offset := Offset + Written;
+    end;
+  end while;
 
-  return Ok(true)
-end;
+  return Ok(true);
+end function;
+end unit;

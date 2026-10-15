@@ -1,0 +1,163 @@
+// Real listener diagnostics reflect accepted state, failed saves, selection and reconnects.
+program ServerDashboardNetworkTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Wire as Wire, Dungeon.World.Interiors as Interiors, Dungeon.World.Catalog as CatalogUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+function Snapshot(Logs: channel of Logging.ServerLogEvent): Logging.ServerDashboardStatus;
+begin
+  while true do
+    const Value := Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap();
+    case Value.Snapshot of
+      when Some(const Status):
+        return Status;
+      when None:
+        null;
+    end case;
+  end while;
+
+  panic('snapshot missing');
+end function;
+
+procedure WaitKind(Logs: channel of Logging.ServerLogEvent; Kind: string);
+begin
+  while true do
+    const Value := Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap();
+    if Value.Kind = Kind then
+      Test.AssertTrue(Value.Timestamp > 0);
+      return;
+    end if;
+  end while;
+end procedure;
+
+function Run(Config: ConfigUnit.ServerConfig; Port: integer; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  return Server.RunServerWithCancellation('127.0.0.1', Port, Config, Token);
+end function;
+
+begin
+  const Root := '.temp-data/dashboard-network-' + Conv.IntToStr(Time.TimestampMillis());
+  const Reservation := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Reservation).Unwrap().Port;
+  Test.AssertTrue(Net.CloseListener(Reservation).Unwrap());
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := Some(Logs), WorldsRoot := Root,
+    WorldId := 'missing', WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  scope
+    const Worker := go Run(Config, Port, Token);
+    WaitKind(Logs, 'status');
+    var Client := Wire.ConnectClient(Port, Token);
+    WaitKind(Logs, 'connected');
+    var Status := Snapshot(Logs);
+    Test.AssertEquals('', Status.WorldId);
+    Test.AssertFalse(Status.Active);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SelectWorld('missing'), Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Rejected(_, _));
+    Status := Snapshot(Logs);
+    Test.AssertEquals('', Status.WorldId);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.CreateWorld(12345, 4), Token);
+    Status := Snapshot(Logs);
+    Test.AssertEquals('world-1', Status.WorldId);
+    Test.AssertTrue(Status.Active);
+    Test.AssertTrue(Status.Dirty);
+    Test.AssertFalse(Status.SavePresent);
+    Test.AssertEquals(0, Status.LastSavedAt);
+    // A directory at the save target forces a genuine storage failure without altering progress.
+    Test.AssertTrue(Fs.CreateDirAll(Root + '/world-1/saves/default.json').Unwrap());
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Rejected(_, _));
+    Status := Snapshot(Logs);
+    Test.AssertTrue(Status.Dirty);
+    Test.AssertEquals(0, Status.LastSavedAt);
+    Test.AssertFalse(Status.SavePresent);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ListWorlds(0, true), Token);
+    Status := Snapshot(Logs);
+    Test.AssertFalse(Status.Active);
+    Test.AssertFalse(Status.Dirty);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.CreateWorld(-2147483648, 16), Token);
+    Status := Snapshot(Logs);
+    Test.AssertEquals('world-2', Status.WorldId);
+    Test.AssertEquals(-2147483648, Status.Seed);
+    Test.AssertEquals(16, Status.RegionChunks);
+    Test.AssertEquals(0, Status.LastSavedAt);
+    const World := CatalogUnit.OpenExistingWorld(Root, 'world-2', 32).Unwrap();
+    Client := Wire.WalkOutdoors(Client, World.Metadata.SpawnEntrance, Token);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    const DungeonName := Wire.FirstPersonOf(Client).Title;
+    Test.AssertEquals(
+      Interiors.ReadLevel(World, Fixtures.SpawnDungeonAreaId(World.Metadata)).Unwrap().DisplayName,
+      DungeonName
+    );
+    while true do
+      Status := Snapshot(Logs);
+      if Status.Area = DungeonName then
+        break;
+      end if;
+    end while;
+
+    Test.AssertTrue(Status.Active);
+    Test.AssertTrue(Status.Dirty);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token);
+    Wire.RequireSaved(Client);
+    Status := Snapshot(Logs);
+    Test.AssertFalse(Status.Dirty);
+    Test.AssertTrue(Status.SavePresent);
+    Test.AssertTrue(Status.LastSavedAt > 0);
+    const SavedAt := Status.LastSavedAt;
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Wait, Token);
+    Status := Snapshot(Logs);
+    Test.AssertTrue(Status.Dirty);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Rejected(_, _));
+    Status := Snapshot(Logs);
+    Test.AssertTrue(Status.Dirty);
+    Test.AssertEquals(SavedAt, Status.LastSavedAt);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Wire.RequireSaved(Client);
+    Status := Snapshot(Logs);
+    Test.AssertFalse(Status.Dirty);
+    Test.AssertTrue(Status.LastSavedAt >= SavedAt);
+    const LastSaved := Status.LastSavedAt;
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ListWorlds(0, false), Token);
+    Status := Snapshot(Logs);
+    Test.AssertFalse(Status.Active);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SelectWorld('world-2'), Token);
+    Status := Snapshot(Logs);
+    Test.AssertEquals(LastSaved, Status.LastSavedAt);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SelectWorld('world-1'), Token);
+    Status := Snapshot(Logs);
+    Test.AssertEquals(0, Status.LastSavedAt);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SelectWorld('world-2'), Token);
+    Status := Snapshot(Logs);
+    Test.AssertEquals(0, Status.LastSavedAt);
+    Test.AssertTrue(Net.Close(Client.Connection).Unwrap());
+    WaitKind(Logs, 'disconnected');
+    Client := Wire.ConnectClient(Port, Token);
+    WaitKind(Logs, 'connected');
+    Status := Snapshot(Logs);
+    Test.AssertEquals('', Status.WorldId);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SelectWorld('world-2'), Token);
+    Status := Snapshot(Logs);
+    Test.AssertEquals('world-2', Status.WorldId);
+    Test.AssertFalse(Status.Active);
+    Test.AssertTrue(Status.SavePresent);
+    Test.AssertEquals(0, Status.LastSavedAt);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    Test.AssertEquals(DungeonName, Wire.FirstPersonOf(Client).Title);
+    Status := Snapshot(Logs);
+    Test.AssertEquals(DungeonName, Status.Area);
+    Test.AssertTrue(Status.Active);
+    Test.AssertFalse(Status.Dirty);
+    Test.AssertEquals(0, Status.LastSavedAt);
+    Test.AssertTrue(Net.Close(Client.Connection).Unwrap());
+    WaitKind(Logs, 'disconnected');
+    Test.AssertTrue(Tasks.Cancel(Stop));
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Tasks.CloseChannel(Logs));
+end.

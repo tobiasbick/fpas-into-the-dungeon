@@ -1,0 +1,243 @@
+// Covers the savegame failure matrix: missing, invalid, and unreadable levels never remove a save.
+program PersistenceFailureTest;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Errors as Errors, Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as SavegameErrors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
+
+function LevelPath(World: WorldUnit.WorldSession): string;
+begin
+  const Region: Entrances.RegionCoordinate := Entrances.RegionOf(
+    World.Metadata,
+    World.Metadata.Spawn
+  );
+  return PathOps.Join([
+    World.Directory,
+    'dungeons',
+    (Conv.IntToStr(Region.X) + '_') + Conv.IntToStr(Region.Y),
+    '0.json'
+  ]);
+end function;
+
+// Names the class of a persistence failure without looking at any message text.
+function FailureClass(Failure: SavegameErrors.PersistenceFailure): string;
+begin
+  case Failure of
+    when SavegameErrors.PersistenceFailure.InvalidState(const Reason):
+      begin
+        return 'invalid-state';
+      end;
+    when SavegameErrors.PersistenceFailure.Io(const Reason):
+      begin
+        return 'io';
+      end;
+    when SavegameErrors.PersistenceFailure.Level(const Level):
+      begin
+        case Level of
+          when Errors.LevelFailure.Missing(const AreaId):
+            begin
+              return 'level-missing';
+            end;
+          when Errors.LevelFailure.Invalid(const AreaId, const Reason):
+            begin
+              return 'level-invalid';
+            end;
+          when Errors.LevelFailure.Io(const Reason):
+            begin
+              return 'level-io';
+            end;
+          when Errors.LevelFailure.Generation(const AreaId, const Reason):
+            begin
+              return 'level-generation';
+            end;
+        end case;
+      end;
+  end case;
+end function;
+
+// Names the class of a load outcome without looking at any message text.
+function LoadClass(Value: result of (Savegame.SaveGameLoad, SavegameErrors.PersistenceFailure)): string;
+begin
+  case Value of
+    when Ok(const Loaded):
+      begin
+        case Loaded of
+          when Savegame.SaveGameLoad.Missing:
+            begin
+              return 'missing';
+            end;
+          when Savegame.SaveGameLoad.Invalid(const Reason):
+            begin
+              return 'invalid';
+            end;
+          when Savegame.SaveGameLoad.Loaded(const State, const View):
+            begin
+              return 'loaded';
+            end;
+        end case;
+      end;
+    when Error(const Failure):
+      begin
+        return FailureClass(Failure);
+      end;
+  end case;
+end function;
+
+function WriteClass(Value: result of (boolean, SavegameErrors.PersistenceFailure)): string;
+begin
+  case Value of
+    when Ok(const Written):
+      begin
+        return 'written';
+      end;
+    when Error(const Failure):
+      begin
+        return FailureClass(Failure);
+      end;
+  end case;
+end function;
+
+begin
+  const Root: string := '.temp-data/persistence-failure-test-' +
+    Conv.IntToStr(Time.TimestampMillis());
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    Root,
+    'failures',
+    24680,
+    4,
+    16
+  ).Unwrap();
+  const Dungeons: string := PathOps.Join([World.Directory, 'dungeons']);
+  // No save: Missing, and no level is inspected or created.
+  Test.AssertEquals('missing', LoadClass(Savegame.LoadSaveGame(World)));
+  Test.AssertFalse(Fs.Exists(Dungeons));
+  // A valid save that visited the spawn dungeon, standing outside again.
+  const Map: InteriorUnit.InteriorMap := Levels.SpawnLevel(World);
+  const Entered: GameState.GameState := Levels.EnterSpawnLevel(
+    World,
+    GameState.NewGame(World.Metadata)
+  ).Unwrap();
+  const AtExit: GameState.GameState := Entered with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing)
+  ); end with;
+  const Outside: GameState.GameState := Levels.LeaveLevel(World, AtExit, Map).Unwrap();
+  Test.AssertEquals('written', WriteClass(Savegame.WriteSaveGame(World, Outside)));
+  const SaveText: string := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  const LevelText: string := Fs.ReadText(LevelPath(World)).Unwrap();
+  // Fully valid: loaded without any write.
+  Test.AssertEquals('loaded', LoadClass(Savegame.LoadSaveGame(World)));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertEquals(LevelText, Fs.ReadText(LevelPath(World)).Unwrap());
+  // Missing referenced level: a world-data failure that keeps the save and never regenerates.
+  Test.AssertTrue(Fs.DeleteFile(LevelPath(World)).Unwrap());
+  Test.AssertEquals('level-missing', LoadClass(Savegame.LoadSaveGame(World)));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertFalse(Fs.Exists(LevelPath(World)));
+  Test.AssertEquals('level-missing', WriteClass(Savegame.WriteSaveGame(World, Outside)));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  // Invalid referenced level: reported, never repaired, and the save is kept.
+  const Broken: string := LevelText.Replace('"level":0', '"level":1');
+  Test.AssertTrue(Fs.WriteTextAtomic(LevelPath(World), Broken).Unwrap());
+  Test.AssertEquals('level-invalid', LoadClass(Savegame.LoadSaveGame(World)));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertEquals(Broken, Fs.ReadText(LevelPath(World)).Unwrap());
+  // A level path that cannot be read is an I/O failure of the level.
+  Test.AssertTrue(Fs.DeleteFile(LevelPath(World)).Unwrap());
+  Test.AssertTrue(Fs.CreateDirAll(LevelPath(World)).Unwrap());
+  Test.AssertEquals('level-io', LoadClass(Savegame.LoadSaveGame(World)));
+  Test.AssertEquals('level-io', WriteClass(Savegame.WriteSaveGame(World, Outside)));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  // Restore the level; invalid save content is classified and preserved.
+  const RestoreRoot: string := PathOps.Join([Root, 'restore']);
+  const Fresh: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    RestoreRoot,
+    'failures',
+    24680,
+    4,
+    16
+  ).Unwrap();
+  const FreshMap: InteriorUnit.InteriorMap := Levels.SpawnLevel(Fresh);
+  const FreshOutside: GameState.GameState := Levels.LeaveLevel(
+    Fresh,
+    Levels.EnterSpawnLevel(Fresh, GameState.NewGame(Fresh.Metadata)).Unwrap() with Player := Coordinates.PlayerPosition.FirstPerson(
+      Coordinates.FirstPersonPose(Position := FreshMap.Exit, Facing := FreshMap.StartFacing)
+    ); end with,
+    FreshMap
+  ).Unwrap();
+  var OnWall: GameState.GameState := FreshOutside;
+  OnWall.Items[0] := OnWall.Items[0] with Location := ItemRules.ItemLocation.InInterior(
+    FreshMap.AreaId,
+    Coordinates.InteriorPosition(X := 0, Y := 0)
+  ); end with;
+
+  Test.AssertEquals('invalid-state', WriteClass(Savegame.WriteSaveGame(Fresh, OnWall)));
+  Test.AssertFalse(Fs.Exists(Savegame.SaveGamePath(Fresh)));
+  Test.AssertEquals('written', WriteClass(Savegame.WriteSaveGame(Fresh, FreshOutside)));
+  const FreshSave: string := Fs.ReadText(Savegame.SaveGamePath(Fresh)).Unwrap();
+  Test.AssertEquals('invalid-state', WriteClass(Savegame.WriteSaveGame(Fresh, OnWall)));
+  Test.AssertEquals(FreshSave, Fs.ReadText(Savegame.SaveGamePath(Fresh)).Unwrap());
+  const FreshLevel: string := Fs.ReadText(LevelPath(Fresh)).Unwrap();
+  const ItemField: Coordinates.InteriorPosition := FreshMap.Items[0].Position;
+  const ItemJson: string := (('"x":' + Conv.IntToStr(ItemField.X)) + ',"y":') +
+    Conv.IntToStr(ItemField.Y);
+  Test.AssertTrue(ItemJson in FreshSave);
+  Test.AssertTrue(
+    Fs.WriteTextAtomic(
+      Savegame.SaveGamePath(Fresh),
+      FreshSave.Replace(ItemJson, '"x":0,"y":0')
+    ).Unwrap()
+  );
+  Test.AssertEquals('invalid', LoadClass(Savegame.LoadSaveGame(Fresh)));
+  Test.AssertEquals(
+    FreshSave.Replace(ItemJson, '"x":0,"y":0'),
+    Fs.ReadText(Savegame.SaveGamePath(Fresh)).Unwrap()
+  );
+  Test.AssertTrue(Savegame.DeleteSaveGame(Fresh).Unwrap());
+  Test.AssertEquals(FreshLevel, Fs.ReadText(LevelPath(Fresh)).Unwrap());
+  // An unreadable save is an I/O failure; a blocked save directory makes writing fail the same way.
+  Test.AssertTrue(Fs.CreateDirAll(Savegame.SaveGamePath(Fresh)).Unwrap());
+  Test.AssertEquals('io', LoadClass(Savegame.LoadSaveGame(Fresh)));
+  Test.AssertTrue(Fs.Exists(Savegame.SaveGamePath(Fresh)));
+  const Blocked: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    PathOps.Join([Root, 'blocked']),
+    'failures',
+    24680,
+    4,
+    16
+  ).Unwrap();
+  Test.AssertTrue(
+    Fs.WriteTextAtomic(PathOps.Join([Blocked.Directory, 'saves']), 'not a directory').Unwrap()
+  );
+  Test.AssertEquals(
+    'io',
+    WriteClass(Savegame.WriteSaveGame(Blocked, GameState.NewGame(Blocked.Metadata)))
+  );
+  Test.AssertEquals(
+    'not a directory',
+    Fs.ReadText(PathOps.Join([Blocked.Directory, 'saves'])).Unwrap()
+  );
+  // An older save that never visited an existing level loads unvisited and reuses the file on entry.
+  const Older: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    PathOps.Join([Root, 'older']),
+    'failures',
+    24680,
+    4,
+    16
+  ).Unwrap();
+  Test.AssertEquals(
+    'written',
+    WriteClass(Savegame.WriteSaveGame(Older, GameState.NewGame(Older.Metadata)))
+  );
+  const OlderMap: InteriorUnit.InteriorMap := Levels.SpawnLevel(Older);
+  const OlderLevel: string := Fs.ReadText(LevelPath(Older)).Unwrap();
+  case Savegame.LoadSaveGame(Older).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, const View):
+      Test.AssertEquals(0, State.VisitedAreas.Length());
+      Test.AssertEquals(0, State.Items.Length());
+      const Again: GameState.GameState := Levels.EnterSpawnLevel(Older, State).Unwrap();
+      Test.AssertEquals(OlderMap.Items.Length(), Again.Items.Length());
+      Test.AssertEquals(OlderMap.Hostiles.Length(), Again.Hostiles.Length());
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('expected the older save to load');
+  end case;
+
+  Test.AssertEquals(OlderLevel, Fs.ReadText(LevelPath(Older)).Unwrap());
+end.

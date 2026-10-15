@@ -1,0 +1,165 @@
+// Entrance regions and sites: where generated dungeons connect to the outdoor world.
+unit Dungeon.Terrain.Entrances;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Terrain as Terrain, Dungeon.Terrain.Generation as TerrainGeneration, Dungeon.Terrain.Noise as Noise;
+
+// Signed coordinate of one square entrance region of DungeonRegionChunks by DungeonRegionChunks chunks.
+public type RegionCoordinate = record
+  public X: integer;
+  public Y: integer;
+end record;
+
+function RegionFields(Metadata: Terrain.WorldMetadata): integer;
+begin
+  return Metadata.DungeonRegionChunks * Coordinates.WorldChunkSize;
+end function;
+
+function SameRegion(Left: RegionCoordinate; Right: RegionCoordinate): boolean;
+begin
+  return (Left.X = Right.X) and (Left.Y = Right.Y);
+end function;
+
+function SameWorldPosition(Left: Coordinates.WorldPosition; Right: Coordinates.WorldPosition): boolean;
+begin
+  return (Left.X = Right.X) and (Left.Y = Right.Y);
+end function;
+
+// Returns the entrance region containing one world field.
+public function RegionOf(Metadata: Terrain.WorldMetadata; Position: Coordinates.WorldPosition): RegionCoordinate;
+begin
+  return RegionCoordinate(
+    X := Coordinates.FloorDivide(Position.X, RegionFields(Metadata)),
+    Y := Coordinates.FloorDivide(Position.Y, RegionFields(Metadata))
+  );
+end function;
+
+// Returns whether a natural cell can hold an entrance: walkable land without water or a feature.
+public function CellIsClearEntrance(Cell: Terrain.WorldCell): boolean;
+begin
+  return (Terrain.CellIsWalkable(Cell) and (Cell.Feature = Terrain.TerrainFeatureKind.NoFeature))
+    and
+    (Cell.Water = Terrain.WaterKind.NoWater);
+end function;
+
+// Returns the seeded candidate field of an ordinary region, at least 16 fields from its border.
+public function EntranceCandidate(Metadata: Terrain.WorldMetadata; Region: RegionCoordinate): Coordinates.WorldPosition;
+begin
+  const Fields: integer := RegionFields(Metadata);
+  const HashX1: integer := Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 307);
+  const HashX2: integer := Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 311);
+  const HashY1: integer := Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 313);
+  const HashY2: integer := Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 317);
+  return Coordinates.WorldPosition(
+    X := (Region.X * Fields) +
+    (16 + (((HashX1 * 1000) + HashX2) mod (Fields - 32))), Y := (Region.Y * Fields) +
+    (16 + (((HashY1 * 1000) + HashY2) mod (Fields - 32)))
+  );
+end function;
+
+// Returns the region whose dungeon the spawn entrance leads to, even across a region border.
+function SpawnRegion(Metadata: Terrain.WorldMetadata): RegionCoordinate;
+begin
+  return RegionOf(Metadata, Metadata.Spawn);
+end function;
+
+// Returns the entrance site of one region: the spawn entrance for the spawn region,
+// otherwise the candidate when its natural cell is clear and differs from the spawn entrance.
+public function EntranceSite(Metadata: Terrain.WorldMetadata; Region: RegionCoordinate): option of Coordinates.WorldPosition;
+begin
+  if SameRegion(Region, SpawnRegion(Metadata)) then
+    begin
+      return Some(Metadata.SpawnEntrance);
+    end;
+  end if;
+  const Candidate: Coordinates.WorldPosition := EntranceCandidate(Metadata, Region);
+  if SameWorldPosition(Candidate, Metadata.SpawnEntrance) then
+    begin
+      return None;
+    end;
+  end if;
+
+  if not CellIsClearEntrance(
+    TerrainGeneration.NaturalCell(Metadata.Seed, Candidate.X, Candidate.Y)
+  )
+  then
+    begin
+      return None;
+    end;
+  end if;
+
+  return Some(Candidate);
+end function;
+
+// Returns the region whose entrance site is exactly this field, computing at most one natural cell.
+// The spawn entrance is checked first and always belongs to the spawn region.
+public function EntranceRegionAt(Metadata: Terrain.WorldMetadata; Position: Coordinates.WorldPosition): option of RegionCoordinate;
+begin
+  if SameWorldPosition(Position, Metadata.SpawnEntrance) then
+    begin
+      return Some(SpawnRegion(Metadata));
+    end;
+  end if;
+  const Region: RegionCoordinate := RegionOf(Metadata, Position);
+  if SameRegion(Region, SpawnRegion(Metadata)) then
+    begin
+      return None;
+    end;
+  end if;
+
+  if not SameWorldPosition(Position, EntranceCandidate(Metadata, Region)) then
+    begin
+      return None;
+    end;
+  end if;
+
+  if not CellIsClearEntrance(TerrainGeneration.NaturalCell(Metadata.Seed, Position.X, Position.Y)) then
+    begin
+      return None;
+    end;
+  end if;
+
+  return Some(Region);
+end function;
+
+function InsideChunk(Position: Coordinates.WorldPosition; Coordinate: Coordinates.ChunkCoordinate): boolean;
+begin
+  return (Coordinates.ChunkForCoordinate(Position.X) = Coordinate.X)
+    and
+    (Coordinates.ChunkForCoordinate(Position.Y) = Coordinate.Y);
+end function;
+
+// Returns the fields of one chunk that may hold an entrance: the spawn entrance when inside,
+// plus the chunk region's candidate when inside and the region is not the spawn region.
+// Callers mark a returned field only when its generated or stored cell is clear.
+public function EntranceFieldsInChunk(Metadata: Terrain.WorldMetadata; Coordinate: Coordinates.ChunkCoordinate): array of Coordinates.WorldPosition;
+begin
+  var Fields: array of Coordinates.WorldPosition := [];
+  if InsideChunk(Metadata.SpawnEntrance, Coordinate) then
+    begin
+      Fields := [Metadata.SpawnEntrance];
+    end;
+  end if;
+  const Region: RegionCoordinate := RegionOf(
+    Metadata, Coordinates.WorldPosition(
+      X := Coordinate.X *
+      Coordinates.WorldChunkSize, Y := Coordinate.Y *
+      Coordinates.WorldChunkSize
+    )
+  );
+  if not SameRegion(Region, SpawnRegion(Metadata)) then
+    begin
+      const Candidate: Coordinates.WorldPosition := EntranceCandidate(Metadata, Region);
+      if InsideChunk(Candidate, Coordinate)
+        and
+        not SameWorldPosition(Candidate, Metadata.SpawnEntrance)
+      then
+        begin
+          Fields.PushInPlace(Candidate);
+        end;
+      end if;
+    end;
+  end if;
+
+  return Fields;
+end function;
+end unit;

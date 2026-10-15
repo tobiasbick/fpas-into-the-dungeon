@@ -1,438 +1,523 @@
 // Keyboard and control-action handling for screens, overlays, and gameplay.
 unit Dungeon.Client.Ui.Input;
 
-uses
-  Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Intentions, Dungeon.Client.Ui.Layout,
-  Dungeon.Client.Ui.Session, Dungeon.Client.Character, Dungeon.Client.Model, Dungeon.Protocol,
-  Std.Arrays, Std.Console, Std.Tui;
+uses Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Intentions as Intentions, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.Session as Session, Dungeon.Client.Ui.Worlds as UiWorlds, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.Client.Character as Character, Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Std.Console as Console, Std.Tui as Tui;
 
-function HasCharacter(Key: TuiKeyEvent; Lower: string; Upper: string): boolean;
+function HasCharacter(Key: Tui.TuiKeyEvent; Lower: string; Upper: string): boolean;
 begin
-  return (Key.kind = TuiKeyKind.Character) and ((Key.ch = Lower) or (Key.ch = Upper))
-end;
+  return (Key.kind = Tui.TuiKeyKind.Character) and ((Key.ch = Lower) or (Key.ch = Upper));
+end function;
 
-function IsCtrlCharacter(Key: TuiKeyEvent; Lower: string; Upper: string): boolean;
+function IsCtrlCharacter(Key: Tui.TuiKeyEvent; Lower: string; Upper: string): boolean;
 begin
-  return (HasCharacter(Key, Lower, Upper) and Key.ctrl) and not Key.alt
-end;
+  return (HasCharacter(Key, Lower, Upper) and Key.ctrl) and not Key.alt;
+end function;
 
-function IsAltCharacter(Key: TuiKeyEvent; Lower: string; Upper: string): boolean;
+function IsAltCharacter(Key: Tui.TuiKeyEvent; Lower: string; Upper: string): boolean;
 begin
-  return (HasCharacter(Key, Lower, Upper) and Key.alt) and not Key.ctrl
-end;
+  return (HasCharacter(Key, Lower, Upper) and Key.alt) and not Key.ctrl;
+end function;
 
 // Applies one activated button action; actions arrive only from visible controls.
-public function HandleAction(State: ClientModel; Action: TuiAction; Cmd: TuiCmdOutput): ClientModel;
+public function HandleAction(State: Model.ClientModel; Action: Tui.TuiAction; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
-  if Action.Value = ConnectAction then
-  begin
-    return StartConnection(State, Cmd)
-  end;
+  case UiWorlds.HandleWorldAction(State, Action) of
+    when Some(const Next):
+      begin
+        return Next;
+      end;
+    when None:
+      begin
+        null;
+      end;
+  end case;
 
-  if Action.Value = InformationAction then
-  begin
-    mutable var Next: ClientModel := State;
-    Next.Overlay := ClientOverlay.InformationOverlay;
-    Next.FocusedControl := OverlayBackControlId;
-    return Next
-  end;
-
-  if Action.Value = NewGameAction then
-  begin
-    return QueueSessionChoice(State, ClientMessage.StartNewGame, 'Starting new game...')
-  end;
-
-  if Action.Value = LoadGameAction then
-  begin
-    if not State.SaveAvailable then
+  if Action.Value = Controls.ConnectAction then
     begin
-      return State
+      return Session.StartConnection(State, Cmd);
     end;
+  end if;
 
-    return QueueSessionChoice(State, ClientMessage.LoadGame, 'Loading game...')
-  end;
-
-  if Action.Value = RequestCancelSessionAction then
-  begin
-    if ((State.Screen <> ClientScreen.StartScreen) or (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession)) or
-       not State.Pending then
+  if Action.Value = Controls.InformationAction then
     begin
-      return State
+      var Next: Model.ClientModel := State;
+      Next.Overlay := Model.ClientOverlay.InformationOverlay;
+      Next.FocusedControl := Controls.OverlayBackControlId;
+      return Next;
     end;
-    mutable var Next: ClientModel := State;
-    Next.Overlay := ClientOverlay.SessionCancelConfirmationOverlay;
-    Next.FocusedControl := ContinueSessionStartControlId;
-    return Next
-  end;
+  end if;
 
-  if Action.Value = ConfirmCancelSessionAction then
-  begin
-    if (State.Overlay <> ClientOverlay.SessionCancelConfirmationOverlay) or not State.Pending then
+  if Action.Value = Controls.NewGameAction then
     begin
-      return State
+      case WorldsUnit.SelectedWorld(State.Catalog) of
+        when Some(const World):
+          begin
+            if World.Status <> 'ready' then
+              return State;
+            end if;
+          end;
+        when None:
+          begin
+            return State;
+          end;
+      end case;
+
+      return Session.QueueSessionChoice(
+        State,
+        Protocol.ClientMessage.StartNewGame,
+        'Starting over...'
+      );
     end;
+  end if;
 
-    return ReturnToStart(State, Cmd)
-  end;
-
-  if Action.Value = ContinueSessionStartAction then
-  begin
-    if State.Overlay <> ClientOverlay.SessionCancelConfirmationOverlay then
+  if Action.Value = Controls.LoadGameAction then
     begin
-      return State
+      if not WorldsUnit.CanContinueWorld(State.Catalog) then
+        begin
+          return State;
+        end;
+      end if;
+
+      return Session.QueueSessionChoice(State, Protocol.ClientMessage.LoadGame, 'Loading game...');
     end;
+  end if;
 
-    return CloseOverlay(State)
-  end;
-
-  if Action.Value = QuitAction then
-  begin
-    return RequestQuit(State, Cmd)
-  end;
-
-  if Action.Value = ResumeAction then
-  begin
-    return CloseOverlay(State)
-  end;
-
-  if Action.Value = SaveAction then
-  begin
-    if State.SaveAvailable then
+  if Action.Value = Controls.RequestCancelSessionAction then
     begin
-      mutable var Next: ClientModel := State;
-      Next.Overlay := ClientOverlay.SaveConfirmationOverlay;
-      Next.FocusedControl := ConfirmSaveControlId;
-      return Next
+      if (
+        (State.Screen <> Model.ClientScreen.StartScreen)
+        or
+        (State.ConnectionPhase <> Model.ClientConnectionPhase.AwaitingSession)
+      )
+        or
+        not State.Pending
+      then
+        begin
+          return State;
+        end;
+      end if;
+      var Next: Model.ClientModel := State;
+      Next.Overlay := Model.ClientOverlay.SessionCancelConfirmationOverlay;
+      Next.FocusedControl := Controls.ContinueSessionStartControlId;
+      return Next;
     end;
+  end if;
 
-    return QueueSave(State)
-  end;
+  if Action.Value = Controls.ConfirmCancelSessionAction then
+    begin
+      if (State.Overlay <> Model.ClientOverlay.SessionCancelConfirmationOverlay)
+        or
+        not State.Pending
+      then
+        begin
+          return State;
+        end;
+      end if;
 
-  if Action.Value = ConfirmSaveAction then
-  begin
-    return QueueSave(State)
-  end;
+      return Session.ReturnToStart(State, Cmd);
+    end;
+  end if;
 
-  if Action.Value = CancelSaveAction then
-  begin
-    mutable var Next: ClientModel := State;
-    Next.Overlay := ClientOverlay.SystemMenuOverlay;
-    Next.FocusedControl := SaveControlId;
-    return Next
-  end;
+  if Action.Value = Controls.ContinueSessionStartAction then
+    begin
+      if State.Overlay <> Model.ClientOverlay.SessionCancelConfirmationOverlay then
+        begin
+          return State;
+        end;
+      end if;
 
-  if Action.Value = DisconnectAction then
-  begin
-    return ReturnToStart(State, Cmd)
-  end;
+      return Session.CloseOverlay(State);
+    end;
+  end if;
 
-  if Action.Value = BackAction then
-  begin
-    return CloseOverlay(State)
-  end;
+  if Action.Value = Controls.QuitAction then
+    begin
+      return Session.RequestQuit(State, Cmd);
+    end;
+  end if;
 
-  if Action.Value = ClosePanelAction then
-  begin
-    return CloseOverlay(State)
-  end;
+  if Action.Value = Controls.ResumeAction then
+    begin
+      return Session.CloseOverlay(State);
+    end;
+  end if;
 
-  return State
-end;
+  if Action.Value = Controls.SaveAction then
+    begin
+      if State.Pending or State.MapRequestPending or not State.HasVisibleState
+        or
+        (State.ConnectionPhase <> Model.ClientConnectionPhase.Active)
+      then
+        return State;
+      end if;
+
+      if State.SaveAvailable then
+        begin
+          var Next: Model.ClientModel := State;
+          Next.Overlay := Model.ClientOverlay.SaveConfirmationOverlay;
+          Next.FocusedControl := Controls.ConfirmSaveControlId;
+          return Next;
+        end;
+      end if;
+
+      return Session.QueueSave(State);
+    end;
+  end if;
+
+  if Action.Value = Controls.ConfirmSaveAction then
+    begin
+      if State.Overlay <> Model.ClientOverlay.SaveConfirmationOverlay then
+        return State;
+      end if;
+
+      return Session.QueueSave(State);
+    end;
+  end if;
+
+  if Action.Value = Controls.CancelSaveAction then
+    begin
+      var Next: Model.ClientModel := State;
+      Next.Overlay := Model.ClientOverlay.SystemMenuOverlay;
+      Next.FocusedControl := Controls.SaveControlId;
+      return Next;
+    end;
+  end if;
+
+  if Action.Value = Controls.DisconnectAction then
+    begin
+      return Session.ReturnToStart(State, Cmd);
+    end;
+  end if;
+
+  if Action.Value = Controls.BackAction then
+    begin
+      return Session.CloseOverlay(State);
+    end;
+  end if;
+
+  if Action.Value = Controls.ClosePanelAction then
+    begin
+      return Session.CloseOverlay(State);
+    end;
+  end if;
+
+  return State;
+end function;
 
 // Routes one key press to the active overlay first, then to game controls.
-public function HandleKey(State: ClientModel; Key: TuiKeyEvent; Cmd: TuiCmdOutput): ClientModel;
+public function HandleKey(State: Model.ClientModel; Key: Tui.TuiKeyEvent; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
   if IsAltCharacter(Key, 'x', 'X') then
-  begin
-    return RequestQuit(State, Cmd)
-  end;
-
-  if State.Screen <> ClientScreen.GameScreen then
-  begin
-    return State
-  end;
-
-  if State.Overlay = ClientOverlay.DescriptionOverlay then
-  begin
-    if (Key.kind = TuiKeyKind.Enter) or (Key.kind = TuiKeyKind.Escape) then
     begin
-      return CloseOverlay(State)
+      return Session.RequestQuit(State, Cmd);
     end;
-    mutable var Next: ClientModel := State;
-    if (Key.kind = TuiKeyKind.Up) and (Next.DescriptionOffset > 0) then
+  end if;
+
+  if State.Screen <> Model.ClientScreen.GameScreen then
     begin
-      Next.DescriptionOffset := Next.DescriptionOffset - 1
+      return State;
     end;
+  end if;
 
-    if (Key.kind = TuiKeyKind.Down) and
-       (Next.DescriptionOffset + DescriptionPageHeight(State) < Std.Arrays.Length(DescriptionLines(State))) then
+  if State.Overlay = Model.ClientOverlay.DescriptionOverlay then
     begin
-      Next.DescriptionOffset := Next.DescriptionOffset + 1
-    end;
-
-    return Next
-  end;
-
-  if State.Overlay = ClientOverlay.DialogueOverlay then
-  begin
-    if State.Pending then
-    begin
-      return State
-    end;
-
-    if Key.kind = TuiKeyKind.Escape then
-    begin
-      return QueueDialogueEnd(State)
-    end;
-    mutable var Next: ClientModel := State;
-    var ChoiceCount: integer := Std.Arrays.Length(State.DialogueChoices);
-    if ((Key.kind = TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W')) and (ChoiceCount > 0) then
-    begin
-      Next.DialogueSelection := State.DialogueSelection - 1;
-      if Next.DialogueSelection < 0 then
-      begin
-        Next.DialogueSelection := ChoiceCount - 1
-      end;
-
-      return Next
-    end;
-
-    if ((Key.kind = TuiKeyKind.Down) or HasCharacter(Key, 's', 'S')) and (ChoiceCount > 0) then
-    begin
-      Next.DialogueSelection := State.DialogueSelection + 1;
-      if Next.DialogueSelection >= ChoiceCount then
-      begin
-        Next.DialogueSelection := 0
-      end;
-
-      return Next
-    end;
-
-    if Key.kind = TuiKeyKind.Enter then
-    begin
-      return QueueDialogueChoice(State)
-    end;
-
-    return State
-  end;
-
-  if State.Overlay = ClientOverlay.InventoryOverlay then
-  begin
-    if (Key.kind = TuiKeyKind.Escape) or HasCharacter(Key, 'i', 'I') then
-    begin
-      return CloseOverlay(State)
-    end;
-
-    if (Key.kind = TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W') then
-    begin
-      return MoveInventorySelection(State, -1)
-    end;
-
-    if (Key.kind = TuiKeyKind.Down) or HasCharacter(Key, 's', 'S') then
-    begin
-      return MoveInventorySelection(State, 1)
-    end;
-
-    if Key.kind = TuiKeyKind.Enter then
-    begin
-      case SelectedEquipmentRequest(State) of
-        Some(Request):
+      if (Key.kind = Tui.TuiKeyKind.Enter) or (Key.kind = Tui.TuiKeyKind.Escape) then
         begin
-          return QueueCombatAction(State, Request, 'Changing gear...')
+          return Session.CloseOverlay(State);
         end;
-        None:
+      end if;
+      var Next: Model.ClientModel := State;
+      if (Key.kind = Tui.TuiKeyKind.Up) and (Next.DescriptionOffset > 0) then
         begin
-          mutable var Next: ClientModel := State;
-          Next.Status := 'That cannot be worn.';
-          return Next
-        end
-      end
+          Next.DescriptionOffset := Next.DescriptionOffset - 1;
+        end;
+      end if;
+
+      if (Key.kind = Tui.TuiKeyKind.Down)
+        and
+        (
+          Next.DescriptionOffset + Layout.DescriptionPageHeight(State) <
+          Layout.DescriptionLines(State).Length()
+        )
+      then
+        begin
+          Next.DescriptionOffset := Next.DescriptionOffset + 1;
+        end;
+      end if;
+
+      return Next;
     end;
+  end if;
 
-    return State
-  end;
-
-  if State.Overlay = ClientOverlay.CharacterSheetOverlay then
-  begin
-    if (Key.kind = TuiKeyKind.Escape) or HasCharacter(Key, 'c', 'C') then
+  if State.Overlay = Model.ClientOverlay.InventoryOverlay then
     begin
-      return CloseOverlay(State)
-    end;
+      if (Key.kind = Tui.TuiKeyKind.Escape) or HasCharacter(Key, 'i', 'I') then
+        begin
+          return Session.CloseOverlay(State);
+        end;
+      end if;
 
-    if HasCharacter(Key, 'i', 'I') then
+      if (Key.kind = Tui.TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W') then
+        begin
+          return Character.MoveInventorySelection(State, -1);
+        end;
+      end if;
+
+      if (Key.kind = Tui.TuiKeyKind.Down) or HasCharacter(Key, 's', 'S') then
+        begin
+          return Character.MoveInventorySelection(State, 1);
+        end;
+      end if;
+
+      if Key.kind = Tui.TuiKeyKind.Enter then
+        begin
+          case Character.SelectedEquipmentRequest(State) of
+            when Some(const Request):
+              begin
+                return Intentions.QueueCombatAction(State, Request, 'Changing gear...');
+              end;
+            when None:
+              begin
+                var Next: Model.ClientModel := State;
+                Next.Status := 'That cannot be worn.';
+                return Next;
+              end;
+          end case;
+        end;
+      end if;
+
+      if HasCharacter(Key, 'd', 'D') then
+        begin
+          case Character.SelectedDropRequest(State) of
+            when Some(const Request):
+              return Intentions.QueueCombatAction(State, Request, 'Dropping...');
+            when None:
+              return State;
+          end case;
+        end;
+      end if;
+
+      return State;
+    end;
+  end if;
+
+  if State.Overlay = Model.ClientOverlay.CharacterSheetOverlay then
     begin
-      mutable var Next: ClientModel := State;
-      Next.Overlay := ClientOverlay.InventoryOverlay;
-      return MoveInventorySelection(Next, 0)
-    end;
+      if (Key.kind = Tui.TuiKeyKind.Escape) or HasCharacter(Key, 'c', 'C') then
+        begin
+          return Session.CloseOverlay(State);
+        end;
+      end if;
 
-    return State
-  end;
+      if HasCharacter(Key, 'i', 'I') then
+        begin
+          var Next: Model.ClientModel := State;
+          Next.Overlay := Model.ClientOverlay.InventoryOverlay;
+          return Character.MoveInventorySelection(Next, 0);
+        end;
+      end if;
+
+      return State;
+    end;
+  end if;
 
   if IsCtrlCharacter(Key, 'p', 'P') then
-  begin
-    if State.Overlay = ClientOverlay.SystemMenuOverlay then
     begin
-      return CloseOverlay(State)
+      if State.Overlay = Model.ClientOverlay.SystemMenuOverlay then
+        begin
+          return Session.CloseOverlay(State);
+        end;
+      end if;
+      var Next: Model.ClientModel := State;
+      Next.Overlay := Model.ClientOverlay.SystemMenuOverlay;
+      Next.FocusedControl := Controls.ResumeControlId;
+      return Next;
     end;
-    mutable var Next: ClientModel := State;
-    Next.Overlay := ClientOverlay.SystemMenuOverlay;
-    Next.FocusedControl := ResumeControlId;
-    return Next
-  end;
+  end if;
 
   if HasCharacter(Key, 'm', 'M') then
-  begin
-    if State.Overlay = ClientOverlay.ExplorationMapOverlay then
     begin
-      return CloseOverlay(State)
+      if State.Overlay = Model.ClientOverlay.ExplorationMapOverlay then
+        begin
+          return Session.CloseOverlay(State);
+        end;
+      end if;
+
+      if State.Overlay = Model.ClientOverlay.NoOverlay then
+        begin
+          return Intentions.OpenExplorationMap(State);
+        end;
+      end if;
+
+      return State;
     end;
+  end if;
 
-    if State.Overlay = ClientOverlay.NoOverlay then
+  if (State.Overlay = Model.ClientOverlay.NoOverlay) and State.HasVisibleState then
     begin
-      return OpenExplorationMap(State)
+      if HasCharacter(Key, 'i', 'I') then
+        begin
+          var Next: Model.ClientModel := State;
+          Next.Overlay := Model.ClientOverlay.InventoryOverlay;
+          Next.FocusedControl := 0;
+          return Character.MoveInventorySelection(Next, 0);
+        end;
+      end if;
+
+      if HasCharacter(Key, 'c', 'C') then
+        begin
+          var Next: Model.ClientModel := State;
+          Next.Overlay := Model.ClientOverlay.CharacterSheetOverlay;
+          Next.FocusedControl := 0;
+          return Next;
+        end;
+      end if;
     end;
+  end if;
 
-    return State
-  end;
-
-  if (State.Overlay = ClientOverlay.NoOverlay) and State.HasVisibleState then
-  begin
-    if HasCharacter(Key, 'i', 'I') then
+  if State.Overlay = Model.ClientOverlay.ExplorationMapOverlay then
     begin
-      mutable var Next: ClientModel := State;
-      Next.Overlay := ClientOverlay.InventoryOverlay;
-      Next.FocusedControl := 0;
-      return MoveInventorySelection(Next, 0)
+      if Key.kind = Tui.TuiKeyKind.Escape then
+        begin
+          return Session.CloseOverlay(State);
+        end;
+      end if;
+
+      if Key.kind = Tui.TuiKeyKind.Home then
+        begin
+          return Intentions.CenterMap(State);
+        end;
+      end if;
+
+      if (Key.kind = Tui.TuiKeyKind.Left) or HasCharacter(Key, 'a', 'A') then
+        begin
+          return Intentions.PanExplorationMap(State, -1, 0);
+        end;
+      end if;
+
+      if (Key.kind = Tui.TuiKeyKind.Right) or HasCharacter(Key, 'd', 'D') then
+        begin
+          return Intentions.PanExplorationMap(State, 1, 0);
+        end;
+      end if;
+
+      if (Key.kind = Tui.TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W') then
+        begin
+          return Intentions.PanExplorationMap(State, 0, -1);
+        end;
+      end if;
+
+      if (Key.kind = Tui.TuiKeyKind.Down) or HasCharacter(Key, 's', 'S') then
+        begin
+          return Intentions.PanExplorationMap(State, 0, 1);
+        end;
+      end if;
+
+      return State;
     end;
+  end if;
 
-    if HasCharacter(Key, 'c', 'C') then
+  if Key.kind = Tui.TuiKeyKind.F2 then
     begin
-      mutable var Next: ClientModel := State;
-      Next.Overlay := ClientOverlay.CharacterSheetOverlay;
-      Next.FocusedControl := 0;
-      return Next
-    end
-  end;
-
-  if State.Overlay = ClientOverlay.ExplorationMapOverlay then
-  begin
-    if Key.kind = TuiKeyKind.Escape then
-    begin
-      return CloseOverlay(State)
+      return Session.ToggleContext(State);
     end;
+  end if;
 
-    if Key.kind = TuiKeyKind.Home then
+  if Key.kind = Tui.TuiKeyKind.F3 then
     begin
-      return CenterMap(State)
+      return Session.ToggleMessages(State);
     end;
+  end if;
 
-    if (Key.kind = TuiKeyKind.Left) or HasCharacter(Key, 'a', 'A') then
+  if State.Overlay <> Model.ClientOverlay.NoOverlay then
     begin
-      return PanExplorationMap(State, -1, 0)
+      return State;
     end;
+  end if;
 
-    if (Key.kind = TuiKeyKind.Right) or HasCharacter(Key, 'd', 'D') then
+  if Key.kind = Tui.TuiKeyKind.Enter then
     begin
-      return PanExplorationMap(State, 1, 0)
+      return Intentions.QueueInteraction(State);
     end;
-
-    if (Key.kind = TuiKeyKind.Up) or HasCharacter(Key, 'w', 'W') then
-    begin
-      return PanExplorationMap(State, 0, -1)
-    end;
-
-    if (Key.kind = TuiKeyKind.Down) or HasCharacter(Key, 's', 'S') then
-    begin
-      return PanExplorationMap(State, 0, 1)
-    end;
-
-    return State
-  end;
-
-  if Key.kind = TuiKeyKind.F2 then
-  begin
-    return ToggleContext(State)
-  end;
-
-  if Key.kind = TuiKeyKind.F3 then
-  begin
-    return ToggleMessages(State)
-  end;
-
-  if State.Overlay <> ClientOverlay.NoOverlay then
-  begin
-    return State
-  end;
-
-  if Key.kind = TuiKeyKind.Enter then
-  begin
-    return QueueInteraction(State)
-  end;
+  end if;
 
   if HasCharacter(Key, 'a', 'A') then
-  begin
-    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
     begin
-      return QueueFirstPersonStep(State, FirstPersonStepDirection.Left)
-    end;
+      if State.HasVisibleState and (State.View = Protocol.ViewKind.FirstPerson) then
+        begin
+          return Intentions.QueueFirstPersonStep(State, Protocol.FirstPersonStepDirection.Left);
+        end;
+      end if;
 
-    return QueueMove(State, -1, 0)
-  end;
+      return Intentions.QueueMove(State, -1, 0);
+    end;
+  end if;
 
   if HasCharacter(Key, 'd', 'D') then
-  begin
-    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
     begin
-      return QueueFirstPersonStep(State, FirstPersonStepDirection.Right)
-    end;
+      if State.HasVisibleState and (State.View = Protocol.ViewKind.FirstPerson) then
+        begin
+          return Intentions.QueueFirstPersonStep(State, Protocol.FirstPersonStepDirection.Right);
+        end;
+      end if;
 
-    return QueueMove(State, 1, 0)
-  end;
+      return Intentions.QueueMove(State, 1, 0);
+    end;
+  end if;
 
   if HasCharacter(Key, 'w', 'W') then
-  begin
-    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
     begin
-      return QueueFirstPersonStep(State, FirstPersonStepDirection.Forward)
-    end;
+      if State.HasVisibleState and (State.View = Protocol.ViewKind.FirstPerson) then
+        begin
+          return Intentions.QueueFirstPersonStep(State, Protocol.FirstPersonStepDirection.Forward);
+        end;
+      end if;
 
-    return QueueMove(State, 0, -1)
-  end;
+      return Intentions.QueueMove(State, 0, -1);
+    end;
+  end if;
 
   if HasCharacter(Key, 's', 'S') then
-  begin
-    if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
     begin
-      return QueueFirstPersonStep(State, FirstPersonStepDirection.Backward)
+      if State.HasVisibleState and (State.View = Protocol.ViewKind.FirstPerson) then
+        begin
+          return Intentions.QueueFirstPersonStep(State, Protocol.FirstPersonStepDirection.Backward);
+        end;
+      end if;
+
+      return Intentions.QueueMove(State, 0, 1);
     end;
+  end if;
 
-    return QueueMove(State, 0, 1)
-  end;
-
-  if State.HasVisibleState and (State.View = ViewKind.FirstPerson) then
-  begin
-    if HasCharacter(Key, 'q', 'Q') then
+  if State.HasVisibleState and (State.View = Protocol.ViewKind.FirstPerson) then
     begin
-      return QueueFirstPersonTurn(State, FirstPersonTurnDirection.Left)
+      if HasCharacter(Key, 'q', 'Q') then
+        begin
+          return Intentions.QueueFirstPersonTurn(State, Protocol.FirstPersonTurnDirection.Left);
+        end;
+      end if;
+
+      if HasCharacter(Key, 'e', 'E') then
+        begin
+          return Intentions.QueueFirstPersonTurn(State, Protocol.FirstPersonTurnDirection.Right);
+        end;
+      end if;
+
+      // Terminals report Space as its own key kind, not as a character.
+      if Key.kind = Tui.TuiKeyKind.Space then
+        begin
+          return Intentions.QueueCombatAction(State, Protocol.ClientMessage.Attack, 'Attacking...');
+        end;
+      end if;
+
+      if HasCharacter(Key, 'z', 'Z') then
+        begin
+          return Intentions.QueueCombatAction(State, Protocol.ClientMessage.Wait, 'Waiting...');
+        end;
+      end if;
     end;
+  end if;
 
-    if HasCharacter(Key, 'e', 'E') then
-    begin
-      return QueueFirstPersonTurn(State, FirstPersonTurnDirection.Right)
-    end;
-
-    // Terminals report Space as its own key kind, not as a character.
-    if Key.kind = TuiKeyKind.Space then
-    begin
-      return QueueCombatAction(State, ClientMessage.Attack, 'Attacking...')
-    end;
-
-    if HasCharacter(Key, 'z', 'Z') then
-    begin
-      return QueueCombatAction(State, ClientMessage.Wait, 'Waiting...')
-    end
-  end;
-
-  return State
-end;
+  return State;
+end function;
+end unit;

@@ -1,49 +1,92 @@
 // Verifies titled inspection results cross the real client network adapter.
 program DescriptionNetworkTest;
 
-uses
-  Dungeon.Client, Dungeon.Protocol, Dungeon.Protocol.ServerMessages, Dungeon.Protocol.Transport,
-  Std.Net, Std.Results, Std.Task, Std.Test;
+uses Dungeon.Test.Catalog as CatalogUnit, Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Test.ClientSession as ClientSession, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
 
-function ServeDescription(ListenerValue: Listener; Token: CancellationToken): result of boolean, string;
+function ServeSession(ListenerValue: Net.Listener; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  var ConnectionValue: Connection := try AcceptWithCancellation(ListenerValue, Token);
-  var Reader: LineReader := NewLineReader(ConnectionValue);
-  var Hello: LineRead := try ReadLine(Reader, Token);
-  var Welcomed: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Welcome(ProtocolVersion, false, false)), Token);
-  var Request: LineRead := try ReadLine(Hello.Reader, Token);
-  var Sent: boolean := try WriteLine(ConnectionValue, EncodeServer(ServerMessage.Interaction('Stone tablet', 'An inscription.')), Token);
-  var FinalRead: LineRead := try ReadLine(Request.Reader, Token);
-  return Close(ConnectionValue)
-end;
+  const ConnectionValue: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Reader: Transport.LineReader := Transport.NewLineReader(ConnectionValue);
+  const Hello: Transport.LineRead := try Transport.ReadLine(Reader, Token);
+  const Welcomed: boolean := try Transport.WriteLine(
+    ConnectionValue,
+    ServerMessages.EncodeServer(
+      Protocol.ServerMessage.Welcome(
+        Protocol.ProtocolVersion,
+        CatalogUnit.FixtureCatalog(false, false)
+      )
+    ),
+    Token
+  );
+  const Request: Transport.LineRead := try Transport.ReadLine(Hello.Reader, Token);
+  const Sent: boolean := try Transport.WriteLine(
+    ConnectionValue,
+    ServerMessages.EncodeServer(
+      Protocol.ServerMessage.Interaction('Ancient coin', 'A tarnished coin.')
+    ),
+    Token
+  );
+  const FinalRead: Transport.LineRead := try Transport.ReadLine(Request.Reader, Token);
+  return Net.Close(ConnectionValue);
+end function;
+
+// Serves the scripted session and publishes its outcome so a stalled test reports the cause.
+function ServeDescription(
+  ListenerValue: Net.Listener;
+  Outcomes: channel of string;
+  Token: Tasks.CancellationToken
+): result of (boolean, string);
+begin
+  const Outcome: result of (boolean, string) := ServeSession(ListenerValue, Token);
+  ClientSession.ReportOutcome(Outcomes, 'server', Outcome);
+  return Outcome;
+end function;
 
 begin
-  var ListenerValue: Listener := Unwrap(Listen('127.0.0.1', 0));
-  var Address: NetworkAddress := Unwrap(ListenerLocalAddress(ListenerValue));
-  var Source: CancellationSource := CreateCancellationSource();
-  var Token: CancellationToken := GetCancellationToken(Source);
-  var Requests: channel of ClientMessage := CreateChannel(4);
-  var Events: channel of ClientEvent := CreateChannel(4);
-  var ServerTask: task := go ServeDescription(ListenerValue, Token);
-  var ClientTask: task := go RunNetwork('127.0.0.1', Address.Port, 1, 1, Requests, Events, Token);
-  var Welcome: ClientEvent := Unwrap(ReceiveWithTimeout(Events, 5000));
-  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.Interact, 1000)));
-  case Unwrap(ReceiveWithTimeout(Events, 5000)) of
-    ClientEvent.Interaction(Title, Message):
-    begin
-      AssertEquals('Stone tablet', Title);
-      AssertEquals('An inscription.', Message)
-    end
-    else
-    begin
-      panic('expected inspection result')
-    end
-  end;
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(4);
+  const Outcomes: channel of string := Tasks.CreateChannel(4);
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeDescription(
+      ListenerValue,
+      Outcomes,
+      Token
+    );
+    const ClientTask: task of result of (boolean, string) := go ClientSession.RunReportedClient(
+      '127.0.0.1',
+      Address.Port,
+      1,
+      1,
+      Requests,
+      Events,
+      Outcomes,
+      Token
+    );
+    const Welcome: ClientUnit.ClientEvent := ClientSession.NextClientEvent(Events, Outcomes, 5000);
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Interact, 1000).Unwrap()
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 5000) of
+      when ClientUnit.ClientEvent.Interaction(const Title, const Message):
+        Test.AssertEquals('Ancient coin', Title);
+        Test.AssertEquals('A tarnished coin.', Message);
+      when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.State(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected inspection result');
+    end case;
 
-  AssertTrue(Unwrap(SendWithTimeout(Requests, ClientMessage.Disconnect, 1000)));
-  AssertTrue(Unwrap(Std.Task.Wait(ClientTask)));
-  AssertTrue(Unwrap(Std.Task.Wait(ServerTask)));
-  AssertTrue(Unwrap(CloseListener(ListenerValue)));
-  CloseChannel(Requests);
-  CloseChannel(Events)
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Disconnect, 1000).Unwrap()
+    );
+    Test.AssertTrue(Tasks.Wait(ClientTask).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+  discard Tasks.CloseChannel(Outcomes);
 end.

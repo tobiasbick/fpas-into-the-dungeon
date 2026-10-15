@@ -52,7 +52,8 @@ these projects.
   `Dungeon.Client.Ui` holds the TUI update and view entry points; its subunits
   own one concern each: `Backdrop` (responsive pre-game ASCII scenery),
   `Controls` (control and action identities), `Layout` (docking and viewports),
-  `Session` (connection and session lifecycle),
+  `Session` (connection and session lifecycle), `Worlds` (catalog, creation
+  editor and discard confirmation),
   `Intentions` (queued player requests), `Input` (keys and actions), `Events`
   (network events), `Playback` (combat animation clock), `MapCells`,
   `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`, and
@@ -60,24 +61,50 @@ these projects.
   character sheet. The raycaster's subunits own ray casting (`Rays`), pixels and
   lighting (`Pixels`), wall and floor textures (`Textures`), pixel art (`Art`),
   and sprites with animation effects (`Sprites`).
+  The client facade prepares size-dependent start artwork after framework and
+  network updates. `Backdrop` owns its generation and reuse; `Model` retains one
+  immutable cell grid so focus navigation does not regenerate it.
 - `apps/server` owns the server program entry point and server lifetime.
   `Dungeon.Server` runs the handshake, message loop, and listener; its subunits
   own the policy (`Config`), per-connection session rules (`Session`),
   enumeration conversions (`Mapping`), client-safe projections (`Projection`),
-  replies and turn commits (`Replies`), and message handling (`Handling`).
+  replies, turn and transition commits (`Replies`), message handling
+  (`Handling`), and the mapping of typed storage failures to stable rejection
+  codes (`Failures`), world lifecycle (`Worlds`), bounded diagnostics (`Logging`)
+  and optional dashboard/settings (`Console`). `Diagnostics` projects committed
+  session facts into typed snapshots, separately from timestamped log text.
+  The console submodules own presentation/settings state (`Model`), bounded log
+  filtering and scroll anchors (`Log`), responsive dimensions (`Layout`), native
+  panels and settings overlays (`View`), and validated keyboard events (`Input`).
+  The facade owns only the cancellable listener subscription and event inbox.
+  `Session` retains
+  the current interior map and builds area views from it. Entry opens the target
+  level through the world layer; loading
+  installs the already validated view returned by the world layer.
 - `libs/game` owns the authoritative world model, rules, and simulation,
   including the deterministic outdoor terrain generator. It has one unit per
   concern, layered without cycles:
   - `Dungeon.Coordinates`: positions, facing, relative steps, chunk arithmetic.
-  - `Dungeon.Terrain` with `.Noise`, `.Generation`, and `.Placement`: cells,
-    chunks, and world metadata; noise; chunk generation; spawn and entrance.
-  - `Dungeon.Items`, `Dungeon.Npcs`, `Dungeon.Hostiles`: kinds, identities,
+  - `Dungeon.Terrain` with `.Noise`, `.Generation`, `.Entrances`, `.Chunks`, and
+    `.Placement`: cells, chunks, and world metadata; noise; natural terrain;
+    entrance regions and sites; complete chunks with entrances; spawn and spawn
+    entrance.
+  - `Dungeon.Items`, `Dungeon.Hostiles`: kinds, identities,
     and per-kind texts and values.
-  - `Dungeon.Interior` and `Dungeon.Interior.InitialDungeon`: interior
-    geometry and its validation; the hand-authored initial dungeon.
+  - `Dungeon.Interior` with `.Generation`, `.Generation.Content` and `.Generation.Validation`:
+    interior geometry and its validation; the deterministic dungeon generator;
+    the structural rules shared by the generator and stored levels. `Content`
+    derives dungeon names using independent seeds; the immutable map retains
+    its display name for storage, projections and diagnostics.
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
-    read-only queries.
-  - `Dungeon.Movement`, `Dungeon.Interaction`, `Dungeon.Dialogue`,
+    read-only queries; the `AreaView` type pairs world metadata with a supplied
+    current interior map.
+  - `Dungeon.Areas`: pure construction of an area view, requiring no interior
+    outdoors and a matching map in a dungeon; first-visit entity materialization;
+    `.Identities` owns canonical dungeon area identities; `.Validation` owns the
+    map-free save shape check and full saved-state checks against all supplied
+    visited maps and placements, without loading or generating geometry.
+  - `Dungeon.Movement`, `Dungeon.Interaction`,
     `Dungeon.Equipment`, `Dungeon.Combat`: the rules that change the state.
   - `Dungeon.Exploration` with `.Model` and `.Sight`: discovery masks,
     outdoor sight and discovery updates, and interior line of sight.
@@ -85,9 +112,15 @@ these projects.
   creation of missing chunks through the `libs/game` generator, visible-window
   composition, prefetching, and bounded caching. `Dungeon.World` owns world
   sessions, the chunk cache, and visible windows; `Dungeon.World.Encoding` owns
-  the exact JSON formats of world metadata and chunks. `Dungeon.World.Savegame` owns the
-  savegame file and its format version; its subunits `Player`, `Entities`, and
-  `Discovery` encode and strictly decode the parts of the saved state.
+  the exact JSON formats of world metadata and chunks. `Dungeon.World.Interiors`
+  owns immutable level files (read, first-visit creation, visited-level reads)
+  with `.Encoding` (level format) and `.Errors` (`LevelFailure`).
+  `Dungeon.World.Catalog` opens existing worlds without creating them, lists
+  non-destructively, and allocates exclusive new identities using `Std.Fs.ReadDir`.
+  `Dungeon.World.Names` holds the persisted kind and facing names shared by saves
+  and levels. `Dungeon.World.Savegame` owns the savegame file, its format version,
+  and three-phase loading; its subunits `Player`, `Entities`, `Discovery`, and
+  `Errors` (`PersistenceFailure`) encode, decode, and classify its parts.
 - `libs/protocol` owns commands and visible-state messages shared by client and
   server, including the one-character cell and knowledge code alphabet of
   visible rows. It contains no game rules; a server contract test verifies that
@@ -95,13 +128,31 @@ these projects.
   `Dungeon.Protocol` holds the contract itself: limits, codes, and message
   types. `Names`, `Validation`, and `Fields` encode and check nested values;
   `ClientMessages` and `ServerMessages` encode and strictly decode whole
-  messages; `Transport` frames them as bounded lines.
+  messages; `Worlds` validates bounded world catalogs and selection predicates;
+  `Transport` frames them as bounded lines.
 - `libs/persistence` currently owns the shared runtime path and configuration
   interface. Authoritative world files are owned by `libs/world`.
 - `tools/world-preview` samples final terrain or one normalized generator field
-  without loading a persistent world.
+  without loading a persistent world. `tools/persistence-bench` measures
+  first-entry level creation and complete save and load for a chosen number of
+  visited dungeons.
 - `tests` follows the production modules so each module is exercised through
-  its interface.
+  its interface. `tests/fixtures` is a test-only library exporting
+  `Dungeon.Test.Fixtures`, `Dungeon.Test.Catalog` and `Dungeon.Test.StateComparison`:
+  protocol catalog fixtures,
+  independent authored dungeon geometry, metadata with an area identity, initial
+  entities at a requested pose, and area-view helpers. `Dungeon.Test.StateComparison`
+  compares complete states, including entity arrays and discovery masks, for
+  regression assertions without invoking game rules or persistence.
+  The fixture library also lends its layout to any world's spawn dungeon for
+  pure rule tests and turns maps into first-person routes (`RouteTo`). Production projects do not
+  depend on it; fixture geometry stays independent of generated output.
+  `tests/levels` exports `Dungeon.Test.Levels` (entering and validating against
+  stored generated levels), `Dungeon.Test.Routes` (routes as client intentions,
+  outdoor paths), and `Dungeon.Test.Wire` (whole TCP play sessions).
+  `tests/server/internal` compiles production server units directly in a
+  separate test project to test session and projection internals without
+  expanding the server library's public exports.
 
 ## Client-server seam
 
@@ -128,8 +179,6 @@ are described in [interaction](interaction.md).
 The server-owned item state, inventory projection, pickup semantics, and
 persistence boundary are described in
 [items and inventory](items-and-inventory.md).
-The fixed NPC, deterministic dialogue graph, session lifecycle, and persistence
-boundary are described in [NPCs and simple dialogue](npcs-and-dialogue.md).
 Turn-based combat, its dice, opponent behavior, defeat, and persistence are
 described in [combat](combat.md).
 
@@ -148,4 +197,6 @@ and ownership rules.
   the canonical spatial terminology and presentation rules. The
   [client UI](../product/client-ui.md) document defines the shared terminal
   presentation and interaction shell.
+- The [server console](../product/server-console.md) describes the optional
+  full-terminal administration dashboard, log controls and creation defaults.
 - `docs/architecture` describes the system structure and module interfaces.

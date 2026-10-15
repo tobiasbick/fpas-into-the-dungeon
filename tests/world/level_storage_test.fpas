@@ -1,0 +1,383 @@
+// Covers immutable dungeon level files: strict format, read-only access, first-visit creation, and failures.
+program LevelStorageTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
+
+function EnsureTestRoot(Path: string): result of (boolean, string);
+begin
+  if not Fs.Exists('.temp-data') then
+    begin
+      const Created: boolean := try Fs.CreateDir('.temp-data');
+    end;
+  end if;
+
+  return Fs.CreateDirAll(Path);
+end function;
+
+function LevelFile(World: WorldUnit.WorldSession; Region: Entrances.RegionCoordinate): string;
+begin
+  return PathOps.Join([
+    World.Directory,
+    'dungeons',
+    (Conv.IntToStr(Region.X) + '_') + Conv.IntToStr(Region.Y),
+    '0.json'
+  ]);
+end function;
+
+// Returns the first ordinary region east of the spawn region that has an entrance site.
+function OrdinaryRegion(Metadata: Terrain.WorldMetadata): Entrances.RegionCoordinate;
+begin
+  const Spawn: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  for Offset: integer := 1 to 64 do
+    begin
+      const Candidate: Entrances.RegionCoordinate := Entrances.RegionCoordinate(
+        X := Spawn.X + Offset,
+        Y := Spawn.Y
+      );
+      case Entrances.EntranceSite(Metadata, Candidate) of
+        when Some(const Site):
+          return Candidate;
+        when None:
+          null;
+      end case;
+    end;
+  end for;
+
+  panic('test world has no ordinary entrance region');
+end function;
+
+function SiteOf(Metadata: Terrain.WorldMetadata; Region: Entrances.RegionCoordinate): Coordinates.WorldPosition;
+begin
+  case Entrances.EntranceSite(Metadata, Region) of
+    when Some(const Site):
+      return Site;
+    when None:
+      panic('region has no entrance site');
+  end case;
+end function;
+
+function IsMissing(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): boolean;
+begin
+  case Value of
+    when Error(const Failure):
+      case Failure of
+        when Errors.LevelFailure.Missing(const AreaId):
+          return true;
+        when Errors.LevelFailure.Invalid(_, _), Errors.LevelFailure.Io(_), Errors.LevelFailure.Generation(_, _):
+          return false;
+      end case;
+    when Ok(_):
+      return false;
+  end case;
+end function;
+
+function IsInvalid(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): boolean;
+begin
+  case Value of
+    when Error(const Failure):
+      case Failure of
+        when Errors.LevelFailure.Invalid(const AreaId, const Reason):
+          return true;
+        when Errors.LevelFailure.Missing(_), Errors.LevelFailure.Io(_), Errors.LevelFailure.Generation(_, _):
+          return false;
+      end case;
+    when Ok(_):
+      return false;
+  end case;
+end function;
+
+function IsIo(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): boolean;
+begin
+  case Value of
+    when Error(const Failure):
+      case Failure of
+        when Errors.LevelFailure.Io(const Reason):
+          return true;
+        when Errors.LevelFailure.Missing(_), Errors.LevelFailure.Invalid(_, _), Errors.LevelFailure.Generation(_, _):
+          return false;
+      end case;
+    when Ok(_):
+      return false;
+  end case;
+end function;
+
+function Unwrapped(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): InteriorUnit.InteriorMap;
+begin
+  case Value of
+    when Ok(const Map):
+      return Map;
+    when Error(_):
+      panic('expected a level map');
+  end case;
+end function;
+
+function OutsideAt(Metadata: Terrain.WorldMetadata; Position: Coordinates.WorldPosition): GameState.GameState;
+begin
+  return GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(Position); end with;
+end function;
+
+// Asserts that one textual change makes a valid level text invalid.
+procedure AssertRejected(
+  Text: string;
+  Old: string;
+  New: string;
+  Metadata: Terrain.WorldMetadata;
+  AreaId: string
+);
+begin
+  Test.AssertTrue(Old in Text);
+  Test.AssertTrue(Encoding.DecodeLevel(Text.Replace(Old, New), Metadata, AreaId) is Error(_));
+end procedure;
+
+begin
+  const Root: string := '.temp-data/level-storage-test-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(EnsureTestRoot(Root).Unwrap());
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(Root, 'levels', 12345, 4, 16).Unwrap();
+  const Metadata: Terrain.WorldMetadata := World.Metadata;
+  const SpawnRegion: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  const SpawnAreaId: string := Identities.DungeonAreaId(Metadata, SpawnRegion);
+  const AtSpawnEntrance: GameState.GameState := OutsideAt(Metadata, Metadata.SpawnEntrance);
+  const SpawnPath: string := LevelFile(World, SpawnRegion);
+  // Reading never creates a level.
+  Test.AssertTrue(IsMissing(Interiors.ReadLevel(World, SpawnAreaId)));
+  Test.AssertFalse(Fs.Exists(SpawnPath));
+  Test.AssertTrue(Interiors.ReadVisitedLevels(World, GameState.NewGame(Metadata)) is Ok(_));
+  // Entry verifies the target against the entrance under the player before creating anything.
+  Test.AssertTrue(
+    IsInvalid(Interiors.OpenLevelForEntry(World, OutsideAt(Metadata, Metadata.Spawn), SpawnAreaId))
+  );
+  Test.AssertFalse(Fs.Exists(SpawnPath));
+  Test.AssertTrue(
+    IsInvalid(Interiors.OpenLevelForEntry(World, AtSpawnEntrance, 'levels:dungeon:01:0'))
+  );
+  // First entry generates, validates, and publishes the level; its bytes are the generated map's encoding.
+  const Created: InteriorUnit.InteriorMap := Unwrapped(
+    Interiors.OpenLevelForEntry(World, AtSpawnEntrance, SpawnAreaId)
+  );
+  const Generated: InteriorUnit.InteriorMap := Generation.GenerateDungeon(
+    Metadata.Seed,
+    SpawnRegion.X,
+    SpawnRegion.Y,
+    SpawnAreaId
+  ).Unwrap();
+  Test.AssertEquals(
+    Encoding.EncodeLevel(Metadata, Generated),
+    Encoding.EncodeLevel(Metadata, Created)
+  );
+  Test.AssertTrue(Fs.IsFile(SpawnPath));
+  const StoredText: string := Fs.ReadText(SpawnPath).Unwrap();
+  Test.AssertEquals(Encoding.EncodeLevel(Metadata, Generated), StoredText);
+  // The writer emits the contract's key order.
+  Test.AssertTrue(
+    StoredText.StartsWith(
+      '{"format_version":2,"world_id":"levels","generator_version":7,"area_id":'
+    )
+  );
+  // Revisits and fresh games reuse the existing file without rewriting it.
+  Test.AssertEquals(
+    StoredText,
+    Encoding.EncodeLevel(
+      Metadata,
+      Unwrapped(Interiors.OpenLevelForEntry(World, AtSpawnEntrance, SpawnAreaId))
+    )
+  );
+  Test.AssertEquals(
+    StoredText,
+    Encoding.EncodeLevel(Metadata, Unwrapped(Interiors.ReadLevel(World, SpawnAreaId)))
+  );
+  const Visited: GameState.GameState := AtSpawnEntrance with VisitedAreas := [SpawnAreaId]; end with;
+
+  Test.AssertEquals(1, Interiors.ReadVisitedLevels(World, Visited).Unwrap().Length());
+  Test.AssertEquals(StoredText, Fs.ReadText(SpawnPath).Unwrap());
+  // A missing level of an already visited area is never regenerated.
+  const Ordinary: Entrances.RegionCoordinate := OrdinaryRegion(Metadata);
+  const OrdinaryAreaId: string := Identities.DungeonAreaId(Metadata, Ordinary);
+  const AtOrdinary: GameState.GameState := OutsideAt(Metadata, SiteOf(Metadata, Ordinary));
+  Test.AssertTrue(
+    IsMissing(
+      Interiors.OpenLevelForEntry(
+        World,
+        AtOrdinary with VisitedAreas := [OrdinaryAreaId]; end with,
+        OrdinaryAreaId
+      )
+    )
+  );
+  Test.AssertFalse(Fs.Exists(LevelFile(World, Ordinary)));
+  Test.AssertTrue(
+    (
+      Interiors.ReadVisitedLevels(
+        World,
+        Visited with VisitedAreas := [OrdinaryAreaId, SpawnAreaId]; end with
+      ) is Error(_)
+    )
+  );
+  // A failed atomic creation leaves no published level: the level directory is blocked by a file.
+  const OrdinaryDirectory: string := PathOps.Join([
+    World.Directory,
+    'dungeons',
+    (Conv.IntToStr(Ordinary.X) + '_') + Conv.IntToStr(Ordinary.Y)
+  ]);
+  Test.AssertTrue(Fs.WriteTextAtomic(OrdinaryDirectory, 'blocking file').Unwrap());
+  Test.AssertTrue(IsIo(Interiors.OpenLevelForEntry(World, AtOrdinary, OrdinaryAreaId)));
+  Test.AssertEquals('blocking file', Fs.ReadText(OrdinaryDirectory).Unwrap());
+  Test.AssertTrue(Fs.DeleteFile(OrdinaryDirectory).Unwrap());
+  const OrdinaryMap: InteriorUnit.InteriorMap := Unwrapped(
+    Interiors.OpenLevelForEntry(World, AtOrdinary, OrdinaryAreaId)
+  );
+  Test.AssertEquals(OrdinaryAreaId, OrdinaryMap.AreaId);
+  Test.AssertTrue(Encoding.EncodeLevel(Metadata, OrdinaryMap) <> StoredText);
+  // A level path that is a directory is an I/O failure, not invalid content.
+  const DirectoryWorld: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    Root,
+    'directory-level',
+    12345,
+    4,
+    16
+  ).Unwrap();
+  const DirectoryPath: string := LevelFile(DirectoryWorld, SpawnRegion);
+  Test.AssertTrue(Fs.CreateDirAll(DirectoryPath).Unwrap());
+  Test.AssertTrue(
+    IsIo(
+      Interiors.ReadLevel(
+        DirectoryWorld,
+        Identities.DungeonAreaId(DirectoryWorld.Metadata, SpawnRegion)
+      )
+    )
+  );
+  Test.AssertTrue(
+    IsIo(
+      Interiors.OpenLevelForEntry(
+        DirectoryWorld,
+        OutsideAt(DirectoryWorld.Metadata, DirectoryWorld.Metadata.SpawnEntrance),
+        Identities.DungeonAreaId(DirectoryWorld.Metadata, SpawnRegion)
+      )
+    )
+  );
+  // An invalid stored file is reported, never repaired or replaced, including on entry.
+  const Broken: string := StoredText.Replace('"level":0', '"level":1');
+  Test.AssertTrue(Fs.WriteTextAtomic(SpawnPath, Broken).Unwrap());
+  Test.AssertTrue(IsInvalid(Interiors.ReadLevel(World, SpawnAreaId)));
+  Test.AssertTrue(IsInvalid(Interiors.OpenLevelForEntry(World, AtSpawnEntrance, SpawnAreaId)));
+  Test.AssertEquals(Broken, Fs.ReadText(SpawnPath).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(SpawnPath, StoredText).Unwrap());
+  // Strict decoding: identities, versions, dimensions, rows, endpoints, placements, and field sets.
+  Test.AssertTrue(Encoding.DecodeLevel(StoredText, Metadata, SpawnAreaId) is Ok(_));
+  Test.AssertTrue(Encoding.DecodeLevel(StoredText, Metadata, OrdinaryAreaId) is Error(_));
+  Test.AssertTrue(
+    (
+      Encoding.DecodeLevel(StoredText, Metadata with Id := 'other'; end with, SpawnAreaId) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Encoding.DecodeLevel(StoredText, Metadata with GeneratorVersion := 5; end with, SpawnAreaId) is Error(_)
+    )
+  );
+  AssertRejected(StoredText, '"format_version":2', '"format_version":1', Metadata, SpawnAreaId);
+  AssertRejected(
+    StoredText,
+    '"generator_version":7',
+    '"generator_version":6',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(StoredText, '"world_id":"levels"', '"world_id":"other"', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"level":0', '"level":1', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"width":31', '"width":30', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"height":21', '"height":21.5', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"level":0', '"level":0,"extra":1', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"level":0,', '', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"level":0', '"level":null', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"level":0', '"level":0,"level":0', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"facing":"east"', '"facing":"west"', Metadata, SpawnAreaId);
+  AssertRejected(StoredText, '"facing":"east"', '"facing":"east","extra":1', Metadata, SpawnAreaId);
+  AssertRejected(
+    StoredText,
+    '"rows":["###############################",',
+    '"rows":[',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(
+    StoredText,
+    '"rows":["###############################"',
+    '"rows":["##############################"',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(
+    StoredText,
+    '"rows":["###############################"',
+    '"rows":["##############################."',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(
+    StoredText,
+    '"rows":["###############################"',
+    '"rows":["##############################i"',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(
+    StoredText,
+    '"kind":"ancient_coin"',
+    '"kind":"leather_jerkin"',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(
+    StoredText,
+    '"kind":"restless_skeleton"',
+    '"kind":"ancient_coin"',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(
+    StoredText,
+    SpawnAreaId + ':item:0',
+    SpawnAreaId + ':item:9',
+    Metadata,
+    SpawnAreaId
+  );
+  AssertRejected(
+    StoredText,
+    '"kind":"ancient_coin"',
+    '"kind":"ancient_coin","extra":1',
+    Metadata,
+    SpawnAreaId
+  );
+  // Content changes that keep the JSON shape: start off the exit's east side, an item on a wall.
+  const MovedStart: InteriorUnit.InteriorMap := Generated with Start := Coordinates.InteriorPosition(
+    X := Generated.Start.X, Y := Generated.Start.Y +
+    1
+  ); end with;
+
+  Test.AssertTrue(
+    (
+      Encoding.DecodeLevel(Encoding.EncodeLevel(Metadata, MovedStart), Metadata, SpawnAreaId) is Error(_)
+    )
+  );
+  var WalledItem: InteriorUnit.InteriorMap := Generated;
+  WalledItem.Items[0] := WalledItem.Items[0] with Position := Coordinates.InteriorPosition(
+    X := 0,
+    Y := 0
+  ); end with;
+
+  Test.AssertTrue(
+    (
+      Encoding.DecodeLevel(Encoding.EncodeLevel(Metadata, WalledItem), Metadata, SpawnAreaId) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Encoding.DecodeLevel(
+        StoredText + ' '.RepeatStr(Encoding.MaximumLevelTextLength),
+        Metadata,
+        SpawnAreaId
+      ) is Error(_)
+    )
+  );
+  // The stored file's bytes are unchanged by every rejected operation above.
+  Test.AssertEquals(StoredText, Fs.ReadText(SpawnPath).Unwrap());
+end.

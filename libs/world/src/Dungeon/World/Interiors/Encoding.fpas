@@ -1,0 +1,293 @@
+// Exact JSON format of immutable dungeon level files: geometry, endpoints, and original placements.
+unit Dungeon.World.Interiors.Encoding;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.World.Names as NamesUnit, Std.Conv as Conv, Std.Json as Json, Std.Json.Fields as JsonFields;
+
+// Current-only schema version of level files; other versions are rejected, never migrated.
+public const LevelFormatVersion: integer := 2;
+// Longest accepted level text, checked before parsing.
+public const MaximumLevelTextLength: integer := 65536;
+
+const LevelFields: array of string := [
+  'format_version',
+  'world_id',
+  'generator_version',
+  'area_id',
+  'name',
+  'level',
+  'width',
+  'height',
+  'rows',
+  'start',
+  'exit',
+  'items',
+  'hostiles'
+];
+
+function Number(Value: integer): Json.JsonValue;
+begin
+  return Json.JsonValue.Number(Conv.IntToReal(Value));
+end function;
+
+function EncodeRows(Map: InteriorUnit.InteriorMap): array of Json.JsonValue;
+begin
+  var Rows: array of Json.JsonValue := [];
+  for Y: integer := 0 to Map.Height - 1 do
+    begin
+      var Row: string := '';
+      for X: integer := 0 to Map.Width - 1 do
+        begin
+          Row := Row + InteriorUnit.InteriorCellCode(Map.Cells[(Y * Map.Width) + X]);
+        end;
+      end for;
+
+      Rows.PushInPlace(Json.JsonValue.String(Row));
+    end;
+  end for;
+
+  return Rows;
+end function;
+
+function EncodePlacement(Id: string; Kind: string; Position: Coordinates.InteriorPosition): Json.JsonValue;
+begin
+  return Json.JsonValue.Object([
+    'id': Json.JsonValue.String(Id),
+    'kind': Json.JsonValue.String(Kind),
+    'x': Number(Position.X),
+    'y': Number(Position.Y)
+  ]);
+end function;
+
+// Encodes a validated generated map as level 0 of its area in the current level format.
+public function EncodeLevel(Metadata: Terrain.WorldMetadata; Map: InteriorUnit.InteriorMap): string;
+begin
+  var Items: array of Json.JsonValue := [];
+  for Item: ItemRules.ItemPlacement in Map.Items do
+    begin
+      Items.PushInPlace(
+        EncodePlacement(Item.ItemId, NamesUnit.ItemKindName(Item.Kind), Item.Position)
+      );
+    end;
+  end for;
+  var Hostiles: array of Json.JsonValue := [];
+  for Hostile: HostileRules.HostilePlacement in Map.Hostiles do
+    begin
+      Hostiles.PushInPlace(
+        EncodePlacement(Hostile.Id, NamesUnit.HostileKindName(Hostile.Kind), Hostile.Position)
+      );
+    end;
+  end for;
+  const Start: Json.JsonValue := Json.JsonValue.Object([
+    'x': Number(Map.Start.X),
+    'y': Number(Map.Start.Y),
+    'facing': Json.JsonValue.String(NamesUnit.FacingName(Map.StartFacing))
+  ]);
+  const Exit: Json.JsonValue := Json.JsonValue.Object([
+    'x': Number(Map.Exit.X),
+    'y': Number(Map.Exit.Y)
+  ]);
+  return Json.Stringify(
+    Json.JsonValue.Object([
+      'format_version': Number(LevelFormatVersion),
+      'world_id': Json.JsonValue.String(Metadata.Id),
+      'generator_version': Number(Metadata.GeneratorVersion),
+      'area_id': Json.JsonValue.String(Map.AreaId),
+      'name': Json.JsonValue.String(Map.DisplayName),
+      'level': Number(0),
+      'width': Number(Map.Width),
+      'height': Number(Map.Height),
+      'rows': Json.JsonValue.ArrayValue(EncodeRows(Map)),
+      'start': Start,
+      'exit': Exit,
+      'items': Json.JsonValue.ArrayValue(Items),
+      'hostiles': Json.JsonValue.ArrayValue(Hostiles)
+    ])
+  );
+end function;
+
+// Requires exactly the named fields; unknown and missing fields are both errors.
+function ExactFields(Fields: dict of string to Json.JsonValue; Names: array of string; Source: string): result of (boolean, string);
+begin
+  const Known: boolean := try JsonFields.RequireOnlyFields(Fields, Names);
+  if Fields.Length() <> Names.Length() then
+    begin
+      return Error(Source + ' has an unexpected field set');
+    end;
+  end if;
+
+  return Ok(true);
+end function;
+
+function DecodePosition(Fields: dict of string to Json.JsonValue): result of (Coordinates.InteriorPosition, string);
+begin
+  return Ok(
+    Coordinates.InteriorPosition(
+      X := try JsonFields.IntegerField(Fields, 'x'),
+      Y := try JsonFields.IntegerField(Fields, 'y')
+    )
+  );
+end function;
+
+function DecodeCells(Rows: array of string): result of (array of InteriorUnit.InteriorCellKind, string);
+begin
+  if Rows.Length() <> Validation.GeneratedDungeonHeight then
+    begin
+      return Error('level must contain exactly 21 rows');
+    end;
+  end if;
+  var Cells: array of InteriorUnit.InteriorCellKind := [];
+  for Row: string in Rows do
+    begin
+      if Row.Length() <> Validation.GeneratedDungeonWidth then
+        begin
+          return Error('level rows must contain exactly 31 fields');
+        end;
+      end if;
+
+      for X: integer := 0 to Validation.GeneratedDungeonWidth - 1 do
+        begin
+          Cells.PushInPlace(try InteriorUnit.InteriorCellFromCode(Row[X]));
+        end;
+      end for;
+    end;
+  end for;
+
+  return Ok(Cells);
+end function;
+
+function PlacementFields(Value: Json.JsonValue): result of (dict of string to Json.JsonValue, string);
+begin
+  case Value of
+    when Json.JsonValue.Object(const Fields):
+      const Exact: boolean := try ExactFields(Fields, ['id', 'kind', 'x', 'y'], 'level placement');
+      return Ok(Fields);
+    when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+      return Error('level placements must be objects');
+  end case;
+end function;
+
+function DecodeItemPlacements(Values: array of Json.JsonValue): result of (array of ItemRules.ItemPlacement, string);
+begin
+  var Items: array of ItemRules.ItemPlacement := [];
+  for Value: Json.JsonValue in Values do
+    begin
+      const Fields: dict of string to Json.JsonValue := try PlacementFields(Value);
+      Items.PushInPlace(
+        ItemRules.ItemPlacement(
+          ItemId := try JsonFields.StringField(Fields, 'id'),
+          Kind := try NamesUnit.DecodeItemKind(try JsonFields.StringField(Fields, 'kind')),
+          Position := try DecodePosition(Fields)
+        )
+      );
+    end;
+  end for;
+
+  return Ok(Items);
+end function;
+
+function DecodeHostilePlacements(Values: array of Json.JsonValue): result of (array of HostileRules.HostilePlacement, string);
+begin
+  var Hostiles: array of HostileRules.HostilePlacement := [];
+  for Value: Json.JsonValue in Values do
+    begin
+      const Fields: dict of string to Json.JsonValue := try PlacementFields(Value);
+      Hostiles.PushInPlace(
+        HostileRules.HostilePlacement(
+          Id := try JsonFields.StringField(Fields, 'id'),
+          Kind := try NamesUnit.DecodeHostileKind(try JsonFields.StringField(Fields, 'kind')),
+          Position := try DecodePosition(Fields)
+        )
+      );
+    end;
+  end for;
+
+  return Ok(Hostiles);
+end function;
+
+function DecodeLevelFields(Text: string; Metadata: Terrain.WorldMetadata; AreaId: string): result of (InteriorUnit.InteriorMap, string);
+begin
+  if Text.Length() > MaximumLevelTextLength then
+    begin
+      return Error('level text is too long');
+    end;
+  end if;
+  const Fields: dict of string to Json.JsonValue := try JsonFields.ParseObject(Text);
+  const Exact: boolean := try ExactFields(Fields, LevelFields, 'level');
+  if try JsonFields.IntegerField(Fields, 'format_version') <> LevelFormatVersion then
+    begin
+      return Error('unsupported level format version');
+    end;
+  end if;
+
+  if try JsonFields.StringField(Fields, 'world_id') <> Metadata.Id then
+    begin
+      return Error('level world id does not match selected world');
+    end;
+  end if;
+
+  if try JsonFields.IntegerField(Fields, 'generator_version') <> Metadata.GeneratorVersion then
+    begin
+      return Error('unsupported level generator version');
+    end;
+  end if;
+
+  if try JsonFields.StringField(Fields, 'area_id') <> AreaId then
+    begin
+      return Error('level area id does not match the requested area');
+    end;
+  end if;
+
+  if try JsonFields.IntegerField(Fields, 'level') <> 0 then
+    begin
+      return Error('level index must be 0');
+    end;
+  end if;
+
+  if (try JsonFields.IntegerField(Fields, 'width') <> Validation.GeneratedDungeonWidth)
+    or
+    (try JsonFields.IntegerField(Fields, 'height') <> Validation.GeneratedDungeonHeight)
+  then
+    begin
+      return Error('level must be 31 by 21 fields');
+    end;
+  end if;
+  const StartFields: dict of string to Json.JsonValue := try JsonFields.ObjectField(
+    Fields,
+    'start'
+  );
+  const StartExact: boolean := try ExactFields(StartFields, ['x', 'y', 'facing'], 'level start');
+  const ExitFields: dict of string to Json.JsonValue := try JsonFields.ObjectField(Fields, 'exit');
+  const ExitExact: boolean := try ExactFields(ExitFields, ['x', 'y'], 'level exit');
+  // Structural validation reuses the generator's rules without rerunning the generator.
+  return Validation.ValidateGeneratedDungeon(
+    InteriorUnit.InteriorMap(
+      AreaId := AreaId,
+      DisplayName := try JsonFields.StringField(Fields, 'name'),
+      Width := Validation.GeneratedDungeonWidth,
+      Height := Validation.GeneratedDungeonHeight,
+      Cells := try DecodeCells(try JsonFields.StringArrayField(Fields, 'rows')),
+      Start := try DecodePosition(StartFields),
+      StartFacing := try NamesUnit.DecodeFacing(try JsonFields.StringField(StartFields, 'facing')),
+      Exit := try DecodePosition(ExitFields),
+      Items := try DecodeItemPlacements(try JsonFields.ArrayField(Fields, 'items')),
+      Hostiles := try DecodeHostilePlacements(try JsonFields.ArrayField(Fields, 'hostiles'))
+    )
+  );
+end function;
+
+// Strictly decodes and structurally validates level 0 of one requested area of the selected world.
+// Never regenerates the map; every error is prefixed with `invalid level file:`.
+public function DecodeLevel(Text: string; Metadata: Terrain.WorldMetadata; AreaId: string): result of (InteriorUnit.InteriorMap, string);
+begin
+  case DecodeLevelFields(Text, Metadata, AreaId) of
+    when Ok(const Map):
+      begin
+        return Ok(Map);
+      end;
+    when Error(const Message):
+      begin
+        return Error('invalid level file: ' + Message);
+      end;
+  end case;
+end function;
+end unit;

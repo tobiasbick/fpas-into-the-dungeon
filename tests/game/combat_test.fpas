@@ -1,222 +1,393 @@
-// Verifies turn-based combat: perception, pursuit, dice, victory, defeat, healing, and validation.
+// Verifies turn-based combat, pinned dice outcomes, perception, victory, defeat, and validation.
 program CombatTest;
 
-uses
-  Dungeon.Combat, Dungeon.Coordinates, Dungeon.Dialogue, Dungeon.GameState, Dungeon.Hostiles,
-  Dungeon.Interaction, Dungeon.Interior, Dungeon.Interior.InitialDungeon, Dungeon.Npcs,
-  Dungeon.Terrain, Dungeon.Terrain.Placement, Std.Arrays, Std.Results, Std.Str, Std.Test;
+uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Test as Test;
 
-function InDungeon(Metadata: WorldMetadata; X: integer; Y: integer; Facing: FacingDirection): GameState;
+// Independently calculated unarmed attack expectations, including the opponent's response.
+type AttackVector = record
+  Seed: integer;
+  PlayerDamage: integer;
+  HostileDamage: integer;
+  FinalRandomState: integer;
+  PlayerEvent: Combat.CombatEventKind;
+  HostileEvent: Combat.CombatEventKind;
+end record;
+
+// Pins the full resulting state and both combat facts, not just repeatability.
+procedure AssertPinnedAttack(Vector: AttackVector);
 begin
-  return NewGame(Metadata) with Area := AreaKind.Dungeon; AreaId := Metadata.DungeonAreaId; Player := PlayerPosition.FirstPerson(record
-    Position := record
-      X := X;
-      Y := Y;
-    end;
-    Facing := Facing;
-  end); ReturnLocation := ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.Entrance); end
-end;
+  const Position: Coordinates.InteriorPosition := Coordinates.InteriorPosition(X := 4, Y := 3);
+  const Initial: GameState.GameState := Fixtures.FixtureDungeonState(
+    Position, Coordinates.FacingDirection.West
+  ) with RandomState := Vector.Seed; end with;
+  const View: GameState.AreaView := Fixtures.FixtureAreaView(Initial);
+  const Outcome: Combat.TurnOutcome := Combat.ResolveTurn(
+    View, Initial, Combat.TurnAction.Attack
+  ).Unwrap();
+  var Expected: GameState.GameState := Initial with Health := 20 - Vector.HostileDamage; RandomState := Vector.FinalRandomState; end with;
 
-function Continued(Outcome: TurnOutcome): GameState;
+  Expected.Hostiles[0] := Expected.Hostiles[0] with Health := 12 - Vector.PlayerDamage; Alerted := true; end with;
+
+  case Outcome of
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+      Test.AssertTrue(States.SameState(Expected, State));
+      Test.AssertEquals(2, Log.Length());
+      Test.AssertEquals(2, Events.Length());
+      Test.AssertTrue(
+        Events[0] = Combat.CombatEvent(Kind := Vector.PlayerEvent, Amount := Vector.PlayerDamage)
+      );
+      Test.AssertTrue(
+        Events[1] = Combat.CombatEvent(Kind := Vector.HostileEvent, Amount := Vector.HostileDamage)
+      );
+    when Combat.TurnOutcome.Defeated(_):
+      panic('pinned attack must not defeat a full-health player');
+  end case;
+
+  const Fresh: GameState.GameState := Fixtures.FixtureDungeonState(
+    Position, Coordinates.FacingDirection.West
+  ) with RandomState := Vector.Seed; end with;
+
+  Test.AssertTrue(States.SameState(Fresh, Initial));
+end procedure;
+
+function InDungeon(Metadata: Terrain.WorldMetadata; X: integer; Y: integer; Facing: Coordinates.FacingDirection): GameState.GameState;
+begin
+  return Fixtures.MaterializedFixtureState(Metadata) with Area := Coordinates.AreaKind.Dungeon; AreaId := Fixtures.SpawnDungeonAreaId(
+    Metadata
+  ); Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(
+      Position := Coordinates.InteriorPosition(X := X, Y := Y),
+      Facing := Facing
+    )
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    Metadata.OutdoorAreaId,
+    Metadata.SpawnEntrance
+  ); end with;
+end function;
+
+function Continued(Outcome: Combat.TurnOutcome): GameState.GameState;
 begin
   case Outcome of
-    TurnOutcome.Continued(State, Log, Events):
-    begin
-      return State
-    end;
-    TurnOutcome.Defeated(Log):
-    begin
-      panic('expected the game to continue')
-    end
-  end
-end;
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+      begin
+        return State;
+      end;
+    when Combat.TurnOutcome.Defeated(const Log):
+      begin
+        panic('expected the game to continue');
+      end;
+  end case;
+end function;
 
-function LogOf(Outcome: TurnOutcome): array of string;
+function LogOf(Outcome: Combat.TurnOutcome): array of string;
 begin
   case Outcome of
-    TurnOutcome.Continued(State, Log, Events):
-    begin
-      return Log
-    end;
-    TurnOutcome.Defeated(Log):
-    begin
-      return Log
-    end
-  end
-end;
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+      begin
+        return Log;
+      end;
+    when Combat.TurnOutcome.Defeated(const Log):
+      begin
+        return Log;
+      end;
+  end case;
+end function;
 
 function LogContains(Log: array of string; Text: string): boolean;
 begin
   for Line: string in Log do
-  begin
-    if Std.Str.Contains(Line, Text) then
     begin
-      return true
-    end
-  end;
-
-  return false
-end;
-
-function Skeleton(State: GameState): GameHostile;
-begin
-  return State.Hostiles[0]
-end;
-
-begin
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('combat', 12345));
-  var Fresh: GameState := NewGame(Metadata);
-  AssertEquals(PlayerMaximumHealth, Fresh.Health);
-  AssertEquals(1, Std.Arrays.Length(Fresh.Hostiles));
-  AssertEquals(RestlessSkeletonId, Skeleton(Fresh).Id);
-  AssertEquals(RestlessSkeletonMaximumHealth, Skeleton(Fresh).Health);
-  AssertFalse(Skeleton(Fresh).Alerted);
-  AssertEquals(3, Skeleton(Fresh).Position.X);
-  AssertEquals(3, Skeleton(Fresh).Position.Y);
-  AssertEquals(InitialRandomState(12345), Fresh.RandomState);
-  // Walls hide the inner passages from the main corridors: the start, the lower hall
-  // at the exit, and the corridor before Mara never alert the skeleton.
-  for Watch: integer := 0 to 2 do
-  begin
-    mutable var Hidden: GameState := InDungeon(Metadata, 9, 1, FacingDirection.West);
-    if Watch = 1 then
-    begin
-      Hidden := InDungeon(Metadata, 1, 7, FacingDirection.West)
-    end;
-
-    if Watch = 2 then
-    begin
-      Hidden := InDungeon(Metadata, 2, 1, FacingDirection.West)
-    end;
-    var Quiet: TurnOutcome := Unwrap(ResolveTurn(Metadata, Hidden, TurnAction.Wait));
-    AssertFalse(Skeleton(Continued(Quiet)).Alerted);
-    AssertTrue(LogContains(LogOf(Quiet), 'You wait.'))
-  end;
-  // In the inner passages it notices the player, then approaches one field per turn.
-  var InPassage: GameState := InDungeon(Metadata, 5, 3, FacingDirection.West);
-  var Noticed: TurnOutcome := Unwrap(ResolveTurn(Metadata, InPassage, TurnAction.Wait));
-  AssertTrue(Skeleton(Continued(Noticed)).Alerted);
-  AssertTrue(LogContains(LogOf(Noticed), 'notices you'));
-  AssertEquals(3, Skeleton(Continued(Noticed)).Position.X);
-  // Now it stands directly ahead: it blocks movement and the hint offers an attack.
-  var Blocked: GameState := Continued(Unwrap(ResolveTurn(Metadata, Continued(Noticed), TurnAction.Wait)));
-  AssertEquals(4, Skeleton(Blocked).Position.X);
-  AssertEquals(3, Skeleton(Blocked).Position.Y);
-  AssertTrue(IsError(ResolveTurn(Metadata, Blocked, TurnAction.Step(RelativeStep.Forward))));
-  AssertTrue(Std.Str.Contains(HostileInteractionHint(Blocked), 'Restless skeleton'));
-  AssertTrue(Std.Str.Contains(HostileInteractionHint(Blocked), 'Space: Attack'));
-  AssertEquals(HostileInteractionHint(Blocked), InteractionHint(Blocked));
-  // Rejected actions consume neither time nor dice.
-  var NothingAhead: GameState := InDungeon(Metadata, 9, 1, FacingDirection.West);
-  AssertTrue(IsError(ResolveTurn(Metadata, NothingAhead, TurnAction.Attack)));
-  AssertTrue(IsError(ResolveTurn(Metadata, NewGame(Metadata), TurnAction.Attack)));
-  // Fighting is deterministic: the same actions from the same state produce the same fight.
-  mutable var Fight: GameState := Blocked;
-  mutable var Replay: GameState := Blocked;
-  mutable var Turns: integer := 0;
-  mutable var SawHit: boolean := false;
-  while (Skeleton(Fight).Health > 0) and (Turns < 60) do
-  begin
-    // Mara restores the player between blows so this fight can only end in victory.
-    Fight := Fight with Health := PlayerMaximumHealth; end;
-
-    Replay := Replay with Health := PlayerMaximumHealth; end;
-    var Blow: TurnOutcome := Unwrap(ResolveTurn(Metadata, Fight, TurnAction.Attack));
-    var Again: TurnOutcome := Unwrap(ResolveTurn(Metadata, Replay, TurnAction.Attack));
-    AssertEquals(Std.Arrays.Length(LogOf(Blow)), Std.Arrays.Length(LogOf(Again)));
-    for Index: integer := 0 to Std.Arrays.Length(LogOf(Blow)) - 1 do
-    begin
-      AssertEquals(LogOf(Blow)[Index], LogOf(Again)[Index])
-    end;
-
-    SawHit := SawHit or LogContains(LogOf(Blow), 'You hit');
-    Fight := Continued(Blow);
-    Replay := Continued(Again);
-    AssertEquals(Fight.RandomState, Replay.RandomState);
-    Turns := Turns + 1
-  end;
-
-  AssertTrue(SawHit);
-  AssertEquals(0, Skeleton(Fight).Health);
-  // A destroyed skeleton leaves no figure, blocks nothing, and stays recorded.
-  AssertEquals(-1, StandingHostileAt(Fight, Metadata.DungeonAreaId, Skeleton(Fight).Position));
-  AssertEquals('', HostileInteractionHint(Fight));
-  var Map: InteriorMap := Unwrap(InitialDungeonMap());
-  AssertTrue(Unwrap(InteriorVisibleCodeForState(Map, Fight, Skeleton(Fight).Position)) <> 'h');
-  var Walked: GameState := Continued(Unwrap(ResolveTurn(Metadata, Fight, TurnAction.Step(RelativeStep.Forward))));
-  AssertEquals(4, Unwrap(FirstPersonPlayerPose(Walked)).Position.X);
-  AssertTrue(IsError(ResolveTurn(Metadata, Walked, TurnAction.Attack)));
-  // A wounded player adjacent to an alerted skeleton eventually falls.
-  mutable var Doomed: GameState := Blocked with Health := 1; end;
-  mutable var Fallen: boolean := false;
-  for Turn: integer := 1 to 40 do
-  begin
-    if not Fallen then
-    begin
-      case Unwrap(ResolveTurn(Metadata, Doomed, TurnAction.Wait)) of
-        TurnOutcome.Continued(State, Log, Events):
+      if Text in Line then
         begin
-          Doomed := State
+          return true;
         end;
-        TurnOutcome.Defeated(Log):
-        begin
-          AssertTrue(LogContains(Log, 'You have fallen.'));
-          Fallen := true
-        end
-      end
-    end
-  end;
+      end if;
+    end;
+  end for;
 
-  AssertTrue(Fallen);
-  // Mara offers to tend wounds only while the player is hurt.
-  var Hurt: GameState := InDungeon(Metadata, 2, 1, FacingDirection.West) with Health := 7; end;
-  mutable var Offered: boolean := false;
-  case Unwrap(Interact(Metadata, Hurt)) of
-    InteractionOutcome.DialogueStarted(Met, Dialogue):
+  return false;
+end function;
+
+function Skeleton(State: GameState.GameState): HostileRules.GameHostile;
+begin
+  return State.Hostiles[0];
+end function;
+
+begin
+  // LCG vectors calculated independently: missed attacks skip the damage draw.
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 0, PlayerDamage := 0, HostileDamage := 1,
+      FinalRandomState := 654583775, PlayerEvent := Combat.CombatEventKind.PlayerMiss,
+      HostileEvent := Combat.CombatEventKind.HostileHit
+    )
+  );
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 1, PlayerDamage := 2, HostileDamage := 4,
+      FinalRandomState := 1147902781, PlayerEvent := Combat.CombatEventKind.PlayerHit,
+      HostileEvent := Combat.CombatEventKind.HostileHit
+    )
+  );
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 2, PlayerDamage := 3, HostileDamage := 3,
+      FinalRandomState := 846338638, PlayerEvent := Combat.CombatEventKind.PlayerHit,
+      HostileEvent := Combat.CombatEventKind.HostileHit
+    )
+  );
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 3, PlayerDamage := 1, HostileDamage := 0,
+      FinalRandomState := 679304702, PlayerEvent := Combat.CombatEventKind.PlayerHit,
+      HostileEvent := Combat.CombatEventKind.HostileMiss
+    )
+  );
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    'combat',
+    12345,
+    4
+  ).Unwrap();
+  const Fresh: GameState.GameState := Fixtures.MaterializedFixtureState(Metadata);
+  Test.AssertEquals(GameState.PlayerMaximumHealth, Fresh.Health);
+  Test.AssertEquals(1, Fresh.Hostiles.Length());
+  Test.AssertEquals(Fixtures.FixtureSkeletonId(Metadata), Skeleton(Fresh).Id);
+  Test.AssertEquals(HostileRules.RestlessSkeletonMaximumHealth, Skeleton(Fresh).Health);
+  Test.AssertFalse(Skeleton(Fresh).Alerted);
+  Test.AssertEquals(3, Skeleton(Fresh).Position.X);
+  Test.AssertEquals(3, Skeleton(Fresh).Position.Y);
+  Test.AssertEquals(GameState.InitialRandomState(12345), Fresh.RandomState);
+  // Walls hide the inner passages from the main corridors: the start, the lower hall
+  // at the exit, and the upper corridor never alert the skeleton.
+  for Watch: integer := 0 to 2 do
     begin
-      for Choice: NpcDialogueChoice in Dialogue.Choices do
-      begin
-        Offered := Offered or (Choice.Id = DialogueChoiceWounds)
-      end;
-
-      case Unwrap(ResolveNpcDialogueChoice(Metadata, Met, Met.Npc.Id, DialogueChoiceWounds)) of
-        DialogueOutcome.Continued(Healed, Frame):
+      var Hidden: GameState.GameState := InDungeon(
+        Metadata,
+        9,
+        1,
+        Coordinates.FacingDirection.West
+      );
+      if Watch = 1 then
         begin
-          AssertEquals(PlayerMaximumHealth, Healed.Health);
-          for Choice: NpcDialogueChoice in Frame.Choices do
-          begin
-            AssertFalse(Choice.Id = DialogueChoiceWounds)
-          end;
+          Hidden := InDungeon(Metadata, 1, 7, Coordinates.FacingDirection.West);
+        end;
+      end if;
 
-          AssertTrue(IsError(ResolveNpcDialogueChoice(Metadata, Healed, Healed.Npc.Id, DialogueChoiceWounds)))
-        end
-        else
+      if Watch = 2 then
         begin
-          panic('expected Mara to continue the dialogue after tending wounds')
-        end
-      end
-    end
-    else
+          Hidden := InDungeon(Metadata, 2, 1, Coordinates.FacingDirection.West);
+        end;
+      end if;
+      const Quiet: Combat.TurnOutcome := Combat.ResolveTurn(
+        Fixtures.FixtureViewFor(Metadata, Hidden),
+        Hidden,
+        Combat.TurnAction.Wait
+      ).Unwrap();
+      Test.AssertFalse(Skeleton(Continued(Quiet)).Alerted);
+      Test.AssertTrue(LogContains(LogOf(Quiet), 'You wait.'));
+    end;
+  end for;
+  // In the inner passages it notices the player, then approaches one field per turn.
+  const InPassage: GameState.GameState := InDungeon(
+    Metadata,
+    5,
+    3,
+    Coordinates.FacingDirection.West
+  );
+  const Noticed: Combat.TurnOutcome := Combat.ResolveTurn(
+    Fixtures.FixtureViewFor(Metadata, InPassage),
+    InPassage,
+    Combat.TurnAction.Wait
+  ).Unwrap();
+  Test.AssertTrue(Skeleton(Continued(Noticed)).Alerted);
+  Test.AssertTrue(LogContains(LogOf(Noticed), 'notices you'));
+  Test.AssertEquals(3, Skeleton(Continued(Noticed)).Position.X);
+  // Now it stands directly ahead: it blocks movement and the hint offers an attack.
+  const Blocked: GameState.GameState := Continued(
+    Combat.ResolveTurn(
+      Fixtures.FixtureViewFor(Metadata, Continued(Noticed)),
+      Continued(Noticed),
+      Combat.TurnAction.Wait
+    ).Unwrap()
+  );
+  Test.AssertEquals(4, Skeleton(Blocked).Position.X);
+  Test.AssertEquals(3, Skeleton(Blocked).Position.Y);
+  Test.AssertTrue(
+    (
+      Combat.ResolveTurn(
+        Fixtures.FixtureViewFor(Metadata, Blocked),
+        Blocked,
+        Combat.TurnAction.Step(Coordinates.RelativeStep.Forward)
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue('Restless skeleton' in Interaction.HostileInteractionHint(Blocked));
+  Test.AssertTrue('Space: Attack' in Interaction.HostileInteractionHint(Blocked));
+  Test.AssertEquals(
+    Interaction.HostileInteractionHint(Blocked),
+    Interaction.InteractionHint(Blocked)
+  );
+  // Rejected actions consume neither time nor dice.
+  const NothingAhead: GameState.GameState := InDungeon(
+    Metadata,
+    9,
+    1,
+    Coordinates.FacingDirection.West
+  );
+  Test.AssertTrue(
+    (
+      Combat.ResolveTurn(
+        Fixtures.FixtureViewFor(Metadata, NothingAhead),
+        NothingAhead,
+        Combat.TurnAction.Attack
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Combat.ResolveTurn(
+        Fixtures.FixtureViewFor(Metadata, Fixtures.MaterializedFixtureState(Metadata)),
+        Fixtures.MaterializedFixtureState(Metadata),
+        Combat.TurnAction.Attack
+      ) is Error(_)
+    )
+  );
+  // Fighting is deterministic: the same actions from the same state produce the same fight.
+  var Fight: GameState.GameState := Blocked;
+  var Replay: GameState.GameState := Blocked;
+  var Turns: integer := 0;
+  var SawHit: boolean := false;
+  while (Skeleton(Fight).Health > 0) and (Turns < 60) do
     begin
-      panic('expected dialogue with Mara')
-    end
-  end;
+      // Reset health between blows to cover the full deterministic combat sequence.
+      Fight := Fight with Health := GameState.PlayerMaximumHealth; end with;
 
-  AssertTrue(Offered);
+      Replay := Replay with Health := GameState.PlayerMaximumHealth; end with;
+      const Blow: Combat.TurnOutcome := Combat.ResolveTurn(
+        Fixtures.FixtureViewFor(Metadata, Fight),
+        Fight,
+        Combat.TurnAction.Attack
+      ).Unwrap();
+      const Again: Combat.TurnOutcome := Combat.ResolveTurn(
+        Fixtures.FixtureViewFor(Metadata, Replay),
+        Replay,
+        Combat.TurnAction.Attack
+      ).Unwrap();
+      Test.AssertEquals(LogOf(Blow).Length(), LogOf(Again).Length());
+      for Index: integer := 0 to LogOf(Blow).Length() - 1 do
+        begin
+          Test.AssertEquals(LogOf(Blow)[Index], LogOf(Again)[Index]);
+        end;
+      end for;
+
+      SawHit := SawHit or LogContains(LogOf(Blow), 'You hit');
+      Fight := Continued(Blow);
+      Replay := Continued(Again);
+      Test.AssertEquals(Fight.RandomState, Replay.RandomState);
+      Turns := Turns + 1;
+    end;
+  end while;
+
+  Test.AssertTrue(SawHit);
+  Test.AssertEquals(0, Skeleton(Fight).Health);
+  // A destroyed skeleton leaves no figure, blocks nothing, and stays recorded.
+  Test.AssertEquals(
+    -1,
+    GameState.StandingHostileAt(
+      Fight,
+      Fixtures.SpawnDungeonAreaId(Metadata),
+      Skeleton(Fight).Position
+    )
+  );
+  Test.AssertEquals('', Interaction.HostileInteractionHint(Fight));
+  const Map: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMapFor(
+    Fixtures.SpawnDungeonAreaId(Metadata)
+  );
+  Test.AssertTrue(
+    GameState.InteriorVisibleCodeForState(Map, Fight, Skeleton(Fight).Position).Unwrap() <> 'h'
+  );
+  const Walked: GameState.GameState := Continued(
+    Combat.ResolveTurn(
+      Fixtures.FixtureViewFor(Metadata, Fight),
+      Fight,
+      Combat.TurnAction.Step(Coordinates.RelativeStep.Forward)
+    ).Unwrap()
+  );
+  Test.AssertEquals(4, GameState.FirstPersonPlayerPose(Walked).Unwrap().Position.X);
+  Test.AssertTrue(
+    (
+      Combat.ResolveTurn(
+        Fixtures.FixtureViewFor(Metadata, Walked),
+        Walked,
+        Combat.TurnAction.Attack
+      ) is Error(_)
+    )
+  );
+  // A wounded player adjacent to an alerted skeleton eventually falls.
+  var Doomed: GameState.GameState := Blocked with Health := 1; end with;
+  var Fallen: boolean := false;
+  for Turn: integer := 1 to 40 do
+    begin
+      if not Fallen then
+        begin
+          case Combat.ResolveTurn(
+            Fixtures.FixtureViewFor(Metadata, Doomed),
+            Doomed,
+            Combat.TurnAction.Wait
+          ).Unwrap() of
+            when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+              begin
+                Doomed := State;
+              end;
+            when Combat.TurnOutcome.Defeated(const Log):
+              begin
+                Test.AssertTrue(LogContains(Log, 'You have fallen.'));
+                Fallen := true;
+              end;
+          end case;
+        end;
+      end if;
+    end;
+  end for;
+
+  Test.AssertTrue(Fallen);
   // Validation rejects impossible combat state.
-  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Health := 0; end)));
-  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Health := PlayerMaximumHealth + 1; end)));
-  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with RandomState := -1; end)));
-  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Hostiles := []; end)));
-  mutable var Unknown: GameHostile := Skeleton(Fresh);
-  Unknown.Id := 'initial-dungeon:someone-else';
-  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Hostiles := [Unknown]; end)));
-  mutable var OnMara: GameHostile := Skeleton(Fresh);
-  OnMara.Position := Map.Npc;
-  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Hostiles := [OnMara]; end)));
-  mutable var TooHealthy: GameHostile := Skeleton(Fresh);
-  TooHealthy.Health := RestlessSkeletonMaximumHealth + 1;
-  AssertTrue(IsError(ValidateGameState(Metadata, Fresh with Hostiles := [TooHealthy]; end)));
-  var StandingOnPlayer: GameState := InDungeon(Metadata, 3, 3, FacingDirection.West);
-  AssertTrue(IsError(ValidateGameState(Metadata, StandingOnPlayer)))
+  Test.AssertTrue(
+    (Fixtures.ValidateFixtureSave(Metadata, Fresh with Health := 0; end with) is Error(_))
+  );
+  Test.AssertTrue(
+    (
+      Fixtures.ValidateFixtureSave(
+        Metadata,
+        Fresh with Health := GameState.PlayerMaximumHealth + 1; end with
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (Fixtures.ValidateFixtureSave(Metadata, Fresh with RandomState := -1; end with) is Error(_))
+  );
+  Test.AssertTrue(
+    (Fixtures.ValidateFixtureSave(Metadata, Fresh with Hostiles := []; end with) is Error(_))
+  );
+  var Unknown: HostileRules.GameHostile := Skeleton(Fresh);
+  Unknown.Id := 'unknown:hostile';
+  Test.AssertTrue(
+    (
+      Fixtures.ValidateFixtureSave(Metadata, Fresh with Hostiles := [Unknown]; end with) is Error(_)
+    )
+  );
+  var TooHealthy: HostileRules.GameHostile := Skeleton(Fresh);
+  TooHealthy.Health := HostileRules.RestlessSkeletonMaximumHealth + 1;
+  Test.AssertTrue(
+    (
+      Fixtures.ValidateFixtureSave(Metadata, Fresh with Hostiles := [TooHealthy]; end with) is Error(_)
+    )
+  );
+  const StandingOnPlayer: GameState.GameState := InDungeon(
+    Metadata,
+    3,
+    3,
+    Coordinates.FacingDirection.West
+  );
+  Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, StandingOnPlayer) is Error(_));
 end.

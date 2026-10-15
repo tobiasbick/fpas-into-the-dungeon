@@ -45,7 +45,7 @@ and carried state, so an item is never both carried and worn.
   pays off.
 - An interior map now lists its item placements by item identity instead of
   holding one item field. Validation requires every placement to be a distinct
-  floor field that differs from start, exit, Mara, and the opponent.
+  floor field that differs from start, exit, and the opponent.
 - Picking up keeps the existing rule: `Enter` on the item's field carries it.
   Nothing is equipped automatically.
 
@@ -66,6 +66,10 @@ therefore cannot be swapped for free during a fight.
 The turn log reports the change, for example `You wield the rusty short sword.`
 or `You take off the leather jerkin.`
 
+**Dropping** a carried item (`drop_item`, stage 14a) is also a turn action. Worn
+items must be unequipped first; see
+[items and inventory](items-and-inventory.md).
+
 ## Protocol version 12
 
 - Client intentions `equip` and `unequip`, each with an `item_id`.
@@ -84,7 +88,7 @@ or `You take off the leather jerkin.`
 
 ## Persistence
 
-Savegame format 6 stores equipped items as their own location variant with
+Savegame format 7 stores equipped items as their own location variant with
 their slot. Validation requires exactly the three known items with matching
 identity and kind, at most one item per slot, and a slot that fits the item.
 Format 5 and older are rejected according to the current-version-only policy.

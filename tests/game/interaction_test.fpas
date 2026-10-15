@@ -1,132 +1,145 @@
 // Verifies generic interaction targeting, descriptions, and area transitions.
 program DungeonInteractionTest;
 
-uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interaction, Dungeon.Interior,
-  Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Terrain, Dungeon.Terrain.Placement,
-  Std.Arrays, Std.Results, Std.Test;
+uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Test as Test;
 
-function AtEntrance(Metadata: WorldMetadata; State: GameState): GameState;
+function AtEntrance(Metadata: Terrain.WorldMetadata; State: GameState.GameState): GameState.GameState;
 begin
-  mutable var Value: GameState := State;
-  Value.Player := PlayerPosition.Outdoor(Metadata.Entrance);
-  return Value
-end;
+  var Value: GameState.GameState := State;
+  Value.Player := Coordinates.PlayerPosition.Outdoor(Metadata.SpawnEntrance);
+  return Value;
+end function;
 
-function AtDungeonPosition(State: GameState; Position: InteriorPosition; Facing: FacingDirection): GameState;
+function AtDungeonPosition(State: GameState.GameState; Position: Coordinates.InteriorPosition; Facing: Coordinates.FacingDirection): GameState.GameState;
 begin
-  mutable var Value: GameState := State;
-  Value.Player := PlayerPosition.FirstPerson(record
-    Position := Position;
-    Facing := Facing;
-  end);
-  return Value
-end;
+  var Value: GameState.GameState := State;
+  Value.Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Position, Facing := Facing)
+  );
+  return Value;
+end function;
 
 begin
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('interaction-test', 9182));
-  var Initial: GameState := NewGame(Metadata);
-  case Unwrap(Interact(Metadata, Initial)) of
-    InteractionOutcome.Described(Title, Text):
-    begin
-      AssertEquals(NoInteractionMessage, Text)
-    end
-    else
-    begin
-      panic('expected a no-target description at spawn')
-    end
-  end;
-  mutable var Entered: GameState := Initial;
-  case Unwrap(Interact(Metadata, AtEntrance(Metadata, Initial))) of
-    InteractionOutcome.Transitioned(State):
-    begin
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    'interaction-test',
+    9182,
+    4
+  ).Unwrap();
+  const Initial: GameState.GameState := GameState.NewGame(Metadata);
+  case Interaction.Interact(Fixtures.FixtureViewFor(Metadata, Initial), Initial).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals(Interaction.NoInteractionMessage, Text);
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.StateChanged(_):
+      panic('expected a no-target description at spawn');
+  end case;
+  var Entered: GameState.GameState := Initial;
+  case Interaction.Interact(
+    Fixtures.FixtureViewFor(Metadata, AtEntrance(Metadata, Initial)),
+    AtEntrance(Metadata, Initial)
+  ).Unwrap() of
+    when Interaction.InteractionOutcome.TransitionRequested(const Target):
+      Test.AssertEquals(Fixtures.SpawnDungeonAreaId(Metadata), Target);
+      const State: GameState.GameState := Fixtures.ActivateFixtureTransition(
+        Metadata,
+        AtEntrance(Metadata, Initial)
+      ).Unwrap();
       Entered := State;
-      AssertTrue(State.Area = AreaKind.Dungeon)
-    end
-    else
-    begin
-      panic('expected the entrance interaction to change areas')
-    end
-  end;
-  var Map: InteriorMap := Unwrap(InitialDungeonMap());
-  var CoinField: InteriorPosition := Unwrap(InitialItemPosition(Map, InitialDungeonItemId));
-  AssertEquals(9, Map.Tablet.X);
-  AssertEquals(0, Map.Tablet.Y);
-  AssertEquals(8, CoinField.X);
-  AssertEquals(1, CoinField.Y);
-  AssertTrue(Unwrap(InteriorCellAt(Map, Map.Tablet)) = InteriorCellKind.Wall);
-  AssertTrue(Unwrap(InteriorCellAt(Map, CoinField)) = InteriorCellKind.Floor);
-  AssertEquals('t', Unwrap(InteriorVisibleCode(Map, Map.Tablet)));
-  AssertEquals('i', Unwrap(InteriorVisibleCodeForState(Map, Entered, CoinField)));
-  AssertEquals('#', Unwrap(InteriorVisibleCode(Map, record
-    X := 0;
-    Y := 0;
-  end)));
-  case Unwrap(Interact(Metadata, Entered)) of
-    InteractionOutcome.Described(Title, Text):
-    begin
-      AssertEquals(InitialDungeonItemName, Title);
-      AssertEquals(InitialDungeonItemDescription, Text);
-      AssertEquals(0, Std.Arrays.Length(InventoryItems(Entered)))
-    end
-    else
-    begin
-      panic('expected the collectible item description from the dungeon start')
-    end
-  end;
+      Test.AssertTrue(State.Area = Coordinates.AreaKind.Dungeon);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.Described(_, _):
+      panic('expected the entrance interaction to change areas');
+  end case;
+  const Map: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMapFor(
+    Fixtures.SpawnDungeonAreaId(Metadata)
+  );
+  const CoinField: Coordinates.InteriorPosition := Map.Items[0].Position;
+  Test.AssertEquals(8, CoinField.X);
+  Test.AssertEquals(1, CoinField.Y);
+  Test.AssertTrue(
+    InteriorUnit.InteriorCellAt(Map, CoinField).Unwrap() = InteriorUnit.InteriorCellKind.Floor
+  );
+  Test.AssertEquals(
+    '#',
+    InteriorUnit.InteriorVisibleCode(Map, Coordinates.InteriorPosition(X := 9, Y := 0)).Unwrap()
+  );
+  Test.AssertEquals('i', GameState.InteriorVisibleCodeForState(Map, Entered, CoinField).Unwrap());
+  Test.AssertEquals(
+    '#',
+    InteriorUnit.InteriorVisibleCode(Map, Coordinates.InteriorPosition(X := 0, Y := 0)).Unwrap()
+  );
+  case Interaction.Interact(Fixtures.FixtureViewFor(Metadata, Entered), Entered).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals(ItemRules.AncientCoinName, Title);
+      Test.AssertEquals(ItemRules.AncientCoinDescription, Text);
+      Test.AssertEquals(0, GameState.InventoryItems(Entered).Length());
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.StateChanged(_):
+      panic('expected the collectible item description from the dungeon start');
+  end case;
 
-  case Unwrap(Interact(Metadata, AtDungeonPosition(Entered, CoinField, FacingDirection.West))) of
-    InteractionOutcome.StateChanged(State):
-    begin
+  case Interaction.Interact(
+    Fixtures.FixtureViewFor(
+      Metadata,
+      AtDungeonPosition(Entered, CoinField, Coordinates.FacingDirection.West)
+    ),
+    AtDungeonPosition(Entered, CoinField, Coordinates.FacingDirection.West)
+  ).Unwrap() of
+    when Interaction.InteractionOutcome.StateChanged(const State):
       Entered := State;
-      AssertEquals(1, Std.Arrays.Length(InventoryItems(State)));
-      AssertEquals(InitialDungeonItemId, InventoryItems(State)[0].Id);
-      AssertEquals('.', Unwrap(InteriorVisibleCodeForState(Map, State, CoinField)))
-    end
-    else
-    begin
-      panic('expected the occupied item field to add the item to inventory')
-    end
-  end;
+      Test.AssertEquals(1, GameState.InventoryItems(State).Length());
+      Test.AssertEquals(Map.Items[0].ItemId, GameState.InventoryItems(State)[0].Id);
+      Test.AssertEquals('.', GameState.InteriorVisibleCodeForState(Map, State, CoinField).Unwrap());
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.Described(_, _):
+      panic('expected the occupied item field to add the item to inventory');
+  end case;
 
-  case Unwrap(Interact(Metadata, AtDungeonPosition(Entered, CoinField, FacingDirection.West))) of
-    InteractionOutcome.Described(Title, Text):
-    begin
-      AssertEquals(NoInteractionMessage, Text);
-      AssertEquals(1, Std.Arrays.Length(InventoryItems(Entered)))
-    end
-    else
-    begin
-      panic('expected repeated pickup to leave the single inventory item unchanged')
-    end
-  end;
-  var FacingTablet: GameState := AtDungeonPosition(Entered, Map.Start, FacingDirection.North);
-  case Unwrap(Interact(Metadata, FacingTablet)) of
-    InteractionOutcome.Described(Title, Text):
-    begin
-      AssertEquals('Stone tablet', Title);
-      AssertEquals(StoneTabletDescription, Text)
-    end
-    else
-    begin
-      panic('expected the stone tablet description')
-    end
-  end;
+  case Interaction.Interact(
+    Fixtures.FixtureViewFor(
+      Metadata,
+      AtDungeonPosition(Entered, CoinField, Coordinates.FacingDirection.West)
+    ),
+    AtDungeonPosition(Entered, CoinField, Coordinates.FacingDirection.West)
+  ).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals(Interaction.NoInteractionMessage, Text);
+      Test.AssertEquals(1, GameState.InventoryItems(Entered).Length());
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.StateChanged(_):
+      panic('expected repeated pickup to leave the single inventory item unchanged');
+  end case;
+  const FacingWall: GameState.GameState := AtDungeonPosition(
+    Entered,
+    Map.Start,
+    Coordinates.FacingDirection.North
+  );
+  case Interaction.Interact(Fixtures.FixtureViewFor(Metadata, FacingWall), FacingWall).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals('', Title);
+      Test.AssertEquals(Interaction.NoInteractionMessage, Text);
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.StateChanged(_):
+      panic('expected no interaction with an ordinary wall');
+  end case;
 
-  case Unwrap(Interact(Metadata, AtDungeonPosition(Entered, Map.Exit, FacingDirection.West))) of
-    InteractionOutcome.Transitioned(State):
-    begin
-      AssertTrue(State.Area = AreaKind.OutdoorRegion);
-      var Position: WorldPosition := Unwrap(OutdoorPlayerPosition(State));
-      AssertEquals(Metadata.Entrance.X, Position.X);
-      AssertEquals(Metadata.Entrance.Y, Position.Y)
-    end
-    else
-    begin
-      panic('expected the exit interaction to return outdoors')
-    end
-  end;
-  mutable var Invalid: GameState := Entered;
-  Invalid.ReturnLocation := ReturnLocation.NoReturnLocation;
-  AssertTrue(IsError(Interact(Metadata, Invalid)))
+  case Interaction.Interact(
+    Fixtures.FixtureViewFor(
+      Metadata,
+      AtDungeonPosition(Entered, Map.Exit, Coordinates.FacingDirection.West)
+    ),
+    AtDungeonPosition(Entered, Map.Exit, Coordinates.FacingDirection.West)
+  ).Unwrap() of
+    when Interaction.InteractionOutcome.TransitionRequested(const Target):
+      Test.AssertEquals(Metadata.OutdoorAreaId, Target);
+      const State: GameState.GameState := Fixtures.ActivateFixtureTransition(
+        Metadata,
+        AtDungeonPosition(Entered, Map.Exit, Coordinates.FacingDirection.West)
+      ).Unwrap();
+      Test.AssertTrue(State.Area = Coordinates.AreaKind.OutdoorRegion);
+      const Position: Coordinates.WorldPosition := GameState.OutdoorPlayerPosition(State).Unwrap();
+      Test.AssertEquals(Metadata.SpawnEntrance.X, Position.X);
+      Test.AssertEquals(Metadata.SpawnEntrance.Y, Position.Y);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.Described(_, _):
+      panic('expected the exit interaction to return outdoors');
+  end case;
+  var Invalid: GameState.GameState := Entered;
+  Invalid.ReturnLocation := Coordinates.ReturnLocation.NoReturnLocation;
+  Test.AssertTrue(
+    (Interaction.Interact(Fixtures.FixtureViewFor(Metadata, Invalid), Invalid) is Error(_))
+  );
 end.

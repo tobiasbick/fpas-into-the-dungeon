@@ -1,0 +1,206 @@
+// Verifies that missing level data remains visible in the catalog and rejects Continue without deleting saves.
+program HandshakeFailureTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.ClientSession as ClientSession, Dungeon.Test.Levels as Levels, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
+
+function TestConfig(WorldsRoot: string): ConfigUnit.ServerConfig;
+begin
+  return ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := WorldsRoot,
+    WorldId := 'handshake',
+    WorldSeed := 24680,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 240,
+    MaximumViewHeight := 120
+  );
+end function;
+
+function ServeOnce(ListenerValue: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Client: Net.Connection := try Net.AcceptWithCancellation(ListenerValue, Token);
+  const Configured: boolean := try Net.SetTimeout(Client, 30000);
+  const Outcome: result of (boolean, string) := Server.ServeConnection(Client, Config, Token);
+  const Closed: boolean := try Net.Close(Client);
+  return Outcome;
+end function;
+
+function ServeReported(
+  ListenerValue: Net.Listener;
+  Config: ConfigUnit.ServerConfig;
+  Outcomes: channel of string;
+  Token: Tasks.CancellationToken
+): result of (boolean, string);
+begin
+  const Outcome: result of (boolean, string) := ServeOnce(ListenerValue, Config, Token);
+  ClientSession.ReportOutcome(Outcomes, 'server', Outcome);
+  return Outcome;
+end function;
+
+begin
+  const WorldsRoot: string := '.temp-data/handshake-failure-' +
+    Conv.IntToStr(Time.TimestampMillis());
+  const Config: ConfigUnit.ServerConfig := TestConfig(WorldsRoot);
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    WorldsRoot,
+    Config.WorldId,
+    Config.WorldSeed,
+    4,
+    32
+  ).Unwrap();
+  // A valid save that visited the spawn dungeon, whose level file then disappears.
+  const Map: InteriorUnit.InteriorMap := Levels.SpawnLevel(World);
+  const Entered: GameState.GameState := Levels.EnterSpawnLevel(
+    World,
+    GameState.NewGame(World.Metadata)
+  ).Unwrap();
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Entered).Unwrap());
+  const SaveBytes: string := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  const Region: Entrances.RegionCoordinate := Entrances.RegionOf(
+    World.Metadata,
+    World.Metadata.Spawn
+  );
+  const LevelPath: string := PathOps.Join([
+    World.Directory,
+    'dungeons',
+    (Conv.IntToStr(Region.X) + '_') + Conv.IntToStr(Region.Y),
+    '0.json'
+  ]);
+  Test.AssertTrue(Fs.DeleteFile(LevelPath).Unwrap());
+  const Source: Tasks.CancellationSource := Tasks.CreateCancellationSource();
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(Source);
+  // Raw protocol: Rejected with a world-data code instead of Welcome, then the server closes.
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeOnce(
+      ListenerValue,
+      Config,
+      Token
+    );
+    const Client: Net.Connection := Net.Connect('127.0.0.1', Address.Port, 5000).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(Client, 30000).Unwrap());
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 20, 10)),
+        Token
+      ).Unwrap()
+    );
+    const Reader: Transport.LineReader := Transport.NewLineReader(Client);
+    const Answer: Transport.LineRead := Transport.ReadLine(Reader, Token).Unwrap();
+    case ServerMessages.DecodeServer(Answer.Line).Unwrap() of
+      when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+        const Selected: Protocol.WorldSummary := WorldsUnit.SelectedWorld(Catalog).Unwrap();
+        Test.AssertEquals('world_data_error', Selected.SaveStatus);
+      when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected welcome with damaged world data');
+    end case;
+
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.LoadGame),
+        Token
+      ).Unwrap()
+    );
+    const Rejected: Transport.LineRead := Transport.ReadLine(Answer.Reader, Token).Unwrap();
+    case ServerMessages.DecodeServer(Rejected.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, const Message):
+        Test.AssertEquals('world_data_error', Code);
+        Test.AssertTrue(Map.AreaId in Message);
+        Test.AssertFalse(WorldsRoot in Message);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected rejected Continue');
+    end case;
+
+    Test.AssertTrue(
+      Transport.WriteLine(
+        Client,
+        ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+        Token
+      ).Unwrap()
+    );
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+    Test.AssertTrue(Net.Close(Client).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+  // The save survives and the missing level is not regenerated by inspection.
+  Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertFalse(Fs.Exists(LevelPath));
+  // Real network adapter and headless client: the reason arrives as a connection failure.
+  const AdapterListener: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const AdapterAddress: Net.NetworkAddress := Net.ListenerLocalAddress(AdapterListener).Unwrap();
+  const Outcomes: channel of string := Tasks.CreateChannel(4);
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(4);
+  scope
+    const AdapterServer: task of result of (boolean, string) := go ServeReported(
+      AdapterListener,
+      Config,
+      Outcomes,
+      Token
+    );
+    const AdapterClient: task of result of (boolean, string) := go ClientSession.RunReportedClient(
+      '127.0.0.1',
+      AdapterAddress.Port,
+      20,
+      10,
+      Requests,
+      Events,
+      Outcomes,
+      Token
+    );
+    const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+    var Model: ClientUnit.ClientModel := ClientUnit.NewClientModel(
+      '127.0.0.1',
+      AdapterAddress.Port,
+      '',
+      RuntimeData.DefaultClientPreferences(),
+      Requests,
+      Events
+    );
+    case ClientSession.NextClientEvent(Events, Outcomes, 30000) of
+      when ClientUnit.ClientEvent.Connected(const Catalog):
+        Model := ClientUnit.UpdateClientEvent(
+          Model,
+          ClientUnit.ClientEvent.Connected(Catalog),
+          Cmd
+        );
+      when ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.State(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected usable world selection');
+    end case;
+
+    Test.AssertTrue(Tasks.Send(Requests, Protocol.ClientMessage.LoadGame).Unwrap());
+    case ClientSession.NextClientEvent(Events, Outcomes, 30000) of
+      when ClientUnit.ClientEvent.Rejected(const Code, const Message):
+        Test.AssertEquals('world_data_error', Code);
+        Test.AssertTrue(Map.AreaId in Message);
+        Model := ClientUnit.UpdateClientEvent(
+          Model,
+          ClientUnit.ClientEvent.Rejected(Code, Message),
+          Cmd
+        );
+      when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.State(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+        panic('expected Continue rejection');
+    end case;
+
+    Test.AssertTrue(Model.ConnectionPhase = ClientUnit.ClientConnectionPhase.AwaitingSession);
+    Test.AssertTrue(Map.AreaId in Model.Status);
+    Test.AssertTrue(Tasks.Send(Requests, Protocol.ClientMessage.Disconnect).Unwrap());
+    const App: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(100, 24));
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+    App.Close();
+    Test.AssertTrue(Tasks.Wait(AdapterClient).Unwrap());
+    Test.AssertTrue(Tasks.Wait(AdapterServer).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(AdapterListener).Unwrap());
+  Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+  discard Tasks.CloseChannel(Outcomes);
+end.

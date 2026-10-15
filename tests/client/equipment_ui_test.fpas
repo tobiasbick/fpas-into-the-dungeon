@@ -1,265 +1,380 @@
 // Verifies the inventory overlay, the character sheet, equipment summaries, and combat animation playback.
 program DungeonEquipmentUiTest;
 
-uses
-  Dungeon.Client, Dungeon.Client.Animation, Dungeon.Protocol, Dungeon.RuntimeData, Std.Arrays,
-  Std.Options, Std.Results, Std.Str, Std.Task, Std.Test, Std.Tui;
+uses Dungeon.Test.Catalog as CatalogUnit, Dungeon.Client as ClientUnit, Dungeon.Client.Animation as AnimationUnit, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
 
-function ScreenContains(Snapshot: TuiSurfaceSnapshot; Text: string): boolean;
+function ScreenContains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
 begin
   for Row: integer := 0 to Snapshot.Height - 1 do
-  begin
-    if Std.Str.Contains(Snapshot.LineAt(Row), Text) then
     begin
-      return true
-    end
-  end;
+      if Text in Snapshot.LineAt(Row) then
+        begin
+          return true;
+        end;
+      end if;
+    end;
+  end for;
 
-  return false
-end;
+  return false;
+end function;
 
-function MakeKey(Kind: TuiKeyKind; Character: string): TuiKeyEvent;
+function MakeKey(Kind: Tui.TuiKeyKind; Character: string): Tui.TuiKeyEvent;
 begin
-  return record
-    kind := Kind;
-    ch := Character;
-    shift := false;
-    ctrl := false;
-    alt := false;
-    meta := false;
-  end
-end;
+  return Tui.TuiKeyEvent(
+    kind := Kind,
+    ch := Character,
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+end function;
 
-function Item(Id: string; Name: string; Slot: VisibleItemSlot; Equipped: boolean): VisibleInventoryItem;
+function Item(Id: string; Name: string; Slot: Protocol.VisibleItemSlot; Equipped: boolean): Protocol.VisibleInventoryItem;
 begin
-  return record
-    Id := Id;
-    Name := Name;
-    Slot := Slot;
-    Equipped := Equipped;
-  end
-end;
+  return Protocol.VisibleInventoryItem(Id := Id, Name := Name, Slot := Slot, Equipped := Equipped);
+end function;
 
-function Happened(Kind: VisibleCombatEventKind; Amount: integer): VisibleCombatEvent;
+function Happened(Kind: Protocol.VisibleCombatEventKind; Amount: integer): Protocol.VisibleCombatEvent;
 begin
-  return record
-    Kind := Kind;
-    Amount := Amount;
-  end
-end;
+  return Protocol.VisibleCombatEvent(Kind := Kind, Amount := Amount);
+end function;
 
 function Hall(
-  Inventory: array of VisibleInventoryItem;
+  Inventory: array of Protocol.VisibleInventoryItem;
   Health: integer;
-  Events: array of VisibleCombatEvent
-): VisibleState;
+  Events: array of Protocol.VisibleCombatEvent
+): Protocol.VisibleState;
 begin
-  return VisibleState.FirstPersonState(record
-    Title := 'Initial dungeon';
-    Status := 'Restless skeleton 9/12 — Space: Attack';
-    Width := 5;
-    Height := 3;
-    Rows := ['#####', '#.h.#', '#####'];
-    KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'];
-    PlayerX := 3;
-    PlayerY := 1;
-    Facing := FirstPersonFacing.West;
-    Inventory := Inventory;
-    Health := Health;
-    MaxHealth := 20;
-    Character := [record
-      Label := 'Damage';
-      Value := 'd6+1';
-      Source := 'Rusty short sword';
-    end, record
-      Label := 'Armor';
-      Value := '0';
-      Source := 'None';
-    end];
-    CombatLog := [];
-    CombatEvents := Events;
-  end)
-end;
+  return Protocol.VisibleState.FirstPersonState(
+    Protocol.FirstPersonVisibleState(
+      Title := 'Initial dungeon', Status := 'Restless skeleton 9/12 — Space: Attack', Width := 5,
+      Height := 3, Rows := [
+        '#####',
+        '#.h.#',
+        '#####'
+      ], KnowledgeRows := [
+        'vvvvv',
+        'vvvvv',
+        'vvvvv'
+      ], PlayerX := 3, PlayerY := 1, Facing := Protocol.FirstPersonFacing.West,
+      Inventory := Inventory, Health := Health, MaxHealth := 20, Character := [
+        Protocol.VisibleCharacterValue(
+          Label := 'Damage',
+          Value := 'd6+1',
+          Source := 'Rusty short sword'
+        ),
+        Protocol.VisibleCharacterValue(Label := 'Armor', Value := '0', Source := 'None')
+      ], CombatLog := [], CombatEvents := Events
+    )
+  );
+end function;
 
-function Press(App: TuiApplication; Model: ClientModel; Kind: TuiKeyKind; Character: string): ClientModel;
+function Press(App: Tui.TuiApplication; Model: ClientUnit.ClientModel; Kind: Tui.TuiKeyKind; Character: string): ClientUnit.ClientModel;
 begin
   App.InjectKeyForTest(MakeKey(Kind, Character));
-  return App.RunIterations(Model, UpdateClient, ViewClient, 1, 0)
-end;
+  return App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+end function;
 
-var
-  Coin: VisibleInventoryItem := Item('coin', 'Ancient coin', VisibleItemSlot.NoSlot, false);
-  Sword: VisibleInventoryItem := Item('sword', 'Rusty short sword', VisibleItemSlot.Weapon, false);
-  WornSword: VisibleInventoryItem := Item('sword', 'Rusty short sword', VisibleItemSlot.Weapon, true);
+const Coin: Protocol.VisibleInventoryItem := Item(
+  'coin',
+  'Ancient coin',
+  Protocol.VisibleItemSlot.NoSlot,
+  false
+);
+const Sword: Protocol.VisibleInventoryItem := Item(
+  'sword',
+  'Rusty short sword',
+  Protocol.VisibleItemSlot.Weapon,
+  false
+);
+const WornSword: Protocol.VisibleInventoryItem := Item(
+  'sword',
+  'Rusty short sword',
+  Protocol.VisibleItemSlot.Weapon,
+  true
+);
 
 begin
   // Playback rules: durations follow the turn's events, and frames change over time.
-  AssertFalse(StartAnimation([], false).Active);
-  var Swing: CombatAnimation := StartAnimation([Happened(VisibleCombatEventKind.PlayerHit, 5)], true);
-  AssertTrue(Swing.Active);
-  AssertEquals(2 * AnimationPhaseMilliseconds, Swing.Duration);
-  AssertTrue(AnimationFrameAt(Swing).Effect.Swing >= 0.0);
-  AssertTrue(AnimationFrameAt(Swing).Effect.Armed);
-  var Impact: CombatAnimation := AdvanceAnimation(Swing, AnimationPhaseMilliseconds);
-  AssertTrue(AnimationFrameAt(Impact).Effect.Flash);
-  AssertEquals('-5', AnimationFrameAt(Impact).HostileText);
-  AssertTrue(AnimationFrameAt(Impact).Effect.Swing < 0.0);
-  AssertFalse(AdvanceAnimation(Impact, AnimationPhaseMilliseconds).Active);
-  AssertEquals('', AnimationFrameAt(AdvanceAnimation(Impact, AnimationPhaseMilliseconds))
-                     .HostileText);
-  var Dodge: CombatAnimation := AdvanceAnimation(StartAnimation([
-                                                                  Happened(VisibleCombatEventKind.PlayerMiss, 0)
-                                                                ], false), AnimationPhaseMilliseconds +
-                                                                           (AnimationPhaseMilliseconds div 2));
-  AssertTrue(AnimationFrameAt(Dodge).Effect.Shift > 0.2);
-  AssertEquals('miss', AnimationFrameAt(Dodge).HostileText);
+  Test.AssertFalse(AnimationUnit.StartAnimation([], false).Active);
+  const Swing: AnimationUnit.CombatAnimation := AnimationUnit.StartAnimation(
+    [Happened(Protocol.VisibleCombatEventKind.PlayerHit, 5)],
+    true
+  );
+  Test.AssertTrue(Swing.Active);
+  Test.AssertEquals(2 * AnimationUnit.AnimationPhaseMilliseconds, Swing.Duration);
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Swing).Effect.Swing >= 0.0);
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Swing).Effect.Armed);
+  const Impact: AnimationUnit.CombatAnimation := AnimationUnit.AdvanceAnimation(
+    Swing,
+    AnimationUnit.AnimationPhaseMilliseconds
+  );
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Impact).Effect.Flash);
+  Test.AssertEquals('-5', AnimationUnit.AnimationFrameAt(Impact).HostileText);
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Impact).Effect.Swing < 0.0);
+  Test.AssertFalse(
+    AnimationUnit.AdvanceAnimation(Impact, AnimationUnit.AnimationPhaseMilliseconds).Active
+  );
+  Test.AssertEquals(
+    '',
+    AnimationUnit.AnimationFrameAt(
+      AnimationUnit.AdvanceAnimation(Impact, AnimationUnit.AnimationPhaseMilliseconds)
+    ).HostileText
+  );
+  const Dodge: AnimationUnit.CombatAnimation := AnimationUnit.AdvanceAnimation(
+    AnimationUnit.StartAnimation(
+      [
+        Happened(Protocol.VisibleCombatEventKind.PlayerMiss, 0)
+      ], false
+    ), AnimationUnit.AnimationPhaseMilliseconds +
+    (AnimationUnit.AnimationPhaseMilliseconds div 2)
+  );
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Dodge).Effect.Shift > 0.2);
+  Test.AssertEquals('miss', AnimationUnit.AnimationFrameAt(Dodge).HostileText);
   // The opponent's blow comes after the player's; the red frame waits for it.
-  var Exchange: CombatAnimation := StartAnimation([
-                                                    Happened(VisibleCombatEventKind.PlayerMiss, 0),
-                                                    Happened(VisibleCombatEventKind.HostileHit, 3)
-                                                  ], false);
-  AssertEquals(3 * AnimationPhaseMilliseconds, Exchange.Duration);
-  AssertFalse(AnimationFrameAt(Exchange).ShowDamageFrame);
-  var Lunge: CombatAnimation := AdvanceAnimation(Exchange, (2 * AnimationPhaseMilliseconds) +
-                                                           (AnimationPhaseMilliseconds div 2));
-  AssertTrue(AnimationFrameAt(Lunge).Effect.Scale > 1.2);
-  AssertTrue(AnimationFrameAt(Lunge).ShowDamageFrame);
-  AssertEquals('-3', AnimationFrameAt(Lunge).PlayerText);
+  const Exchange: AnimationUnit.CombatAnimation := AnimationUnit.StartAnimation(
+    [
+      Happened(Protocol.VisibleCombatEventKind.PlayerMiss, 0),
+      Happened(Protocol.VisibleCombatEventKind.HostileHit, 3)
+    ], false
+  );
+  Test.AssertEquals(3 * AnimationUnit.AnimationPhaseMilliseconds, Exchange.Duration);
+  Test.AssertFalse(AnimationUnit.AnimationFrameAt(Exchange).ShowDamageFrame);
+  const Lunge: AnimationUnit.CombatAnimation := AnimationUnit.AdvanceAnimation(
+    Exchange, (2 * AnimationUnit.AnimationPhaseMilliseconds) +
+    (AnimationUnit.AnimationPhaseMilliseconds div 2)
+  );
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Lunge).Effect.Scale > 1.2);
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Lunge).ShowDamageFrame);
+  Test.AssertEquals('-3', AnimationUnit.AnimationFrameAt(Lunge).PlayerText);
   // A destroyed opponent sinks where it stood.
-  var Collapse: CombatAnimation := AdvanceAnimation(StartAnimation([
-                                                                     Happened(VisibleCombatEventKind.PlayerHit, 4),
-                                                                     Happened(VisibleCombatEventKind.HostileDefeated, 0)
-                                                                   ], true), 2 *
-                                                                             AnimationPhaseMilliseconds);
-  AssertTrue(AnimationFrameAt(Collapse).Effect.FallenAhead);
-  AssertTrue(AnimationFrameAt(Collapse).Effect.Sink > 0.4);
+  const Collapse: AnimationUnit.CombatAnimation := AnimationUnit.AdvanceAnimation(
+    AnimationUnit.StartAnimation(
+      [
+        Happened(Protocol.VisibleCombatEventKind.PlayerHit, 4),
+        Happened(Protocol.VisibleCombatEventKind.HostileDefeated, 0)
+      ], true
+    ), 2 *
+    AnimationUnit.AnimationPhaseMilliseconds
+  );
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Collapse).Effect.FallenAhead);
+  Test.AssertTrue(AnimationUnit.AnimationFrameAt(Collapse).Effect.Sink > 0.4);
   // The client: equipment summaries in the context panel.
-  var Requests: channel of ClientMessage := CreateChannel(4);
-  var Events: channel of ClientEvent := CreateChannel(1);
-  mutable var Model: ClientModel := NewClientModel('127.0.0.1', 4040, '', DefaultClientPreferences(), Requests, Events);
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(1);
+  var Model: ClientUnit.ClientModel := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
   Model.ViewportWidth := 120;
   Model.ViewportHeight := 34;
   Model.RequestedWorldWidth := 78;
   Model.RequestedWorldHeight := 29;
-  var Cmd: TuiCmdOutput := TuiCmdOutput.Create();
-  Model := UpdateClientEvent(Model, ClientEvent.Connected(false, false), Cmd);
-  Model := UpdateClientEvent(Model, ClientEvent.State(Hall([Coin, Sword], 20, [])), Cmd);
-  var App: TuiApplication := TuiApplication.OpenForTest(TuiSize.Create(120, 34));
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Nothing worn'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Rusty short sword'));
+  const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Connected(CatalogUnit.FixtureCatalog(false, false)),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.State(Hall([Coin, Sword], 20, [])),
+    Cmd
+  );
+  const App: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 34));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Nothing worn'));
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Rusty short sword'));
   // I opens the inventory; the coin cannot be worn, the sword can.
-  Model := Press(App, Model, TuiKeyKind.Character, 'i');
-  AssertTrue(Model.Overlay = ClientOverlay.InventoryOverlay);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), '> Ancient coin — cannot be worn'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Rusty short sword — Weapon'));
-  Model := Press(App, Model, TuiKeyKind.Enter, '');
-  AssertEquals('That cannot be worn.', Model.Status);
-  AssertTrue(IsError(ReceiveWithTimeout(Requests, 0)));
-  Model := Press(App, Model, TuiKeyKind.Down, '');
-  AssertEquals(1, Model.InventorySelection);
-  Model := Press(App, Model, TuiKeyKind.Character, 's');
-  AssertEquals(0, Model.InventorySelection);
-  Model := Press(App, Model, TuiKeyKind.Character, 'w');
-  AssertEquals(1, Model.InventorySelection);
-  Model := Press(App, Model, TuiKeyKind.Enter, '');
-  AssertTrue(Model.Pending);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.Equip(ItemId):
-    begin
-      AssertEquals('sword', ItemId)
-    end
-    else
-    begin
-      panic('expected Enter to equip the sword')
-    end
-  end;
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'i');
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), '> Ancient coin — cannot be worn'));
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Rusty short sword — Weapon'));
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  Test.AssertEquals('That cannot be worn.', Model.Status);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := Press(App, Model, Tui.TuiKeyKind.Down, '');
+  Test.AssertEquals(1, Model.InventorySelection);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 's');
+  Test.AssertEquals(0, Model.InventorySelection);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'w');
+  Test.AssertEquals(1, Model.InventorySelection);
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(Model.Pending);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.Equip(const ItemId):
+      Test.AssertEquals('sword', ItemId);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected Enter to equip the sword');
+  end case;
 
   // The answer keeps the overlay open and shows the sword as worn.
-  Model := UpdateClientEvent(Model, ClientEvent.State(Hall([Coin, WornSword], 20, [])), Cmd);
-  AssertTrue(Model.Overlay = ClientOverlay.InventoryOverlay);
-  AssertFalse(Model.Pending);
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Rusty short sword — worn as Weapon'));
-  Model := Press(App, Model, TuiKeyKind.Enter, '');
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.Unequip(ItemId):
-    begin
-      AssertEquals('sword', ItemId)
-    end
-    else
-    begin
-      panic('expected Enter on a worn item to unequip it')
-    end
-  end;
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.State(Hall([Coin, WornSword], 20, [])),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+  Test.AssertFalse(Model.Pending);
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Rusty short sword — worn as Weapon'));
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.Unequip(const ItemId):
+      Test.AssertEquals('sword', ItemId);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected Enter on a worn item to unequip it');
+  end case;
 
-  Model := UpdateClientEvent(Model, ClientEvent.Rejected('equip_rejected', 'this item is not worn'), Cmd);
-  AssertEquals('this item is not worn', Model.Status);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Rejected('equip_rejected', 'this item is not worn'),
+    Cmd
+  );
+  Test.AssertEquals('this item is not worn', Model.Status);
   // Escape closes; the context panel lists the worn sword separately from carried items.
-  Model := Press(App, Model, TuiKeyKind.Escape, '');
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Weapon: Rusty short sword'));
-  AssertFalse(ScreenContains(App.SurfaceSnapshot(), 'Nothing worn'));
+  Model := Press(App, Model, Tui.TuiKeyKind.Escape, '');
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Weapon: Rusty short sword'));
+  Test.AssertFalse(ScreenContains(App.SurfaceSnapshot(), 'Nothing worn'));
   // C opens the character sheet with the server's lines; I switches to the inventory.
-  Model := Press(App, Model, TuiKeyKind.Character, 'c');
-  AssertTrue(Model.Overlay = ClientOverlay.CharacterSheetOverlay);
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health         20/20'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Damage         d6+1  · Rusty short sword'));
-  AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Armor          0  · None'));
-  Model := Press(App, Model, TuiKeyKind.Character, 'i');
-  AssertTrue(Model.Overlay = ClientOverlay.InventoryOverlay);
-  Model := Press(App, Model, TuiKeyKind.Character, 'I');
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
-  Model := Press(App, Model, TuiKeyKind.Character, 'C');
-  Model := Press(App, Model, TuiKeyKind.Escape, '');
-  AssertTrue(Model.Overlay = ClientOverlay.NoOverlay);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'c');
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.CharacterSheetOverlay);
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health         20/20'));
+  Test.AssertTrue(
+    ScreenContains(App.SurfaceSnapshot(), 'Damage         d6+1  · Rusty short sword')
+  );
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Armor          0  · None'));
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'i');
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'I');
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'C');
+  Model := Press(App, Model, Tui.TuiKeyKind.Escape, '');
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
   // A turn with combat events starts the animation; ticks advance it until it ends.
-  Model := UpdateClientEvent(Model, ClientEvent.State(Hall([Coin, WornSword], 17, [
-                                                                                    Happened(VisibleCombatEventKind.PlayerHit, 5),
-                                                                                    Happened(VisibleCombatEventKind.HostileHit, 3)
-                                                                                  ])), Cmd);
-  AssertTrue(Model.Animation.Active);
-  AssertTrue(Model.Animation.Armed);
-  AssertTrue(Model.DamageTaken);
-  AssertTrue(Model.AnimationScene.Width > 0);
-  Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-  mutable var Ticks: integer := 0;
-  mutable var SawDamageNumber: boolean := false;
+  Model := ClientUnit.UpdateClientEvent(
+    Model, ClientUnit.ClientEvent.State(
+      Hall(
+        [Coin, WornSword], 17, [
+          Happened(Protocol.VisibleCombatEventKind.PlayerHit, 5),
+          Happened(Protocol.VisibleCombatEventKind.HostileHit, 3)
+        ]
+      )
+    ), Cmd
+  );
+  Test.AssertTrue(Model.Animation.Active);
+  Test.AssertTrue(Model.Animation.Armed);
+  Test.AssertTrue(Model.DamageTaken);
+  Test.AssertTrue(Model.AnimationScene.Width > 0);
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  var Ticks: integer := 0;
+  var SawDamageNumber: boolean := false;
   while Model.Animation.Active and (Ticks < 40) do
-  begin
-    Model := UpdateClient(Model, TuiMsg.Tick(AnimationFrameMilliseconds), Cmd);
-    Model := App.RunIterations(Model, UpdateClient, ViewClient, 0, 0);
-    SawDamageNumber := SawDamageNumber or ScreenContains(App.SurfaceSnapshot(), '-5');
-    Ticks := Ticks + 1
-  end;
+    begin
+      Model := ClientUnit.UpdateClient(
+        Model,
+        Tui.TuiMsg.Tick(AnimationUnit.AnimationFrameMilliseconds),
+        Cmd
+      );
+      Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+      SawDamageNumber := SawDamageNumber or ScreenContains(App.SurfaceSnapshot(), '-5');
+      Ticks := Ticks + 1;
+    end;
+  end while;
 
-  AssertFalse(Model.Animation.Active);
-  AssertEquals((3 * AnimationPhaseMilliseconds) div AnimationFrameMilliseconds, Ticks);
-  AssertTrue(SawDamageNumber);
+  Test.AssertFalse(Model.Animation.Active);
+  Test.AssertEquals(
+    (3 * AnimationUnit.AnimationPhaseMilliseconds) div AnimationUnit.AnimationFrameMilliseconds,
+    Ticks
+  );
+  Test.AssertTrue(SawDamageNumber);
   // Late ticks change nothing; a key press completes a running animation at once.
-  var Settled: ClientModel := UpdateClient(Model, TuiMsg.Tick(AnimationFrameMilliseconds), Cmd);
-  AssertFalse(Settled.Animation.Active);
-  Model := UpdateClientEvent(Model, ClientEvent.State(Hall([Coin, WornSword], 17, [
-                                                                                    Happened(VisibleCombatEventKind.PlayerMiss, 0)
-                                                                                  ])), Cmd);
-  AssertTrue(Model.Animation.Active);
-  Model := Press(App, Model, TuiKeyKind.Character, 'z');
-  AssertFalse(Model.Animation.Active);
-  case Std.Results.Unwrap(ReceiveWithTimeout(Requests, 0)) of
-    ClientMessage.Wait:
+  const Settled: ClientUnit.ClientModel := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.Tick(AnimationUnit.AnimationFrameMilliseconds),
+    Cmd
+  );
+  Test.AssertFalse(Settled.Animation.Active);
+  Model := ClientUnit.UpdateClientEvent(
+    Model, ClientUnit.ClientEvent.State(
+      Hall(
+        [Coin, WornSword], 17, [
+          Happened(Protocol.VisibleCombatEventKind.PlayerMiss, 0)
+        ]
+      )
+    ), Cmd
+  );
+  Test.AssertTrue(Model.Animation.Active);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'z');
+  Test.AssertFalse(Model.Animation.Active);
+  if Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.Wait then
     begin
-    end
-    else
+      null;
+    end;
+  else
     begin
-      panic('expected the key that ended the animation to be handled')
-    end
-  end;
+      panic('expected the key that ended the animation to be handled');
+    end;
+  end if;
 
+  // D drops the selected item; the server decides whether that is allowed. An empty inventory sends nothing.
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.State(Hall([Coin, WornSword], 20, [])),
+    Cmd
+  );
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'i');
+  Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'D drop'));
+  Test.AssertTrue(
+    ScreenContains(App.SurfaceSnapshot(), 'Changing or dropping gear takes one turn.')
+  );
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'w');
+  Test.AssertEquals(0, Model.InventorySelection);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'd');
+  Test.AssertTrue(Model.Pending);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.DropItem(const ItemId):
+      Test.AssertEquals('coin', ItemId);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.Disconnect:
+      panic('expected D to drop the selected coin');
+  end case;
+
+  // The answer leaves the overlay open with a valid selection, even when the list shrinks to nothing.
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.State(Hall([WornSword], 20, [])),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+  Test.AssertEquals(0, Model.InventorySelection);
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.State(Hall([], 20, [])), Cmd);
+  Test.AssertEquals(0, Model.InventorySelection);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'D');
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := Press(App, Model, Tui.TuiKeyKind.Escape, '');
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
   // Defeat stops any running animation.
-  Model := UpdateClientEvent(Model, ClientEvent.State(Hall([Coin, WornSword], 17, [
-                                                                                    Happened(VisibleCombatEventKind.PlayerMiss, 0)
-                                                                                  ])), Cmd);
-  AssertTrue(Model.Animation.Active);
-  Model := UpdateClientEvent(Model, ClientEvent.Defeated('You have fallen.'), Cmd);
-  AssertFalse(Model.Animation.Active)
+  Model := ClientUnit.UpdateClientEvent(
+    Model, ClientUnit.ClientEvent.State(
+      Hall(
+        [Coin, WornSword], 17, [
+          Happened(Protocol.VisibleCombatEventKind.PlayerMiss, 0)
+        ]
+      )
+    ), Cmd
+  );
+  Test.AssertTrue(Model.Animation.Active);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Defeated('You have fallen.'),
+    Cmd
+  );
+  Test.AssertFalse(Model.Animation.Active);
 end.

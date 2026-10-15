@@ -1,0 +1,138 @@
+// Pure console presentation state plus explicit atomic server-default settings updates.
+unit Dungeon.Server.Console.Model;
+
+uses Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Logging as Logging, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Std.Conv as Conv;
+
+// Retain a bounded history independent of incoming event frequency.
+public const MaximumConsoleLines: integer := LogUnit.MaximumLogEntries;
+
+// The console edits creation defaults, never metadata of an existing world.
+public type ConsoleModel = record
+  public ConfigPath: string;
+  public History: LogUnit.LogHistory;
+  // Typed authoritative state; absent while no player is connected.
+  public Dashboard: option of Logging.ServerDashboardStatus;
+  public ListenerStatus: string;
+  public Port: integer := 4040;
+  public Width: integer := 100;
+  public Height: integer := 26;
+  public Uptime: integer := 0;
+  public Status: string;
+  public Connected: boolean;
+  public SettingsOpen: boolean;
+  public FocusedControl: integer;
+  public Seed: integer;
+  public RegionChunks: integer;
+  public SeedText: string;
+  public SeedCaret: integer;
+  public RegionText: string;
+  public RegionCaret: integer;
+  public SettingsError: string;
+end record;
+
+// Starts with validated settings from the current server configuration.
+public function NewConsoleModel(ConfigPath: string; Settings: RuntimeData.ServerWorldConfig): ConsoleModel;
+begin
+  const Seed: string := Conv.IntToStr(Settings.Seed);
+  const Region: string := Conv.IntToStr(Settings.DungeonRegionChunks);
+  return ConsoleModel(
+    ConfigPath := ConfigPath,
+    History := LogUnit.EmptyHistory(), Dashboard := None, ListenerStatus := 'Starting server',
+    Status := 'Starting server',
+    Connected := false,
+    FocusedControl := 20,
+    SettingsOpen := false,
+    Seed := Settings.Seed,
+    RegionChunks := Settings.DungeonRegionChunks,
+    SeedText := Seed,
+    SeedCaret := Seed.Length(),
+    RegionText := Region,
+    RegionCaret := Region.Length(),
+    SettingsError := ''
+  );
+end function;
+
+// Appends bounded live log text and tracks the last reported connection/world status.
+public function ApplyConsoleLog(State: ConsoleModel; Value: Logging.ServerLogEvent): ConsoleModel;
+begin
+  var Next: ConsoleModel := State;
+  Next.History := LogUnit.Append(
+    State.History,
+    Value,
+    LayoutUnit.ResolveLayout(State.Width, State.Height).LogRows
+  );
+  case Value.Snapshot of
+    when Some(const Dashboard):
+      Next.Dashboard := Some(Dashboard);
+      Next.Connected := true;
+    when None:
+      null;
+  end case;
+
+  if Value.Kind = 'connected' then
+    Next.Connected := true;
+    Next.Status := Value.Text;
+  end if;
+
+  if Value.Kind = 'world' then
+    Next.Status := Value.Text;
+  end if;
+
+  if Value.Kind = 'disconnected' then
+    Next.Connected := false;
+    Next.Dashboard := None;
+    Next.Status := 'Listening; no player connected';
+  end if;
+
+  if Value.Kind = 'stopped' then
+    Next.ListenerStatus := 'Stopped';
+    Next.Status := 'Stopped';
+    Next.Connected := false;
+    Next.Dashboard := None;
+  end if;
+
+  if Value.Kind = 'status' then
+    Next.ListenerStatus := Value.Text;
+    Next.Status := Value.Text;
+  end if;
+
+  return Next;
+end function;
+
+// Publishes changed defaults only after validation and successful atomic TOML storage.
+public function StoreConsoleSettings(State: ConsoleModel): ConsoleModel;
+begin
+  if not State.SettingsOpen then
+    return State;
+  end if;
+
+  case WorldsUnit.ParseWorldInteger(State.SeedText) of
+    when Error(const Reason):
+      begin
+        return State with SettingsError := 'Enter a valid whole-number seed.'; end with;
+      end;
+    when Ok(const Seed):
+      begin
+        case WorldsUnit.ParseWorldInteger(State.RegionText) of
+          when Error(const Reason):
+            begin
+              return State with SettingsError := 'Enter a valid whole-number region size.'; end with;
+            end;
+          when Ok(const RegionChunks):
+            begin
+              case RuntimeData.SaveServerDefaults(State.ConfigPath, Seed, RegionChunks) of
+                when Error(const Reason):
+                  begin
+                    return State with SettingsError := Reason; end with;
+                  end;
+                when Ok(const Written):
+                  begin
+                    return State with Seed := Seed; RegionChunks := RegionChunks; SettingsError := ''; SettingsOpen := false; FocusedControl := 20; end with;
+                  end;
+              end case;
+            end;
+        end case;
+      end;
+  end case;
+end function;
+end unit;

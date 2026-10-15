@@ -1,0 +1,269 @@
+// Positive, rejected and boundary tests for world selection, controlled input and confirmations.
+program WorldManagementUiTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as CatalogUnit, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Action(Id: integer): Tui.TuiMsg;
+begin
+  return Tui.TuiMsg.Action(Tui.TuiControlId.Create(1), Tui.TuiAction.Create(Id));
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(16);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(4);
+  const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+  var Model: ClientUnit.ClientModel := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  Model.ViewportHeight := 28;
+  const Good: Protocol.WorldSummary := CatalogUnit.FixtureCatalog(false, false).Worlds[0];
+  const Bad: Protocol.WorldSummary := Good with Id := 'broken'; Status := 'incompatible'; SaveStatus := 'unknown'; Reason := 'Recreate this world.'; end with;
+  const Mixed: Protocol.WorldCatalog := WorldsUnit.EmptyWorldCatalog(0, 4) with Worlds := [
+    Bad,
+    Good
+  ]; Total := 2; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Connected(Mixed), Cmd);
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(40), Tui.TuiAction.Create(148), 0),
+    Cmd
+  );
+  Test.AssertEquals(0, Model.WorldCursor);
+  Test.AssertFalse(Model.Pending);
+  Test.AssertEquals('', Model.Catalog.SelectedId);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(40), Tui.TuiAction.Create(148), 1),
+    Cmd
+  );
+  Test.AssertTrue(Model.Pending);
+  Test.AssertTrue(
+    Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() = Protocol.ClientMessage.SelectWorld(Good.Id)
+  );
+  // A preselected page may start less than one screen from the first world.
+  const LastPage: Protocol.WorldCatalog := WorldsUnit.EmptyWorldCatalog(0, 4) with Worlds := [Good]; Offset := 1; Total := 2; SelectedId := Good.Id; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(LastPage), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(147), Cmd);
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(Model, Action(140), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(146), Cmd);
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(Model, Action(120), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(146), Cmd);
+  Test.AssertTrue(Model.Pending);
+  Test.AssertTrue(
+    Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() = Protocol.ClientMessage.ListWorlds(0, false)
+  );
+  Model := ClientUnit.UpdateClient(Model, Action(146), Cmd);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(Mixed), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(146), Cmd);
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model.ViewportHeight := 0;
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Worlds(WorldsUnit.EmptyWorldCatalog(-17, 8)),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClient(Model, Action(149), Cmd);
+  Test.AssertTrue(Model.Pending);
+  Test.AssertTrue(
+    Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() = Protocol.ClientMessage.ListWorlds(0, false)
+  );
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Worlds(WorldsUnit.EmptyWorldCatalog(-17, 8)),
+    Cmd
+  );
+  Test.AssertFalse(Model.SaveAvailable);
+  Model := ClientUnit.UpdateClient(Model, Action(104), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(105), Cmd);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(Model, Action(140), Cmd);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NewWorldOverlay);
+  Test.AssertEquals('-17', Model.SeedText);
+  Test.AssertEquals('8', Model.RegionText);
+  // Actual terminal routing edits the controlled seed field.
+  const App: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(100, 28));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  const Key: Tui.TuiKeyEvent := Tui.TuiKeyEvent(
+    kind := Tui.TuiKeyKind.Character,
+    ch := '0',
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+  App.InjectKeyForTest(Key);
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertEquals('-170', Model.SeedText);
+  App.Close();
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.TextChanged(
+      Tui.TuiControlId.Create(42),
+      Tui.TuiAction.Create(141),
+      '2147483648',
+      10
+    ),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClient(Model, Action(143), Cmd);
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NewWorldOverlay);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  for Text: string in ['', 'abc', '9223372036854775808'] do
+    Model := ClientUnit.UpdateClient(
+      Model,
+      Tui.TuiMsg.TextChanged(
+        Tui.TuiControlId.Create(42),
+        Tui.TuiAction.Create(141),
+        Text,
+        Text.Length()
+      ),
+      Cmd
+    );
+    Model := ClientUnit.UpdateClient(Model, Action(143), Cmd);
+    Test.AssertFalse(Model.Pending);
+  end for;
+
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.TextChanged(
+      Tui.TuiControlId.Create(42),
+      Tui.TuiAction.Create(141),
+      '-2147483648',
+      11
+    ),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.TextChanged(Tui.TuiControlId.Create(43), Tui.TuiAction.Create(142), '16', 2),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClient(Model, Action(143), Cmd);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.CreateWorld(const Seed, const Region):
+      Test.AssertEquals(-2147483648, Seed);
+      Test.AssertEquals(16, Region);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected bounded create');
+  end case;
+
+  Test.AssertTrue(Model.Pending);
+  Model := ClientUnit.UpdateClient(Model, Action(143), Cmd);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Rejected('create_failed', 'Storage blocked'),
+    Cmd
+  );
+  Test.AssertFalse(Model.Pending);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NewWorldOverlay);
+  Model := ClientUnit.UpdateClient(Model, Action(120), Cmd);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Worlds(CatalogUnit.FixtureCatalog(false, false)),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClient(Model, Action(105), Cmd);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() = Protocol.ClientMessage.LoadGame);
+  const Visible: Protocol.VisibleState := Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      OriginX := 0, OriginY := 0, Width := 1, Height := 1, Rows := [
+        'g'
+      ], KnowledgeRows := [
+        'v'
+      ], PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := [], Health := 20,
+      MaxHealth := 20, Character := []
+    )
+  );
+  Model.RequestedWorldWidth := 1;
+  Model.RequestedWorldHeight := 1;
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.State(Visible), Cmd);
+  Test.AssertTrue(Model.Dirty);
+  Model := ClientUnit.UpdateClient(Model, Action(144), Cmd);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.DiscardConfirmationOverlay);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(Model, Action(120), Cmd);
+  Test.AssertTrue(Model.HasVisibleState);
+  Test.AssertTrue(Model.Dirty);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.SystemMenuOverlay);
+  Model := ClientUnit.UpdateClient(Model, Action(144), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(145), Cmd);
+  case Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() of
+    when Protocol.ClientMessage.ListWorlds(const Offset, const DiscardProgress):
+      Test.AssertTrue(DiscardProgress);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+      panic('expected explicit discard');
+  end case;
+
+  Test.AssertTrue(Model.HasVisibleState);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Rejected('storage_error', 'Catalog blocked'),
+    Cmd
+  );
+  Test.AssertTrue(Model.HasVisibleState);
+  Test.AssertTrue(Model.Dirty);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Worlds(CatalogUnit.FixtureCatalog(true, false)),
+    Cmd
+  );
+  Test.AssertFalse(Model.HasVisibleState);
+  Test.AssertFalse(Model.Dirty);
+  Model := ClientUnit.UpdateClient(Model, Action(105), Cmd);
+  discard Tasks.ReceiveWithTimeout(Requests, 0).Unwrap();
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.State(Visible), Cmd);
+  Test.AssertFalse(Model.Dirty);
+  Model := ClientUnit.UpdateClient(Model, Action(112), Cmd);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.SaveConfirmationOverlay);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(Model, Action(131), Cmd);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(Model, Action(130), Cmd);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0) is Error(_));
+  Model := ClientUnit.UpdateClient(Model, Action(112), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(130), Cmd);
+  Test.AssertTrue(
+    Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() = Protocol.ClientMessage.OverwriteSaveGame
+  );
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.SaveCompleted, Cmd);
+  Test.AssertFalse(Model.Pending);
+  Test.AssertFalse(Model.Dirty);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Defeated('You have fallen.'),
+    Cmd
+  );
+  Test.AssertTrue(
+    Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() = Protocol.ClientMessage.ListWorlds(0, false)
+  );
+  const NewCatalog: Protocol.WorldCatalog := CatalogUnit.FixtureCatalog(false, false) with SelectedId := 'new-world'; Worlds := [
+    CatalogUnit.FixtureCatalog(false, false).Worlds[0] with Id := 'new-world'; end with
+  ]; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(NewCatalog), Cmd);
+  Test.AssertEquals('new-world', Model.Catalog.SelectedId);
+  Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.DefeatOverlay);
+  Test.AssertFalse(Model.Pending);
+  Model := ClientUnit.UpdateClient(Model, Action(120), Cmd);
+  Model := ClientUnit.UpdateClient(Model, Action(105), Cmd);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() = Protocol.ClientMessage.LoadGame);
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

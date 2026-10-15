@@ -1,0 +1,292 @@
+// Covers the dungeon entry checkpoints: failures before sending keep the session, save, and level files.
+program TransitionCheckpointsTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Failures as FailuresUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Dungeon.World.Interiors.Errors as Errors, Dungeon.World.Savegame.Errors as SavegameErrors;
+
+function Receive(Client: Net.Connection; Token: Tasks.CancellationToken): Protocol.ServerMessage;
+begin
+  const Response: Transport.LineRead := Transport.ReadLine(
+    Transport.NewLineReader(Client),
+    Token
+  ).Unwrap();
+  return ServerMessages.DecodeServer(Response.Line).Unwrap();
+end function;
+
+procedure AssertRejectedWith(Message: Protocol.ServerMessage; Expected: string);
+begin
+  case Message of
+    when Protocol.ServerMessage.Rejected(const Code, const Text):
+      Test.AssertEquals(Expected, Code);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a rejection');
+  end case;
+end procedure;
+
+// The player is still outside on the entrance, with nothing visited and no retained map.
+procedure AssertStillOutside(Session: SessionUnit.ServerSession; Entrance: Coordinates.WorldPosition);
+begin
+  const State: GameState.GameState := Session.State.Unwrap();
+  Test.AssertTrue(State.Area = Coordinates.AreaKind.OutdoorRegion);
+  const Position: Coordinates.WorldPosition := GameState.OutdoorPlayerPosition(State).Unwrap();
+  Test.AssertEquals(Entrance.X, Position.X);
+  Test.AssertEquals(Entrance.Y, Position.Y);
+  Test.AssertEquals(0, State.VisitedAreas.Length());
+  Test.AssertEquals(0, State.Items.Length());
+  Test.AssertEquals(0, State.Exploration.InteriorAreas.Length());
+  Test.AssertTrue(Session.Interior is None);
+end procedure;
+
+begin
+  const Root: string := '.temp-data/transition-checkpoints-' +
+    Conv.IntToStr(Time.TimestampMillis());
+  const World: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    Root,
+    'checkpoints',
+    24680,
+    4,
+    32
+  ).Unwrap();
+  const Metadata: Terrain.WorldMetadata := World.Metadata;
+  const Region: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  const AreaId: string := Identities.DungeonAreaId(Metadata, Region);
+  const LevelDirectory: string := PathOps.Join([
+    World.Directory,
+    'dungeons',
+    (Conv.IntToStr(Region.X) + '_') + Conv.IntToStr(Region.Y)
+  ]);
+  const LevelPath: string := PathOps.Join([LevelDirectory, '0.json']);
+  const Outside: GameState.GameState := GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SpawnEntrance
+  ); end with;
+
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Outside).Unwrap());
+  const SaveBytes: string := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  const Session: SessionUnit.ServerSession := SessionUnit.ServerSession(
+    World := World,
+    WorldSelected := true,
+    Dirty := false,
+    State := Some(Outside),
+    Interior := None,
+    Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12),
+    Finished := false
+  );
+  const Config: ConfigUnit.ServerConfig := ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := None,
+    WorldsRoot := Root,
+    WorldId := Metadata.Id,
+    WorldSeed := Metadata.Seed,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 80,
+    MaximumViewHeight := 24
+  );
+  const ListenerValue: Net.Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address: Net.NetworkAddress := Net.ListenerLocalAddress(ListenerValue).Unwrap();
+  const Client: Net.Connection := Net.Connect('127.0.0.1', Address.Port, 2000).Unwrap();
+  const Server: Net.Connection := Net.Accept(ListenerValue).Unwrap();
+  Test.AssertTrue(Net.SetTimeout(Client, 5000).Unwrap());
+  Test.AssertTrue(Net.SetTimeout(Server, 5000).Unwrap());
+  const Token: Tasks.CancellationToken := Tasks.GetCancellationToken(
+    Tasks.CreateCancellationSource()
+  );
+  // Invalid interaction away from the entrance: no storage operation at all.
+  const AtSpawn: SessionUnit.ServerSession := Session with State := Some(
+    GameState.NewGame(Metadata)
+  ); end with;
+  const Ignored: SessionUnit.ServerSession := Handling.HandleSessionMessage(
+    AtSpawn,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  case Receive(Client, Token) of
+    when Protocol.ServerMessage.Interaction(const Title, const Text):
+      null;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a plain interaction result away from the entrance');
+  end case;
+
+  Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'dungeons'])));
+  // Read failure: the level path is not a file.
+  Test.AssertTrue(Fs.CreateDirAll(LevelPath).Unwrap());
+  const AfterRead: SessionUnit.ServerSession := Handling.HandleSessionMessage(
+    Session,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  AssertRejectedWith(Receive(Client, Token), 'storage_error');
+  AssertStillOutside(AfterRead, Metadata.SpawnEntrance);
+  Test.AssertTrue(Fs.IsDir(LevelPath));
+  Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  // Atomic-write failure in a fresh world: the level directory is blocked by a file; nothing is published.
+  const BlockedRoot: string := PathOps.Join([Root, 'blocked']);
+  const BlockedWorld: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    BlockedRoot,
+    'checkpoints',
+    24680,
+    4,
+    32
+  ).Unwrap();
+  const BlockedDirectory: string := PathOps.Join([
+    BlockedWorld.Directory,
+    'dungeons',
+    (Conv.IntToStr(Region.X) + '_') + Conv.IntToStr(Region.Y)
+  ]);
+  Test.AssertTrue(Fs.CreateDirAll(PathOps.Join([BlockedWorld.Directory, 'dungeons'])).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(BlockedDirectory, 'blocking file').Unwrap());
+  const AfterWrite: SessionUnit.ServerSession := Handling.HandleSessionMessage(
+    Session with World := BlockedWorld; end with,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  AssertRejectedWith(Receive(Client, Token), 'storage_error');
+  AssertStillOutside(AfterWrite, Metadata.SpawnEntrance);
+  Test.AssertEquals('blocking file', Fs.ReadText(BlockedDirectory).Unwrap());
+  // A published level followed by a candidate failure before sending: rejected, session unchanged,
+  // and the valid file may remain for the next entry.
+  const CleanRoot: string := PathOps.Join([Root, 'clean']);
+  const CleanWorld: WorldUnit.WorldSession := WorldUnit.OpenWorld(
+    CleanRoot,
+    'checkpoints',
+    24680,
+    4,
+    32
+  ).Unwrap();
+  const CleanSession: SessionUnit.ServerSession := Session with World := CleanWorld; end with;
+  const Map: InteriorUnit.InteriorMap := Interiors.OpenLevelForEntry(
+    CleanWorld,
+    Outside,
+    AreaId
+  ).Unwrap();
+  const CleanLevelPath: string := PathOps.Join([
+    CleanWorld.Directory,
+    'dungeons',
+    (Conv.IntToStr(Region.X) + '_') + Conv.IntToStr(Region.Y),
+    '0.json'
+  ]);
+  const Published: string := Fs.ReadText(CleanLevelPath).Unwrap();
+  const OutdoorView: GameState.AreaView := GameState.AreaView(
+    Metadata := Metadata,
+    Interior := None
+  );
+  const Transition: Movement.AreaTransition := Movement.ActivateAreaTransition(
+    OutdoorView,
+    Outside,
+    Some(Map)
+  ).Unwrap();
+  const Inconsistent: Movement.AreaTransition := Transition with View := OutdoorView; end with;
+  const AfterCandidate: SessionUnit.ServerSession := Replies.CommitTransition(
+    CleanSession,
+    Inconsistent,
+    Server,
+    Token
+  ).Unwrap();
+  AssertRejectedWith(Receive(Client, Token), 'interaction_rejected');
+  AssertStillOutside(AfterCandidate, Metadata.SpawnEntrance);
+  Test.AssertEquals(Published, Fs.ReadText(CleanLevelPath).Unwrap());
+  // Success: state and map are installed together; the previous save is untouched.
+  const Entered: SessionUnit.ServerSession := Handling.HandleSessionMessage(
+    CleanSession,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  case Receive(Client, Token) of
+    when Protocol.ServerMessage.State(const Value):
+      null;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected the entered first-person state');
+  end case;
+  const Inside: GameState.GameState := Entered.State.Unwrap();
+  Test.AssertEquals(AreaId, Inside.AreaId);
+  Test.AssertEquals(AreaId, Entered.Interior.Unwrap().AreaId);
+  Test.AssertTrue(GameState.HasVisitedArea(Inside, AreaId));
+  Test.AssertEquals(Published, Fs.ReadText(CleanLevelPath).Unwrap());
+  Test.AssertFalse(Fs.Exists(Savegame.SaveGamePath(CleanWorld)));
+  // Leaving and entering again reuses the single stored level.
+  const AtExit: SessionUnit.ServerSession := Entered with State := Some(
+    Inside with Player := Coordinates.PlayerPosition.FirstPerson(
+      Coordinates.FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing)
+    ); end with
+  ); end with;
+  const Left: SessionUnit.ServerSession := Handling.HandleSessionMessage(
+    AtExit,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  const LeftMessage: Protocol.ServerMessage := Receive(Client, Token);
+  Test.AssertTrue(Left.Interior is None);
+  const Again: SessionUnit.ServerSession := Handling.HandleSessionMessage(
+    Left,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  const AgainMessage: Protocol.ServerMessage := Receive(Client, Token);
+  Test.AssertTrue(Again.Interior is Some(_));
+  Test.AssertEquals(Published, Fs.ReadText(CleanLevelPath).Unwrap());
+  // A send failure is an error: the caller closes the connection and discards the unsaved session.
+  Test.AssertTrue(Net.Close(Client).Unwrap());
+  Test.AssertTrue(Net.Close(Server).Unwrap());
+  Test.AssertTrue(Replies.CommitTransition(CleanSession, Transition, Server, Token) is Error(_));
+  Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(Net.CloseListener(ListenerValue).Unwrap());
+  // Failure classes map to stable codes; the generator cannot fail for a valid region, so the
+  // generation class is checked directly. Messages name world and area but no host path.
+  Test.AssertEquals(
+    'world_data_error',
+    FailuresUnit.LevelRejection('w', Errors.LevelFailure.Missing('w:dungeon:0:0')).Code
+  );
+  Test.AssertEquals(
+    'world_data_error',
+    FailuresUnit.LevelRejection('w', Errors.LevelFailure.Invalid('w:dungeon:0:0', 'C:\x')).Code
+  );
+  Test.AssertEquals(
+    'storage_error',
+    FailuresUnit.LevelRejection('w', Errors.LevelFailure.Io('C:\x')).Code
+  );
+  Test.AssertEquals(
+    'generation_error',
+    FailuresUnit.LevelRejection(
+      'w',
+      Errors.LevelFailure.Generation('w:dungeon:0:0', 'defect')
+    ).Code
+  );
+  Test.AssertFalse(
+    'C:' in FailuresUnit.LevelRejection('w', Errors.LevelFailure.Io('C:\x')).Message
+  );
+  Test.AssertEquals(
+    'save_failed',
+    FailuresUnit.PersistenceRejection(
+      'w',
+      'save_failed',
+      SavegameErrors.PersistenceFailure.InvalidState('bad')
+    ).Code
+  );
+  Test.AssertEquals(
+    'storage_error',
+    FailuresUnit.PersistenceRejection(
+      'w',
+      'save_failed',
+      SavegameErrors.PersistenceFailure.Io('disk')
+    ).Code
+  );
+  Test.AssertEquals(
+    'world_data_error',
+    FailuresUnit.PersistenceRejection(
+      'w',
+      'load_failed',
+      SavegameErrors.PersistenceFailure.Level(Errors.LevelFailure.Missing('a'))
+    ).Code
+  );
+end.

@@ -8,11 +8,28 @@ define quests, experience, or levels.
 
 - **World** is the complete authoritative game state owned by the server. It
   contains all known areas, locations, actors, and their relationships.
+- **World catalog** is the server-provided list of existing world identities,
+  original parameters, compatibility and save status. Listing does not create
+  worlds, generate levels or modify saves.
+- **Continue** restores the selected world's explicit save, or starts at spawn
+  when no save exists. **Start over** resets mutable game state in the same world
+  while retaining immutable geometry and the previous save.
+- **Creation defaults** are server settings used by the new-world editor. They
+  never replace original parameters of an existing world.
+- **Unsaved progress** is authoritative game state changed since the last
+  successful explicit save or load. Returning to world selection requires
+  explicit discard confirmation while such progress exists.
 - **Area** is one navigable spatial environment. The player occupies one area
   at a time.
 - **Area identity** is the stable server-owned identifier of one area. It is
   deterministic within the selected world and remains separate from the
   display label shown to players.
+- **Visited area** is a dungeon whose original entities have been created in
+  the current game. It remains visited after leaving, and its visit record
+  survives save/load. A new game starts with no visited areas.
+- **Materialization** is the one-time creation of mutable items and opponents
+  from a dungeon's original placements on its first entry in a game. Revisits
+  retain their current state.
 - **Outdoor region** is an exterior area such as countryside, wilderness, or
   the land between settlements. Outdoor regions may be practically unbounded.
 - **Settlement** is an exterior built-up area such as a village or town.
@@ -25,8 +42,24 @@ define quests, experience, or levels.
   entrance.
 - **Entrance** is a location in one source area that names a valid transition
   target. Standing on an entrance and activating it are separate events.
+- **Entrance region** is a square part of the outdoor region, a whole number of
+  chunks wide (`dungeon_region_chunks`), that holds at most one dungeon
+  entrance. Its signed region coordinate names its dungeon.
+- **Entrance site** is the one outdoor field of an entrance region that leads
+  to its dungeon. A region whose seeded candidate field is not clear land has
+  no site and no dungeon.
+- **Spawn entrance** is the entrance site of the spawn's region, three steps
+  from the spawn. It belongs to the spawn region even when it lies across a
+  region border.
+- **Generated dungeon** is a dungeon whose geometry and original placements
+  are generated from the world seed and its entrance region when it is first
+  entered, then stored as an immutable **level file**.
+- **Dungeon name** is a stored display label generated from the world seed and
+  entrance region on first entry. Different dungeons may share a name; their
+  area identities remain distinct. Revisit, rendering and load use the stored name.
 - **Return location** is the exact source area identity and coordinate retained
-  by the server while the player occupies an entered area.
+  by the server while the player occupies an entered area. For a dungeon it is
+  the entrance site of its region.
 - **Terrain** is the generated ground material, vegetation, or water that gives
   an outdoor location its physical character.
 - **Tree** is an individual vegetation feature on otherwise open terrain.
@@ -49,46 +82,33 @@ define quests, experience, or levels.
   state or only return a description.
 - **Inspectable object** is a world feature that can return a description
   without necessarily changing game state.
-- **Stone tablet** is the first fixed, wall-mounted inspectable object in the
-  initial dungeon.
 - **Item** is a server-owned game object with stable identity, kind, and exactly
   one authoritative location.
 - **Inventory** is the set of items whose authoritative location is the player.
   The visible inventory is only a client-safe projection of that set.
-- **Ancient coin** is the first fixed collectible item in the initial dungeon.
+- **Ancient coin** is a collectible item placed in every generated dungeon.
   It proves inspection, pickup, projection, and persistence without defining a
   broader loot system.
 - **Equipment** is the set of items the player wears. A worn item is still part
   of the inventory; its location records the slot it occupies.
 - **Slot** is the body location for one worn item: **weapon** or **body**. An
   item kind fits at most one slot, and each slot holds at most one item.
-- **Rusty short sword** is the first weapon; it lies in the initial dungeon's
-  middle passage. **Leather jerkin** is the first armor; it lies in the nook
-  north of the exit.
+- **Rusty short sword** is the first weapon and **Leather jerkin** the first
+  armor; every generated dungeon places both on room corners.
 - **Derived values** are the character's values as the rules read them: hit
   threshold, damage, armor, and maximum health. They follow from base values
   plus equipment and are never stored.
 - **Armor** raises the roll an opponent needs to hit the player.
-- **NPC** is a non-player character with stable server-owned identity, kind,
-  placement, and persistent state.
-- **Mara, the old adventurer** is the first fixed NPC. She occupies and blocks
-  one dungeon field and remembers whether she has met the player.
-- **Dialogue** is a connection-scoped conversation controlled by the server.
-  It is not part of the saved world snapshot.
-- **Dialogue frame** is one complete server-provided speaker, text, and ordered
-  set of currently available choices.
-- **Dialogue choice** is a stable server-owned response identity plus
-  client-facing text. The client selects it but does not resolve its effect.
 - **Opponent** is a hostile actor with stable server-owned identity, kind,
   area, position, health, and alert status. A standing opponent blocks its
   field; a destroyed one stays recorded but is never projected.
-- **Restless skeleton** is the first opponent. It rests in the inner passages
-  of the initial dungeon.
+- **Restless skeleton** is the first opponent. Every generated dungeon places one
+  or two in the rooms farthest from its start.
 - **Health** is the player's current and full hit points. Reaching zero means
   defeat.
 - **Turn** is one time-consuming player action (step, attack, wait, or a change
   of equipment) followed
-  by the opponents' actions. Turning, interaction, dialogue, and saving are not
+  by the opponents' actions. Turning, interaction, and saving are not
   turns.
 - **Attack** is the player intention that strikes the field directly ahead.
 - **Combat log** is the ordered list of messages describing one resolved turn.
@@ -147,8 +167,6 @@ area.
 - **Exploration map** is an overlay showing the current area's discovered
   world knowledge. It may be panned independently of the player and does not
   replace the primary view or issue movement intentions.
-- **Dialogue overlay** is the framed modal presentation of the current dialogue
-  frame. It owns gameplay input until the server advances or ends the dialogue.
 - **Inventory overlay** lists carried and worn items with a client-owned
   selection; `Enter` asks the server to wear or remove the selected item.
 - **Character sheet** is the overlay that shows health, the server-formatted
@@ -187,33 +205,27 @@ presentation concerns and never expand the discovered area.
 
 ## Current implementation
 
-The first world contains a deterministic, chunked outdoor region and one
-initial dungeon. A distinct entrance is generated exactly three traversable
-cardinal steps from the spawn. Walking onto it remains ordinary outdoor
-movement; `Enter` requests a server-authoritative interaction, which activates
-the transition on that field. The dungeon is
-an 11 by 9 bounded area with a fixed start pose, walls, floor, corridors, and
-one visible exit field. It also contains a fixed stone tablet on a wall directly
-north of the start. Facing the tablet and pressing `Enter` returns its
-description without changing game state. A fixed Ancient coin can first be
-inspected from the adjacent start field and then picked up with `Enter` while
-standing on its field. The server removes it from the area, exposes it in the
-visible inventory, and persists its carried state. The server accepts the exit
-interaction only on the exit field and then returns the player to the exact
-outdoor entrance coordinate.
+The world contains a deterministic, chunked outdoor region divided into
+entrance regions. The spawn entrance lies three traversable cardinal steps
+from the spawn; further entrances are rare, at most one per region. Walking onto
+an entrance remains ordinary outdoor movement; `Enter` requests a
+server-authoritative interaction, which activates the transition on that field.
 
-Mara occupies the dead end at dungeon field `(1, 1)`. She blocks movement and
-can be addressed with `Enter` from the adjacent field. Her deterministic
-conversation distinguishes the first and later meeting and conditionally
-offers a question about the Ancient coin while the player carries it. Only the
-meeting flag is persistent; an active conversation ends with the connection.
-While the player is hurt, Mara also offers to tend their wounds.
+Each entrance leads to a named generated dungeon: a 31 by 21 area of
+rooms and corridors with a start beside one visible exit field, one or two
+restless skeletons, and an Ancient coin, a Rusty short sword, and a Leather
+jerkin. Its level is generated and stored on the first visit and read back
+afterwards. Items can be inspected from the field before them, picked up with
+`Enter`, worn, dropped with `D`, and carried into other dungeons. The server
+accepts the exit interaction only on the exit field and then returns the player
+to the dungeon's entrance site.
 
-The restless skeleton rests at field `(3, 3)` in the inner passages that form
-the second route to the exit. It notices the player through line of sight,
-chases, and fights turn by turn; see [combat](../architecture/combat.md).
+Accepted outdoor steps restore one health point, up to the player's maximum.
 
-Settlements, further entrances, navigable interiors, mutable terrain, broader
+Skeletons notice the player through line of sight, chase, and fight turn by
+turn; see [combat](../architecture/combat.md).
+
+Settlements, building interiors, multi-level dungeons, mutable terrain, broader
 world simulation, isometric rendering, LLM integration, and broader mutable RPG
 systems remain outside this slice. Their intended order is tracked in the
 [roadmap](../roadmap.md).

@@ -1,295 +1,317 @@
 // Versioned wire contract shared by client and server: limits, cell codes, and message types.
 unit Dungeon.Protocol;
 
-uses Std.Arrays;
+// Wire compatibility version required during the hello/welcome handshake.
+public const ProtocolVersion: integer := 14;
+// Catalog pages and text are bounded to fit one transport line.
+public const MaximumWorldsPerPage: integer := 64;
+public const MaximumWorldReasonLength: integer := 256;
+// Maximum UTF-8 payload before the terminating line feed.
+public const MaximumLineBytes: integer := 65536;
+// Largest exploration-map window that remains below the line-size limit with two row planes.
+public const MaximumExplorationMapWidth: integer := 240;
+public const MaximumExplorationMapHeight: integer := 120;
+// Symmetric wire bound that keeps origin-plus-dimension arithmetic inside the integer domain.
+public const MaximumExplorationMapOriginMagnitude: integer := 1000000000;
+// Defensive bounds for client-safe inventory summaries in visible-state messages.
+public const MaximumVisibleInventoryItems: integer := 64;
+public const MaximumVisibleInventoryTextLength: integer := 128;
+// Defensive bounds for the character's health and one turn's combat messages.
+public const MaximumVisibleHealth: integer := 999;
+public const MaximumCombatLogEntries: integer := 8;
+public const MaximumCombatLogTextLength: integer := 160;
+// Defensive bounds for one turn's structured combat events and their damage amounts.
+public const MaximumCombatEvents: integer := 8;
+public const MaximumCombatEventAmount: integer := 999;
+// Defensive bounds for the server-formatted character sheet lines.
+public const MaximumCharacterValues: integer := 8;
+public const MaximumCharacterTextLength: integer := 64;
+// One-character wire alphabet for visible-state and exploration-map rows. Dungeon.Terrain
+// and Dungeon.Interior produce these codes; the server contract test keeps both aligned.
+// Field whose content is undiscovered in both map and interior rows.
+public const UnknownFieldCode: string := '?';
+// Outdoor map rows.
+public const MapGrassCode: string := 'g';
+public const MapTreeCode: string := 't';
+public const MapForestCode: string := 'f';
+public const MapDesertCode: string := 'd';
+public const MapMountainCode: string := 'm';
+public const MapSeaCode: string := 'o';
+public const MapRiverCode: string := 'r';
+public const MapLakeCode: string := 'l';
+public const MapPathCode: string := 'p';
+public const MapEntranceCode: string := 'e';
+// First-person and interior map rows; item codes appear only in currently visible fields.
+public const InteriorWallCode: string := '#';
+public const InteriorFloorCode: string := '.';
+public const InteriorExitCode: string := 'x';
+public const InteriorItemCode: string := 'i';
+// Weapon and armor lying on a visible interior field.
+public const InteriorWeaponCode: string := 'w';
+public const InteriorArmorCode: string := 'a';
+// A standing opponent appears only in currently visible fields.
+public const InteriorHostileCode: string := 'h';
+// Knowledge rows: undiscovered, remembered, or currently visible.
+public const KnowledgeUndiscoveredCode: string := 'u';
+public const KnowledgeRememberedCode: string := 'r';
+public const KnowledgeVisibleCode: string := 'v';
 
-public const
-  // Wire compatibility version required during the hello/welcome handshake.
-  ProtocolVersion: integer := 12;
-  // Maximum UTF-8 payload before the terminating line feed.
-  MaximumLineBytes: integer := 65536;
-  // Largest exploration-map window that remains below the line-size limit with two row planes.
-  MaximumExplorationMapWidth: integer := 240;
-  MaximumExplorationMapHeight: integer := 120;
-  // Symmetric wire bound that keeps origin-plus-dimension arithmetic inside the integer domain.
-  MaximumExplorationMapOriginMagnitude: integer := 1000000000;
-  // Defensive bounds for client-safe inventory summaries in visible-state messages.
-  MaximumVisibleInventoryItems: integer := 64;
-  MaximumVisibleInventoryTextLength: integer := 128;
-  // Defensive bounds for one deterministic dialogue frame.
-  MaximumDialogueChoices: integer := 6;
-  MaximumDialogueIdLength: integer := 128;
-  MaximumDialogueTextLength: integer := 2048;
-  // Bound for short dialogue labels: the speaker name and each choice text.
-  MaximumDialogueLabelLength: integer := 128;
-  // Defensive bounds for the character's health and one turn's combat messages.
-  MaximumVisibleHealth: integer := 999;
-  MaximumCombatLogEntries: integer := 8;
-  MaximumCombatLogTextLength: integer := 160;
-  // Defensive bounds for one turn's structured combat events and their damage amounts.
-  MaximumCombatEvents: integer := 8;
-  MaximumCombatEventAmount: integer := 999;
-  // Defensive bounds for the server-formatted character sheet lines.
-  MaximumCharacterValues: integer := 8;
-  MaximumCharacterTextLength: integer := 64;
-  // One-character wire alphabet for visible-state and exploration-map rows. Dungeon.Terrain
-  // and Dungeon.Interior produce these codes; the server contract test keeps both aligned.
-  // Field whose content is undiscovered in both map and interior rows.
-  UnknownFieldCode: string := '?';
-  // Outdoor map rows.
-  MapGrassCode: string := 'g';
-  MapTreeCode: string := 't';
-  MapForestCode: string := 'f';
-  MapDesertCode: string := 'd';
-  MapMountainCode: string := 'm';
-  MapSeaCode: string := 'o';
-  MapRiverCode: string := 'r';
-  MapLakeCode: string := 'l';
-  MapPathCode: string := 'p';
-  MapEntranceCode: string := 'e';
-  // First-person and interior map rows; item and NPC codes appear only in currently visible fields.
-  InteriorWallCode: string := '#';
-  InteriorFloorCode: string := '.';
-  InteriorExitCode: string := 'x';
-  InteriorTabletCode: string := 't';
-  InteriorItemCode: string := 'i';
-  // Weapon and armor lying on a visible interior field.
-  InteriorWeaponCode: string := 'w';
-  InteriorArmorCode: string := 'a';
-  InteriorNpcCode: string := 'n';
-  // A standing opponent; like items and NPCs it appears only in currently visible fields.
-  InteriorHostileCode: string := 'h';
-  // Knowledge rows: undiscovered, remembered, or currently visible.
-  KnowledgeUndiscoveredCode: string := 'u';
-  KnowledgeRememberedCode: string := 'r';
-  KnowledgeVisibleCode: string := 'v';
+// Selects the renderer the client must use for a visible state.
+public type ViewKind = enum
+  Map;
+  FirstPerson;
+end enum;
 
-public type
-  // Selects the renderer the client must use for a visible state.
-  ViewKind = enum
-    Map;
-    FirstPerson;
-  end;
-  // Cardinal player orientation carried by a first-person visible state.
-  FirstPersonFacing = enum
-    North;
-    East;
-    South;
-    West;
-  end;
-  // Relative one-field first-person translation requested by the client.
-  FirstPersonStepDirection = enum
-    Forward;
-    Backward;
-    Left;
-    Right;
-  end;
-  // Relative 90-degree first-person rotation requested by the client.
-  FirstPersonTurnDirection = enum
-    Left;
-    Right;
-  end;
-  // Slot in which an inventory item can be worn; NoSlot marks items that cannot be worn.
-  VisibleItemSlot = enum
-    NoSlot;
-    Weapon;
-    Body;
-  end;
-  // Client-safe identity, display name, and wear state of one carried or worn item.
-  VisibleInventoryItem = record
-    public Id: string;
-    public Name: string;
-    public Slot: VisibleItemSlot;
-    // True while the item is worn; only items with a slot can be worn.
-    public Equipped: boolean;
-  end;
-  // One server-formatted character sheet line such as `Damage`, `d6+1`, `Rusty short sword`.
-  VisibleCharacterValue = record
-    public Label: string;
-    public Value: string;
-    public Source: string;
-  end;
-  // Kind of one structured fact of the resolved turn.
-  VisibleCombatEventKind = enum
-    PlayerHit;
-    PlayerMiss;
-    HostileHit;
-    HostileMiss;
-    HostileDefeated;
-  end;
-  // One structured fact of the resolved turn; Amount is the damage of a hit, otherwise zero.
-  VisibleCombatEvent = record
-    public Kind: VisibleCombatEventKind;
-    public Amount: integer;
-  end;
-  // One stable server-provided response displayed by the dialogue overlay.
-  VisibleDialogueChoice = record
-    public Id: string;
-    public Text: string;
-  end;
-  // Complete current dialogue frame; the client never derives available choices.
-  VisibleDialogue = record
-    public NpcId: string;
-    public Speaker: string;
-    public Text: string;
-    public Choices: array of VisibleDialogueChoice;
-  end;
-  // Client-safe map projection; dimensions, rows, and player coordinates must agree.
-  MapVisibleState = record
-    public OriginX: integer;
-    public OriginY: integer;
-    public Width: integer;
-    public Height: integer;
-    public Rows: array of string;
-    // One u, r, or v code per terrain field: undiscovered, remembered, or visible.
-    public KnowledgeRows: array of string;
-    public PlayerX: integer;
-    public PlayerY: integer;
-    public WorldX: integer;
-    public WorldY: integer;
-    // Bounded carried-item summaries; IDs are unique and names are display-only.
-    public Inventory: array of VisibleInventoryItem;
-    // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
-    public Health: integer;
-    public MaxHealth: integer;
-    // Character sheet lines in display order.
-    public Character: array of VisibleCharacterValue;
-  end;
-  // Client-safe bounded interior geometry and pose used by the first-person renderer.
-  FirstPersonVisibleState = record
-    public Title: string;
-    public Status: string;
-    public Width: integer;
-    public Height: integer;
-    public Rows: array of string;
-    // One u, r, or v code per geometry field: undiscovered, remembered, or visible.
-    public KnowledgeRows: array of string;
-    public PlayerX: integer;
-    public PlayerY: integer;
-    public Facing: FirstPersonFacing;
-    // Bounded carried-item summaries; IDs are unique and names are display-only.
-    public Inventory: array of VisibleInventoryItem;
-    // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
-    public Health: integer;
-    public MaxHealth: integer;
-    // Character sheet lines in display order.
-    public Character: array of VisibleCharacterValue;
-    // Messages of the turn that produced this state, oldest first; empty without combat.
-    public CombatLog: array of string;
-    // Structured facts of the same turn in order; presentation only.
-    public CombatEvents: array of VisibleCombatEvent;
-  end;
-  // View-specific server projection; map-only fields cannot occur in a first-person state.
-  VisibleState = enum
-    MapState(Value: MapVisibleState);
-    FirstPersonState(Value: FirstPersonVisibleState);
-  end;
-  // Client-safe current-area map window; u fields must contain ? and dimensions match both row planes.
-  ExplorationMapState = record
-    public View: ViewKind;
-    public LabelText: string;
-    public OriginX: integer;
-    public OriginY: integer;
-    public Width: integer;
-    public Height: integer;
-    public Rows: array of string;
-    public KnowledgeRows: array of string;
-    public PlayerWorldX: integer;
-    public PlayerWorldY: integer;
-    public PlayerInWindow: boolean;
-  end;
-  // Session setup, player intentions, and lifecycle messages accepted by the server.
-  ClientMessage = enum
-    Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
-    StartNewGame;
-    LoadGame;
-    SaveGame;
-    Viewport(Width: integer; Height: integer);
-    // Requests a read-only current-area map window; this never changes discovery or player state.
-    ExplorationMap(OriginX: integer; OriginY: integer; Width: integer; Height: integer);
-    Move(DeltaX: integer; DeltaY: integer);
-    StepFirstPerson(Direction: FirstPersonStepDirection);
-    TurnFirstPerson(Direction: FirstPersonTurnDirection);
-    // Requests server-side interaction with the current field or field directly ahead.
-    Interact;
-    // Selects one stable response from the active server-owned dialogue frame.
-    DialogueChoice(ChoiceId: string);
-    // Ends the active dialogue without changing persistent game state.
-    EndDialogue;
-    // Attacks the field directly ahead; consumes one combat turn.
-    Attack;
-    // Passes one combat turn without acting.
-    Wait;
-    // Wears one carried item; consumes one turn.
-    Equip(ItemId: string);
-    // Returns one worn item to the inventory; consumes one turn.
-    Unequip(ItemId: string);
-    Disconnect;
-  end;
-  // Handshake, including save availability/removal, visible state, and structured outcomes.
-  ServerMessage = enum
-    Welcome(Version: integer; SaveAvailable: boolean; InvalidSaveRemoved: boolean);
-    State(Value: VisibleState);
-    ExplorationMap(Value: ExplorationMapState);
-    // Read-only result; nonempty title opens a description, empty title denotes status feedback.
-    Interaction(Title: string; Message: string);
-    // Starts or advances one server-owned deterministic dialogue.
-    Dialogue(Value: VisibleDialogue);
-    // Acknowledges that no dialogue remains active for this connection.
-    DialogueEnded;
-    SaveCompleted;
-    // Replaces the state response of the turn in which the character fell; the session has ended.
-    Defeated(Message: string);
-    Rejected(Code: string; Message: string);
-    ErrorMessage(Code: string; Message: string);
-  end;
+// Cardinal player orientation carried by a first-person visible state.
+public type FirstPersonFacing = enum
+  North;
+  East;
+  South;
+  West;
+end enum;
+
+// Relative one-field first-person translation requested by the client.
+public type FirstPersonStepDirection = enum
+  Forward;
+  Backward;
+  Left;
+  Right;
+end enum;
+
+// Relative 90-degree first-person rotation requested by the client.
+public type FirstPersonTurnDirection = enum
+  Left;
+  Right;
+end enum;
+
+// Slot in which an inventory item can be worn; NoSlot marks items that cannot be worn.
+public type VisibleItemSlot = enum
+  NoSlot;
+  Weapon;
+  Body;
+end enum;
+
+// Client-safe identity, display name, and wear state of one carried or worn item.
+public type VisibleInventoryItem = record
+  public Id: string;
+  public Name: string;
+  public Slot: VisibleItemSlot;
+  // True while the item is worn; only items with a slot can be worn.
+  public Equipped: boolean;
+end record;
+
+// One server-formatted character sheet line such as `Damage`, `d6+1`, `Rusty short sword`.
+public type VisibleCharacterValue = record
+  public Label: string;
+  public Value: string;
+  public Source: string;
+end record;
+
+// Kind of one structured fact of the resolved turn.
+public type VisibleCombatEventKind = enum
+  PlayerHit;
+  PlayerMiss;
+  HostileHit;
+  HostileMiss;
+  HostileDefeated;
+end enum;
+
+// One structured fact of the resolved turn; Amount is the damage of a hit, otherwise zero.
+public type VisibleCombatEvent = record
+  public Kind: VisibleCombatEventKind;
+  public Amount: integer;
+end record;
+
+// Client-safe map projection; dimensions, rows, and player coordinates must agree.
+public type MapVisibleState = record
+  public OriginX: integer;
+  public OriginY: integer;
+  public Width: integer;
+  public Height: integer;
+  public Rows: array of string;
+  // One u, r, or v code per terrain field: undiscovered, remembered, or visible.
+  public KnowledgeRows: array of string;
+  public PlayerX: integer;
+  public PlayerY: integer;
+  public WorldX: integer;
+  public WorldY: integer;
+  // Bounded carried-item summaries; IDs are unique and names are display-only.
+  public Inventory: array of VisibleInventoryItem;
+  // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
+  public Health: integer;
+  public MaxHealth: integer;
+  // Character sheet lines in display order.
+  public Character: array of VisibleCharacterValue;
+end record;
+
+// Client-safe bounded interior geometry and pose used by the first-person renderer.
+public type FirstPersonVisibleState = record
+  public Title: string;
+  public Status: string;
+  public Width: integer;
+  public Height: integer;
+  public Rows: array of string;
+  // One u, r, or v code per geometry field: undiscovered, remembered, or visible.
+  public KnowledgeRows: array of string;
+  public PlayerX: integer;
+  public PlayerY: integer;
+  public Facing: FirstPersonFacing;
+  // Bounded carried-item summaries; IDs are unique and names are display-only.
+  public Inventory: array of VisibleInventoryItem;
+  // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
+  public Health: integer;
+  public MaxHealth: integer;
+  // Character sheet lines in display order.
+  public Character: array of VisibleCharacterValue;
+  // Messages of the turn that produced this state, oldest first; empty without combat.
+  public CombatLog: array of string;
+  // Structured facts of the same turn in order; presentation only.
+  public CombatEvents: array of VisibleCombatEvent;
+end record;
+
+// View-specific server projection; map-only fields cannot occur in a first-person state.
+public type VisibleState = enum
+  MapState(Value: MapVisibleState);
+  FirstPersonState(Value: FirstPersonVisibleState);
+end enum;
+
+// Client-safe current-area map window; u fields must contain ? and dimensions match both row planes.
+public type ExplorationMapState = record
+  public View: ViewKind;
+  public LabelText: string;
+  public OriginX: integer;
+  public OriginY: integer;
+  public Width: integer;
+  public Height: integer;
+  public Rows: array of string;
+  public KnowledgeRows: array of string;
+  public PlayerWorldX: integer;
+  public PlayerWorldY: integer;
+  public PlayerInWindow: boolean;
+end record;
+
+// Client-safe world metadata and classified save availability; no geometry is exposed.
+public type WorldSummary = record
+  public Id: string;
+  public Seed: integer;
+  public RegionChunks: integer;
+  public Status: string;
+  public SaveStatus: string;
+  public Reason: string;
+end record;
+
+// One stable page plus current defaults/ranges and server-selected identity.
+public type WorldCatalog = record
+  public Worlds: array of WorldSummary;
+  public SelectedId: string;
+  public SelectionReason: string;
+  public Offset: integer;
+  public Total: integer;
+  public DefaultSeed: integer;
+  public MinimumSeed: integer;
+  public MaximumSeed: integer;
+  public DefaultRegionChunks: integer;
+  public MinimumRegionChunks: integer;
+  public MaximumRegionChunks: integer;
+end record;
+
+// Session setup, player intentions, and lifecycle messages accepted by the server.
+public type ClientMessage = enum
+  Hello(Version: integer; ViewWidth: integer; ViewHeight: integer);
+  StartNewGame;
+  LoadGame;
+  SaveGame;
+  // Explicit permission to replace the selected world's existing save.
+  OverwriteSaveGame;
+  // Return to selection; Discard authorizes abandoning unsaved state.
+  ListWorlds(Offset: integer; DiscardProgress: boolean);
+  // Prepares an existing world before installing it; allowed only outside active play.
+  SelectWorld(Id: string);
+  // Server allocates the identity and starts fresh play using validated parameters.
+  CreateWorld(Seed: integer; RegionChunks: integer);
+  Viewport(Width: integer; Height: integer);
+  // Requests a read-only current-area map window; this never changes discovery or player state.
+  ExplorationMap(OriginX: integer; OriginY: integer; Width: integer; Height: integer);
+  Move(DeltaX: integer; DeltaY: integer);
+  StepFirstPerson(Direction: FirstPersonStepDirection);
+  TurnFirstPerson(Direction: FirstPersonTurnDirection);
+  // Requests server-side interaction with the current field or field directly ahead.
+  Interact;
+  // Attacks the field directly ahead; consumes one combat turn.
+  Attack;
+  // Passes one combat turn without acting.
+  Wait;
+  // Wears one carried item; consumes one turn.
+  Equip(ItemId: string);
+  // Returns one worn item to the inventory; consumes one turn.
+  Unequip(ItemId: string);
+  // Lays one carried item on the occupied dungeon floor field; consumes one turn.
+  DropItem(ItemId: string);
+  Disconnect;
+end enum;
+
+// Handshake, including save availability/removal, visible state, and structured outcomes.
+public type ServerMessage = enum
+  Welcome(Version: integer; Catalog: WorldCatalog);
+  Worlds(Catalog: WorldCatalog);
+  State(Value: VisibleState);
+  ExplorationMap(Value: ExplorationMapState);
+  // Read-only result; nonempty title opens a description, empty title denotes status feedback.
+  Interaction(Title: string; Message: string);
+  SaveCompleted;
+  // Replaces the state response of the turn in which the character fell; the session has ended.
+  Defeated(Message: string);
+  Rejected(Code: string; Message: string);
+  ErrorMessage(Code: string; Message: string);
+end enum;
 
 // Returns whether one character belongs to the outdoor map-row alphabet, including UnknownFieldCode.
 public function IsMapCellCode(Value: string): boolean;
 begin
-  return Std.Arrays.Contains([
-                               UnknownFieldCode,
-                               MapGrassCode,
-                               MapTreeCode,
-                               MapForestCode,
-                               MapDesertCode,
-                               MapMountainCode,
-                               MapSeaCode,
-                               MapRiverCode,
-                               MapLakeCode,
-                               MapPathCode,
-                               MapEntranceCode
-                             ], Value)
-end;
+  return Value in
+    [
+      UnknownFieldCode,
+      MapGrassCode,
+      MapTreeCode,
+      MapForestCode,
+      MapDesertCode,
+      MapMountainCode,
+      MapSeaCode,
+      MapRiverCode,
+      MapLakeCode,
+      MapPathCode,
+      MapEntranceCode
+    ];
+end function;
 
 // Returns whether one character belongs to the interior-row alphabet, including UnknownFieldCode.
 public function IsInteriorCellCode(Value: string): boolean;
 begin
-  return Std.Arrays.Contains([
-                               UnknownFieldCode,
-                               InteriorWallCode,
-                               InteriorFloorCode,
-                               InteriorExitCode,
-                               InteriorTabletCode,
-                               InteriorItemCode,
-                               InteriorWeaponCode,
-                               InteriorArmorCode,
-                               InteriorNpcCode,
-                               InteriorHostileCode
-                             ], Value)
-end;
+  return Value in
+    [
+      UnknownFieldCode,
+      InteriorWallCode,
+      InteriorFloorCode,
+      InteriorExitCode,
+      InteriorItemCode,
+      InteriorWeaponCode,
+      InteriorArmorCode,
+      InteriorHostileCode
+    ];
+end function;
 
 // Returns the renderer family selected by a view-specific visible state.
 public function ViewForVisibleState(Value: VisibleState): ViewKind;
 begin
   case Value of
-    VisibleState.MapState(MapValue):
-    begin
-      return ViewKind.Map
-    end;
-    VisibleState.FirstPersonState(FirstPersonValue):
-    begin
-      return ViewKind.FirstPerson
-    end
-  end
-end;
+    when VisibleState.MapState(const MapValue):
+      begin
+        return ViewKind.Map;
+      end;
+    when VisibleState.FirstPersonState(const FirstPersonValue):
+      begin
+        return ViewKind.FirstPerson;
+      end;
+  end case;
+end function;
+end unit;

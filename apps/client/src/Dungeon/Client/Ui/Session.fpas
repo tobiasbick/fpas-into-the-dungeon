@@ -1,267 +1,334 @@
 // Client session lifecycle: connecting, session choice, saving, quitting, overlays, panels, and the message log.
 unit Dungeon.Client.Ui.Session;
 
-uses
-  Dungeon.Client.Ui.Controls, Dungeon.Client.Ui.Intentions, Dungeon.Client.Ui.Layout,
-  Dungeon.Client.Model, Dungeon.Client.Network, Dungeon.Protocol, Dungeon.RuntimeData, Std.Arrays,
-  Std.Conv, Std.Str, Std.Task, Std.Tui;
+uses Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Intentions as Intentions, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Model as Model, Dungeon.Client.Network as Network, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Std.Conv as Conv, Std.Tasks as Tasks, Std.Tui as Tui;
 
 // Appends one entry to the bounded message history, dropping the oldest.
-public function AppendMessage(State: ClientModel; Text: string): ClientModel;
+public function AppendMessage(State: Model.ClientModel; Text: string): Model.ClientModel;
 begin
-  mutable var Next: ClientModel := State;
-  mutable var Values: array of string := Std.Arrays.Concat(State.Messages, [Text]);
-  if Std.Arrays.Length(Values) > MaximumMessages then
-  begin
-    Values := Std.Arrays.Slice(Values, Std.Arrays.Length(Values) - MaximumMessages, MaximumMessages)
-  end;
+  var Next: Model.ClientModel := State;
+  var Values: array of string := State.Messages.Concat([Text]);
+  if Values.Length() > Layout.MaximumMessages then
+    begin
+      Values := Values.Slice(Values.Length() - Layout.MaximumMessages, Layout.MaximumMessages);
+    end;
+  end if;
 
   Next.Messages := Values;
-  return Next
-end;
+  return Next;
+end function;
 
 // Closes the active overlay and restores the focus that belongs to the screen below it.
-public function CloseOverlay(State: ClientModel): ClientModel;
+public function CloseOverlay(State: Model.ClientModel): Model.ClientModel;
 begin
-  mutable var Next: ClientModel := State;
-  if State.Overlay = ClientOverlay.DescriptionOverlay then
-  begin
-    Next.Status := 'Ready';
-    Next.DescriptionTitle := '';
-    Next.DescriptionText := '';
-    Next.DescriptionOffset := 0
-  end;
-
-  if State.Overlay = ClientOverlay.SessionCancelConfirmationOverlay then
-  begin
-    Next.Overlay := ClientOverlay.NoOverlay;
-    Next.FocusedControl := CancelSessionStartControlId;
-    return Next
-  end;
-
-  if State.Overlay = ClientOverlay.SaveConfirmationOverlay then
-  begin
-    Next.Overlay := ClientOverlay.SystemMenuOverlay;
-    Next.FocusedControl := SaveControlId;
-    return Next
-  end;
-
-  if State.Overlay = ClientOverlay.InformationOverlay then
-  begin
-    if State.Screen = ClientScreen.StartScreen then
+  var Next: Model.ClientModel := State;
+  if State.Overlay = Model.ClientOverlay.DescriptionOverlay then
     begin
-      if State.ConnectionPhase = ClientConnectionPhase.AwaitingSession then
-      begin
-        Next.FocusedControl := NewGameControlId
-      end
+      Next.Status := 'Ready';
+      Next.DescriptionTitle := '';
+      Next.DescriptionText := '';
+      Next.DescriptionOffset := 0;
+    end;
+  end if;
+
+  if State.Overlay = Model.ClientOverlay.SessionCancelConfirmationOverlay then
+    begin
+      Next.Overlay := Model.ClientOverlay.NoOverlay;
+      Next.FocusedControl := Controls.CancelSessionStartControlId;
+      return Next;
+    end;
+  end if;
+
+  if (State.Overlay = Model.ClientOverlay.SaveConfirmationOverlay)
+    or
+    (State.Overlay = Model.ClientOverlay.DiscardConfirmationOverlay)
+  then
+    begin
+      Next.Overlay := Model.ClientOverlay.SystemMenuOverlay;
+      Next.FocusedControl := Controls.SaveControlId;
+      return Next;
+    end;
+  end if;
+
+  if State.Overlay = Model.ClientOverlay.InformationOverlay then
+    begin
+      if State.Screen = Model.ClientScreen.StartScreen then
+        begin
+          if State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession then
+            begin
+              Next.FocusedControl := Controls.NewGameControlId;
+            end;
+          else
+            begin
+              Next.FocusedControl := Controls.ConnectControlId;
+            end;
+          end if;
+        end;
       else
-      begin
-        Next.FocusedControl := ConnectControlId
-      end
-    end
-    else
-    begin
-      Next.Overlay := ClientOverlay.SystemMenuOverlay;
-      Next.FocusedControl := ResumeControlId;
-      return Next
-    end
-  end;
+        begin
+          Next.Overlay := Model.ClientOverlay.SystemMenuOverlay;
+          Next.FocusedControl := Controls.ResumeControlId;
+          return Next;
+        end;
+      end if;
+    end;
+  end if;
 
-  Next.Overlay := ClientOverlay.NoOverlay;
+  Next.Overlay := Model.ClientOverlay.NoOverlay;
   Next.FocusedControl := 0;
-  if State.Screen = ClientScreen.StartScreen then
-  begin
-    if State.ConnectionPhase = ClientConnectionPhase.AwaitingSession then
+  if State.Screen = Model.ClientScreen.StartScreen then
     begin
-      Next.FocusedControl := NewGameControlId
-    end
-    else
-    begin
-      Next.FocusedControl := ConnectControlId
-    end
-  end;
+      if State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession then
+        begin
+          Next.FocusedControl := Controls.NewGameControlId;
+        end;
+      else
+        begin
+          Next.FocusedControl := Controls.ConnectControlId;
+        end;
+      end if;
+    end;
+  end if;
 
-  return Next
-end;
+  return Next;
+end function;
 
 // Disconnects cleanly when connected and quits the client.
-public function RequestQuit(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+public function RequestQuit(State: Model.ClientModel; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
-  if ((State.ConnectionPhase = ClientConnectionPhase.Active) or (State.ConnectionPhase = ClientConnectionPhase.AwaitingSession)) or
-     (State.ConnectionPhase = ClientConnectionPhase.Connecting) then
-  begin
-    TrySend(State.Requests, ClientMessage.Disconnect)
-  end;
+  if (
+    (State.ConnectionPhase = Model.ClientConnectionPhase.Active)
+    or
+    (State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession)
+  )
+    or
+    (State.ConnectionPhase = Model.ClientConnectionPhase.Connecting)
+  then
+    begin
+      discard Tasks.TrySend(State.Requests, Protocol.ClientMessage.Disconnect);
+    end;
+  end if;
 
-  Cmd.Set(TuiCmd.Quit);
-  return State
-end;
+  Cmd.Set(Tui.TuiCmd.Quit);
+  return State;
+end function;
 
 // Starts the network subscription and shows the connecting start screen.
-public function StartConnection(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+public function StartConnection(State: Model.ClientModel; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
-  var Host: string := State.Host;
-  var Port: integer := State.Port;
-  var Requests: channel of ClientMessage := State.Requests;
-  var Events: channel of ClientEvent := State.Events;
-  var Viewport: WorldViewport := DesiredWorldViewport(State);
-  Cmd.ReplaceSubscription(NetworkSubscriptionId, function(Token: CancellationToken): result of boolean, string begin
-    return Dungeon.Client.Network.RunNetwork(Host, Port, Viewport.Width, Viewport.Height, Requests, Events, Token)
-  end);
-  mutable var Next: ClientModel := State;
-  Next.Screen := ClientScreen.StartScreen;
-  Next.Overlay := ClientOverlay.NoOverlay;
-  Next.ConnectionPhase := ClientConnectionPhase.Connecting;
+  const Host: string := State.Host;
+  const Port: integer := State.Port;
+  const Requests: channel of Protocol.ClientMessage := State.Requests;
+  const Events: channel of Model.ClientEvent := State.Events;
+  const Viewport: Layout.WorldViewport := Layout.DesiredWorldViewport(State);
+  Cmd.ReplaceSubscription(
+    Controls.NetworkSubscriptionId,
+    function(Token: Tasks.CancellationToken): result of (boolean, string) begin
+      return Network.RunNetwork(
+        Host,
+        Port,
+        Viewport.Width,
+        Viewport.Height,
+        Requests,
+        Events,
+        Token
+      );
+    end function
+  );
+  var Next: Model.ClientModel := State;
+  Next.Screen := Model.ClientScreen.StartScreen;
+  Next.Overlay := Model.ClientOverlay.NoOverlay;
+  Next.ConnectionPhase := Model.ClientConnectionPhase.Connecting;
   Next.FocusedControl := 0;
   Next.Pending := false;
   Next.RequestedWorldWidth := Viewport.Width;
   Next.RequestedWorldHeight := Viewport.Height;
   Next.HasVisibleState := false;
-  Next.Status := ('Connecting to ' + Host) + (':' + IntToStr(Port));
-  return AppendMessage(Next, Next.Status)
-end;
+  Next.Status := ('Connecting to ' + Host) + (':' + Conv.IntToStr(Port));
+  return AppendMessage(Next, Next.Status);
+end function;
 
 // Disconnects from the session and returns to the offline start screen.
-public function ReturnToStart(State: ClientModel; Cmd: TuiCmdOutput): ClientModel;
+public function ReturnToStart(State: Model.ClientModel; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
-  if ((State.ConnectionPhase = ClientConnectionPhase.Active) or (State.ConnectionPhase = ClientConnectionPhase.AwaitingSession)) or
-     (State.ConnectionPhase = ClientConnectionPhase.Connecting) then
-  begin
-    TrySend(State.Requests, ClientMessage.Disconnect);
-    Cmd.CancelSubscription(NetworkSubscriptionId)
-  end;
-  mutable var Next: ClientModel := State;
-  Next.Screen := ClientScreen.StartScreen;
-  Next.Overlay := ClientOverlay.NoOverlay;
-  Next.ConnectionPhase := ClientConnectionPhase.Offline;
-  Next.FocusedControl := ConnectControlId;
+  if (
+    (State.ConnectionPhase = Model.ClientConnectionPhase.Active)
+    or
+    (State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession)
+  )
+    or
+    (State.ConnectionPhase = Model.ClientConnectionPhase.Connecting)
+  then
+    begin
+      discard Tasks.TrySend(State.Requests, Protocol.ClientMessage.Disconnect);
+      Cmd.CancelSubscription(Controls.NetworkSubscriptionId);
+    end;
+  end if;
+  var Next: Model.ClientModel := State;
+  Next.Screen := Model.ClientScreen.StartScreen;
+  Next.Overlay := Model.ClientOverlay.NoOverlay;
+  Next.ConnectionPhase := Model.ClientConnectionPhase.Offline;
+  Next.FocusedControl := Controls.ConnectControlId;
   Next.Pending := false;
   Next.HasVisibleState := false;
   Next.SaveAvailable := false;
   Next.Status := 'Ready';
-  return Next
-end;
+  return Next;
+end function;
 
 // Sends a new-game or load request while the server awaits a session choice.
-public function QueueSessionChoice(State: ClientModel; Message: ClientMessage; Status: string): ClientModel;
+public function QueueSessionChoice(State: Model.ClientModel; Message: Protocol.ClientMessage; Status: string): Model.ClientModel;
 begin
-  if (State.ConnectionPhase <> ClientConnectionPhase.AwaitingSession) or State.Pending then
-  begin
-    return State
-  end;
+  if (State.ConnectionPhase <> Model.ClientConnectionPhase.AwaitingSession) or State.Pending then
+    begin
+      return State;
+    end;
+  end if;
 
-  case TrySend(State.Requests, Message) of
-    Ok(Queued):
-    begin
+  case Tasks.TrySend(State.Requests, Message) of
+    when Ok(const Queued):
       if not Queued then
-      begin
-        return State
-      end;
-      mutable var Next: ClientModel := State;
+        begin
+          return State;
+        end;
+      end if;
+      var Next: Model.ClientModel := State;
       Next.Pending := true;
-      Next.FocusedControl := CancelSessionStartControlId;
+      Next.PendingCreatedWorld := false;
+      Next.PendingChangesProgress := Message = Protocol.ClientMessage.StartNewGame;
+      case Message of
+        when Protocol.ClientMessage.CreateWorld(const Seed, const RegionChunks):
+          begin
+            Next.PendingCreatedWorld := true;
+            Next.PendingChangesProgress := true;
+          end;
+        when Protocol.ClientMessage.LoadGame:
+          begin
+            Next.PendingChangesProgress := not WorldsUnit.CatalogHasSave(State.Catalog);
+          end;
+        when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.Disconnect:
+          begin
+            null;
+          end;
+      end case;
+
+      Next.FocusedControl := Controls.CancelSessionStartControlId;
       Next.Status := Status;
-      return Next
-    end
-    else
-    begin
-      return State
-    end
-  end
-end;
+      return Next;
+    when Error(_):
+      return State;
+  end case;
+end function;
 
 // Sends a save request during an active game with nothing pending.
-public function QueueSave(State: ClientModel): ClientModel;
+public function QueueSave(State: Model.ClientModel): Model.ClientModel;
 begin
-  if ((State.ConnectionPhase <> ClientConnectionPhase.Active) or State.Pending) or
-     not State.HasVisibleState then
-  begin
-    return State
-  end;
-
-  case TrySend(State.Requests, ClientMessage.SaveGame) of
-    Ok(Queued):
+  if (
+    (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) or State.Pending
+    or
+    State.MapRequestPending
+  )
+    or
+    not State.HasVisibleState
+  then
     begin
+      return State;
+    end;
+  end if;
+  var Message: Protocol.ClientMessage := Protocol.ClientMessage.SaveGame;
+  if State.Overlay = Model.ClientOverlay.SaveConfirmationOverlay then
+    Message := Protocol.ClientMessage.OverwriteSaveGame;
+  end if;
+
+  case Tasks.TrySend(State.Requests, Message) of
+    when Ok(const Queued):
       if not Queued then
-      begin
-        return State
-      end;
-      mutable var Next: ClientModel := State;
-      Next.Overlay := ClientOverlay.NoOverlay;
+        begin
+          return State;
+        end;
+      end if;
+      var Next: Model.ClientModel := State;
+      Next.Overlay := Model.ClientOverlay.NoOverlay;
       Next.FocusedControl := 0;
       Next.Pending := true;
       Next.Status := 'Saving game...';
-      return Next
-    end
-    else
-    begin
-      return State
-    end
-  end
-end;
+      return Next;
+    when Error(_):
+      return State;
+  end case;
+end function;
 
-function PersistPanelPreferences(State: ClientModel): ClientModel;
+function PersistPanelPreferences(State: Model.ClientModel): Model.ClientModel;
 begin
-  if Std.Str.Length(State.ClientConfigPath) = 0 then
-  begin
-    return State
-  end;
-
-  case SaveClientPreferences(State.ClientConfigPath, record
-    ContextPanelVisible := State.ContextPanelVisible;
-    MessagePanelVisible := State.MessagePanelVisible;
-  end) of
-    Ok(Written):
+  if State.ClientConfigPath.Length() = 0 then
     begin
-      return State
+      return State;
     end;
-    Error(Message):
-    begin
-      mutable var Next: ClientModel := State;
-      Next.Status := 'Cannot save client preferences: ' + Message;
-      return AppendMessage(Next, Next.Status)
-    end
-  end
-end;
+  end if;
+
+  case RuntimeData.SaveClientPreferences(
+    State.ClientConfigPath,
+    RuntimeData.ClientPreferences(
+      ContextPanelVisible := State.ContextPanelVisible,
+      MessagePanelVisible := State.MessagePanelVisible
+    )
+  ) of
+    when Ok(const Written):
+      begin
+        return State;
+      end;
+    when Error(const Message):
+      begin
+        var Next: Model.ClientModel := State;
+        Next.Status := 'Cannot save client preferences: ' + Message;
+        return AppendMessage(Next, Next.Status);
+      end;
+  end case;
+end function;
 
 // Shows or hides the context panel, docked or as an overlay, and stores the preference.
-public function ToggleContext(State: ClientModel): ClientModel;
+public function ToggleContext(State: Model.ClientModel): Model.ClientModel;
 begin
-  mutable var Next: ClientModel := State;
-  if ContextCanDock(State) then
-  begin
-    Next.ContextPanelVisible := not State.ContextPanelVisible;
-    Next := QueueViewport(Next);
-    return PersistPanelPreferences(Next)
-  end;
+  var Next: Model.ClientModel := State;
+  if Layout.ContextCanDock(State) then
+    begin
+      Next.ContextPanelVisible := not State.ContextPanelVisible;
+      Next := Intentions.QueueViewport(Next);
+      return PersistPanelPreferences(Next);
+    end;
+  end if;
 
-  if State.Overlay = ClientOverlay.ContextOverlay then
-  begin
-    return CloseOverlay(State)
-  end;
+  if State.Overlay = Model.ClientOverlay.ContextOverlay then
+    begin
+      return CloseOverlay(State);
+    end;
+  end if;
 
-  Next.Overlay := ClientOverlay.ContextOverlay;
-  Next.FocusedControl := PanelCloseControlId;
-  return Next
-end;
+  Next.Overlay := Model.ClientOverlay.ContextOverlay;
+  Next.FocusedControl := Controls.PanelCloseControlId;
+  return Next;
+end function;
 
 // Shows or hides the message panel, docked or as an overlay, and stores the preference.
-public function ToggleMessages(State: ClientModel): ClientModel;
+public function ToggleMessages(State: Model.ClientModel): Model.ClientModel;
 begin
-  mutable var Next: ClientModel := State;
-  if MessagesCanDock(State) then
-  begin
-    Next.MessagePanelVisible := not State.MessagePanelVisible;
-    Next := QueueViewport(Next);
-    return PersistPanelPreferences(Next)
-  end;
+  var Next: Model.ClientModel := State;
+  if Layout.MessagesCanDock(State) then
+    begin
+      Next.MessagePanelVisible := not State.MessagePanelVisible;
+      Next := Intentions.QueueViewport(Next);
+      return PersistPanelPreferences(Next);
+    end;
+  end if;
 
-  if State.Overlay = ClientOverlay.MessageOverlay then
-  begin
-    return CloseOverlay(State)
-  end;
+  if State.Overlay = Model.ClientOverlay.MessageOverlay then
+    begin
+      return CloseOverlay(State);
+    end;
+  end if;
 
-  Next.Overlay := ClientOverlay.MessageOverlay;
-  Next.FocusedControl := PanelCloseControlId;
-  return Next
-end;
+  Next.Overlay := Model.ClientOverlay.MessageOverlay;
+  Next.FocusedControl := Controls.PanelCloseControlId;
+  return Next;
+end function;
+end unit;

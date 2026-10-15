@@ -1,0 +1,272 @@
+// Verifies complete placement/geometry checks across visited maps and independent entity ordering.
+program MultiAreaValidationTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Std.Conv as Conv, Std.Test as Test;
+
+// Returns the first ordinary region east of the spawn region that has an entrance site.
+function SecondRegion(Metadata: Terrain.WorldMetadata): Entrances.RegionCoordinate;
+begin
+  const Spawn: Entrances.RegionCoordinate := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  for Offset: integer := 1 to 64 do
+    begin
+      const Candidate: Entrances.RegionCoordinate := Entrances.RegionCoordinate(
+        X := Spawn.X + Offset,
+        Y := Spawn.Y
+      );
+      case Entrances.EntranceSite(Metadata, Candidate) of
+        when Some(const Site):
+          return Candidate;
+        when None:
+          null;
+      end case;
+    end;
+  end for;
+
+  panic('fixture world has no second entrance region');
+end function;
+
+function SecondSite(Metadata: Terrain.WorldMetadata): Coordinates.WorldPosition;
+begin
+  case Entrances.EntranceSite(Metadata, SecondRegion(Metadata)) of
+    when Some(const Site):
+      return Site;
+    when None:
+      panic('second region lost its entrance site');
+  end case;
+end function;
+
+// A wider second area has its own identities and fields absent from the first map.
+function SecondMap(First: InteriorUnit.InteriorMap): InteriorUnit.InteriorMap;
+begin
+  var Cells: array of InteriorUnit.InteriorCellKind := [];
+  for Y: integer := 0 to First.Height - 1 do
+    begin
+      for X: integer := 0 to First.Width + 1 do
+        begin
+          var Cell: InteriorUnit.InteriorCellKind := InteriorUnit.InteriorCellKind.Wall;
+          if X < First.Width then
+            begin
+              Cell := First.Cells[Y * First.Width + X];
+            end;
+          end if;
+
+          if ((Y > 0) and (Y < First.Height - 1)) and ((X = 10) or (X = 11)) then
+            begin
+              Cell := InteriorUnit.InteriorCellKind.Floor;
+            end;
+          end if;
+
+          Cells.PushInPlace(Cell);
+        end;
+      end for;
+    end;
+  end for;
+  var Map: InteriorUnit.InteriorMap := First with AreaId := Identities.DungeonAreaId(
+    Fixtures.FixtureMetadata(),
+    SecondRegion(Fixtures.FixtureMetadata())
+  ); Width := 13; Cells := Cells; end with;
+
+  for Index: integer := 0 to Map.Items.Length() - 1 do
+    begin
+      Map.Items[Index] := Map.Items[Index] with ItemId := (Map.AreaId + ':item:') +
+        Conv.IntToStr(Index); end with;
+    end;
+  end for;
+
+  for Index: integer := 0 to Map.Hostiles.Length() - 1 do
+    begin
+      Map.Hostiles[Index] := Map.Hostiles[Index] with Id := (Map.AreaId + ':hostile:') +
+        Conv.IntToStr(Index); end with;
+    end;
+  end for;
+
+  return InteriorUnit.ValidateInteriorMap(Map).Unwrap();
+end function;
+
+begin
+  const Metadata: Terrain.WorldMetadata := Fixtures.FixtureMetadata();
+  const First: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMap();
+  const Second: InteriorUnit.InteriorMap := SecondMap(First);
+  const One: GameState.GameState := Fixtures.FixtureDungeonState(First.Start, First.StartFacing);
+  const Both: GameState.GameState := Areas.MaterializeArea(One, Second);
+  // Same local opponent coordinates in different areas are valid.
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Both, [First, Second]) is Ok(_));
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Both, [Second, First]) is Ok(_));
+  // Entity arrays need not follow placement order; only visited identities stay canonically sorted.
+  var Reordered: GameState.GameState := Both with Items := []; Hostiles := []; end with;
+
+  for Index: integer := Both.Items.Length() - 1 downto 0 do
+    Reordered.Items.PushInPlace(Both.Items[Index]);
+  end for;
+
+  for Index: integer := Both.Hostiles.Length() - 1 downto 0 do
+    Reordered.Hostiles.PushInPlace(Both.Hostiles[Index]);
+  end for;
+
+  Test.AssertTrue(
+    States.SameState(
+      Reordered,
+      Areas.ValidateSavedGame(Metadata, Reordered, [First, Second]).Unwrap()
+    )
+  );
+  Test.AssertTrue(
+    States.SameState(
+      Reordered,
+      Areas.ValidateSavedGame(Metadata, Reordered, [Second, First]).Unwrap()
+    )
+  );
+  Test.AssertTrue(States.SameState(Reordered, Areas.MaterializeArea(Reordered, First)));
+  Test.AssertTrue(States.SameState(Reordered, Areas.MaterializeArea(Reordered, Second)));
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Both, [First]) is Error(_));
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Both, [First, First]) is Error(_));
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, One, [First, Second]) is Error(_));
+  Test.AssertTrue(
+    (
+      Areas.ValidateSavedGame(Metadata, Both, [First, Second with Cells := []; end with]) is Error(_)
+    )
+  );
+  // Visited areas must stay in canonical order.
+  Test.AssertTrue(
+    (
+      Areas.ValidateSavedGame(
+        Metadata, Both with VisitedAreas := [
+          Both.VisitedAreas[1],
+          Both.VisitedAreas[0]
+        ]; end with, [First, Second]
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(
+    (
+      Areas.ValidateSavedGame(
+        Metadata, Both with VisitedAreas := [First.AreaId, First.AreaId]; end with, [
+          First,
+          Second
+        ]
+      ) is Error(_)
+    )
+  );
+  const View: GameState.AreaView := Areas.AreaViewFor(Metadata, Both, Some(First)).Unwrap();
+  var Transfer: GameState.GameState := Both;
+  Transfer.Items[0] := Transfer.Items[0] with Location := ItemRules.ItemLocation.InInterior(
+    Second.AreaId,
+    Coordinates.InteriorPosition(X := 11, Y := 1)
+  ); end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Transfer, [First, Second]) is Ok(_));
+  // The current view may select either visited dungeon, independently of the initial identity.
+  const InSecond: GameState.GameState := Transfer with AreaId := Second.AreaId; Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Second.Start, Facing := Second.StartFacing)
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    Metadata.OutdoorAreaId,
+    SecondSite(Metadata)
+  ); end with;
+
+  // The return location must be the entrance site of the current dungeon's region.
+  Test.AssertTrue(
+    (
+      Areas.ValidateSavedGame(
+        Metadata, InSecond with ReturnLocation := Transfer.ReturnLocation; end with, [
+          Second,
+          First
+        ]
+      ) is Error(_)
+    )
+  );
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, InSecond, [Second, First]) is Ok(_));
+  Test.AssertTrue(
+    (
+      Areas.ValidateSavedGame(Metadata, Transfer with Items := []; end with, [First, Second]) is Error(_)
+    )
+  );
+  var Wrong: GameState.GameState := Transfer;
+  Wrong.Items[0] := Wrong.Items[0] with Id := 'unknown-item'; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong := Transfer;
+  Wrong.Items[0] := Wrong.Items[0] with Kind := ItemRules.ItemKind.LeatherJerkin; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong := Transfer;
+  Wrong.Items[0] := Wrong.Items[0] with Location := ItemRules.ItemLocation.InInterior(
+    Second.AreaId,
+    Coordinates.InteriorPosition(X := 12, Y := 1)
+  ); end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong := Transfer;
+  Wrong.Items[0] := Wrong.Items[0] with Location := ItemRules.ItemLocation.InInterior(
+    'unvisited',
+    First.Start
+  ); end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong := Transfer;
+  Wrong.Items[0] := Wrong.Items[0] with Location := Wrong.Items[3].Location; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong := Both;
+  Wrong.Items[3] := Wrong.Items[0];
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  var DuplicateOrigin: InteriorUnit.InteriorMap := Second;
+  DuplicateOrigin.Items[0] := DuplicateOrigin.Items[0] with ItemId := First.Items[0].ItemId; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Both, [First, DuplicateOrigin]) is Error(_));
+  Test.AssertTrue(
+    (
+      Areas.ValidateSavedGame(Metadata, Both with Hostiles := []; end with, [First, Second]) is Error(_)
+    )
+  );
+  Wrong := Both;
+  Wrong.Hostiles[0] := Wrong.Hostiles[0] with AreaId := Second.AreaId; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong := Both;
+  Wrong.Hostiles[1] := Wrong.Hostiles[1] with Position := Coordinates.InteriorPosition(
+    X := 12,
+    Y := 1
+  ); end with;
+
+  // Local validation cannot see the second map; full validation must reject its wall position.
+  Test.AssertTrue(GameState.ValidateGameState(View, Wrong) is Ok(_));
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong.Hostiles[1] := Wrong.Hostiles[1] with Health := 0; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong := Both;
+  Wrong.Hostiles[1] := Wrong.Hostiles[1] with Health := 99; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  var Fields: array of boolean := array.Fill(false, Second.Width * Second.Height);
+  Fields[Second.Start.Y * Second.Width + Second.Start.X] := true;
+  const Discovery: Model.InteriorDiscoveryArea := Model.InteriorDiscoveryArea(
+    AreaId := Second.AreaId,
+    Width := Second.Width,
+    Height := Second.Height,
+    Fields := Fields
+  );
+  Wrong := Both;
+  Wrong.Exploration.InteriorAreas := [Discovery];
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Ok(_));
+  Wrong.Exploration.InteriorAreas[0] := Discovery with Width := First.Width; Fields := array.Fill(
+    true, First.Width *
+    First.Height
+  ); end with;
+
+  Test.AssertTrue(GameState.ValidateGameState(View, Wrong) is Ok(_));
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  Wrong.Exploration.InteriorAreas[0] := Discovery with AreaId := 'unvisited'; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Wrong, [First, Second]) is Error(_));
+  const Outdoor: GameState.GameState := Both with Area := Coordinates.AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SpawnEntrance
+  ); ReturnLocation := Coordinates.ReturnLocation.NoReturnLocation; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Outdoor, [Second, First]) is Ok(_));
+  const Foreign: InteriorUnit.InteriorMap := First with AreaId := 'another-world:dungeon:0:0'; end with;
+  const ForeignState: GameState.GameState := Areas.MaterializeArea(
+    GameState.NewGame(Metadata),
+    Foreign
+  );
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, ForeignState, [Foreign]) is Error(_));
+end.

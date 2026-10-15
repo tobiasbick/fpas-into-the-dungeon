@@ -1,0 +1,237 @@
+// Full saved-state validation against exactly one supplied map per visited dungeon.
+unit Dungeon.Areas.Validation;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv, Std.Parse as Parse;
+
+function MapIndex(Maps: array of InteriorUnit.InteriorMap; AreaId: string): result of (integer, string);
+begin
+  for Index: integer := 0 to Maps.Length() - 1 do
+    begin
+      if Maps[Index].AreaId = AreaId then
+        begin
+          return Ok(Index);
+        end;
+      end if;
+    end;
+  end for;
+
+  return Error('saved state references an area without a supplied map');
+end function;
+
+// Returns whether Id is Prefix followed by a canonical non-negative index.
+function IsIndexedId(Id: string; Prefix: string): boolean;
+begin
+  if not Id.StartsWith(Prefix) then
+    begin
+      return false;
+    end;
+  end if;
+  const Suffix: string := Id.Slice(Prefix.Length(), Id.Length() - Prefix.Length());
+  case Parse.Int(Suffix) of
+    when Ok(const Index):
+      return (Index >= 0) and (Conv.IntToStr(Index) = Suffix);
+    when Error(_):
+      return false;
+  end case;
+end function;
+
+// Checks a decoded save without reading any level: the self-contained state shape, canonical
+// visited dungeon identities of the selected world, and canonical placement identities of
+// visited areas. Not a full validation; ValidateSavedAreas still requires the visited maps.
+public function ValidateSaveShape(Metadata: Terrain.WorldMetadata; State: GameState.GameState): result of (GameState.GameState, string);
+begin
+  const Shaped: GameState.GameState := try GameState.ValidateStateShape(Metadata, State);
+  for AreaId: string in State.VisitedAreas do
+    begin
+      const Region: Entrances.RegionCoordinate := try Identities.ParseDungeonAreaId(
+        Metadata,
+        AreaId
+      );
+    end;
+  end for;
+
+  for Item: ItemRules.GameItem in State.Items do
+    begin
+      var Canonical: boolean := false;
+      for AreaId: string in State.VisitedAreas do
+        begin
+          if IsIndexedId(Item.Id, AreaId + ':item:') then
+            begin
+              Canonical := true;
+            end;
+          end if;
+        end;
+      end for;
+
+      if not Canonical then
+        begin
+          return Error('saved item identity must name a placement of a visited area');
+        end;
+      end if;
+    end;
+  end for;
+
+  for Hostile: HostileRules.GameHostile in State.Hostiles do
+    begin
+      if not IsIndexedId(Hostile.Id, Hostile.AreaId + ':hostile:') then
+        begin
+          return Error('saved opponent identity must name a placement of its area');
+        end;
+      end if;
+    end;
+  end for;
+
+  return Ok(State);
+end function;
+
+// Requires exact placement identities/kinds and valid mutable positions in every visited area.
+// Geometry is validated once here; no map is generated or loaded, including the current map.
+public function ValidateSavedAreas(Metadata: Terrain.WorldMetadata; State: GameState.GameState; Maps: array of InteriorUnit.InteriorMap): result of (GameState.GameState, string);
+begin
+  const Shaped: GameState.GameState := try ValidateSaveShape(Metadata, State);
+  if Maps.Length() <> State.VisitedAreas.Length() then
+    begin
+      return Error('saved game requires exactly one map per visited area');
+    end;
+  end if;
+  var ValidMaps: array of InteriorUnit.InteriorMap := [];
+  var ItemCount: integer := 0;
+  var HostileCount: integer := 0;
+  for Index: integer := 0 to Maps.Length() - 1 do
+    begin
+      const Map: InteriorUnit.InteriorMap := try InteriorUnit.ValidateInteriorMap(Maps[Index]);
+      if not GameState.HasVisitedArea(State, Map.AreaId)
+        or
+        not Map.AreaId.StartsWith(Metadata.Id + ':dungeon:')
+      then
+        begin
+          return Error('saved game map must name a visited dungeon of the selected world');
+        end;
+      end if;
+
+      for Other: integer := 0 to Index - 1 do
+        begin
+          if ValidMaps[Other].AreaId = Map.AreaId then
+            begin
+              return Error('saved game contains duplicate area maps');
+            end;
+          end if;
+        end;
+      end for;
+
+      ItemCount := ItemCount + Map.Items.Length();
+      HostileCount := HostileCount + Map.Hostiles.Length();
+      ValidMaps.PushInPlace(Map);
+    end;
+  end for;
+
+  for AreaId: string in State.VisitedAreas do
+    begin
+      const Found: integer := try MapIndex(ValidMaps, AreaId);
+    end;
+  end for;
+
+  if (State.Items.Length() <> ItemCount) or (State.Hostiles.Length() <> HostileCount) then
+    begin
+      return Error('saved entities must correspond exactly to visited-area placements');
+    end;
+  end if;
+
+  for Item: ItemRules.GameItem in State.Items do
+    begin
+      var Matches: integer := 0;
+      for Map: InteriorUnit.InteriorMap in ValidMaps do
+        begin
+          for Placement: ItemRules.ItemPlacement in Map.Items do
+            begin
+              if (Placement.ItemId = Item.Id) and (Placement.Kind = Item.Kind) then
+                begin
+                  Matches := Matches + 1;
+                end;
+              end if;
+            end;
+          end for;
+        end;
+      end for;
+
+      if Matches <> 1 then
+        begin
+          return Error('saved item identity and kind must match exactly one placement');
+        end;
+      end if;
+
+      case Item.Location of
+        when ItemRules.ItemLocation.InInterior(const AreaId, const Position):
+          const Destination: integer := try MapIndex(ValidMaps, AreaId);
+          if try InteriorUnit.InteriorCellAt(ValidMaps[Destination], Position) <>
+            InteriorUnit.InteriorCellKind.Floor
+          then
+            begin
+              return Error('saved floor item must occupy an ordinary floor field');
+            end;
+          end if;
+        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_):
+          null;
+      end case;
+    end;
+  end for;
+
+  for Hostile: HostileRules.GameHostile in State.Hostiles do
+    begin
+      var Matches: integer := 0;
+      for Map: InteriorUnit.InteriorMap in ValidMaps do
+        begin
+          for Placement: HostileRules.HostilePlacement in Map.Hostiles do
+            begin
+              if ((Placement.Id = Hostile.Id) and (Placement.Kind = Hostile.Kind))
+                and
+                (Map.AreaId = Hostile.AreaId)
+              then
+                begin
+                  Matches := Matches + 1;
+                end;
+              end if;
+            end;
+          end for;
+        end;
+      end for;
+
+      if Matches <> 1 then
+        begin
+          return Error('saved opponent must match exactly one placement in its origin area');
+        end;
+      end if;
+      const Origin: integer := try MapIndex(ValidMaps, Hostile.AreaId);
+      if try InteriorUnit.InteriorCellAt(ValidMaps[Origin], Hostile.Position) =
+        InteriorUnit.InteriorCellKind.Wall
+      then
+        begin
+          return Error('saved opponent must occupy a traversable field');
+        end;
+      end if;
+    end;
+  end for;
+
+  for Area: Model.InteriorDiscoveryArea in State.Exploration.InteriorAreas do
+    begin
+      const Index: integer := try MapIndex(ValidMaps, Area.AreaId);
+      if (Area.Width <> ValidMaps[Index].Width) or (Area.Height <> ValidMaps[Index].Height) then
+        begin
+          return Error('interior discovery dimensions do not match its authoritative area');
+        end;
+      end if;
+    end;
+  end for;
+  var Current: option of InteriorUnit.InteriorMap := None;
+  if State.Area = Coordinates.AreaKind.Dungeon then
+    begin
+      Current := Some(ValidMaps[try MapIndex(ValidMaps, State.AreaId)]);
+    end;
+  end if;
+
+  return GameState.ValidateGameState(
+    GameState.AreaView(Metadata := Metadata, Interior := Current),
+    State
+  );
+end function;
+end unit;

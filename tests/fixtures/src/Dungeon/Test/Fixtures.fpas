@@ -1,0 +1,395 @@
+// Independent authored dungeon geometry and state builders for game and view tests.
+unit Dungeon.Test.Fixtures;
+
+uses Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as PlacementRules;
+
+// One first-person intention of a route: a quarter turn or one step forward.
+public type RouteMove = enum
+  RouteTurnLeft;
+  RouteTurnRight;
+  RouteForward;
+end enum;
+
+// Fixed world metadata for map-injection tests. No fixture is persisted.
+public function FixtureMetadata(): Terrain.WorldMetadata;
+begin
+  return PlacementRules.NewWorldMetadata('fixture-world', 12345, 4).Unwrap();
+end function;
+
+// Canonical identity of the fixture world's spawn-region dungeon, which the fixture map stands in for.
+public function FixtureAreaId(): string;
+begin
+  const Metadata: Terrain.WorldMetadata := FixtureMetadata();
+  return Identities.DungeonAreaId(Metadata, Entrances.RegionOf(Metadata, Metadata.Spawn));
+end function;
+
+// Returns the identity of the spawn entrance's dungeon in any world.
+public function SpawnDungeonAreaId(Metadata: Terrain.WorldMetadata): string;
+begin
+  return Identities.DungeonAreaId(Metadata, Entrances.RegionOf(Metadata, Metadata.Spawn));
+end function;
+
+// Returns the independent 11 by 9 authored layout under one area identity with area-scoped placements.
+// Its explicit name is 'Fixture dungeon'; geometry is independent of generation and stands in for a stored level.
+public function FixtureDungeonMapFor(AreaId: string): InteriorUnit.InteriorMap;
+begin
+  const Rows: array of string := [
+    '###########',
+    '#.........#',
+    '#.#####.#.#',
+    '#.....#.#.#',
+    '###.#.#.#.#',
+    '#...#...#.#',
+    '#.#####.#.#',
+    '#x........#',
+    '###########'
+  ];
+  var Cells: array of InteriorUnit.InteriorCellKind := [];
+  for Row: string in Rows do
+    begin
+      for X: integer := 0 to Row.Length() - 1 do
+        begin
+          Cells.PushInPlace(InteriorUnit.InteriorCellFromCode(Row[X]).Unwrap());
+        end;
+      end for;
+    end;
+  end for;
+
+  return InteriorUnit.ValidateInteriorMap(
+    InteriorUnit.InteriorMap(
+      AreaId := AreaId, DisplayName := 'Fixture dungeon', Width := 11, Height := 9, Cells := Cells,
+      Start := Coordinates.InteriorPosition(X := 9, Y := 1),
+      StartFacing := Coordinates.FacingDirection.West,
+      Exit := Coordinates.InteriorPosition(X := 1, Y := 7), Items := [
+        ItemRules.ItemPlacement(
+          ItemId := AreaId + ':item:0',
+          Kind := ItemRules.ItemKind.AncientCoin,
+          Position := Coordinates.InteriorPosition(X := 8, Y := 1)
+        ),
+        ItemRules.ItemPlacement(
+          ItemId := AreaId + ':item:1',
+          Kind := ItemRules.ItemKind.RustyShortSword,
+          Position := Coordinates.InteriorPosition(X := 7, Y := 4)
+        ),
+        ItemRules.ItemPlacement(
+          ItemId := AreaId + ':item:2',
+          Kind := ItemRules.ItemKind.LeatherJerkin,
+          Position := Coordinates.InteriorPosition(X := 1, Y := 6)
+        )
+      ], Hostiles := [
+        HostileRules.HostilePlacement(
+          Id := AreaId + ':hostile:0',
+          Kind := HostileRules.HostileKind.RestlessSkeleton,
+          Position := Coordinates.InteriorPosition(X := 3, Y := 3)
+        )
+      ]
+    )
+  ).Unwrap();
+end function;
+
+// Returns the fixture layout as the fixture world's spawn dungeon.
+public function FixtureDungeonMap(): InteriorUnit.InteriorMap;
+begin
+  return FixtureDungeonMapFor(FixtureAreaId());
+end function;
+
+// Creates expected initial entities and an interior pose independently of NewGame.
+// The caller chooses a traversable, unoccupied position when testing valid state.
+public function FixtureDungeonState(Position: Coordinates.InteriorPosition; Facing: Coordinates.FacingDirection): GameState.GameState;
+begin
+  const Metadata: Terrain.WorldMetadata := FixtureMetadata();
+  const Map: InteriorUnit.InteriorMap := FixtureDungeonMap();
+  var Items: array of ItemRules.GameItem := [];
+  for Placement: ItemRules.ItemPlacement in Map.Items do
+    begin
+      Items.PushInPlace(
+        ItemRules.GameItem(
+          Id := Placement.ItemId,
+          Kind := Placement.Kind,
+          Location := ItemRules.ItemLocation.InInterior(Map.AreaId, Placement.Position)
+        )
+      );
+    end;
+  end for;
+  var Hostiles: array of HostileRules.GameHostile := [];
+  for Placement: HostileRules.HostilePlacement in Map.Hostiles do
+    begin
+      Hostiles.PushInPlace(
+        HostileRules.GameHostile(
+          Id := Placement.Id,
+          Kind := Placement.Kind,
+          AreaId := Map.AreaId,
+          Position := Placement.Position,
+          Health := HostileRules.HostileMaximumHealth(Placement.Kind),
+          Alerted := false
+        )
+      );
+    end;
+  end for;
+
+  return GameState.GameState(
+    VisitedAreas := [Map.AreaId],
+    Area := Coordinates.AreaKind.Dungeon,
+    AreaId := Map.AreaId,
+    Player := Coordinates.PlayerPosition.FirstPerson(
+      Coordinates.FirstPersonPose(Position := Position, Facing := Facing)
+    ),
+    ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+      Metadata.OutdoorAreaId,
+      Metadata.SpawnEntrance
+    ),
+    Exploration := Model.EmptyExploration(),
+    Items := Items,
+    Hostiles := Hostiles,
+    Health := GameState.PlayerMaximumHealth,
+    RandomState := GameState.InitialRandomState(Metadata.Seed)
+  );
+end function;
+
+// Pairs fixture metadata with the current fixture map, or no map outdoors.
+// Invalid area or identity combinations fail through the real area-view constructor.
+public function FixtureAreaView(State: GameState.GameState): GameState.AreaView;
+begin
+  if State.Area = Coordinates.AreaKind.OutdoorRegion then
+    begin
+      return Areas.AreaViewFor(FixtureMetadata(), State, None).Unwrap();
+    end;
+  end if;
+
+  return Areas.AreaViewFor(FixtureMetadata(), State, Some(FixtureDungeonMap())).Unwrap();
+end function;
+
+// Identity of the fixture layout's ancient coin in a world's spawn dungeon.
+public function FixtureCoinId(Metadata: Terrain.WorldMetadata): string;
+begin
+  return ItemRules.ItemPlacementId(SpawnDungeonAreaId(Metadata), 0);
+end function;
+
+// Identity of the fixture layout's rusty short sword in a world's spawn dungeon.
+public function FixtureSwordId(Metadata: Terrain.WorldMetadata): string;
+begin
+  return ItemRules.ItemPlacementId(SpawnDungeonAreaId(Metadata), 1);
+end function;
+
+// Identity of the fixture layout's leather jerkin in a world's spawn dungeon.
+public function FixtureJerkinId(Metadata: Terrain.WorldMetadata): string;
+begin
+  return ItemRules.ItemPlacementId(SpawnDungeonAreaId(Metadata), 2);
+end function;
+
+// Identity of the fixture layout's restless skeleton in a world's spawn dungeon.
+public function FixtureSkeletonId(Metadata: Terrain.WorldMetadata): string;
+begin
+  return HostileRules.HostilePlacementId(SpawnDungeonAreaId(Metadata), 0);
+end function;
+
+// A new game outside that has already materialized the fixture layout as its spawn dungeon.
+public function MaterializedFixtureState(Metadata: Terrain.WorldMetadata): GameState.GameState;
+begin
+  return Areas.MaterializeArea(
+    GameState.NewGame(Metadata),
+    FixtureDungeonMapFor(SpawnDungeonAreaId(Metadata))
+  );
+end function;
+
+// Pairs any world's metadata with the fixture layout as its spawn dungeon, or no map outdoors.
+// Invalid states are passed on unchanged so that validation can reject them.
+public function FixtureViewFor(Metadata: Terrain.WorldMetadata; State: GameState.GameState): GameState.AreaView;
+begin
+  var Map: option of InteriorUnit.InteriorMap := None;
+  if State.Area = Coordinates.AreaKind.Dungeon then
+    begin
+      Map := Some(FixtureDungeonMapFor(SpawnDungeonAreaId(Metadata)));
+    end;
+  end if;
+
+  return GameState.AreaView(Metadata := Metadata, Interior := Map);
+end function;
+
+// Applies a transition through the spawn entrance into the fixture layout, or back outside.
+public function ActivateFixtureTransition(Metadata: Terrain.WorldMetadata; State: GameState.GameState): result of (GameState.GameState, string);
+begin
+  const View: GameState.AreaView := FixtureViewFor(Metadata, State);
+  const Target: string := try Movement.AreaTransitionTarget(View, State);
+  var Map: option of InteriorUnit.InteriorMap := None;
+  if State.Area = Coordinates.AreaKind.OutdoorRegion then
+    begin
+      Map := Some(FixtureDungeonMapFor(Target));
+    end;
+  end if;
+  const Transition: Movement.AreaTransition := try Movement.ActivateAreaTransition(
+    View,
+    State,
+    Map
+  );
+  return Ok(Transition.State);
+end function;
+
+// Runs the full saved-state validation with the fixture layout for every visited area.
+public function ValidateFixtureSave(Metadata: Terrain.WorldMetadata; State: GameState.GameState): result of (GameState.GameState, string);
+begin
+  var Maps: array of InteriorUnit.InteriorMap := [];
+  for AreaId: string in State.VisitedAreas do
+    begin
+      Maps.PushInPlace(FixtureDungeonMapFor(AreaId));
+    end;
+  end for;
+
+  return Areas.ValidateSavedGame(Metadata, State, Maps);
+end function;
+
+function FacingOfStep(From: Coordinates.InteriorPosition; Target: Coordinates.InteriorPosition): Coordinates.FacingDirection;
+begin
+  if Target.X > From.X then
+    begin
+      return Coordinates.FacingDirection.East;
+    end;
+  end if;
+
+  if Target.X < From.X then
+    begin
+      return Coordinates.FacingDirection.West;
+    end;
+  end if;
+
+  if Target.Y > From.Y then
+    begin
+      return Coordinates.FacingDirection.South;
+    end;
+  end if;
+
+  return Coordinates.FacingDirection.North;
+end function;
+
+// Turns that bring Facing to Wanted, preferring a single left or right turn.
+function TurnsTowards(Facing: Coordinates.FacingDirection; Wanted: Coordinates.FacingDirection): array of RouteMove;
+begin
+  if Facing = Wanted then
+    begin
+      return [];
+    end;
+  end if;
+
+  if Coordinates.TurnedFacing(Facing, Coordinates.RelativeTurn.TurnRight) = Wanted then
+    begin
+      return [RouteMove.RouteTurnRight];
+    end;
+  end if;
+
+  if Coordinates.TurnedFacing(Facing, Coordinates.RelativeTurn.TurnLeft) = Wanted then
+    begin
+      return [RouteMove.RouteTurnLeft];
+    end;
+  end if;
+
+  return [RouteMove.RouteTurnRight, RouteMove.RouteTurnRight];
+end function;
+
+// Returns turns and forward steps along a shortest walkable path from a pose to Target, avoiding
+// the given fields (for example standing opponents), or an error when Target is unreachable.
+public function TryRouteTo(
+  Map: InteriorUnit.InteriorMap;
+  From: Coordinates.FirstPersonPose;
+  Target: Coordinates.InteriorPosition;
+  Avoid: array of Coordinates.InteriorPosition
+): result of (array of RouteMove, string);
+begin
+  const FieldCount: integer := Map.Width * Map.Height;
+  var Previous: array of integer := array.Fill(-1, FieldCount);
+  const StartIndex: integer := (From.Position.Y * Map.Width) + From.Position.X;
+  Previous[StartIndex] := StartIndex;
+  var Queue: array of Coordinates.InteriorPosition := [From.Position];
+  var ReadIndex: integer := 0;
+  while ReadIndex < Queue.Length() do
+    begin
+      const Current: Coordinates.InteriorPosition := Queue[ReadIndex];
+      ReadIndex := ReadIndex + 1;
+      for Facing: Coordinates.FacingDirection in [
+        Coordinates.FacingDirection.North,
+        Coordinates.FacingDirection.East,
+        Coordinates.FacingDirection.South,
+        Coordinates.FacingDirection.West
+      ] do
+        begin
+          const Offset: Coordinates.InteriorPosition := Coordinates.StepOffset(
+            Facing,
+            Coordinates.RelativeStep.Forward
+          );
+          const Next: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+            X := Current.X + Offset.X, Y := Current.Y +
+            Offset.Y
+          );
+          var Free: boolean := InteriorUnit.InteriorCellAt(Map, Next).Unwrap() <>
+            InteriorUnit.InteriorCellKind.Wall;
+          for Blocked: Coordinates.InteriorPosition in Avoid do
+            begin
+              if Coordinates.SamePosition(Blocked, Next) then
+                begin
+                  Free := false;
+                end;
+              end if;
+            end;
+          end for;
+          const NextIndex: integer := (Next.Y * Map.Width) + Next.X;
+          if Free and (Previous[NextIndex] < 0) then
+            begin
+              Previous[NextIndex] := (Current.Y * Map.Width) + Current.X;
+              Queue.PushInPlace(Next);
+            end;
+          end if;
+        end;
+      end for;
+    end;
+  end while;
+  const TargetIndex: integer := (Target.Y * Map.Width) + Target.X;
+  if Previous[TargetIndex] < 0 then
+    begin
+      return Error('route target is unreachable');
+    end;
+  end if;
+  var Path: array of Coordinates.InteriorPosition := [];
+  var Index: integer := TargetIndex;
+  while Index <> StartIndex do
+    begin
+      Path.PushInPlace(
+        Coordinates.InteriorPosition(X := Index mod Map.Width, Y := Index div Map.Width)
+      );
+      Index := Previous[Index];
+    end;
+  end while;
+  var Moves: array of RouteMove := [];
+  var Position: Coordinates.InteriorPosition := From.Position;
+  var Facing: Coordinates.FacingDirection := From.Facing;
+  for Step: integer := Path.Length() - 1 downto 0 do
+    begin
+      const Wanted: Coordinates.FacingDirection := FacingOfStep(Position, Path[Step]);
+      Moves := Moves.Concat(TurnsTowards(Facing, Wanted));
+      Moves.PushInPlace(RouteMove.RouteForward);
+      Facing := Wanted;
+      Position := Path[Step];
+    end;
+  end for;
+
+  return Ok(Moves);
+end function;
+
+// Like TryRouteTo, but panics when Target is unreachable.
+public function RouteTo(
+  Map: InteriorUnit.InteriorMap;
+  From: Coordinates.FirstPersonPose;
+  Target: Coordinates.InteriorPosition;
+  Avoid: array of Coordinates.InteriorPosition
+): array of RouteMove;
+begin
+  case TryRouteTo(Map, From, Target, Avoid) of
+    when Ok(const Moves):
+      begin
+        return Moves;
+      end;
+    when Error(const Message):
+      begin
+        panic(Message);
+      end;
+  end case;
+end function;
+end unit;

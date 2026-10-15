@@ -1,0 +1,177 @@
+// Structural rules of generated dungeons, shared by the generator and stored level validation.
+unit Dungeon.Interior.Generation.Validation;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Sight as Sight, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Std.Math as Math;
+
+// Fixed field dimensions of every generated dungeon, including the outer wall.
+public const GeneratedDungeonWidth: integer := 31;
+public const GeneratedDungeonHeight: integer := 21;
+// Longest accepted placement identity; equals the protocol's visible inventory text bound.
+public const MaximumPlacementIdLength: integer := 128;
+
+function FloorShareAccepted(Cells: array of InteriorUnit.InteriorCellKind): boolean;
+begin
+  var Open: integer := 0;
+  for Cell: InteriorUnit.InteriorCellKind in Cells do
+    begin
+      if Cell <> InteriorUnit.InteriorCellKind.Wall then
+        begin
+          Open := Open + 1;
+        end;
+      end if;
+    end;
+  end for;
+
+  return ((Open * 100) >= (Cells.Length() * 25)) and ((Open * 100) <= (Cells.Length() * 60));
+end function;
+
+// Mirrors combat perception: Chebyshev range and a clear line in either direction.
+function HostileSeesStart(Map: InteriorUnit.InteriorMap; Hostile: HostileRules.HostilePlacement): boolean;
+begin
+  const DeltaX: integer := Math.Abs(Hostile.Position.X - Map.Start.X);
+  const DeltaY: integer := Math.Abs(Hostile.Position.Y - Map.Start.Y);
+  if Math.Max(DeltaX, DeltaY) > HostileRules.HostileSightRange then
+    begin
+      return false;
+    end;
+  end if;
+
+  return Sight.HasLineOfSight(Map, Hostile.Position, Map.Start)
+    or
+    Sight.HasLineOfSight(Map, Map.Start, Hostile.Position);
+end function;
+
+function OuterWallIntact(Map: InteriorUnit.InteriorMap): boolean;
+begin
+  for Y: integer := 0 to Map.Height - 1 do
+    begin
+      for X: integer := 0 to Map.Width - 1 do
+        begin
+          const OnBorder: boolean := ((X = 0) or (X = Map.Width - 1))
+            or
+            ((Y = 0) or (Y = Map.Height - 1));
+          if OnBorder and (Map.Cells[(Y * Map.Width) + X] <> InteriorUnit.InteriorCellKind.Wall) then
+            begin
+              return false;
+            end;
+          end if;
+        end;
+      end for;
+    end;
+  end for;
+
+  return true;
+end function;
+
+function PlacementsAccepted(Map: InteriorUnit.InteriorMap): result of (boolean, string);
+begin
+  const Kinds: array of ItemRules.ItemKind := [
+    ItemRules.ItemKind.AncientCoin,
+    ItemRules.ItemKind.RustyShortSword,
+    ItemRules.ItemKind.LeatherJerkin
+  ];
+  if Map.Items.Length() <> Kinds.Length() then
+    begin
+      return Error('generated dungeon must place exactly three items');
+    end;
+  end if;
+
+  for Index: integer := 0 to Map.Items.Length() - 1 do
+    begin
+      const Item: ItemRules.ItemPlacement := Map.Items[Index];
+      if (Item.ItemId <> ItemRules.ItemPlacementId(Map.AreaId, Index))
+        or
+        (Item.Kind <> Kinds[Index])
+      then
+        begin
+          return Error(
+            'generated dungeon items must be the coin, sword, and jerkin in index order'
+          );
+        end;
+      end if;
+
+      if Item.ItemId.Length() > MaximumPlacementIdLength then
+        begin
+          return Error('generated dungeon placement identity is too long');
+        end;
+      end if;
+    end;
+  end for;
+
+  if (Map.Hostiles.Length() < 1) or (Map.Hostiles.Length() > 2) then
+    begin
+      return Error('generated dungeon must place one or two opponents');
+    end;
+  end if;
+
+  for Index: integer := 0 to Map.Hostiles.Length() - 1 do
+    begin
+      const Hostile: HostileRules.HostilePlacement := Map.Hostiles[Index];
+      if (Hostile.Id <> HostileRules.HostilePlacementId(Map.AreaId, Index))
+        or
+        (Hostile.Kind <> HostileRules.HostileKind.RestlessSkeleton)
+      then
+        begin
+          return Error('generated dungeon opponents must be restless skeletons in index order');
+        end;
+      end if;
+
+      if Hostile.Id.Length() > MaximumPlacementIdLength then
+        begin
+          return Error('generated dungeon placement identity is too long');
+        end;
+      end if;
+    end;
+  end for;
+
+  return Ok(true);
+end function;
+
+// Checks every structural rule a stored or freshly generated dungeon must satisfy without
+// rerunning the generator: dimensions, outer wall, start east of the exit facing east, map
+// validity, ordered placements, floor share, and no opponent that could see the start.
+// Room count is a generation-time rule only and is not checked here.
+public function ValidateGeneratedDungeon(Map: InteriorUnit.InteriorMap): result of (InteriorUnit.InteriorMap, string);
+begin
+  if (Map.Width <> GeneratedDungeonWidth) or (Map.Height <> GeneratedDungeonHeight) then
+    begin
+      return Error('generated dungeon must be 31 by 21 fields');
+    end;
+  end if;
+  const Valid: InteriorUnit.InteriorMap := try InteriorUnit.ValidateInteriorMap(Map);
+  if not OuterWallIntact(Valid) then
+    begin
+      return Error('generated dungeon outer wall must be intact');
+    end;
+  end if;
+
+  if (
+    (Valid.StartFacing <> Coordinates.FacingDirection.East) or (Valid.Start.X <> Valid.Exit.X + 1)
+  )
+    or
+    (Valid.Start.Y <> Valid.Exit.Y)
+  then
+    begin
+      return Error('generated dungeon start must face east one field east of the exit');
+    end;
+  end if;
+  const Placements: boolean := try PlacementsAccepted(Valid);
+  if not FloorShareAccepted(Valid.Cells) then
+    begin
+      return Error('generated dungeon floor share is outside 25 to 60 percent');
+    end;
+  end if;
+
+  for Hostile: HostileRules.HostilePlacement in Valid.Hostiles do
+    begin
+      if HostileSeesStart(Valid, Hostile) then
+        begin
+          return Error('generated dungeon opponent can see the start');
+        end;
+      end if;
+    end;
+  end for;
+
+  return Ok(Valid);
+end function;
+end unit;

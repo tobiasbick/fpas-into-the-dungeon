@@ -1,7 +1,7 @@
 # Combat
 
-The first combat slice adds one server-authoritative fight against one opponent
-in the initial dungeon. It keeps the grid-based first-person presentation of
+Combat is a server-authoritative fight against the restless skeletons of
+generated dungeons. It keeps the grid-based first-person presentation of
 classic dungeon crawlers such as *Eye of the Beholder* and *Legend of
 Grimrock*: the opponent stands visibly in the corridor, attacks target the
 field directly ahead, and stepping away or around it matters. Time, however,
@@ -12,20 +12,18 @@ push unsolicited updates, and every fight is reproducible in tests.
 
 ## Opponent
 
-The **restless skeleton** rests in the inner passages of the initial dungeon at
-field `(3, 3)`. Those passages form the second route to the exit; walls hide
-them from the corridor before Mara, the long eastern corridor, and the lower
-hall. Exploring the side route therefore means meeting the skeleton, while the
-main route stays calm, as side passages in classic crawlers tend to be more
-dangerous. Mara warns that something restless still walks the inner passages.
+Each generated dungeon places one or two **restless skeletons** at the centers
+of the rooms farthest from the start by walking distance, never in the exit
+room. Generation guarantees that no skeleton can see the start, so a visit
+begins calmly and exploring the far rooms means meeting them.
 
-- It blocks its field like Mara while it stands.
+- It blocks its field while it stands.
 - It is dormant until it can see the player: the player's field lies within six
   fields and an unobstructed line of sight connects both field centers. From
   then on it stays alerted.
 - An alerted skeleton attacks when the player occupies an orthogonally adjacent
   field. Otherwise it takes one step along a shortest traversable path toward
-  the player. Walls, Mara, and the player's own field block that path; items do
+  the player. Walls and the player's own field block that path; items do
   not.
 - A destroyed skeleton disappears from all projections and never returns in
   the same game.
@@ -34,11 +32,11 @@ dangerous. Mara warns that something restless still walks the inner passages.
 
 Only these intentions consume a turn: a successful first-person **step**, an
 **attack**, **wait**, and wearing or removing an item. After each of them the skeleton acts once while it
-stands in the player's current area. Turning, interaction, dialogue, the
+stands in the player's current area. Turning, interaction, the
 exploration map, saving, and rejected intentions do not advance time.
 
 Keys: `Space` attacks the field directly ahead and `Z` waits one turn. `Enter`
-keeps its non-violent meaning, so talking to Mara can never become an attack.
+keeps its non-violent meaning.
 
 ## Rules and dice
 
@@ -54,9 +52,8 @@ loaded game continues from its saved state. Identical actions therefore always
 produce identical fights, which keeps tests deterministic without making the
 fight predictable for a player.
 
-Mara tends the player's wounds: while the player is hurt, her dialogue offers
-`Could you tend my wounds?`, which restores full health without consuming a
-turn. The player's values come from base values plus equipment; see
+Each accepted outdoor step restores one health point up to the player's
+maximum. The player's values come from base values plus equipment; see
 [equipment and character values](equipment.md).
 
 ## Defeat and victory
@@ -85,14 +82,15 @@ Introduced with protocol version 11 and extended in version 12:
   visible standing opponent. Remembered fields never retain it.
 - `defeated` replaces the state response of the turn that ended the game; it
   carries a player-facing summary.
-- Dialogue frames may offer up to six choices.
 
 ## Persistence
 
-Since savegame format 5 the save holds the player's health, the random generator state, and
-the complete opponent record with identity, kind, area, position, health, and
-alert status. Validation requires exactly the known opponent, a floor field
-that overlaps neither Mara nor a standing player, and consistent health. Saving
+The save (format 7) holds the player's health, the random generator state, and
+the complete record of every opponent of the visited dungeons with identity,
+kind, area, position, health, and alert status. Validation requires exactly one
+record per stored opponent placement, a traversable field in its own area that
+overlaps no standing player or opponent, and consistent health. Destroyed
+opponents stay recorded, so re-entering never restores them. Saving
 is allowed during a fight.
 
 ## Ownership

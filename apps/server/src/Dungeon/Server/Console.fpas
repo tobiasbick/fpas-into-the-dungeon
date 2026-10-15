@@ -1,0 +1,94 @@
+// Dashboard facade owning the cancellable server subscription and typed event inbox.
+unit Dungeon.Server.Console;
+
+uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Input as InputUnit, Dungeon.Server.Console.View as ViewUnit, Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Tasks as Tasks, Std.Tui as Tui;
+
+type ConsoleState = record
+  Model: ModelUnit.ConsoleModel;
+  Host: string;
+  Port: integer;
+  Config: ConfigUnit.ServerConfig;
+end record;
+
+// Public framework update seam; headless tests exercise the same keyboard/modal logic as the host.
+public function UpdateServerConsole(State: ModelUnit.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
+begin
+  return InputUnit.UpdateDashboard(State, Msg, Cmd);
+end function;
+
+// Reports ordinary returned server errors explicitly; Result.Error is data, not a task failure.
+// Stop events clear console state after cancellation or listener failure, before the worker returns.
+public function RunConsoleListener(Host: string; Port: integer; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Outcome := Server.RunServerWithCancellation(Host, Port, Config, Token);
+  Logging.LogServer(Config.Logs, 'stopped', 'Server stopped');
+  case Outcome of
+    when Error(const Reason):
+      Logging.LogServer(Config.Logs, 'error', Reason);
+    when Ok(_):
+      null;
+  end case;
+
+  return Outcome;
+end function;
+
+function UpdateConsole(State: ConsoleState; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ConsoleState;
+begin
+  const Next := UpdateServerConsole(State.Model, Msg, Cmd);
+  if Msg is Tui.TuiMsg.Started then
+    const Host := State.Host;
+    const Port := State.Port;
+    const Config := State.Config;
+    Cmd.ReplaceSubscription(
+      1, function(Token: Tasks.CancellationToken): result of (boolean, string) begin
+        return RunConsoleListener(Host, Port, Config, Token);
+      end function
+    );
+  end if;
+
+  return State with Model := Next; end with;
+end function;
+
+// The application-message update shares bounded logging and typed status application with tests.
+public function UpdateServerConsoleEvent(State: ModelUnit.ConsoleModel; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
+begin
+  Cmd.Set(Tui.TuiCmd.NoCommand);
+  return ModelUnit.ApplyConsoleLog(State, Value);
+end function;
+
+function UpdateConsoleEvent(State: ConsoleState; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): ConsoleState;
+begin
+  return State with Model := UpdateServerConsoleEvent(State.Model, Value, Cmd); end with;
+end function;
+
+// Full-window responsive dashboard with native scroll/filter controls and optional settings modal.
+public function ViewServerConsole(State: ModelUnit.ConsoleModel): Tui.TuiElement;
+begin
+  return ViewUnit.ViewDashboard(State);
+end function;
+
+function ViewConsole(State: ConsoleState): Tui.TuiElement;
+begin
+  return ViewServerConsole(State.Model);
+end function;
+
+// Closing the dashboard cancels and joins both listener and active session; settings affect new worlds.
+public function RunServerConsole(Host: string; Port: integer; Config: ConfigUnit.ServerConfig): integer;
+begin
+  const Settings := RuntimeData.ReadServerDefaults(Config.ConfigPath).Unwrap();
+  const Events: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const State := ConsoleState(
+    Model := ModelUnit.NewConsoleModel(Config.ConfigPath, Settings) with Port := Port; Width := Console.ScreenWidth(); Height := Console.ScreenHeight(); end with,
+    Host := Host, Port := Port, Config := Config with Logs := Some(Events); end with
+  );
+  discard Tui.TuiApplication.RunWithBackgroundAndPalette(
+    State,
+    Events,
+    UpdateConsole,
+    UpdateConsoleEvent,
+    ViewConsole,
+    ViewUnit.DashboardPalette()
+  );
+  return 0;
+end function;
+end unit;

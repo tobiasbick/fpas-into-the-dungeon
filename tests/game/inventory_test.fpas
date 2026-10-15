@@ -1,155 +1,176 @@
 // Verifies authoritative item placement, pickup, inventory, validation, and reset invariants.
 program DungeonInventoryTest;
 
-uses
-  Dungeon.Coordinates, Dungeon.GameState, Dungeon.Interaction, Dungeon.Interior,
-  Dungeon.Interior.InitialDungeon, Dungeon.Items, Dungeon.Movement, Dungeon.Terrain,
-  Dungeon.Terrain.Placement, Std.Arrays, Std.Results, Std.Test;
+uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Test as Test;
 
-function AtOutdoorEntrance(Metadata: WorldMetadata; State: GameState): GameState;
+function AtOutdoorEntrance(Metadata: Terrain.WorldMetadata; State: GameState.GameState): GameState.GameState;
 begin
-  mutable var Value: GameState := State;
-  Value.Player := PlayerPosition.Outdoor(Metadata.Entrance);
-  return Value
-end;
+  var Value: GameState.GameState := State;
+  Value.Player := Coordinates.PlayerPosition.Outdoor(Metadata.SpawnEntrance);
+  return Value;
+end function;
 
-function AtInteriorPosition(State: GameState; Position: InteriorPosition; Facing: FacingDirection): GameState;
+function AtInteriorPosition(State: GameState.GameState; Position: Coordinates.InteriorPosition; Facing: Coordinates.FacingDirection): GameState.GameState;
 begin
-  mutable var Value: GameState := State;
-  Value.Player := PlayerPosition.FirstPerson(record
-    Position := Position;
-    Facing := Facing;
-  end);
-  return Value
-end;
+  var Value: GameState.GameState := State;
+  Value.Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Position, Facing := Facing)
+  );
+  return Value;
+end function;
 
-function RequireChanged(Value: InteractionOutcome): GameState;
+function RequireChanged(Value: Interaction.InteractionOutcome): GameState.GameState;
 begin
   case Value of
-    InteractionOutcome.StateChanged(State):
-    begin
-      return State
-    end
-    else
-    begin
-      panic('expected a state-changing item interaction')
-    end
-  end
-end;
+    when Interaction.InteractionOutcome.StateChanged(const State):
+      return State;
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.Described(_, _):
+      panic('expected a state-changing item interaction');
+  end case;
+end function;
 
 begin
-  var Metadata: WorldMetadata := Unwrap(NewWorldMetadata('inventory-test', 77191));
-  var Map: InteriorMap := Unwrap(InitialDungeonMap());
-  var Initial: GameState := NewGame(Metadata);
-  var CoinField: InteriorPosition := Unwrap(InitialItemPosition(Map, InitialDungeonItemId));
-  AssertEquals('', ItemInteractionHint(Initial));
-  AssertEquals(3, Std.Arrays.Length(Initial.Items));
-  AssertEquals(InitialDungeonItemId, Initial.Items[0].Id);
-  AssertEquals(InitialDungeonItemName, ItemDisplayName(Initial.Items[0].Kind));
-  AssertEquals(InitialDungeonItemDescription, ItemDescription(Initial.Items[0].Kind));
-  AssertEquals(0, Std.Arrays.Length(InventoryItems(Initial)));
+  const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
+    'inventory-test',
+    77191,
+    4
+  ).Unwrap();
+  const Map: InteriorUnit.InteriorMap := Fixtures.FixtureDungeonMapFor(
+    Fixtures.SpawnDungeonAreaId(Metadata)
+  );
+  const Initial: GameState.GameState := Fixtures.MaterializedFixtureState(Metadata);
+  const CoinField: Coordinates.InteriorPosition := Map.Items[0].Position;
+  Test.AssertEquals('', Interaction.ItemInteractionHint(Initial));
+  Test.AssertEquals(3, Initial.Items.Length());
+  Test.AssertEquals(Fixtures.FixtureCoinId(Metadata), Initial.Items[0].Id);
+  Test.AssertEquals(ItemRules.AncientCoinName, ItemRules.ItemDisplayName(Initial.Items[0].Kind));
+  Test.AssertEquals(
+    ItemRules.AncientCoinDescription,
+    ItemRules.ItemDescription(Initial.Items[0].Kind)
+  );
+  Test.AssertEquals(0, GameState.InventoryItems(Initial).Length());
   case Initial.Items[0].Location of
-    ItemLocation.InInterior(AreaId, Position):
-    begin
-      AssertEquals(Metadata.DungeonAreaId, AreaId);
-      AssertEquals(CoinField.X, Position.X);
-      AssertEquals(CoinField.Y, Position.Y)
-    end
-    else
-    begin
-      panic('new game must place the item in the initial dungeon')
-    end
-  end;
-  mutable var Missing: GameState := Initial;
+    when ItemRules.ItemLocation.InInterior(const AreaId, const Position):
+      Test.AssertEquals(Fixtures.SpawnDungeonAreaId(Metadata), AreaId);
+      Test.AssertEquals(CoinField.X, Position.X);
+      Test.AssertEquals(CoinField.Y, Position.Y);
+    when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_):
+      panic('new game must place the item in the initial dungeon');
+  end case;
+  var Missing: GameState.GameState := Initial;
   Missing.Items := [];
-  AssertTrue(IsError(ValidateGameState(Metadata, Missing)));
-  mutable var Duplicate: GameState := Initial;
+  Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, Missing) is Error(_));
+  var Duplicate: GameState.GameState := Initial;
   Duplicate.Items := [Initial.Items[0], Initial.Items[0]];
-  AssertTrue(IsError(ValidateGameState(Metadata, Duplicate)));
-  mutable var UnknownIdentity: GameState := Initial;
-  mutable var ChangedItem: GameItem := UnknownIdentity.Items[0];
+  Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, Duplicate) is Error(_));
+  var UnknownIdentity: GameState.GameState := Initial;
+  var ChangedItem: ItemRules.GameItem := UnknownIdentity.Items[0];
   ChangedItem.Id := 'unknown:item';
   UnknownIdentity.Items[0] := ChangedItem;
-  AssertTrue(IsError(ValidateGameState(Metadata, UnknownIdentity)));
-  mutable var WrongArea: GameState := Initial;
+  Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, UnknownIdentity) is Error(_));
+  var WrongArea: GameState.GameState := Initial;
   ChangedItem := WrongArea.Items[0];
-  ChangedItem.Location := ItemLocation.InInterior(Metadata.OutdoorAreaId, CoinField);
+  ChangedItem.Location := ItemRules.ItemLocation.InInterior(Metadata.OutdoorAreaId, CoinField);
   WrongArea.Items[0] := ChangedItem;
-  AssertTrue(IsError(ValidateGameState(Metadata, WrongArea)));
-  mutable var WrongPosition: GameState := Initial;
+  Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, WrongArea) is Error(_));
+  var WrongPosition: GameState.GameState := Initial;
   ChangedItem := WrongPosition.Items[0];
-  ChangedItem.Location := ItemLocation.InInterior(Metadata.DungeonAreaId, Map.Start);
+  ChangedItem.Location := ItemRules.ItemLocation.InInterior(
+    Fixtures.SpawnDungeonAreaId(Metadata),
+    Coordinates.InteriorPosition(X := 0, Y := 0)
+  );
   WrongPosition.Items[0] := ChangedItem;
-  AssertTrue(IsError(ValidateGameState(Metadata, WrongPosition)));
-  mutable var InvalidMap: InteriorMap := Map;
-  InvalidMap.Items := [record
-    ItemId := InitialDungeonItemId;
-    Position := Map.Start;
-  end];
-  AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
-  InvalidMap.Items := [record
-    ItemId := InitialDungeonItemId;
-    Position := Map.Tablet;
-  end];
-  AssertTrue(IsError(ValidateInteriorMap(InvalidMap)));
-  var Entered: GameState := Unwrap(ActivateAreaTransition(Metadata, AtOutdoorEntrance(Metadata, Initial)));
-  AssertEquals('Ancient coin — Enter: Examine', ItemInteractionHint(Entered));
-  AssertEquals('', ItemInteractionHint(AtInteriorPosition(Entered, Map.Start, FacingDirection.East)));
-  AssertEquals('i', Unwrap(InteriorVisibleCodeForState(Map, Entered, CoinField)));
-  case Unwrap(Interact(Metadata, Entered)) of
-    InteractionOutcome.Described(Title, Text):
-    begin
-      AssertEquals(InitialDungeonItemName, Title);
-      AssertEquals(InitialDungeonItemDescription, Text)
-    end
-    else
-    begin
-      panic('item directly ahead must be inspectable without being collected')
-    end
-  end;
+  Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, WrongPosition) is Error(_));
+  var InvalidMap: InteriorUnit.InteriorMap := Map;
+  InvalidMap.Items := [
+    ItemRules.ItemPlacement(
+      ItemId := Fixtures.FixtureCoinId(Metadata),
+      Kind := ItemRules.ItemKind.AncientCoin,
+      Position := Map.Start
+    )
+  ];
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(InvalidMap) is Error(_));
+  InvalidMap.Items := [
+    ItemRules.ItemPlacement(
+      ItemId := Fixtures.FixtureCoinId(Metadata),
+      Kind := ItemRules.ItemKind.AncientCoin,
+      Position := Coordinates.InteriorPosition(X := 9, Y := 0)
+    )
+  ];
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(InvalidMap) is Error(_));
+  const Entered: GameState.GameState := Fixtures.ActivateFixtureTransition(
+    Metadata,
+    AtOutdoorEntrance(Metadata, Initial)
+  ).Unwrap();
+  Test.AssertEquals('Ancient coin — Enter: Examine', Interaction.ItemInteractionHint(Entered));
+  Test.AssertEquals(
+    '',
+    Interaction.ItemInteractionHint(
+      AtInteriorPosition(Entered, Map.Start, Coordinates.FacingDirection.East)
+    )
+  );
+  Test.AssertEquals('i', GameState.InteriorVisibleCodeForState(Map, Entered, CoinField).Unwrap());
+  case Interaction.Interact(Fixtures.FixtureViewFor(Metadata, Entered), Entered).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals(ItemRules.AncientCoinName, Title);
+      Test.AssertEquals(ItemRules.AncientCoinDescription, Text);
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.StateChanged(_):
+      panic('item directly ahead must be inspectable without being collected');
+  end case;
 
-  AssertEquals(0, Std.Arrays.Length(InventoryItems(Entered)));
-  var OnItem: GameState := AtInteriorPosition(Entered, CoinField, FacingDirection.West);
-  for Facing: FacingDirection in [
-                                   FacingDirection.North,
-                                   FacingDirection.East,
-                                   FacingDirection.South,
-                                   FacingDirection.West
-                                 ] do
-  begin
-    AssertEquals('At your feet: Ancient coin — Enter: Pick up', ItemInteractionHint(AtInteriorPosition(Entered, CoinField, Facing)))
-  end;
-  var Collected: GameState := RequireChanged(Unwrap(Interact(Metadata, OnItem)));
-  AssertEquals('', ItemInteractionHint(Collected));
-  AssertEquals(1, Std.Arrays.Length(InventoryItems(Collected)));
-  AssertEquals(InitialDungeonItemId, InventoryItems(Collected)[0].Id);
-  AssertEquals('.', Unwrap(InteriorVisibleCodeForState(Map, Collected, CoinField)));
-  AssertTrue(IsOk(ValidateGameState(Metadata, Collected)));
-  case Unwrap(Interact(Metadata, Collected)) of
-    InteractionOutcome.Described(Title, Text):
+  Test.AssertEquals(0, GameState.InventoryItems(Entered).Length());
+  const OnItem: GameState.GameState := AtInteriorPosition(
+    Entered,
+    CoinField,
+    Coordinates.FacingDirection.West
+  );
+  for Facing: Coordinates.FacingDirection in [
+    Coordinates.FacingDirection.North,
+    Coordinates.FacingDirection.East,
+    Coordinates.FacingDirection.South,
+    Coordinates.FacingDirection.West
+  ] do
     begin
-      AssertEquals(NoInteractionMessage, Text)
-    end
-    else
-    begin
-      panic('collecting the same item twice must not change state')
-    end
-  end;
+      Test.AssertEquals(
+        'At your feet: Ancient coin — Enter: Pick up',
+        Interaction.ItemInteractionHint(AtInteriorPosition(Entered, CoinField, Facing))
+      );
+    end;
+  end for;
+  const Collected: GameState.GameState := RequireChanged(
+    Interaction.Interact(Fixtures.FixtureViewFor(Metadata, OnItem), OnItem).Unwrap()
+  );
+  Test.AssertEquals('', Interaction.ItemInteractionHint(Collected));
+  Test.AssertEquals(1, GameState.InventoryItems(Collected).Length());
+  Test.AssertEquals(Fixtures.FixtureCoinId(Metadata), GameState.InventoryItems(Collected)[0].Id);
+  Test.AssertEquals('.', GameState.InteriorVisibleCodeForState(Map, Collected, CoinField).Unwrap());
+  Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, Collected) is Ok(_));
+  case Interaction.Interact(Fixtures.FixtureViewFor(Metadata, Collected), Collected).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals(Interaction.NoInteractionMessage, Text);
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.StateChanged(_):
+      panic('collecting the same item twice must not change state');
+  end case;
 
-  AssertEquals(1, Std.Arrays.Length(InventoryItems(Collected)));
-  var AtExit: GameState := AtInteriorPosition(Collected, Map.Exit, FacingDirection.West);
-  case Unwrap(Interact(Metadata, AtExit)) of
-    InteractionOutcome.Transitioned(Outside):
-    begin
-      AssertTrue(Outside.Area = AreaKind.OutdoorRegion);
-      AssertEquals(1, Std.Arrays.Length(InventoryItems(Outside)))
-    end
-    else
-    begin
-      panic('carried inventory must survive an area transition')
-    end
-  end;
-  var Reset: GameState := NewGame(Metadata);
-  AssertEquals(0, Std.Arrays.Length(InventoryItems(Reset)));
-  AssertEquals('i', Unwrap(InteriorVisibleCodeForState(Map, Entered, CoinField)))
+  Test.AssertEquals(1, GameState.InventoryItems(Collected).Length());
+  const AtExit: GameState.GameState := AtInteriorPosition(
+    Collected,
+    Map.Exit,
+    Coordinates.FacingDirection.West
+  );
+  case Interaction.Interact(Fixtures.FixtureViewFor(Metadata, AtExit), AtExit).Unwrap() of
+    when Interaction.InteractionOutcome.TransitionRequested(const Target):
+      Test.AssertEquals(Metadata.OutdoorAreaId, Target);
+      const Outside: GameState.GameState := Fixtures.ActivateFixtureTransition(
+        Metadata,
+        AtExit
+      ).Unwrap();
+      Test.AssertTrue(Outside.Area = Coordinates.AreaKind.OutdoorRegion);
+      Test.AssertEquals(1, GameState.InventoryItems(Outside).Length());
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.Described(_, _):
+      panic('carried inventory must survive an area transition');
+  end case;
+  const Reset: GameState.GameState := GameState.NewGame(Metadata);
+  Test.AssertEquals(0, GameState.InventoryItems(Reset).Length());
+  Test.AssertEquals('i', GameState.InteriorVisibleCodeForState(Map, Entered, CoinField).Unwrap());
 end.

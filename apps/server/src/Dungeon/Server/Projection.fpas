@@ -1,239 +1,240 @@
-// Client-safe projections of the authoritative state: masked rows, inventory, character, dialogue, and map windows.
+// Client-safe projections of the authoritative state: masked rows, inventory, character, and map windows.
 unit Dungeon.Server.Projection;
 
-uses
-  Dungeon.Server.Mapping, Dungeon.Server.Session, Dungeon.Combat, Dungeon.Coordinates,
-  Dungeon.Equipment, Dungeon.Exploration, Dungeon.Exploration.Sight, Dungeon.Exploration.Model,
-  Dungeon.GameState, Dungeon.Interaction, Dungeon.Interior, Dungeon.Interior.InitialDungeon,
-  Dungeon.Items, Dungeon.Npcs, Dungeon.Protocol, Dungeon.Terrain, Dungeon.Terrain.Generation,
-  Dungeon.World, Std.Arrays, Std.Str;
+uses Dungeon.Server.Mapping as Mapping, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.Exploration as Exploration, Dungeon.Exploration.Sight as Sight, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Protocol as Protocol, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as ChunksUnit, Dungeon.World as WorldUnit;
 
-public type
-  // Visible state of one projection and the world session whose chunk cache it may have grown.
-  SessionProjection = record
-    public World: WorldSession;
-    public State: VisibleState;
-  end;
-  // Visible rows with Fog of War applied and their knowledge codes.
-  MaskedRows = record
-    public Rows: array of string;
-    public KnowledgeRows: array of string;
-  end;
-  // Messages and structured events of the turn that produced a projected state.
-  TurnReport = record
-    public Log: array of string;
-    public Events: array of CombatEvent;
-  end;
+// Visible state of one projection and the world session whose chunk cache it may have grown.
+public type SessionProjection = record
+  public World: WorldUnit.WorldSession;
+  public State: Protocol.VisibleState;
+end record;
 
-function ProjectInventory(State: GameState): array of VisibleInventoryItem;
+// Visible rows with Fog of War applied and their knowledge codes.
+public type MaskedRows = record
+  public Rows: array of string;
+  public KnowledgeRows: array of string;
+end record;
+
+// Messages and structured events of the turn that produced a projected state.
+public type TurnReport = record
+  public Log: array of string;
+  public Events: array of Combat.CombatEvent;
+end record;
+
+function ProjectInventory(State: GameState.GameState): array of Protocol.VisibleInventoryItem;
 begin
-  mutable var Values: array of VisibleInventoryItem := [];
-  for Item: GameItem in InventoryItems(State) do
-  begin
-    mutable var Slot: VisibleItemSlot := VisibleItemSlot.NoSlot;
-    case ItemSlot(Item.Kind) of
-      Some(Fitting):
-      begin
-        Slot := ProtocolSlot(Fitting)
-      end;
-      None:
-      begin
-      end
+  var Values: array of Protocol.VisibleInventoryItem := [];
+  for Item: ItemRules.GameItem in GameState.InventoryItems(State) do
+    begin
+      var Slot: Protocol.VisibleItemSlot := Protocol.VisibleItemSlot.NoSlot;
+      case ItemRules.ItemSlot(Item.Kind) of
+        when Some(const Fitting):
+          begin
+            Slot := Mapping.ProtocolSlot(Fitting);
+          end;
+        when None:
+          begin
+            null;
+          end;
+      end case;
+      var Equipped: boolean := false;
+      case Item.Location of
+        when ItemRules.ItemLocation.EquippedByPlayer(const Worn):
+          Equipped := true;
+        when ItemRules.ItemLocation.InInterior(_, _), ItemRules.ItemLocation.CarriedByPlayer:
+          null;
+      end case;
+
+      Values.PushInPlace(
+        Protocol.VisibleInventoryItem(
+          Id := Item.Id,
+          Name := ItemRules.ItemDisplayName(Item.Kind),
+          Slot := Slot,
+          Equipped := Equipped
+        )
+      );
     end;
-    mutable var Equipped: boolean := false;
-    case Item.Location of
-      ItemLocation.EquippedByPlayer(Worn):
-      begin
-        Equipped := true
-      end
-      else
-      begin
-      end
-    end;
+  end for;
 
-    Std.Arrays.Push(Values, record
-      Id := Item.Id;
-      Name := ItemDisplayName(Item.Kind);
-      Slot := Slot;
-      Equipped := Equipped;
-    end)
-  end;
+  return Values;
+end function;
 
-  return Values
-end;
-
-function ProjectCharacter(State: GameState): array of VisibleCharacterValue;
+function ProjectCharacter(State: GameState.GameState): array of Protocol.VisibleCharacterValue;
 begin
-  mutable var Values: array of VisibleCharacterValue := [];
-  for Line: CharacterValueLine in CharacterValueLines(State) do
-  begin
-    Std.Arrays.Push(Values, record
-      Label := Line.Label;
-      Value := Line.Value;
-      Source := Line.Source;
-    end)
-  end;
+  var Values: array of Protocol.VisibleCharacterValue := [];
+  for Line: Equipment.CharacterValueLine in Equipment.CharacterValueLines(State) do
+    begin
+      Values.PushInPlace(
+        Protocol.VisibleCharacterValue(
+          Label := Line.Label,
+          Value := Line.Value,
+          Source := Line.Source
+        )
+      );
+    end;
+  end for;
 
-  return Values
-end;
+  return Values;
+end function;
 
 // Returns the report of a projection that no turn produced.
 public function NoTurnReport(): TurnReport;
 begin
-  return record
-    Log := [];
-    Events := [];
-  end
-end;
+  return TurnReport(Log := [], Events := []);
+end function;
 
-// Returns the client-safe form of one dialogue frame.
-public function ProjectDialogue(Value: NpcDialogue): VisibleDialogue;
+function InteriorRows(State: GameState.GameState; Map: InteriorUnit.InteriorMap): result of (array of string, string);
 begin
-  mutable var Choices: array of VisibleDialogueChoice := [];
-  for Choice: NpcDialogueChoice in Value.Choices do
-  begin
-    Std.Arrays.Push(Choices, record
-      Id := Choice.Id;
-      Text := Choice.Text;
-    end)
-  end;
-
-  return record
-    NpcId := Value.NpcId;
-    Speaker := Value.Speaker;
-    Text := Value.Text;
-    Choices := Choices;
-  end
-end;
-
-function InteriorRows(State: GameState; Map: InteriorMap): result of array of string, string;
-begin
-  mutable var Rows: array of string := [];
+  var Rows: array of string := [];
   for Y: integer := 0 to Map.Height - 1 do
-  begin
-    mutable var Row: string := '';
-    for X: integer := 0 to Map.Width - 1 do
     begin
-      Row := Row + (try InteriorVisibleCodeForState(Map, State, record
-        X := X;
-        Y := Y;
-      end))
+      var Row: string := '';
+      for X: integer := 0 to Map.Width - 1 do
+        begin
+          Row := Row +
+            (
+              try GameState.InteriorVisibleCodeForState(
+                Map,
+                State,
+                Coordinates.InteriorPosition(X := X, Y := Y)
+              )
+            );
+        end;
+      end for;
+
+      Rows.PushInPlace(Row);
     end;
+  end for;
 
-    Std.Arrays.Push(Rows, Row)
-  end;
+  return Ok(Rows);
+end function;
 
-  return Ok(Rows)
-end;
-
-function KnowledgeCode(Value: FieldKnowledge): string;
+function KnowledgeCode(Value: Model.FieldKnowledge): string;
 begin
   case Value of
-    FieldKnowledge.Undiscovered:
-    begin
-      return KnowledgeUndiscoveredCode
-    end;
-    FieldKnowledge.Remembered:
-    begin
-      return KnowledgeRememberedCode
-    end;
-    FieldKnowledge.Visible:
-    begin
-      return KnowledgeVisibleCode
-    end
-  end
-end;
+    when Model.FieldKnowledge.Undiscovered:
+      begin
+        return Protocol.KnowledgeUndiscoveredCode;
+      end;
+    when Model.FieldKnowledge.Remembered:
+      begin
+        return Protocol.KnowledgeRememberedCode;
+      end;
+    when Model.FieldKnowledge.Visible:
+      begin
+        return Protocol.KnowledgeVisibleCode;
+      end;
+  end case;
+end function;
 
 function MaskOutdoorRows(
-  State: GameState;
+  State: GameState.GameState;
   TerrainRows: array of string;
   OriginX: integer;
   OriginY: integer;
   Width: integer;
   Height: integer;
-  Player: WorldPosition
+  Player: Coordinates.WorldPosition
 ): MaskedRows;
 begin
-  var VisibleFields: array of boolean := OutdoorVisibility(OriginX, OriginY, Width, Height, Player);
-  mutable var Rows: array of string := [];
-  mutable var KnowledgeRows: array of string := [];
+  const VisibleFields: array of boolean := Exploration.OutdoorVisibility(
+    OriginX,
+    OriginY,
+    Width,
+    Height,
+    Player
+  );
+  var Rows: array of string := [];
+  var KnowledgeRows: array of string := [];
   for Y: integer := 0 to Height - 1 do
-  begin
-    mutable var Row: string := '';
-    mutable var KnowledgeRow: string := '';
-    for X: integer := 0 to Width - 1 do
     begin
-      var WorldX: integer := OriginX + X;
-      var WorldY: integer := OriginY + Y;
-      var Knowledge: FieldKnowledge := ClassifyField(OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[(Y * Width) +
-                                                                                                                           X]);
-      if Knowledge = FieldKnowledge.Undiscovered then
-      begin
-        Row := Row + UnknownFieldCode
-      end
-      else
-      begin
-        Row := Row + Std.Str.CharAt(TerrainRows[Y], X)
-      end;
-
-      KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
-    end;
-
-    Std.Arrays.Push(Rows, Row);
-    Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
-  end;
-
-  return record
-    Rows := Rows;
-    KnowledgeRows := KnowledgeRows;
-  end
-end;
-
-function MaskInteriorRows(State: GameState; Map: InteriorMap; Pose: FirstPersonPose): result of MaskedRows, string;
-begin
-  var TerrainRows: array of string := try InteriorRows(State, Map);
-  var VisibleFields: array of boolean := InteriorVisibility(Map, Pose);
-  mutable var Rows: array of string := [];
-  mutable var KnowledgeRows: array of string := [];
-  for Y: integer := 0 to Map.Height - 1 do
-  begin
-    mutable var Row: string := '';
-    mutable var KnowledgeRow: string := '';
-    for X: integer := 0 to Map.Width - 1 do
-    begin
-      var Knowledge: FieldKnowledge := ClassifyField(InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y), VisibleFields[(Y * Map.Width) +
-                                                                                                                                           X]);
-      if Knowledge = FieldKnowledge.Undiscovered then
-      begin
-        Row := Row + UnknownFieldCode
-      end
-      else
-      begin
-        mutable var Code: string := Std.Str.CharAt(TerrainRows[Y], X);
-        if (Knowledge = FieldKnowledge.Remembered) and
-           (((Code = InteriorItemCode) or (Code = InteriorNpcCode)) or (Code = InteriorHostileCode)) then
+      var Row: string := '';
+      var KnowledgeRow: string := '';
+      for X: integer := 0 to Width - 1 do
         begin
-          Code := try InteriorVisibleCode(Map, record
-            X := X;
-            Y := Y;
-          end)
+          const WorldX: integer := OriginX + X;
+          const WorldY: integer := OriginY + Y;
+          const Knowledge: Model.FieldKnowledge := Exploration.ClassifyField(
+            Exploration.OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[
+              (Y * Width) +
+              X
+            ]
+          );
+          if Knowledge = Model.FieldKnowledge.Undiscovered then
+            begin
+              Row := Row + Protocol.UnknownFieldCode;
+            end;
+          else
+            begin
+              Row := Row + TerrainRows[Y][X];
+            end;
+          end if;
+
+          KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
         end;
+      end for;
 
-        Row := Row + Code
-      end;
-
-      KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
+      Rows.PushInPlace(Row);
+      KnowledgeRows.PushInPlace(KnowledgeRow);
     end;
+  end for;
 
-    Std.Arrays.Push(Rows, Row);
-    Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
-  end;
+  return MaskedRows(Rows := Rows, KnowledgeRows := KnowledgeRows);
+end function;
 
-  return Ok(record
-    Rows := Rows;
-    KnowledgeRows := KnowledgeRows;
-  end)
-end;
+function MaskInteriorRows(State: GameState.GameState; Map: InteriorUnit.InteriorMap; Pose: Coordinates.FirstPersonPose): result of (MaskedRows, string);
+begin
+  const TerrainRows: array of string := try InteriorRows(State, Map);
+  const VisibleFields: array of boolean := Sight.InteriorVisibility(Map, Pose);
+  var Rows: array of string := [];
+  var KnowledgeRows: array of string := [];
+  for Y: integer := 0 to Map.Height - 1 do
+    begin
+      var Row: string := '';
+      var KnowledgeRow: string := '';
+      for X: integer := 0 to Map.Width - 1 do
+        begin
+          const Knowledge: Model.FieldKnowledge := Exploration.ClassifyField(
+            Exploration.InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y),
+            VisibleFields[
+              (Y * Map.Width) +
+              X
+            ]
+          );
+          if Knowledge = Model.FieldKnowledge.Undiscovered then
+            begin
+              Row := Row + Protocol.UnknownFieldCode;
+            end;
+          else
+            begin
+              var Code: string := TerrainRows[Y][X];
+              if (Knowledge = Model.FieldKnowledge.Remembered)
+                and
+                ((Code = Protocol.InteriorItemCode) or (Code = Protocol.InteriorHostileCode))
+              then
+                begin
+                  Code := try InteriorUnit.InteriorVisibleCode(
+                    Map,
+                    Coordinates.InteriorPosition(X := X, Y := Y)
+                  );
+                end;
+              end if;
+
+              Row := Row + Code;
+            end;
+          end if;
+
+          KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
+        end;
+      end for;
+
+      Rows.PushInPlace(Row);
+      KnowledgeRows.PushInPlace(KnowledgeRow);
+    end;
+  end for;
+
+  return Ok(MaskedRows(Rows := Rows, KnowledgeRows := KnowledgeRows));
+end function;
 
 function PlayerInWindow(
   PlayerX: integer;
@@ -244,198 +245,258 @@ function PlayerInWindow(
   Height: integer
 ): boolean;
 begin
-  return (((PlayerX >= OriginX) and (PlayerX < OriginX + Width)) and (PlayerY >= OriginY)) and
-         (PlayerY < OriginY + Height)
-end;
+  return (((PlayerX >= OriginX) and (PlayerX < OriginX + Width)) and (PlayerY >= OriginY))
+    and
+    (PlayerY < OriginY + Height);
+end function;
 
 // Projects one exploration-map window of the current area with Fog of War.
 public function ProjectExplorationMap(
-  State: GameState;
-  Metadata: WorldMetadata;
+  State: GameState.GameState;
+  View: GameState.AreaView;
   OriginX: integer;
   OriginY: integer;
   Width: integer;
   Height: integer
-): result of ExplorationMapState, string;
+): result of (Protocol.ExplorationMapState, string);
 begin
-  mutable var Rows: array of string := [];
-  mutable var KnowledgeRows: array of string := [];
-  if State.Area = AreaKind.OutdoorRegion then
-  begin
-    var Player: WorldPosition := try OutdoorPlayerPosition(State);
-    var VisibleFields: array of boolean := OutdoorVisibility(OriginX, OriginY, Width, Height, Player);
-    for Y: integer := 0 to Height - 1 do
+  const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
+  const Metadata: Terrain.WorldMetadata := View.Metadata;
+  var Rows: array of string := [];
+  var KnowledgeRows: array of string := [];
+  if State.Area = Coordinates.AreaKind.OutdoorRegion then
     begin
-      mutable var Row: string := '';
-      mutable var KnowledgeRow: string := '';
-      for X: integer := 0 to Width - 1 do
-      begin
-        var WorldX: integer := OriginX + X;
-        var WorldY: integer := OriginY + Y;
-        var Knowledge: FieldKnowledge := ClassifyField(OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[(Y * Width) +
-                                                                                                                             X]);
-        if Knowledge = FieldKnowledge.Undiscovered then
+      const Player: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(State);
+      const VisibleFields: array of boolean := Exploration.OutdoorVisibility(
+        OriginX,
+        OriginY,
+        Width,
+        Height,
+        Player
+      );
+      for Y: integer := 0 to Height - 1 do
         begin
-          Row := Row + UnknownFieldCode
-        end
-        else
-        begin
-          Row := Row + VisibleCellCode(GenerateWorldCell(Metadata, WorldX, WorldY))
+          var Row: string := '';
+          var KnowledgeRow: string := '';
+          for X: integer := 0 to Width - 1 do
+            begin
+              const WorldX: integer := OriginX + X;
+              const WorldY: integer := OriginY + Y;
+              const Knowledge: Model.FieldKnowledge := Exploration.ClassifyField(
+                Exploration.OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[
+                  (Y * Width) +
+                  X
+                ]
+              );
+              if Knowledge = Model.FieldKnowledge.Undiscovered then
+                begin
+                  Row := Row + Protocol.UnknownFieldCode;
+                end;
+              else
+                begin
+                  Row := Row +
+                    Terrain.VisibleCellCode(ChunksUnit.GenerateWorldCell(Metadata, WorldX, WorldY));
+                end;
+              end if;
+
+              KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
+            end;
+          end for;
+
+          Rows.PushInPlace(Row);
+          KnowledgeRows.PushInPlace(KnowledgeRow);
         end;
+      end for;
 
-        KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
-      end;
-
-      Std.Arrays.Push(Rows, Row);
-      Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
+      return Ok(
+        Protocol.ExplorationMapState(
+          View := Protocol.ViewKind.Map,
+          LabelText := Metadata.OutdoorAreaLabel,
+          OriginX := OriginX,
+          OriginY := OriginY,
+          Width := Width,
+          Height := Height,
+          Rows := Rows,
+          KnowledgeRows := KnowledgeRows,
+          PlayerWorldX := Player.X,
+          PlayerWorldY := Player.Y,
+          PlayerInWindow := PlayerInWindow(Player.X, Player.Y, OriginX, OriginY, Width, Height)
+        )
+      );
     end;
-
-    return Ok(record
-      View := ViewKind.Map;
-      LabelText := Metadata.OutdoorAreaLabel;
-      OriginX := OriginX;
-      OriginY := OriginY;
-      Width := Width;
-      Height := Height;
-      Rows := Rows;
-      KnowledgeRows := KnowledgeRows;
-      PlayerWorldX := Player.X;
-      PlayerWorldY := Player.Y;
-      PlayerInWindow := PlayerInWindow(Player.X, Player.Y, OriginX, OriginY, Width, Height);
-    end)
-  end;
-  var Map: InteriorMap := try InitialDungeonMap();
-  var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
-  var VisibleFields: array of boolean := InteriorVisibility(Map, Pose);
+  end if;
+  const Map: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, State);
+  const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(State);
+  const VisibleFields: array of boolean := Sight.InteriorVisibility(Map, Pose);
   for LocalY: integer := 0 to Height - 1 do
-  begin
-    mutable var Row: string := '';
-    mutable var KnowledgeRow: string := '';
-    for LocalX: integer := 0 to Width - 1 do
     begin
-      var X: integer := OriginX + LocalX;
-      var Y: integer := OriginY + LocalY;
-      mutable var Knowledge: FieldKnowledge := FieldKnowledge.Undiscovered;
-      if (((X >= 0) and (X < Map.Width)) and (Y >= 0)) and (Y < Map.Height) then
-      begin
-        Knowledge := ClassifyField(InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y), VisibleFields[(Y * Map.Width) +
-                                                                                                                         X])
-      end;
-
-      if Knowledge = FieldKnowledge.Undiscovered then
-      begin
-        Row := Row + UnknownFieldCode
-      end
-      else
-      begin
-        mutable var Code: string := try InteriorVisibleCodeForState(Map, State, record
-          X := X;
-          Y := Y;
-        end);
-        if (Knowledge = FieldKnowledge.Remembered) and
-           (((Code = InteriorItemCode) or (Code = InteriorNpcCode)) or (Code = InteriorHostileCode)) then
+      var Row: string := '';
+      var KnowledgeRow: string := '';
+      for LocalX: integer := 0 to Width - 1 do
         begin
-          Code := try InteriorVisibleCode(Map, record
-            X := X;
-            Y := Y;
-          end)
+          const X: integer := OriginX + LocalX;
+          const Y: integer := OriginY + LocalY;
+          var Knowledge: Model.FieldKnowledge := Model.FieldKnowledge.Undiscovered;
+          if (((X >= 0) and (X < Map.Width)) and (Y >= 0)) and (Y < Map.Height) then
+            begin
+              Knowledge := Exploration.ClassifyField(
+                Exploration.InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y),
+                VisibleFields[
+                  (Y * Map.Width) +
+                  X
+                ]
+              );
+            end;
+          end if;
+
+          if Knowledge = Model.FieldKnowledge.Undiscovered then
+            begin
+              Row := Row + Protocol.UnknownFieldCode;
+            end;
+          else
+            begin
+              var Code: string := try GameState.InteriorVisibleCodeForState(
+                Map,
+                State,
+                Coordinates.InteriorPosition(X := X, Y := Y)
+              );
+              if (Knowledge = Model.FieldKnowledge.Remembered)
+                and
+                ((Code = Protocol.InteriorItemCode) or (Code = Protocol.InteriorHostileCode))
+              then
+                begin
+                  Code := try InteriorUnit.InteriorVisibleCode(
+                    Map,
+                    Coordinates.InteriorPosition(X := X, Y := Y)
+                  );
+                end;
+              end if;
+
+              Row := Row + Code;
+            end;
+          end if;
+
+          KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
         end;
+      end for;
 
-        Row := Row + Code
-      end;
-
-      KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge)
+      Rows.PushInPlace(Row);
+      KnowledgeRows.PushInPlace(KnowledgeRow);
     end;
+  end for;
 
-    Std.Arrays.Push(Rows, Row);
-    Std.Arrays.Push(KnowledgeRows, KnowledgeRow)
-  end;
-
-  return Ok(record
-    View := ViewKind.FirstPerson;
-    LabelText := Metadata.DungeonAreaLabel;
-    OriginX := OriginX;
-    OriginY := OriginY;
-    Width := Width;
-    Height := Height;
-    Rows := Rows;
-    KnowledgeRows := KnowledgeRows;
-    PlayerWorldX := Pose.Position.X;
-    PlayerWorldY := Pose.Position.Y;
-    PlayerInWindow := PlayerInWindow(Pose.Position.X, Pose.Position.Y, OriginX, OriginY, Width, Height);
-  end)
-end;
+  return Ok(
+    Protocol.ExplorationMapState(
+      View := Protocol.ViewKind.FirstPerson,
+      LabelText := Map.DisplayName,
+      OriginX := OriginX,
+      OriginY := OriginY,
+      Width := Width,
+      Height := Height,
+      Rows := Rows,
+      KnowledgeRows := KnowledgeRows,
+      PlayerWorldX := Pose.Position.X,
+      PlayerWorldY := Pose.Position.Y,
+      PlayerInWindow := PlayerInWindow(
+        Pose.Position.X,
+        Pose.Position.Y,
+        OriginX,
+        OriginY,
+        Width,
+        Height
+      )
+    )
+  );
+end function;
 
 // Projects the current area; Report carries the messages and events of the turn that produced State.
 public function ProjectSession(
-  World: WorldSession;
-  State: GameState;
-  Viewport: ViewportSize;
+  World: WorldUnit.WorldSession;
+  View: GameState.AreaView;
+  State: GameState.GameState;
+  Viewport: SessionUnit.ViewportSize;
   Report: TurnReport
-): result of SessionProjection, string;
+): result of (SessionProjection, string);
 begin
-  if State.Area = AreaKind.Dungeon then
-  begin
-    var Map: InteriorMap := try InitialDungeonMap();
-    var Pose: FirstPersonPose := try FirstPersonPlayerPose(State);
-    // Keep the protocol's required status text neutral when no action is available.
-    mutable var Status: string := 'Nothing in reach';
-    var Hint: string := InteractionHint(State);
-    if Hint <> '' then
+  const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
+  if State.Area = Coordinates.AreaKind.Dungeon then
     begin
-      Status := Hint
-    end;
+      const Map: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, State);
+      const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(State);
+      // Keep the protocol's required status text neutral when no action is available.
+      var Status: string := 'Nothing in reach';
+      const Hint: string := Interaction.InteractionHint(State);
+      if Hint <> '' then
+        begin
+          Status := Hint;
+        end;
+      end if;
 
-    if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
-    begin
-      Status := 'Press Enter to return to the outdoor region.'
+      if (Pose.Position.X = Map.Exit.X) and (Pose.Position.Y = Map.Exit.Y) then
+        begin
+          Status := 'Press Enter to return to the outdoor region.';
+        end;
+      end if;
+      const Masked: MaskedRows := try MaskInteriorRows(State, Map, Pose);
+      const FirstPersonValue: Protocol.FirstPersonVisibleState := Protocol.FirstPersonVisibleState(
+        Title := Map.DisplayName,
+        Status := Status,
+        Width := Map.Width,
+        Height := Map.Height,
+        Rows := Masked.Rows,
+        KnowledgeRows := Masked.KnowledgeRows,
+        PlayerX := Pose.Position.X,
+        PlayerY := Pose.Position.Y,
+        Facing := Mapping.ProtocolFacing(Pose.Facing),
+        Inventory := ProjectInventory(State),
+        Health := State.Health,
+        MaxHealth := Equipment.DeriveCharacterValues(State).MaximumHealth,
+        Character := ProjectCharacter(State),
+        CombatLog := Report.Log,
+        CombatEvents := Report.Events.Map(Mapping.ProtocolCombatEvent)
+      );
+      return Ok(
+        SessionProjection(
+          World := World,
+          State := Protocol.VisibleState.FirstPersonState(FirstPersonValue)
+        )
+      );
     end;
-    var Masked: MaskedRows := try MaskInteriorRows(State, Map, Pose);
-    var FirstPersonValue: FirstPersonVisibleState := record
-      Title := World.Metadata.DungeonAreaLabel;
-      Status := Status;
-      Width := Map.Width;
-      Height := Map.Height;
-      Rows := Masked.Rows;
-      KnowledgeRows := Masked.KnowledgeRows;
-      PlayerX := Pose.Position.X;
-      PlayerY := Pose.Position.Y;
-      Facing := ProtocolFacing(Pose.Facing);
-      Inventory := ProjectInventory(State);
-      Health := State.Health;
-      MaxHealth := DeriveCharacterValues(State).MaximumHealth;
-      Character := ProjectCharacter(State);
-      CombatLog := Report.Log;
-      CombatEvents := Std.Arrays.Map(Report.Events, ProtocolCombatEvent);
-    end;
-
-    return Ok(record
-      World := World;
-      State := VisibleState.FirstPersonState(FirstPersonValue);
-    end)
-  end;
-  var Loaded: WindowLoad := try LoadVisibleWindow(World, State, Viewport.Width, Viewport.Height);
-  var OutdoorPosition: WorldPosition := try OutdoorPlayerPosition(State);
-  var Masked: MaskedRows := MaskOutdoorRows(State, Loaded.Window.Rows, Loaded.Window.OriginX, Loaded.Window.OriginY, Loaded.Window.Width, Loaded.Window.Height, OutdoorPosition);
-  var MapValue: MapVisibleState := record
-    OriginX := Loaded.Window.OriginX;
-    OriginY := Loaded.Window.OriginY;
-    Width := Loaded.Window.Width;
-    Height := Loaded.Window.Height;
-    Rows := Masked.Rows;
-    KnowledgeRows := Masked.KnowledgeRows;
-    PlayerX := Loaded.Window.PlayerX;
-    PlayerY := Loaded.Window.PlayerY;
-    WorldX := OutdoorPosition.X;
-    WorldY := OutdoorPosition.Y;
-    Inventory := ProjectInventory(State);
-    Health := State.Health;
-    MaxHealth := DeriveCharacterValues(State).MaximumHealth;
-    Character := ProjectCharacter(State);
-  end;
-
-  return Ok(record
-    World := Loaded.World;
-    State := VisibleState.MapState(MapValue);
-  end)
-end;
+  end if;
+  const Loaded: WorldUnit.WindowLoad := try WorldUnit.LoadVisibleWindow(
+    World,
+    State,
+    Viewport.Width,
+    Viewport.Height
+  );
+  const OutdoorPosition: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(State);
+  const Masked: MaskedRows := MaskOutdoorRows(
+    State,
+    Loaded.Window.Rows,
+    Loaded.Window.OriginX,
+    Loaded.Window.OriginY,
+    Loaded.Window.Width,
+    Loaded.Window.Height,
+    OutdoorPosition
+  );
+  const MapValue: Protocol.MapVisibleState := Protocol.MapVisibleState(
+    OriginX := Loaded.Window.OriginX,
+    OriginY := Loaded.Window.OriginY,
+    Width := Loaded.Window.Width,
+    Height := Loaded.Window.Height,
+    Rows := Masked.Rows,
+    KnowledgeRows := Masked.KnowledgeRows,
+    PlayerX := Loaded.Window.PlayerX,
+    PlayerY := Loaded.Window.PlayerY,
+    WorldX := OutdoorPosition.X,
+    WorldY := OutdoorPosition.Y,
+    Inventory := ProjectInventory(State),
+    Health := State.Health,
+    MaxHealth := Equipment.DeriveCharacterValues(State).MaximumHealth,
+    Character := ProjectCharacter(State)
+  );
+  return Ok(
+    SessionProjection(World := Loaded.World, State := Protocol.VisibleState.MapState(MapValue))
+  );
+end function;
+end unit;
