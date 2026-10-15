@@ -433,7 +433,7 @@ The rendering correction passed `fpas check` and the complete workspace suite
 Dungeon names, further opponent kinds, loot tables, and consumables belong to
 14b; stairs and deeper levels to 14c.
 
-### 14s. World management and server console — IN REVIEW
+### 14s. World management and server console — DONE
 
 - [x] The server supplies defaults and allowed ranges for world parameters (seed,
   entrance region size, later more); the client's new-world dialog shows them
@@ -465,23 +465,26 @@ Dungeon names, further opponent kinds, loot tables, and consumables belong to
 - [x] Uses protocol 14; world format 3, generator 6 and save format 7 remain
   unchanged.
 
-Implementation and verification are tracked in
-[the 14s plan](plans/14s-world-management.md). New worlds accept signed 32-bit
-seeds and entrance regions of 1 through 16 chunks. Catalogs are strict bounded
-pages with a transport byte budget; inspecting them never generates content.
+New worlds accept signed 32-bit seeds and entrance regions of 1 through 16
+chunks. Catalogs are strict bounded pages with a transport byte budget;
+inspecting them never generates content.
 Formatting and workspace checking pass; the complete workspace suite passed
 68/68 test programs with positive, negative, and edge-case coverage on
 2026-10-15. The start-menu backdrop is retained for the current terminal size,
 so focus navigation no longer regenerates it; the regression covers resize and
-return from gameplay. The feature remains in review until accepted.
+return from gameplay.
+
 The user approved a full-terminal dashboard on 2026-10-14; its implementation
 was verified on 2026-10-15. It replaces the
 centered menu with Server, Session and World panels, a large timestamped,
 scrollable/filterable live log, and a shortcut footer. Settings remain an
 overlay. Typed server snapshots supply real status; responsive layouts and
-positive, negative and boundary tests are tracked in the 14s plan. Startup
+positive, negative and boundary tests cover the dashboard. Startup
 errors, failed saves, reconnects, native keyboard routing and very small windows
-are covered. Terminal acceptance of the running dashboard remains open.
+are covered. The user accepted the running server console on 2026-10-15,
+closing the final terminal review for 14s. See the
+[server console documentation](product/server-console.md) for operation and
+controls.
 
 ### 14b. Dungeon contents — LATER
 
