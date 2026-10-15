@@ -13,6 +13,9 @@ in [Functional Pascal](https://github.com/tobiasbick/functional-pascal).
 
 The current version has a TUI client connected to an authoritative game server,
 with a generated, chunked outdoor world and a first-person dungeon view.
+Dungeon names are generated on first entry and stored with each immutable level.
+The current checkpoint uses generator 7 and level format 2; generator-6 worlds
+remain on disk but cannot be continued. Create a new world to use this version.
 
 ## Screenshots
 

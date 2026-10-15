@@ -486,10 +486,37 @@ closing the final terminal review for 14s. See the
 [server console documentation](product/server-console.md) for operation and
 controls.
 
-### 14b. Dungeon contents — LATER
+### 14b. Dungeon contents — NEXT
 
-Several opponent kinds such as a giant rat, loot tables, a first consumable
-item, and deterministic dungeon names.
+The [14b implementation plan](plans/14b-dungeon-contents.md) fixes twelve small,
+ordered checkpoints with positive, negative and edge-case tests. It adds stored,
+deterministic dungeon names, a Giant rat alongside the Restless skeleton,
+generated floor finds and a Healing potion. Opponent death drops remain deferred.
+
+- [x] Recheck the baseline and prepare independent regression fixtures and
+  deterministic combat vectors (14b checkpoint 01). On 2026-10-15, formatting,
+  all 20 project checks and the final complete suite passed (68/68 programs).
+  This baseline checkpoint left gameplay and format versions unchanged.
+- [x] Generate and store a bounded dungeon name; use it in the game, exploration
+  map and server dashboard without regeneration during rendering or load.
+  Checkpoint 02 passed formatting, all 20 project checks and the complete
+  workspace suite (70/70 programs) on 2026-10-15, with positive, negative and
+  boundary coverage. Current generator is 7 and level format 2; protocol 14,
+  world format 3 and save format 7 remain unchanged. Checkpoint 03 is next.
+- [ ] Support both opponent kinds through rules, strict storage/wire mappings,
+  Fog of War, sprites and kind-correct combat/death animation.
+- [ ] Keep coin, sword and jerkin; guarantee one potion and roll two optional
+  floor-find slots with stable original identities, including empty slot gaps.
+- [ ] Use a carried potion from inventory to heal up to six health points before
+  the opponents act once. Reject use at full health or of an invalid item without
+  changing state, dice, time or unsaved-progress status.
+- [ ] Persist consumed potion records and prove cross-area drop/pickup/use,
+  explicit save/load, reconnect, revisit and Start over without duplication.
+- [ ] Use protocol 15, generator 7, level format 2 and save format 8; keep world
+  format 3 and runtime settings unchanged. Preserve incompatible files and report
+  why their worlds/saves cannot continue; do not migrate or delete them.
+- [ ] Cover pure rules, stored formats, protocol rejection, real keyboard input
+  and TCP play; run complete verification and obtain explicit user acceptance.
 
 Generated loot has stable identities derived from its source and is created
 only once. Persist consumed items as consumed rather than deleting their

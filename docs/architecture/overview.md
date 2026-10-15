@@ -91,9 +91,11 @@ these projects.
     entrance.
   - `Dungeon.Items`, `Dungeon.Hostiles`: kinds, identities,
     and per-kind texts and values.
-  - `Dungeon.Interior` with `.Generation` and `.Generation.Validation`:
+  - `Dungeon.Interior` with `.Generation`, `.Generation.Content` and `.Generation.Validation`:
     interior geometry and its validation; the deterministic dungeon generator;
-    the structural rules shared by the generator and stored levels.
+    the structural rules shared by the generator and stored levels. `Content`
+    derives dungeon names using independent seeds; the immutable map retains
+    its display name for storage, projections and diagnostics.
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
     read-only queries; the `AreaView` type pairs world metadata with a supplied
     current interior map.
@@ -136,11 +138,14 @@ these projects.
   visited dungeons.
 - `tests` follows the production modules so each module is exercised through
   its interface. `tests/fixtures` is a test-only library exporting
-  `Dungeon.Test.Fixtures` and `Dungeon.Test.Catalog`: protocol catalog fixtures,
+  `Dungeon.Test.Fixtures`, `Dungeon.Test.Catalog` and `Dungeon.Test.StateComparison`:
+  protocol catalog fixtures,
   independent authored dungeon geometry, metadata with an area identity, initial
-  entities at a requested pose, and area-view helpers.
-  It also lends its layout to any world's spawn dungeon for pure rule tests and
-  turns maps into first-person routes (`RouteTo`). Production projects do not
+  entities at a requested pose, and area-view helpers. `Dungeon.Test.StateComparison`
+  compares complete states, including entity arrays and discovery masks, for
+  regression assertions without invoking game rules or persistence.
+  The fixture library also lends its layout to any world's spawn dungeon for
+  pure rule tests and turns maps into first-person routes (`RouteTo`). Production projects do not
   depend on it; fixture geometry stays independent of generated output.
   `tests/levels` exports `Dungeon.Test.Levels` (entering and validating against
   stored generated levels), `Dungeon.Test.Routes` (routes as client intentions,

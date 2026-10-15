@@ -14,8 +14,8 @@ overlay, and tests). NPCs and dialogue return with settlements in stage 15.
 Mara was the only way to heal; every accepted outdoor step restores one health
 point. This remains available in 14b; consumables add healing inside dungeons.
 
-Generation stays deterministic and server-owned. Names, stories, and LLM
-content remain outside this stage.
+Generation stays deterministic and server-owned. Stage 14b checkpoint 02 adds
+stored names; stories and LLM content remain outside this stage.
 
 ## Entrance regions and sites
 
@@ -51,6 +51,8 @@ content remain outside this stage.
 Entrances change chunk content and the metadata schema, so the world generator
 version rises from 5 to 6 and the world format version from 2 to 3. Existing
 worlds are rejected with the usual instruction to delete or recreate them.
+Stage 14b checkpoint 02 raises the generator to 7 for dungeon names; outdoor
+terrain and entrance fingerprints stay unchanged. World format remains 3.
 
 ## Area view instead of a global map
 
@@ -113,8 +115,8 @@ and carried items stay recorded, so re-entering never restores them.
 
 - Store level files below `worlds/<world-id>/dungeons/<rx>_<ry>/0.json` in
   14a. Derive paths from validated numeric region coordinates, never raw area
-  IDs. Each file records its own format version (initially 1), world identity,
-  generator version, area identity, level index, dimensions, geometry, start
+  IDs. Each file records its own format version (currently 2), world identity,
+  generator version, area identity, immutable display name, level index, dimensions, geometry, start
   pose, exit, and original placements. Reject incompatible versions; no migration.
 - Validate and atomically publish a new file before changing the game state.
   Existing files are loaded and structurally validated, never regenerated for
@@ -189,8 +191,8 @@ other optimization was added.
 The 14a slice introduced protocol version 13, removing the dialogue messages
 and the NPC and tablet field codes and adding the drop-item intention. The
 current protocol version 14 adds world management without changing these
-dungeon messages. Generated dungeons are titled
-`Forgotten dungeon` until stage 14b adds names. The raycaster, the exploration
+dungeon messages. Generated dungeons use their stored display name in the
+first-person title, context panel, exploration map and server dashboard. The raycaster, the exploration
 map, and the context panel already work
 with any interior size; tests cover a 31 by 21 dungeon.
 
@@ -209,9 +211,10 @@ introduced.
 ## Deferred
 
 Stage 14s lets the client create worlds with overridden parameters, list and
-continue existing worlds, and adds the server console. Stage 14b adds several
-opponent kinds, loot tables, a first consumable item, and deterministic dungeon
-names and persistent consumed-item state. Stage 13b follows 14b with progression;
+continue existing worlds, and adds the server console. Stage 14b checkpoint 02
+implements deterministic stored dungeon names. Further 14b checkpoints add
+opponent kinds, loot tables, a first consumable item and persistent consumed-item state.
+Stage 13b follows 14b with progression;
 14c then adds separate level areas and paired stairs without changing the
 first-person view family. Settlements with NPCs and
 dialogue belong to stage 15; LLM-generated content to stage 17.

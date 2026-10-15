@@ -54,6 +54,9 @@ define quests, experience, or levels.
 - **Generated dungeon** is a dungeon whose geometry and original placements
   are generated from the world seed and its entrance region when it is first
   entered, then stored as an immutable **level file**.
+- **Dungeon name** is a stored display label generated from the world seed and
+  entrance region on first entry. Different dungeons may share a name; their
+  area identities remain distinct. Revisit, rendering and load use the stored name.
 - **Return location** is the exact source area identity and coordinate retained
   by the server while the player occupies an entered area. For a dungeon it is
   the entrance site of its region.
@@ -208,7 +211,7 @@ from the spawn; further entrances are rare, at most one per region. Walking onto
 an entrance remains ordinary outdoor movement; `Enter` requests a
 server-authoritative interaction, which activates the transition on that field.
 
-Each entrance leads to a **Forgotten dungeon**: a generated 31 by 21 area of
+Each entrance leads to a named generated dungeon: a 31 by 21 area of
 rooms and corridors with a start beside one visible exit field, one or two
 restless skeletons, and an Ancient coin, a Rusty short sword, and a Leather
 jerkin. Its level is generated and stored on the first visit and read back

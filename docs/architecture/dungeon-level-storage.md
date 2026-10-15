@@ -1,6 +1,7 @@
 # Dungeon level storage contract
 
-This is the 14a level storage contract supplementing
+This is the level storage contract, extended by 14b checkpoint 02 with stored
+dungeon names, supplementing
 [generated dungeons](generated-dungeons.md). It is implemented by
 `Dungeon.World.Interiors` and its `.Encoding` and `.Errors` units, the
 three-phase savegame loading in `Dungeon.World.Savegame`, and the transition
@@ -17,17 +18,18 @@ signed region coordinates, then build the path from those integers. Reject
 leading zeros, a leading plus, negative zero, extra segments, and an area with
 no entrance. Never insert a received area identity into a filesystem path.
 
-The JSON root has exactly these 12 required keys. Object key order is not
+The JSON root has exactly these 13 required keys. Object key order is not
 significant; the writer emits the order below. Unknown, missing, duplicate,
 null, or mistyped fields are errors, including in nested objects. Numeric
 fields must be integral and within their stated bounds.
 
 | Key | Format and requirement |
 | --- | --- |
-| `format_version` | Integer `1`. |
+| `format_version` | Integer `2`. |
 | `world_id` | String exactly equal to selected world metadata ID. |
-| `generator_version` | Integer equal to metadata generator version, `6` in 14a. |
+| `generator_version` | Integer equal to metadata generator version, currently `7`. |
 | `area_id` | Canonical `<world>:dungeon:<rx>:<ry>`, equal to the requested area. |
+| `name` | Stored display name, 1..64 printable ASCII characters, no leading/trailing spaces. |
 | `level` | Integer `0`. |
 | `width` | Integer `31`. |
 | `height` | Integer `21`. |
@@ -42,6 +44,14 @@ Positions use `0 <= x < 31` and `0 <= y < 21`. Facing uses the existing strings
 field east of the exit on the same row. Rows are terrain only: item and actor
 markers must never be written into them. Reuse the existing interior cell-code
 functions.
+
+The name is generated once from world seed and numeric entrance region using
+an independent random stream. Readers validate its shape but never regenerate
+or compare it with a newly generated name. Projections and diagnostics use the
+name of the retained map. Duplicate display names are allowed; area identities
+remain unique. Level format 1 and generator-6 worlds are incompatible, remain
+untouched and require user recreation/deletion. Save format 7 and protocol 14
+are unchanged by this checkpoint; item and opponent counts below still apply.
 
 Each placement is exactly `{ "id": string, "kind": string, "x": integer,
 "y": integer }`. Items occur in index order 0, 1, 2, with IDs

@@ -1,7 +1,54 @@
-// Verifies turn-based combat: perception, pursuit, dice, victory, defeat, and validation.
+// Verifies turn-based combat, pinned dice outcomes, perception, victory, defeat, and validation.
 program CombatTest;
 
-uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Test as Test;
+uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Std.Test as Test;
+
+// Independently calculated unarmed attack expectations, including the opponent's response.
+type AttackVector = record
+  Seed: integer;
+  PlayerDamage: integer;
+  HostileDamage: integer;
+  FinalRandomState: integer;
+  PlayerEvent: Combat.CombatEventKind;
+  HostileEvent: Combat.CombatEventKind;
+end record;
+
+// Pins the full resulting state and both combat facts, not just repeatability.
+procedure AssertPinnedAttack(Vector: AttackVector);
+begin
+  const Position: Coordinates.InteriorPosition := Coordinates.InteriorPosition(X := 4, Y := 3);
+  const Initial: GameState.GameState := Fixtures.FixtureDungeonState(
+    Position, Coordinates.FacingDirection.West
+  ) with RandomState := Vector.Seed; end with;
+  const View: GameState.AreaView := Fixtures.FixtureAreaView(Initial);
+  const Outcome: Combat.TurnOutcome := Combat.ResolveTurn(
+    View, Initial, Combat.TurnAction.Attack
+  ).Unwrap();
+  var Expected: GameState.GameState := Initial with Health := 20 - Vector.HostileDamage; RandomState := Vector.FinalRandomState; end with;
+
+  Expected.Hostiles[0] := Expected.Hostiles[0] with Health := 12 - Vector.PlayerDamage; Alerted := true; end with;
+
+  case Outcome of
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+      Test.AssertTrue(States.SameState(Expected, State));
+      Test.AssertEquals(2, Log.Length());
+      Test.AssertEquals(2, Events.Length());
+      Test.AssertTrue(
+        Events[0] = Combat.CombatEvent(Kind := Vector.PlayerEvent, Amount := Vector.PlayerDamage)
+      );
+      Test.AssertTrue(
+        Events[1] = Combat.CombatEvent(Kind := Vector.HostileEvent, Amount := Vector.HostileDamage)
+      );
+    when Combat.TurnOutcome.Defeated(_):
+      panic('pinned attack must not defeat a full-health player');
+  end case;
+
+  const Fresh: GameState.GameState := Fixtures.FixtureDungeonState(
+    Position, Coordinates.FacingDirection.West
+  ) with RandomState := Vector.Seed; end with;
+
+  Test.AssertTrue(States.SameState(Fresh, Initial));
+end procedure;
 
 function InDungeon(Metadata: Terrain.WorldMetadata; X: integer; Y: integer; Facing: Coordinates.FacingDirection): GameState.GameState;
 begin
@@ -67,6 +114,35 @@ begin
 end function;
 
 begin
+  // LCG vectors calculated independently: missed attacks skip the damage draw.
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 0, PlayerDamage := 0, HostileDamage := 1,
+      FinalRandomState := 654583775, PlayerEvent := Combat.CombatEventKind.PlayerMiss,
+      HostileEvent := Combat.CombatEventKind.HostileHit
+    )
+  );
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 1, PlayerDamage := 2, HostileDamage := 4,
+      FinalRandomState := 1147902781, PlayerEvent := Combat.CombatEventKind.PlayerHit,
+      HostileEvent := Combat.CombatEventKind.HostileHit
+    )
+  );
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 2, PlayerDamage := 3, HostileDamage := 3,
+      FinalRandomState := 846338638, PlayerEvent := Combat.CombatEventKind.PlayerHit,
+      HostileEvent := Combat.CombatEventKind.HostileHit
+    )
+  );
+  AssertPinnedAttack(
+    AttackVector(
+      Seed := 3, PlayerDamage := 1, HostileDamage := 0,
+      FinalRandomState := 679304702, PlayerEvent := Combat.CombatEventKind.PlayerHit,
+      HostileEvent := Combat.CombatEventKind.HostileMiss
+    )
+  );
   const Metadata: Terrain.WorldMetadata := PlacementRules.NewWorldMetadata(
     'combat',
     12345,
