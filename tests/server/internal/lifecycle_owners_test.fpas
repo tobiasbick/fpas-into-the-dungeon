@@ -1,7 +1,7 @@
 // Verifies concrete lifecycle prerequisites and facade parity without changing installed sessions on rejection.
 program LifecycleOwnersTest;
 
-uses Dungeon.GameState as GameState, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as Config, Dungeon.Server.Handling as Handling, Dungeon.Server.Session as Session, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Worlds.Creation as Creation, Dungeon.Server.Worlds.Persistence as Persistence, Dungeon.Server.Worlds.Selection as Selection, Dungeon.Test.SessionAssertions as Sessions, Dungeon.World as World, Dungeon.World.Catalog as Catalog, Dungeon.World.Savegame as SavegameUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+uses Dungeon.GameState as GameState, Dungeon.Progression as Progression, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as Config, Dungeon.Server.Handling as Handling, Dungeon.Server.Session as Session, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Worlds.Creation as Creation, Dungeon.Server.Worlds.Persistence as Persistence, Dungeon.Server.Worlds.Selection as Selection, Dungeon.Test.SessionAssertions as Sessions, Dungeon.World as World, Dungeon.World.Catalog as Catalog, Dungeon.World.Savegame as SavegameUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
 type Exchange = record
   After: Session.ServerSession;
@@ -104,7 +104,9 @@ begin
     const Second := World.OpenWorld(Directory, 'b', 12345, 1, 32).Unwrap();
     const FirstMetadata := Fs.ReadText(World.WorldMetadataPath(First)).Unwrap();
     const SecondMetadata := Fs.ReadText(World.WorldMetadataPath(Second)).Unwrap();
-    const OldState := GameState.NewGame(First.Metadata) with Health := 7; end with;
+    // The earlier save carries trained skills (13b); Start over must not inherit them.
+    const Trained := Progression.ProgressionState(UnarmedExperience := 40, BladesExperience := 120);
+    const OldState := GameState.NewGame(First.Metadata) with Health := 7; Progression := Trained; end with;
 
     discard SavegameUnit.WriteSaveGame(First, OldState).Unwrap();
     const OldSave := Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap();
@@ -213,10 +215,17 @@ begin
     Test.AssertEquals(2, Catalog.ListWorldIds(Directory).Unwrap().Length());
     Test.AssertEquals(OldSave, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
 
+    // Continue restores the saved counters exactly, including a mastered skill.
+    const Continued := Request(Idle, Protocol.ClientMessage.LoadGame, Settings, Socket, Direct);
+    Test.AssertTrue(Continued.After.State.Unwrap().Progression = Trained);
+    Test.AssertFalse(Continued.After.Dirty);
+    Test.AssertEquals(OldSave, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
+
     // Start over keeps the earlier save; only explicit overwrite commits the new progress.
     const Started := Request(Idle, Protocol.ClientMessage.StartNewGame, Settings, Socket, Direct);
     Test.AssertTrue(Started.Reply is Protocol.ServerMessage.State(_));
     Test.AssertEquals(20, Started.After.State.Unwrap().Health);
+    Test.AssertTrue(Started.After.State.Unwrap().Progression = Progression.NewProgression());
     Test.AssertTrue(Started.After.Dirty);
     Test.AssertEquals(123456, Started.After.LastSavedAt);
     Test.AssertEquals(OldSave, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
@@ -254,9 +263,10 @@ begin
     const Loaded := Request(Menu.After, Protocol.ClientMessage.LoadGame, Settings, Socket, Direct);
     Test.AssertTrue(Loaded.Reply is Protocol.ServerMessage.State(_));
     Test.AssertEquals(20, Loaded.After.State.Unwrap().Health);
+    Test.AssertTrue(Loaded.After.State.Unwrap().Progression = Progression.NewProgression());
     Test.AssertFalse(Loaded.After.Dirty);
     const Changed := Loaded.After with State := Some(
-      Loaded.After.State.Unwrap() with Health := 13; end with
+      Loaded.After.State.Unwrap() with Health := 13; Progression := Trained; end with
     ); Dirty := true; end with;
 
     Rejected(
@@ -278,6 +288,8 @@ begin
       Direct
     );
     Test.AssertEquals(20, Rewound.After.State.Unwrap().Health);
+    // Discarded training is gone; the explicit save restores its own counters only.
+    Test.AssertTrue(Rewound.After.State.Unwrap().Progression = Progression.NewProgression());
     Test.AssertEquals(SavedBytes, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
     const IdleAgain := Request(
       Rewound.After,
@@ -304,6 +316,7 @@ begin
       Direct
     );
     Test.AssertTrue(MissingSave.After.Dirty);
+    Test.AssertTrue(MissingSave.After.State.Unwrap().Progression = Progression.NewProgression());
     Test.AssertFalse(Fs.Exists(SavegameUnit.SaveGamePath(Second)));
     const BeforeCreate := Request(
       MissingSave.After,
@@ -322,6 +335,7 @@ begin
     Test.AssertTrue(Created.Reply is Protocol.ServerMessage.State(_));
     Test.AssertTrue(Created.After.Dirty);
     Test.AssertEquals('world-1', Created.After.World.Metadata.Id);
+    Test.AssertTrue(Created.After.State.Unwrap().Progression = Progression.NewProgression());
     Test.AssertEquals(0, Created.After.LastSavedAt);
     Test.AssertFalse(Fs.Exists(SavegameUnit.SaveGamePath(Created.After.World)));
     Test.AssertEquals(3, Catalog.ListWorldIds(Directory).Unwrap().Length());

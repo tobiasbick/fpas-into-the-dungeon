@@ -1,0 +1,193 @@
+// Verifies active-skill selection and its literal hit/damage benefits in derived values and real attacks.
+program ProgressionEquipmentTest;
+
+uses Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Items as Items, Dungeon.Progression as Progression, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Std.Test as Test;
+
+const SwordIndex: integer := 1;
+const JerkinIndex: integer := 2;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+// A rat directly west of the player; the sword and jerkin start carried.
+function Encounter(Value: Progression.ProgressionState): GameState.GameState;
+begin
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 4, Y := 3),
+    Coordinates.FacingDirection.West
+  );
+  State.Hostiles[0] := State.Hostiles[0] with Kind := Hostiles.HostileKind.GiantRat; Health := 6; Alerted := true; end with;
+
+  State.Items[SwordIndex] := State.Items[SwordIndex] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  State.Items[JerkinIndex] := State.Items[JerkinIndex] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  State.Progression := Value;
+  return State;
+end function;
+
+function Wearing(State: GameState.GameState; Index: integer; Slot: Items.EquipmentSlot): GameState.GameState;
+begin
+  var Changed := State;
+  Changed.Items[Index] := Changed.Items[Index] with Location := Items.ItemLocation.EquippedByPlayer(
+    Slot
+  ); end with;
+
+  return Changed;
+end function;
+
+function Armed(State: GameState.GameState): GameState.GameState;
+begin
+  return Wearing(State, SwordIndex, Items.EquipmentSlot.Weapon);
+end function;
+
+procedure AssertValues(State: GameState.GameState; Threshold: integer; Sides: integer; Bonus: integer; Armor: integer);
+begin
+  const Values := Equipment.DeriveCharacterValues(State);
+  Test.AssertEquals(20, Values.MaximumHealth);
+  Test.AssertEquals(Threshold, Values.HitThreshold);
+  Test.AssertEquals(Sides, Values.DamageSides);
+  Test.AssertEquals(Bonus, Values.DamageBonus);
+  Test.AssertEquals(Armor, Values.Armor);
+end procedure;
+
+function Resolve(State: GameState.GameState; Action: Combat.TurnAction): Combat.TurnOutcome;
+begin
+  return Combat.ResolveTurn(Fixtures.FixtureAreaView(State), State, Action).Unwrap();
+end function;
+
+function Continued(Outcome: Combat.TurnOutcome): GameState.GameState;
+begin
+  case Outcome of
+    when Combat.TurnOutcome.Continued(const State, _, _):
+      return State;
+    when Combat.TurnOutcome.Defeated(_):
+      panic('expected a surviving turn');
+  end case;
+end function;
+
+// First d20 of a seed, computed independently of the production dice helper.
+function FirstD20(Seed: integer): integer;
+begin
+  const First := ((Seed * 1103515245) + 12345) mod 2147483648;
+  return ((First div 65536) mod 20) + 1;
+end function;
+
+begin
+  // Literal table: experience 0/12/36/72/120 in the active skill.
+  const Xp: array of integer := [0, 12, 36, 72, 120];
+  const Thresholds: array of integer := [6, 6, 5, 5, 4];
+  const UnarmedBonus: array of integer := [0, 1, 1, 2, 2];
+  const SwordBonus: array of integer := [1, 2, 2, 3, 3];
+  for Index: integer := 0 to 4 do
+    const Fist := Encounter(Progress(Xp[Index], 0));
+    Test.AssertTrue(Equipment.ActiveSkill(Fist) = Progression.SkillKind.Unarmed);
+    AssertValues(Fist, Thresholds[Index], 3, UnarmedBonus[Index], 0);
+    const Blade := Armed(Encounter(Progress(0, Xp[Index])));
+    Test.AssertTrue(Equipment.ActiveSkill(Blade) = Progression.SkillKind.Blades);
+    AssertValues(Blade, Thresholds[Index], 6, SwordBonus[Index], 0);
+    // Armor adds only armor and never selects or changes a skill.
+    AssertValues(
+      Wearing(Blade, JerkinIndex, Items.EquipmentSlot.Body),
+      Thresholds[Index],
+      6,
+      SwordBonus[Index],
+      2
+    );
+    AssertValues(
+      Wearing(Fist, JerkinIndex, Items.EquipmentSlot.Body),
+      Thresholds[Index],
+      3,
+      UnarmedBonus[Index],
+      2
+    );
+  end for;
+
+  // Carrying a sword does not select Blades; the inactive skill never contributes.
+  const Mixed := Encounter(Progress(120, 0));
+  AssertValues(Mixed, 4, 3, 2, 0);
+  AssertValues(Armed(Mixed), 6, 6, 1, 0);
+  AssertValues(Armed(Encounter(Progress(0, 120))), 4, 6, 3, 0);
+  AssertValues(Encounter(Progress(0, 120)), 6, 3, 0, 0);
+
+  // Equip rules switch the active skill, retain both counters and the dice, and add no draw.
+  const Untrained := Encounter(Progress(120, 35));
+  const Untouched := Untrained;
+  const Wielded := Equipment.EquipItem(Untrained, Untrained.Items[SwordIndex].Id).Unwrap().State;
+  Test.AssertTrue(Equipment.ActiveSkill(Wielded) = Progression.SkillKind.Blades);
+  AssertValues(Wielded, 6, 6, 2, 0);
+  Test.AssertTrue(Wielded.Progression = Untrained.Progression);
+  Test.AssertEquals(Untrained.RandomState, Wielded.RandomState);
+  const PutAway := Equipment.UnequipItem(Wielded, Wielded.Items[SwordIndex].Id).Unwrap().State;
+  Test.AssertTrue(Equipment.ActiveSkill(PutAway) = Progression.SkillKind.Unarmed);
+  AssertValues(PutAway, 4, 3, 2, 0);
+  Test.AssertTrue(PutAway.Progression = Untrained.Progression);
+  Test.AssertTrue(States.SameState(Untouched, Untrained));
+
+  // Rejected equipment intentions leave both counters untouched.
+  Test.AssertTrue(Equipment.EquipItem(Untrained, Untrained.Items[0].Id) is Error(_));
+  Test.AssertTrue(Equipment.UnequipItem(Untrained, Untrained.Items[SwordIndex].Id) is Error(_));
+  Test.AssertTrue(Equipment.EquipItem(Wielded, Wielded.Items[SwordIndex].Id) is Error(_));
+  Test.AssertTrue(
+    Equipment.DropItem(Fixtures.FixtureAreaView(Wielded), Wielded, Wielded.Items[SwordIndex].Id) is Error(_)
+  );
+  Test.AssertTrue(States.SameState(Untouched, Untrained));
+
+  // Equipping as a turn keeps the counters; the opponent phase changes nothing else of progression.
+  const EquipTurn := Continued(
+    Resolve(Untrained, Combat.TurnAction.Equip(Untrained.Items[SwordIndex].Id))
+  );
+  Test.AssertTrue(EquipTurn.Progression = Untrained.Progression);
+
+  // Two copies of the sword share the same Blades progress.
+  var Copies := Encounter(Progress(0, 72));
+  Copies.Items.PushInPlace(
+    Items.GameItem(
+      Id := 'second-sword',
+      Kind := Items.ItemKind.RustyShortSword,
+      Location := Items.ItemLocation.CarriedByPlayer
+    )
+  );
+  const First := Equipment.EquipItem(Copies, Copies.Items[SwordIndex].Id).Unwrap().State;
+  const Second := Equipment.EquipItem(First, 'second-sword').Unwrap().State;
+  AssertValues(First, 5, 6, 3, 0);
+  AssertValues(Second, 5, 6, 3, 0);
+  Test.AssertTrue(Second.Items[SwordIndex].Location = Items.ItemLocation.CarriedByPlayer);
+
+  // Real attacks: seed 1 rolls d20=19 and d3=2. Unarmed level 5 adds +2 damage.
+  case Resolve(
+    Encounter(Progress(120, 0)) with RandomState := 1; end with,
+    Combat.TurnAction.Attack
+  ) of
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+      Test.AssertEquals(2, State.Hostiles[0].Health);
+      Test.AssertEquals(4, Events[0].Amount);
+      Test.AssertEquals('You hit the Giant rat for 4.', Log[0]);
+      Test.AssertEquals(1147902781, State.RandomState);
+    when Combat.TurnOutcome.Defeated(_):
+      panic('full health encounter must continue');
+  end case;
+
+  // A roll of exactly 5 misses at levels 1-2 and hits at level 3, without changing the draw count.
+  var Seed := 0;
+  while FirstD20(Seed) <> 5 do
+    Seed := Seed + 1;
+  end while;
+
+  for Index: integer := 0 to 4 do
+    const Before := Encounter(Progress(Xp[Index], 0)) with RandomState := Seed; end with;
+
+    case Resolve(Before, Combat.TurnAction.Attack) of
+      when Combat.TurnOutcome.Continued(_, _, const Events):
+        if Index < 2 then
+          Test.AssertTrue(Events[0].Kind = Combat.CombatEventKind.PlayerMiss);
+        else
+          Test.AssertTrue(Events[0].Kind = Combat.CombatEventKind.PlayerHit);
+        end if;
+      when Combat.TurnOutcome.Defeated(_):
+        panic('one rat cannot defeat a full-health player');
+    end case;
+  end for;
+end.

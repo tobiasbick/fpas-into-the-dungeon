@@ -1,0 +1,245 @@
+// Trains both skills through real generated fights over TCP, then saves, reconnects, continues and switches skills.
+program ProgressionNetworkTest;
+
+uses Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Test.Levels as Levels, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Catalog as Catalog, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+function ServeOne(Listener: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Connection := try Net.AcceptWithCancellation(Listener, Token);
+  const Configured := try Net.SetTimeout(Connection, 120000);
+  const ResultValue := Server.ServeConnection(Connection, Config, Token);
+  const Closed := try Net.Close(Connection);
+  return ResultValue;
+end function;
+
+function Value(View: Protocol.FirstPersonVisibleState; Label: string): string;
+begin
+  for Line: Protocol.VisibleCharacterValue in View.Character do
+    if Line.Label = Label then
+      return Line.Value;
+    end if;
+  end for;
+
+  return '';
+end function;
+
+function Source(View: Protocol.FirstPersonVisibleState; Label: string): string;
+begin
+  for Line: Protocol.VisibleCharacterValue in View.Character do
+    if Line.Label = Label then
+      return Line.Source;
+    end if;
+  end for;
+
+  return '';
+end function;
+
+function Stored(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  return Levels.DecodeStoredSave(
+    World,
+    Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap()
+  ).Unwrap();
+end function;
+
+function KindIndex(Map: InteriorUnit.InteriorMap; Kind: Hostiles.HostileKind): integer;
+begin
+  for Index: integer := 0 to Map.Hostiles.Length() - 1 do
+    if Map.Hostiles[Index].Kind = Kind then
+      return Index;
+    end if;
+  end for;
+
+  panic('generated level lacks the opponent kind');
+end function;
+
+function HasEvent(View: Protocol.FirstPersonVisibleState; Kind: Protocol.VisibleCombatEventKind): boolean;
+begin
+  for Fact: Protocol.VisibleCombatEvent in View.CombatEvents do
+    if Fact.Kind = Kind then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function Logged(View: Protocol.FirstPersonVisibleState; Text: string): boolean;
+begin
+  for Entry: string in View.CombatLog do
+    if Entry = Text then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+begin
+  const Root := '.temp-data/progression-network-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := 'missing',
+    WorldSeed := 9462, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Listener).Unwrap().Port;
+  var SavedText := '';
+  var SavedLines: array of Protocol.VisibleCharacterValue := [];
+  var Unarmed := 0;
+  var WorldId := '';
+  scope
+    const Worker := go ServeOne(Listener, Config, Token);
+    var Client := Wire.ConnectClient(Port, Token);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.CreateWorld(9462, 4), Token);
+    const World := Catalog.OpenExistingWorld(Root, 'world-1', 32).Unwrap();
+    WorldId := World.Metadata.Id;
+    const Map := Routes.SpawnDungeonMap(World.Metadata);
+    Client := Wire.WalkOutdoors(Client, World.Metadata.SpawnEntrance, Token);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    const Fresh := Wire.FirstPersonOf(Client);
+    Test.AssertEquals(6, Fresh.Character.Length());
+    Test.AssertEquals('L1 XP 0/12', Value(Fresh, 'Unarmed'));
+    Test.AssertEquals('L1 XP 0/12', Value(Fresh, 'Blades'));
+    Test.AssertEquals('Active; next: damage +1', Source(Fresh, 'Unarmed'));
+
+    // Attacking air is rejected and trains nothing.
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Attack, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Rejected(_, _));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Viewport(20, 10), Token);
+    Test.AssertEquals('L1 XP 0/12', Value(Wire.FirstPersonOf(Client), 'Unarmed'));
+
+    // Collect the sword and the jerkin; wear only the jerkin for now.
+    for Slot: integer in [1, 2] do
+      Client := Wire.WalkTo(Client, Map, Map.Items[Slot].Position, Token).Unwrap();
+      Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    end for;
+
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Equip(Map.Items[2].ItemId), Token);
+
+    // Land unarmed hits on the full-health rat until one connects.
+    const Rat := KindIndex(Map, Hostiles.HostileKind.GiantRat);
+    const Skeleton := KindIndex(Map, Hostiles.HostileKind.RestlessSkeleton);
+    Client := Wire.FaceOpponent(Client, Map, Map.Hostiles[Rat].Position, Token);
+    var Hit := false;
+    for Attempt: integer := 1 to 10 do
+      if not Hit then
+        Client := Wire.Exchange(Client, Protocol.ClientMessage.Attack, Token);
+        Hit := HasEvent(Wire.FirstPersonOf(Client), Protocol.VisibleCombatEventKind.PlayerHit);
+      end if;
+    end for;
+
+    Test.AssertTrue(Hit);
+    const AfterFist := Wire.FirstPersonOf(Client);
+    Test.AssertFalse(HasEvent(AfterFist, Protocol.VisibleCombatEventKind.HostileDefeated));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token);
+    Wire.RequireSaved(Client);
+    Unarmed := 6 - Stored(World).Hostiles[Rat].Health;
+    Test.AssertTrue((Unarmed >= 1) and (Unarmed <= 3));
+    Test.AssertEquals(Unarmed, Stored(World).Progression.UnarmedExperience);
+    Test.AssertEquals('L1 XP ' + Conv.IntToStr(Unarmed) + '/12', Value(AfterFist, 'Unarmed'));
+
+    // Equip the sword, then finish the rat and the skeleton with Blades.
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Equip(Map.Items[1].ItemId), Token);
+    Test.AssertEquals('Active; next: damage +1', Source(Wire.FirstPersonOf(Client), 'Blades'));
+    Client := Wire.FightAhead(Client, Token).Unwrap();
+    Client := Wire.FaceOpponent(Client, Map, Map.Hostiles[Skeleton].Position, Token);
+    var Notice := false;
+    var Done := false;
+    for Blow: integer := 1 to 80 do
+      if not Done then
+        Client := Wire.Exchange(Client, Protocol.ClientMessage.Attack, Token);
+        Notice := Notice or Logged(Wire.FirstPersonOf(Client), 'Blades reached level 2.');
+        Done := HasEvent(
+          Wire.FirstPersonOf(Client),
+          Protocol.VisibleCombatEventKind.HostileDefeated
+        );
+      end if;
+    end for;
+
+    Test.AssertTrue(Done);
+    const Trained := Wire.FirstPersonOf(Client);
+    Test.AssertTrue(Notice);
+    // All 18 opponent health points became experience, split by the skill that removed them.
+    Test.AssertEquals('L2 XP ' + Conv.IntToStr(18 - Unarmed) + '/36', Value(Trained, 'Blades'));
+    Test.AssertEquals('Active; next: hit +1', Source(Trained, 'Blades'));
+    Test.AssertEquals('L1 XP ' + Conv.IntToStr(Unarmed) + '/12', Value(Trained, 'Unarmed'));
+    Test.AssertEquals('d6+2', Value(Trained, 'Damage'));
+
+    // A repeated attack at the defeated target is rejected and changes nothing.
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Attack, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Rejected(_, _));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Wire.RequireSaved(Client);
+    SavedText := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+    SavedLines := Trained.Character;
+    Test.AssertEquals(Unarmed, Stored(World).Progression.UnarmedExperience);
+    Test.AssertEquals(18 - Unarmed, Stored(World).Progression.BladesExperience);
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  // Reconnect and Continue: both counters, equipment and lines are restored exactly.
+  scope
+    const Worker := go ServeOne(Listener, Config, Token);
+    var Client := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.SelectWorld(WorldId),
+      Token
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    const Restored := Wire.FirstPersonOf(Client);
+    Test.AssertEquals(SavedLines.Length(), Restored.Character.Length());
+    for Index: integer := 0 to SavedLines.Length() - 1 do
+      Test.AssertTrue(SavedLines[Index] = Restored.Character[Index]);
+    end for;
+    // Unequipping switches to the retained Unarmed level.
+    var SwordId := '';
+    for Item: Protocol.VisibleInventoryItem in Restored.Inventory do
+      if Item.Slot = Protocol.VisibleItemSlot.Weapon then
+        SwordId := Item.Id;
+      end if;
+    end for;
+
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Unequip(SwordId), Token);
+    const Bare := Wire.FirstPersonOf(Client);
+    Test.AssertEquals('Active; next: damage +1', Source(Bare, 'Unarmed'));
+    Test.AssertEquals('Next: hit +1', Source(Bare, 'Blades'));
+    Test.AssertEquals('d3', Value(Bare, 'Damage'));
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  Test.AssertEquals(
+    SavedText,
+    Fs.ReadText(
+      Savegame.SaveGamePath(Catalog.OpenExistingWorld(Root, WorldId, 32).Unwrap())
+    ).Unwrap()
+  );
+
+  // An obsolete format-8 save is rejected through Continue and preserved byte-for-byte.
+  const World := Catalog.OpenExistingWorld(Root, WorldId, 32).Unwrap();
+  const Obsolete := SavedText.Replace('"format_version":9', '"format_version":8');
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), Obsolete).Unwrap());
+  scope
+    const Worker := go ServeOne(Listener, Config, Token);
+    var Client := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.SelectWorld(WorldId),
+      Token
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Rejected(_, _));
+    // Start over begins untrained and keeps the old file until an explicit overwrite.
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.StartNewGame, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.State(_));
+    Test.AssertEquals(Obsolete, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  Test.AssertEquals(Obsolete, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+end.

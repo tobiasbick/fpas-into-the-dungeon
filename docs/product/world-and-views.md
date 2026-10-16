@@ -1,8 +1,7 @@
 # World structure and views
 
 This document defines the canonical terms for the spatial world model and its
-presentation, including the first combat and equipment terms. It does not yet
-define quests, experience, or levels.
+presentation, including the first combat, equipment and progression terms. It does not yet define quests.
 
 ## Terminology
 
@@ -111,9 +110,18 @@ define quests, experience, or levels.
 - **Rusty short sword** is the first weapon and **Leather jerkin** the first
   armor; every generated dungeon places both on room corners.
 - **Derived values** are the character's values as the rules read them: hit
-  threshold, damage, armor, and maximum health. They follow from base values
-  plus equipment and are never stored.
+  threshold, damage, armor, and maximum health. They follow from base values,
+  equipment and the active skill's benefits and are never stored.
 - **Armor** raises the roll an opponent needs to hit the player.
+- **Experience** is a skill's cumulative training in 0..120,
+  earned only from health a successful player attack actually removes.
+- **Skill** is a fighting ability trained by use: **Unarmed** or
+  **Blades**. Skills progress independently.
+- **Skill level** is 1..5, derived from a skill's experience and
+  never stored. It is unrelated to a dungeon's spatial levels.
+- **Active skill** is the skill selected by the worn weapon at
+  the start of an attack; only its benefits add to the derived values.
+- **Mastery** is skill level 5 at the 120-point cap.
 - **Opponent** is a hostile actor with stable server-owned identity, kind,
   area, position, health, and alert status. A standing opponent blocks its
   field; a destroyed one stays recorded but is never projected.

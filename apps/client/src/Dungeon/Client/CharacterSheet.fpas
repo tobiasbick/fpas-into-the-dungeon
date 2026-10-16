@@ -1,0 +1,116 @@
+// Read-only, bounded and scrollable character sheet overlay built from server-formatted lines.
+unit Dungeon.Client.CharacterSheet;
+
+uses Dungeon.Client.Character as Character, Dungeon.Client.Model as Model, Dungeon.Client.Ui.Layout as Layout, Dungeon.Protocol as Protocol, Std.Conv as Conv, Std.Tui as Tui;
+
+// Returns the scrolling body: a label/value row and a source row per projected line, then the equipment.
+// The client never parses or derives the supplied texts.
+public function BodyLines(State: Model.ClientModel): array of string;
+begin
+  var Lines: array of string := [];
+  for Line: Protocol.VisibleCharacterValue in State.Character do
+    var Label: string := Line.Label;
+    while Label.Length() < 15 do
+      Label := Label + ' ';
+    end while;
+
+    Lines.PushInPlace(Label + Line.Value);
+    Lines.PushInPlace('  · ' + Line.Source);
+  end for;
+
+  Lines.PushInPlace('── Equipment ──');
+  for Entry: string in Character.EquipmentLines(State.Inventory) do
+    Lines.PushInPlace(Entry);
+  end for;
+
+  return Lines;
+end function;
+
+// Largest valid offset for the current body and terminal size; zero when everything fits.
+function MaximumOffset(State: Model.ClientModel): integer;
+begin
+  const Excess := BodyLines(State).Length() - Layout.CharacterSheetBodyRows(State);
+  if Excess < 0 then
+    return 0;
+  end if;
+
+  return Excess;
+end function;
+
+// Clamps the UI-only offset after resizing or an authoritative refresh; never wraps.
+public function ClampOffset(State: Model.ClientModel): Model.ClientModel;
+begin
+  var Next := State;
+  if Next.CharacterSheetOffset > MaximumOffset(State) then
+    Next.CharacterSheetOffset := MaximumOffset(State);
+  end if;
+
+  if Next.CharacterSheetOffset < 0 then
+    Next.CharacterSheetOffset := 0;
+  end if;
+
+  return Next;
+end function;
+
+// Scrolls the body by one row per step, clamped at both ends; no game intention is created.
+public function Scroll(State: Model.ClientModel; Delta: integer): Model.ClientModel;
+begin
+  if not Layout.CharacterSheetCanFit(State) then
+    return State;
+  end if;
+
+  return ClampOffset(
+    State with CharacterSheetOffset := State.CharacterSheetOffset + Delta; end with
+  );
+end function;
+
+// Renders health and the visible row range above the body and two fixed hint rows below it.
+// Below 32 by 8 cells only a resize hint and the close keys are shown.
+public function ViewCharacterSheet(State: Model.ClientModel): Tui.TuiElement;
+begin
+  if not Layout.CharacterSheetCanFit(State) then
+    return Tui.TuiElementBuilders.MakeOverlay(
+      'Character', [
+        Tui.TuiElementBuilders.MakeColumn([
+          Tui.TuiElementBuilders.MakeLabel('Resize to 32x8'),
+          Tui.TuiElementBuilders.MakeLabel('Esc/C close')
+        ])
+      ]
+    );
+  end if;
+  const Width := Layout.CharacterSheetWidth(State);
+  const Rows := Layout.CharacterSheetBodyRows(State);
+  const Lines := BodyLines(State);
+  const First := ClampOffset(State).CharacterSheetOffset;
+  var Last := First + Rows;
+  if Last > Lines.Length() then
+    Last := Lines.Length();
+  end if;
+  var Content: array of Tui.TuiElement := [
+    Tui.TuiElementBuilders.MakeLabel(
+      Layout.FitLine(
+        'Health         ' + Conv.IntToStr(State.Health) + '/' + Conv.IntToStr(State.MaxHealth),
+        Width
+      )
+    ),
+    Tui.TuiElementBuilders.MakeLabel(
+      Layout.FitLine(
+        'Rows ' + Conv.IntToStr(First + 1) + '-' + Conv.IntToStr(Last) + '/' +
+        Conv.IntToStr(Lines.Length()), Width
+      )
+    )
+  ];
+  for Index: integer := First to Last - 1 do
+    Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(Lines[Index], Width)));
+  end for;
+
+  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Layout.FitLine('W/S/arrows scroll', Width)));
+  Content.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(Layout.FitLine('I inventory  Esc/C close', Width))
+  );
+  return Tui.TuiElementBuilders.MakeOverlay(
+    'Character',
+    [Tui.TuiElementBuilders.MakeColumn(Content)]
+  );
+end function;
+end unit;

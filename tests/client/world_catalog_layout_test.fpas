@@ -1,0 +1,129 @@
+// Renders the world catalog: aligned table, one wrapped reason, bounded width, and a renderable refresh wait.
+program WorldCatalogLayoutTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as CatalogUnit, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+const Reason: string := 'invalid world metadata: unsupported world generator version. Delete or recreate this world.';
+
+function Count(Screen: Tui.TuiSurfaceSnapshot; Text: string): integer;
+begin
+  var Found := 0;
+  for Row: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Row) then
+      Found := Found + 1;
+    end if;
+  end for;
+
+  return Found;
+end function;
+
+function RowOf(Screen: Tui.TuiSurfaceSnapshot; Text: string): integer;
+begin
+  for Row: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Row) then
+      return Row;
+    end if;
+  end for;
+
+  return -1;
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of ClientUnit.ConnectionEvent := Tasks.CreateChannel(8);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  const Good := CatalogUnit.FixtureCatalog(false, false).Worlds[0] with Id := 'world-3'; SaveStatus := 'incompatible'; Reason := 'invalid savegame: unsupported savegame format version 8; expected 9. Recreate the save or start over.'; end with;
+  var Rows: array of Protocol.WorldSummary := [];
+  for Id: string in ['main', 'world-1', 'world-2'] do
+    Rows.PushInPlace(
+      Good with Id := Id; Status := 'incompatible'; SaveStatus := 'unknown'; Reason := Reason; end with
+    );
+  end for;
+
+  Rows.PushInPlace(Good);
+  const Catalog := WorldsUnit.EmptyWorldCatalog(0, 4) with Worlds := Rows; Total := 4; SelectedId := 'main'; SelectionReason := Reason; end with;
+
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(160, 50),
+    Tui.TuiSize.Create(100, 30),
+    Tui.TuiSize.Create(60, 30)
+  ] do
+    var Model := ClientUnit.NewClientModel(
+      '127.0.0.1', 4040, '', RuntimeData.DefaultClientPreferences(), Requests, Events
+    ) with ViewportWidth := Size.Width; ViewportHeight := Size.Height; end with;
+
+    Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Connected(Catalog), Cmd);
+    const App := Tui.TuiApplication.OpenForTest(Size);
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+    const Screen := App.SurfaceSnapshot();
+
+    // The status line no longer repeats the reason; it appears once, for the selected world.
+    Test.AssertEquals(1, Count(Screen, 'Choose a world.'));
+    Test.AssertEquals(0, Count(Screen, 'Choose a world. invalid'));
+    Test.AssertEquals(1, Count(Screen, 'Selected: main'));
+    // The wrapped reason may split words across rows; its start appears exactly once.
+    Test.AssertEquals(1, Count(Screen, 'invalid world metadata'));
+
+    // Every world row shares the same columns; the incompatible worlds show placeholders.
+    const Header := RowOf(Screen, 'World');
+    Test.AssertTrue(Header >= 0);
+    const StatusColumn := Screen.LineAt(Header).IndexOf('Status').Unwrap();
+    for Id: string in ['main ', 'world-1 ', 'world-2 ', 'world-3 '] do
+      const Row := RowOf(Screen, Id);
+      Test.AssertTrue(Row > Header);
+      Test.AssertTrue(
+        (Screen.LineAt(Row).IndexOf('incompatible') = Some(StatusColumn))
+        or
+        (Screen.LineAt(Row).IndexOf('ready') = Some(StatusColumn))
+      );
+    end for;
+
+    Test.AssertTrue('12345' in Screen.LineAt(RowOf(Screen, 'world-3 ')));
+
+    // Nothing runs past the frame: every catalog row has the frame border in the header's column.
+    const Border := Screen.LineAt(Header).LastIndexOf('│').Unwrap();
+    Test.AssertTrue(Border > StatusColumn);
+    for Row: integer := Header to RowOf(Screen, 'Create world') do
+      Test.AssertEquals(Border, Screen.LineAt(Row).LastIndexOf('│').Unwrap());
+    end for;
+
+    App.Close();
+  end for;
+
+  // Refresh via real keys: the waiting screen must render (focus on its Cancel), then the reply.
+  var Model := ClientUnit.NewClientModel(
+    '127.0.0.1', 4040, '', RuntimeData.DefaultClientPreferences(), Requests, Events
+  ) with ViewportWidth := 120; ViewportHeight := 40; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Connected(Catalog), Cmd);
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 40));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  for Kind: Tui.TuiKeyKind in [Tui.TuiKeyKind.Up, Tui.TuiKeyKind.Enter] do
+    App.InjectKeyForTest(
+      Tui.TuiKeyEvent(
+        kind := Kind,
+        ch := '',
+        shift := false,
+        ctrl := false,
+        alt := false,
+        meta := false
+      )
+    );
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  end for;
+
+  Test.AssertTrue(Model.Pending);
+  Test.AssertEquals(1, Count(App.SurfaceSnapshot(), 'Please wait.'));
+  Test.AssertEquals(1, Count(App.SurfaceSnapshot(), 'Cancel'));
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap().Unwrap() = Protocol.ClientMessage.ListWorlds(0, false)
+  );
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(Catalog), Cmd);
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertFalse(Model.Pending);
+  Test.AssertEquals(1, Count(App.SurfaceSnapshot(), 'Refresh worlds'));
+  App.Close();
+
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

@@ -1,0 +1,148 @@
+// Verifies that only resolved player hits train: other accepted turns and rejected intentions keep experience.
+program ProgressionActionTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Progression as Progression, Dungeon.Test.Fixtures as Fixtures, Std.Test as Test;
+
+const Trained: Progression.ProgressionState := Progression.ProgressionState(
+  UnarmedExperience := 11,
+  BladesExperience := 35
+);
+
+// Authored map with a rat west and a skeleton east of the player's field (3, 3), plus a potion.
+function FlankMap(): InteriorUnit.InteriorMap;
+begin
+  var Map := Fixtures.WithPotion(Fixtures.FixtureDungeonMap()) with Hostiles := []; end with;
+
+  Map.Hostiles.PushInPlace(
+    Hostiles.HostilePlacement(
+      Id := Map.AreaId + ':hostile:0', Kind := Hostiles.HostileKind.GiantRat,
+      Position := Coordinates.InteriorPosition(X := 2, Y := 3)
+    )
+  );
+  Map.Hostiles.PushInPlace(
+    Hostiles.HostilePlacement(
+      Id := Map.AreaId + ':hostile:1', Kind := Hostiles.HostileKind.RestlessSkeleton,
+      Position := Coordinates.InteriorPosition(X := 4, Y := 3)
+    )
+  );
+  return InteriorUnit.ValidateInteriorMap(Map).Unwrap();
+end function;
+
+// Sword and potion carried, both opponents alerted, player at reduced health.
+function Inside(Map: InteriorUnit.InteriorMap): GameState.GameState;
+begin
+  const Fresh := Areas.MaterializeArea(GameState.NewGame(Fixtures.FixtureMetadata()), Map);
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 3, Y := 3), Coordinates.FacingDirection.West
+  ) with Items := Fresh.Items; Hostiles := Fresh.Hostiles; Health := 10; RandomState := 1; Progression := Trained; end with;
+
+  State.Items[1] := State.Items[1] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  State.Items[3] := State.Items[3] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  for Index: integer := 0 to State.Hostiles.Length() - 1 do
+    State.Hostiles[Index] := State.Hostiles[Index] with Alerted := true; end with;
+  end for;
+
+  return Areas.ValidateSavedGame(Fixtures.FixtureMetadata(), State, [Map]).Unwrap();
+end function;
+
+function ViewFor(Map: InteriorUnit.InteriorMap; State: GameState.GameState): GameState.AreaView;
+begin
+  return GameState.AreaView(Metadata := Fixtures.FixtureMetadata(), Interior := Some(Map));
+end function;
+
+function Resolve(Map: InteriorUnit.InteriorMap; State: GameState.GameState; Action: Combat.TurnAction): result of (Combat.TurnOutcome, string);
+begin
+  return Combat.ResolveTurn(ViewFor(Map, State), State, Action);
+end function;
+
+// An accepted turn that is not a hit leaves both counters unchanged.
+procedure AssertAcceptedQuiet(Map: InteriorUnit.InteriorMap; State: GameState.GameState; Action: Combat.TurnAction);
+begin
+  case Resolve(Map, State, Action) of
+    when Ok(const Outcome):
+      case Outcome of
+        when Combat.TurnOutcome.Continued(const Next, _, _):
+          Test.AssertTrue(Next.Progression = Trained);
+        when Combat.TurnOutcome.Defeated(_):
+          panic('a quiet turn must not defeat a player with 10 health');
+      end case;
+    when Error(const Reason):
+      panic('expected an accepted turn: ' + Reason);
+  end case;
+end procedure;
+
+procedure AssertRejected(Map: InteriorUnit.InteriorMap; State: GameState.GameState; Action: Combat.TurnAction);
+begin
+  const Untouched := State;
+  Test.AssertTrue(Resolve(Map, State, Action) is Error(_));
+  Test.AssertTrue(State.Progression = Untouched.Progression);
+end procedure;
+
+begin
+  const Map := FlankMap();
+  const Start := Inside(Map);
+  const SwordId := Start.Items[1].Id;
+  const PotionId := Start.Items[3].Id;
+
+  // Level increase plus kill, then the other opponent still acts: hit, death, level, skeleton.
+  var Weak := Start;
+  Weak.Hostiles[0] := Weak.Hostiles[0] with Health := 1; end with;
+
+  case Resolve(Map, Weak, Combat.TurnAction.Attack).Unwrap() of
+    when Combat.TurnOutcome.Continued(const Next, const Log, _):
+      Test.AssertEquals(12, Next.Progression.UnarmedExperience);
+      Test.AssertEquals(35, Next.Progression.BladesExperience);
+      Test.AssertEquals(4, Log.Length());
+      Test.AssertEquals('You hit the Giant rat for 2.', Log[0]);
+      Test.AssertEquals('The Giant rat falls lifeless to the floor.', Log[1]);
+      Test.AssertEquals('Unarmed reached level 2.', Log[2]);
+      Test.AssertTrue('Restless skeleton' in Log[3]);
+    when Combat.TurnOutcome.Defeated(_):
+      panic('one skeleton blow cannot defeat 10 health');
+  end case;
+
+  // Accepted turns that are not hits: wait, wear, use a potion, step away from the fight.
+  AssertAcceptedQuiet(Map, Start, Combat.TurnAction.Wait);
+  AssertAcceptedQuiet(Map, Start, Combat.TurnAction.Equip(SwordId));
+  AssertAcceptedQuiet(Map, Start, Combat.TurnAction.UseItem(PotionId));
+  AssertAcceptedQuiet(Map, Start, Combat.TurnAction.Drop(SwordId));
+  var Worn := Start;
+  Worn.Items[1] := Worn.Items[1] with Location := Items.ItemLocation.EquippedByPlayer(
+    Items.EquipmentSlot.Weapon
+  ); end with;
+
+  AssertAcceptedQuiet(Map, Worn, Combat.TurnAction.Unequip(SwordId));
+
+  // Rejected intentions: unknown items, invalid wear/remove, blocked steps, attacks without a target.
+  AssertRejected(Map, Start, Combat.TurnAction.Equip('unknown'));
+  AssertRejected(Map, Start, Combat.TurnAction.Unequip(SwordId));
+  AssertRejected(Map, Start, Combat.TurnAction.UseItem(SwordId));
+  AssertRejected(Map, Start, Combat.TurnAction.Step(Coordinates.RelativeStep.Forward));
+  var Air := Start;
+  Air.Hostiles[0] := Air.Hostiles[0] with Health := 0; end with;
+
+  AssertRejected(Map, Air, Combat.TurnAction.Attack);
+
+  // Turning and inspection are not turns and never train.
+  const Turned := Movement.TurnFirstPerson(
+    ViewFor(Map, Start),
+    Start,
+    Coordinates.RelativeTurn.TurnLeft
+  ).Unwrap();
+  Test.AssertTrue(Turned.Progression = Trained);
+  AssertRejected(Map, Turned, Combat.TurnAction.Attack);
+  case Interaction.Interact(ViewFor(Map, Start), Start).Unwrap() of
+    when Interaction.InteractionOutcome.Described(_, _):
+      Test.AssertTrue(Start.Progression = Trained);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.TransitionRequested(_):
+      panic('inspecting an opponent must not change the state');
+  end case;
+
+  // Outdoors there is nothing to attack.
+  const Outdoor := GameState.NewGame(Fixtures.FixtureMetadata()) with Progression := Trained; end with;
+  const OutdoorView := GameState.AreaView(Metadata := Fixtures.FixtureMetadata(), Interior := None);
+  Test.AssertTrue(Combat.ResolveTurn(OutdoorView, Outdoor, Combat.TurnAction.Attack) is Error(_));
+  Test.AssertTrue(Outdoor.Progression = Trained);
+end.

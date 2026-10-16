@@ -56,9 +56,9 @@ these projects.
   editor and discard confirmation),
   `Intentions` (queued player requests), `Input` (keys and actions), `Events`
   (network events), `Playback` (combat animation clock), `MapCells`,
-  `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`, and
-  `.Character` render the first-person view, combat animation, inventory, and
-  character sheet. The raycaster's subunits own ray casting (`Rays`), pixels and
+  `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`,
+  `.Character` and `.CharacterSheet` render the first-person view, combat
+  animation, inventory, and the scrollable character sheet. The raycaster's subunits own ray casting (`Rays`), pixels and
   lighting (`Pixels`), wall and floor textures (`Textures`), pixel art (`Art`),
   and sprites with animation effects (`Sprites`).
   The client facade prepares size-dependent start artwork after framework and
@@ -253,6 +253,8 @@ persistence boundary are described in
 [items and inventory](items-and-inventory.md).
 Turn-based combat, its dice, opponent behavior, defeat, and persistence are
 described in [combat](combat.md).
+Experience and skill levels (13b) are specified in
+[progression](progression.md).
 
 ## Runtime data
 

@@ -23,8 +23,13 @@ equipped items; the combat rules read only these derived values.
   about four.
 - Maximum health and hit threshold are still derived values, so later stages
   can change them without changing the combat rules again.
+- The **active skill** adds its level benefits (13b): Blades with the worn sword,
+  otherwise Unarmed. Its hit bonus lowers the hit threshold and its damage bonus
+  adds to the damage; the inactive skill, carried items and armor never
+  contribute. See [progression](progression.md) for the table.
 
-`Dungeon.Equipment` owns the base values, the derivation, and the equip rules.
+`Dungeon.Equipment` owns the base values, the derivation, the active-skill
+mapping, and the equip rules.
 `Dungeon.Combat` asks it for the character's values.
 
 ## Items and slots
@@ -103,10 +108,11 @@ See [items and inventory](items-and-inventory.md) for potion use.
 
 ## Persistence
 
-Savegame format 8 stores equipped items as their own location variant with
-their slot. Validation requires exactly one record per original item placement
-with matching identity and kind, at most one item per slot, and a slot that fits
-the item. Format 7 and older saves are rejected and preserved without migration.
+The savegame (currently format 9) stores equipped items as their own location
+variant with their slot. Validation requires exactly one record per original
+item placement with matching identity and kind, at most one item per slot, and a
+slot that fits the item. Obsolete saves are rejected and preserved without
+migration.
 
 ## Client presentation
 
@@ -116,7 +122,8 @@ the item. Format 7 and older saves are rejected and preserved without migration.
   and current health are shown. Items with neither capability nor slot have
   no Enter action. The overlay stays open after a change or rejection;
   selection follows the same identity or clamps after its removal.
-- **Character sheet** on `C`: health and the projected derived values with
+- **Character sheet** on `C`: health and the six projected lines (maximum
+  health, hit chance, damage, armor, Unarmed, Blades) with
   their sources, followed by the equipment. `Escape` or `C` closes.
 - The context panel replaces `Equipment: Not available` with the weapon and
   body slots; `Quick inventory` lists carried items that are not worn.
@@ -160,11 +167,12 @@ owns placements; `Dungeon.GameState` validates the complete item set.
 character sheet lines. `Dungeon.Combat` resolves equip actions as turns, reads
 the derived values, and reports combat events. The server projects inventory,
 character values, and combat events. In the client, `Dungeon.Client.Character`
-builds the inventory overlay, character sheet, and equipment summaries,
+builds the inventory overlay and equipment summaries,
+`Dungeon.Client.CharacterSheet` the scrollable character sheet,
 `Dungeon.Client.Animation` turns combat events into frames, and
 `Dungeon.Client.Raycast` draws scenes, sprites, and effects. The client never
 derives game values.
 
 Item rarity, durability, shops, broader loot tables, two-handed weapons and
-further equipment slots remain deferred. Progression (13b) follows acceptance
-of 14b, before deeper dungeon levels (14c).
+further equipment slots remain deferred. Skill
+[progression](progression.md) (13b) adds the active skill's benefits.

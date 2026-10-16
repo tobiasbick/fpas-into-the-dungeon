@@ -165,8 +165,8 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 gets its own identity, even when another world uses the same seed.
 
 Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 3**,
-**generator 7**, **level format 2**, **protocol 15** and **save format 8**.
-Format-7 saves remain intact but cannot be continued with this server.
+**generator 7**, **level format 2**, **protocol 15** and **save format 9**.
+Format-8 and older saves remain intact but cannot be continued with this server.
 Generator-6 worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds
 can still be continued. Incompatible data is rejected without migration or
@@ -188,8 +188,11 @@ autosave. The
 [persistence smoke measurements](docs/architecture/persistence-measurements.md)
 cover 1/10/100 visited dungeons and explain the additional validation cost.
 Independent review findings are corrected and the documentation is aligned.
-Progression (13b) is the next gameplay slice, before multiple dungeon levels
-(14c). Client/server connection isolation and socket cleanup are verified.
+Progression (13b) is complete and accepted: the character
+trains Unarmed and Blades by the health its hits remove, up to level 5 each, and
+the scrollable `C` sheet shows both skills; see
+[progression](docs/architecture/progression.md). Multiple dungeon levels (14c)
+follow. Client/server connection isolation and socket cleanup are verified.
 Server preparation failures preserve the current session. Large inventories
 keep selection and controls visible; quick summaries stay bounded. World-catalog
 inspection is limited to the requested page and any selected

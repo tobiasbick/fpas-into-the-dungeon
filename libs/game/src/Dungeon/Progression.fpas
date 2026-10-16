@@ -1,0 +1,159 @@
+// Learning-by-doing skill experience: counters, validation, level table and damage awards.
+unit Dungeon.Progression;
+
+uses Std.Conv as Conv, Std.Math as Math;
+
+// Highest cumulative experience of one skill; reaching it is mastery.
+public const MaximumExperience: integer := 120;
+// Highest skill level, reached at MaximumExperience.
+public const MaximumSkillLevel: integer := 5;
+
+// Fighting skills trained by use; each progresses independently.
+public type SkillKind = enum
+  Unarmed;
+  Blades;
+end enum;
+
+// Persisted progression of one game; each counter is cumulative experience in 0..MaximumExperience.
+public type ProgressionState = record
+  public UnarmedExperience: integer;
+  public BladesExperience: integer;
+end record;
+
+// Level and bonuses derived from one skill's experience; never persisted.
+public type SkillBenefits = record
+  public Level: integer;
+  // Lowers the player's d20 hit threshold.
+  public HitBonus: integer;
+  // Added to every hit's rolled damage.
+  public DamageBonus: integer;
+end record;
+
+// Returns the player-facing name of a skill.
+public function SkillName(Skill: SkillKind): string;
+begin
+  case Skill of
+    when SkillKind.Unarmed:
+      return 'Unarmed';
+    when SkillKind.Blades:
+      return 'Blades';
+  end case;
+end function;
+
+// Returns the untrained progression of a new game.
+public function NewProgression(): ProgressionState;
+begin
+  return ProgressionState(UnarmedExperience := 0, BladesExperience := 0);
+end function;
+
+function ValidateExperience(Value: integer; Name: string): result of (integer, string);
+begin
+  if (Value < 0) or (Value > MaximumExperience) then
+    return Error(Name + ' experience must be between 0 and ' + Conv.IntToStr(MaximumExperience));
+  end if;
+
+  return Ok(Value);
+end function;
+
+// Returns the unchanged progression when both counters are in range; never repairs invalid counters.
+public function ValidateProgression(Progress: ProgressionState): result of (ProgressionState, string);
+begin
+  case ValidateExperience(Progress.UnarmedExperience, 'unarmed') of
+    when Error(const Reason):
+      return Error(Reason);
+    when Ok(_):
+      null;
+  end case;
+
+  case ValidateExperience(Progress.BladesExperience, 'blades') of
+    when Error(const Reason):
+      return Error(Reason);
+    when Ok(_):
+      null;
+  end case;
+
+  return Ok(Progress);
+end function;
+
+// Returns one skill's cumulative experience. Precondition: validated progression.
+public function SkillExperience(Progress: ProgressionState; Skill: SkillKind): integer;
+begin
+  case Skill of
+    when SkillKind.Unarmed:
+      return Progress.UnarmedExperience;
+    when SkillKind.Blades:
+      return Progress.BladesExperience;
+  end case;
+end function;
+
+// Returns the level and total bonuses for one experience total. Precondition: 0..MaximumExperience.
+public function BenefitsForExperience(Experience: integer): SkillBenefits;
+begin
+  if Experience >= 120 then
+    return SkillBenefits(Level := 5, HitBonus := 2, DamageBonus := 2);
+  end if;
+
+  if Experience >= 72 then
+    return SkillBenefits(Level := 4, HitBonus := 1, DamageBonus := 2);
+  end if;
+
+  if Experience >= 36 then
+    return SkillBenefits(Level := 3, HitBonus := 1, DamageBonus := 1);
+  end if;
+
+  if Experience >= 12 then
+    return SkillBenefits(Level := 2, HitBonus := 0, DamageBonus := 1);
+  end if;
+
+  return SkillBenefits(Level := 1, HitBonus := 0, DamageBonus := 0);
+end function;
+
+// Returns one skill's level and bonuses. Precondition: validated progression.
+public function SkillBenefitsOf(Progress: ProgressionState; Skill: SkillKind): SkillBenefits;
+begin
+  return BenefitsForExperience(SkillExperience(Progress, Skill));
+end function;
+
+// Returns the cumulative experience of the next level, or None at mastery.
+// Precondition: validated progression.
+public function NextThreshold(Progress: ProgressionState; Skill: SkillKind): option of integer;
+begin
+  case BenefitsForExperience(SkillExperience(Progress, Skill)).Level of
+    when 1:
+      return Some(12);
+    when 2:
+      return Some(36);
+    when 3:
+      return Some(72);
+    when 4:
+      return Some(120);
+    else
+      return None;
+  end case;
+end function;
+
+// Awards one experience point per health point the target actually lost, saturating at the cap.
+// Errors on invalid counters, negative health or AfterHealth > BeforeHealth; equal health is no gain.
+public function AwardDamage(Progress: ProgressionState; Skill: SkillKind; BeforeHealth: integer; AfterHealth: integer): result of (ProgressionState, string);
+begin
+  case ValidateProgression(Progress) of
+    when Error(const Reason):
+      return Error(Reason);
+    when Ok(_):
+      null;
+  end case;
+
+  if (AfterHealth < 0) or (BeforeHealth < AfterHealth) then
+    return Error('target health must not be negative or increase');
+  end if;
+
+  const Current := SkillExperience(Progress, Skill);
+  const Gain := Math.Min(BeforeHealth - AfterHealth, MaximumExperience - Current);
+  case Skill of
+    when SkillKind.Unarmed:
+      return Ok(Progress with UnarmedExperience := Current + Gain; end with);
+    when SkillKind.Blades:
+      return Ok(Progress with BladesExperience := Current + Gain; end with);
+  end case;
+end function;
+end unit;

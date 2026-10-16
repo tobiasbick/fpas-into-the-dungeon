@@ -1,10 +1,10 @@
 // Versioned, server-owned persistence for one authoritative savegame per world.
 unit Dungeon.World.Savegame;
 
-uses Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Errors as Errors, Dungeon.World.Savegame.Discovery as Discovery, Dungeon.World.Savegame.Errors as SavegameErrors, Dungeon.World.Savegame.Entities as Entities, Dungeon.World.Savegame.Player as Player, Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as JsonFields, Std.Path as PathOps;
+uses Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Errors as Errors, Dungeon.World.Savegame.Discovery as Discovery, Dungeon.World.Savegame.Errors as SavegameErrors, Dungeon.World.Savegame.Entities as Entities, Dungeon.World.Savegame.Player as Player, Dungeon.World.Savegame.Progression as ProgressionCodec, Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as JsonFields, Std.Path as PathOps;
 
 // Current-only savegame schema written below each selected world.
-public const SaveGameFormatVersion: integer := 8;
+public const SaveGameFormatVersion: integer := 9;
 
 // Inspection result: absent, invalid and preserved with its reason, or fully validated state.
 public type SaveGameLoad = enum
@@ -67,7 +67,8 @@ begin
       'items': Json.JsonValue.ArrayValue(Entities.EncodeItems(State.Items)),
       'health': Json.JsonValue.Number(Conv.IntToReal(State.Health)),
       'hostiles': Json.JsonValue.ArrayValue(Entities.EncodeHostiles(State.Hostiles)),
-      'random_state': Json.JsonValue.Number(Conv.IntToReal(State.RandomState))
+      'random_state': Json.JsonValue.Number(Conv.IntToReal(State.RandomState)),
+      'progression': ProgressionCodec.EncodeProgression(State.Progression)
     ])
   );
 end function;
@@ -75,15 +76,25 @@ end function;
 function DecodeSaveGameFields(Text: string; Metadata: Terrain.WorldMetadata): result of (GameState.GameState, string);
 begin
   const Fields: dict of string to Json.JsonValue := try JsonFields.ParseObject(Text);
-  if Fields.Length() <> 12 then
-    begin
-      return Error('savegame has an unexpected field set');
-    end;
+  // The version is checked first so an obsolete save reports its version, not its older shape.
+  const Version: integer := try JsonFields.IntegerField(Fields, 'format_version');
+  if Version <> SaveGameFormatVersion then
+    return Error(
+      'unsupported savegame format version ' + Conv.IntToStr(Version) + '; expected ' +
+      Conv.IntToStr(SaveGameFormatVersion)
+    );
   end if;
 
-  if try JsonFields.IntegerField(Fields, 'format_version') <> SaveGameFormatVersion then
+  const OnlyKnown: boolean := try JsonFields.RequireOnlyFields(
+    Fields,
+    [
+      'format_version', 'world_id', 'area_kind', 'area_id', 'player', 'return_location',
+      'exploration', 'visited_areas', 'items', 'health', 'hostiles', 'random_state', 'progression'
+    ]
+  );
+  if Fields.Length() <> 13 then
     begin
-      return Error('unsupported savegame format version');
+      return Error('savegame has an unexpected field set');
     end;
   end if;
 
@@ -106,7 +117,10 @@ begin
     Items := try Entities.DecodeItems(try JsonFields.ArrayField(Fields, 'items')),
     Health := try JsonFields.IntegerField(Fields, 'health'),
     Hostiles := try Entities.DecodeHostiles(try JsonFields.ArrayField(Fields, 'hostiles')),
-    RandomState := try JsonFields.IntegerField(Fields, 'random_state')
+    RandomState := try JsonFields.IntegerField(Fields, 'random_state'),
+    Progression := try ProgressionCodec.DecodeProgression(
+      try JsonFields.ObjectField(Fields, 'progression')
+    )
   );
   return Areas.ValidateSaveShape(Metadata, State);
 end function;

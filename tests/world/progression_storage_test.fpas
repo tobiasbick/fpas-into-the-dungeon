@@ -1,0 +1,179 @@
+// Verifies savegame format 9: strict progression encoding, round trips, obsolete versions and preserved invalid files.
+program ProgressionStorageTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Progression as Progression, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Catalog as Catalog, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('progression save must be loadable');
+  end case;
+end function;
+
+procedure RoundTrip(World: WorldUnit.WorldSession; State: GameState.GameState);
+begin
+  Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+  const Restored := Loaded(World);
+  Test.AssertTrue(States.SameState(State, Restored));
+  Test.AssertTrue(
+    States.SameState(
+      State,
+      Savegame.DecodeSaveGameState(
+        Savegame.EncodeSaveGame(World.Metadata.Id, State),
+        World.Metadata
+      ).Unwrap()
+    )
+  );
+end procedure;
+
+// Writes invalid bytes, expects an Invalid load and identical bytes afterwards.
+procedure PreservedInvalid(World: WorldUnit.WorldSession; Text: string);
+begin
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), Text).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+  Test.AssertTrue(Savegame.DecodeSaveGameState(Text, World.Metadata) is Error(_));
+  Test.AssertEquals(Text, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+end procedure;
+
+procedure BrokenProgression(World: WorldUnit.WorldSession; Valid: string; Replacement: string);
+begin
+  const Original := '"progression":{"unarmed_experience":7,"blades_experience":30}';
+  Test.AssertTrue(Original in Valid);
+  PreservedInvalid(World, Valid.Replace(Original, Replacement));
+end procedure;
+
+begin
+  const Root := '.temp-data/progression-storage-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'progress', 12345, 4, 16).Unwrap();
+  const Outdoor := GameState.NewGame(World.Metadata);
+
+  // Mixed, zero and capped counters round-trip outdoors through real full validation.
+  for Value: Progression.ProgressionState in [
+    Progress(0, 0), Progress(7, 30), Progress(0, 120), Progress(120, 0), Progress(120, 120)
+  ] do
+    RoundTrip(World, Outdoor with Progression := Value; end with);
+  end for;
+
+  // An indoor mid-dungeon state keeps its counters with the stored level unchanged.
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  const AreaId := Identities.DungeonAreaId(World.Metadata, Region);
+  const Map := Interiors.OpenLevelForEntry(
+    World,
+    Outdoor with Player := Coordinates.PlayerPosition.Outdoor(
+      Entrances.EntranceSite(World.Metadata, Region).Unwrap()
+    ); end with,
+    AreaId
+  ).Unwrap();
+  const LevelPath := World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' +
+    Conv.IntToStr(Region.Y) + '/0.json';
+  const LevelBytes := Fs.ReadText(LevelPath).Unwrap();
+  var Inside := Areas.MaterializeArea(Outdoor, Map);
+  Inside.Area := Coordinates.AreaKind.Dungeon;
+  Inside.AreaId := Map.AreaId;
+  Inside.Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Map.Start, Facing := Map.StartFacing)
+  );
+  Inside.ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    World.Metadata.OutdoorAreaId,
+    Entrances.EntranceSite(World.Metadata, Region).Unwrap()
+  );
+  Inside.Progression := Progress(7, 30);
+  RoundTrip(World, Inside);
+  Test.AssertEquals(LevelBytes, Fs.ReadText(LevelPath).Unwrap());
+  Test.AssertEquals('available', Catalog.InspectWorld(Root, 'progress', 16).SaveStatus);
+
+  const Valid := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  Test.AssertTrue('"format_version":9' in Valid);
+  Test.AssertFalse('"level"' in Valid);
+
+  // Nested shape: missing, extra, renamed and duplicate keys; wrong containers.
+  BrokenProgression(World, Valid, '"progression":{"unarmed_experience":7}');
+  BrokenProgression(World, Valid, '"progression":{"blades_experience":30}');
+  BrokenProgression(World, Valid, '"progression":{}');
+  BrokenProgression(
+    World, Valid, '"progression":{"unarmed_experience":7,"blades_experience":30,"extra":1}'
+  );
+  BrokenProgression(
+    World, Valid, '"progression":{"unarmed_experience":7,"blades_experience":30,"level":2}'
+  );
+  BrokenProgression(World, Valid, '"progression":{"unarmed_experience":7,"sword_experience":30}');
+  BrokenProgression(
+    World, Valid,
+    '"progression":{"unarmed_experience":7,"unarmed_experience":7,"blades_experience":30}'
+  );
+  BrokenProgression(World, Valid, '"progression":null');
+  BrokenProgression(World, Valid, '"progression":"7/30"');
+  BrokenProgression(World, Valid, '"progression":[7,30]');
+  // Counter values: wrong JSON kinds, fractions and out-of-range numbers.
+  for Bad: string in ['true', '"7"', 'null', '7.5', '-1', '121', '1e300'] do
+    BrokenProgression(
+      World, Valid, '"progression":{"unarmed_experience":' + Bad + ',"blades_experience":30}'
+    );
+    BrokenProgression(
+      World, Valid, '"progression":{"unarmed_experience":7,"blades_experience":' + Bad + '}'
+    );
+  end for;
+
+  // Top level: absent field, renamed field with the same count, an injected derived field.
+  const Field := ',"progression":{"unarmed_experience":7,"blades_experience":30}';
+  PreservedInvalid(World, Valid.Replace(Field, ''));
+  PreservedInvalid(World, Valid.Replace('"progression":', '"progress":'));
+  PreservedInvalid(World, Valid.Replace(Field, Field + ',"level":2'));
+  PreservedInvalid(
+    World,
+    Valid.Replace(Field, ',"skill_levels":{"unarmed_experience":7,"blades_experience":30}')
+  );
+
+  // Obsolete and future versions are rejected by version before their payload is interpreted.
+  for Version: string in ['8', '10'] do
+    const Other := Valid.Replace('"format_version":9', '"format_version":' + Version);
+    PreservedInvalid(World, Other);
+    case Savegame.DecodeSaveGameState(Other, World.Metadata) of
+      when Error(const Reason):
+        Test.AssertTrue(('unsupported savegame format version ' + Version) in Reason);
+      when Ok(_):
+        panic('obsolete version must be rejected');
+    end case;
+  end for;
+  const Format8 := Valid.Replace('"format_version":9', '"format_version":8').Replace(Field, '');
+  case Savegame.DecodeSaveGameState(Format8, World.Metadata) of
+    when Error(const Reason):
+      Test.AssertTrue('unsupported savegame format version 8' in Reason);
+    when Ok(_):
+      panic('a format-8 save must be rejected');
+  end case;
+
+  PreservedInvalid(World, Format8);
+  Test.AssertEquals('incompatible', Catalog.InspectWorld(Root, 'progress', 16).SaveStatus);
+
+  // Invalid progress is rejected in the map-free phase, before any visited level is read.
+  Test.AssertTrue(Fs.DeleteFile(LevelPath).Unwrap());
+  PreservedInvalid(
+    World,
+    Valid.Replace(
+      '"progression":{"unarmed_experience":7,"blades_experience":30}',
+      '"progression":{"unarmed_experience":7,"blades_experience":121}'
+    )
+  );
+  // The same save with valid progress does reach level I/O and reports the missing level.
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), Valid).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World) is Error(_));
+  Test.AssertTrue(Fs.WriteTextAtomic(LevelPath, LevelBytes).Unwrap());
+  Test.AssertTrue(States.SameState(Inside, Loaded(World)));
+
+  // Invalid in-memory progress is never written and leaves the previous save intact.
+  Test.AssertTrue(
+    Savegame.WriteSaveGame(World, Inside with Progression := Progress(0, 121); end with) is Error(_)
+  );
+  Test.AssertEquals(Valid, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertEquals(LevelBytes, Fs.ReadText(LevelPath).Unwrap());
+end.

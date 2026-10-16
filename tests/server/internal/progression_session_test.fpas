@@ -1,0 +1,264 @@
+// Verifies atomic installation of experience with combat facts and complete rollback of failed candidates over TCP.
+program ProgressionSessionTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as InteriorUnit, Dungeon.Progression as Progression, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as SessionUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type ExchangeResult = record
+  Session: SessionUnit.ServerSession;
+  Reply: Protocol.ServerMessage;
+end record;
+
+function Request(Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage; Client: Net.Connection; Server: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): ExchangeResult;
+begin
+  const Decoded := Clients.DecodeClient(Clients.EncodeClient(Message)).Unwrap();
+  const Next := Handling.HandleSessionMessage(Session, Decoded, Server, Config, Token).Unwrap();
+  const Read := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  return ExchangeResult(Session := Next, Reply := Servers.DecodeServer(Read.Line).Unwrap());
+end function;
+
+function FirstPerson(Message: Protocol.ServerMessage): Protocol.FirstPersonVisibleState;
+begin
+  case Message of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      return Value;
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_)), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected first person reply');
+  end case;
+end function;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+// Fixture rat directly west of the player with seed 1 (d20=19, d3=2) and Unarmed one point below level 2.
+function Encounter(): GameState.GameState;
+begin
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 4, Y := 3),
+    Coordinates.FacingDirection.West
+  ) with RandomState := 1; Progression := Progress(11, 5); end with;
+
+  State.Hostiles[0] := State.Hostiles[0] with Kind := Hostiles.HostileKind.GiantRat; Health := 6; Alerted := true; end with;
+
+  return State;
+end function;
+
+// Valid 240 by 140 open interior: its two full row planes alone exceed one protocol line.
+function OversizedMap(): InteriorUnit.InteriorMap;
+begin
+  const Width := 240;
+  const Height := 140;
+  var Cells: array of InteriorUnit.InteriorCellKind := [];
+  for Y: integer := 0 to Height - 1 do
+    for X: integer := 0 to Width - 1 do
+      if (X = 0) or (Y = 0) or (X = Width - 1) or (Y = Height - 1) then
+        Cells.PushInPlace(InteriorUnit.InteriorCellKind.Wall);
+      elsif (X = 1) and (Y = 1) then
+        Cells.PushInPlace(InteriorUnit.InteriorCellKind.ExitField);
+      else
+        Cells.PushInPlace(InteriorUnit.InteriorCellKind.Floor);
+      end if;
+    end for;
+  end for;
+  const AreaId := Fixtures.FixtureAreaId();
+  return InteriorUnit.ValidateInteriorMap(
+    InteriorUnit.InteriorMap(
+      AreaId := AreaId, DisplayName := 'Oversized hall', Width := Width, Height := Height,
+      Cells := Cells, Start := Coordinates.InteriorPosition(X := 5, Y := 3),
+      StartFacing := Coordinates.FacingDirection.West,
+      Exit := Coordinates.InteriorPosition(X := 1, Y := 1), Items := [], Hostiles := [
+        Hostiles.HostilePlacement(
+          Id := AreaId + ':hostile:0', Kind := Hostiles.HostileKind.GiantRat,
+          Position := Coordinates.InteriorPosition(X := 4, Y := 3)
+        )
+      ]
+    )
+  ).Unwrap();
+end function;
+
+function OversizedState(Map: InteriorUnit.InteriorMap): GameState.GameState;
+begin
+  const Metadata := Fixtures.FixtureMetadata();
+  var State := Areas.MaterializeArea(GameState.NewGame(Metadata), Map);
+  State.Area := Coordinates.AreaKind.Dungeon;
+  State.AreaId := Map.AreaId;
+  State.Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Map.Start, Facing := Map.StartFacing)
+  );
+  State.ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    Metadata.OutdoorAreaId,
+    Metadata.SpawnEntrance
+  );
+  State.RandomState := 1;
+  State.Progression := Progress(11, 5);
+  State.Hostiles[0] := State.Hostiles[0] with Alerted := true; end with;
+
+  return Areas.ValidateSavedGame(Metadata, State, [Map]).Unwrap();
+end function;
+
+begin
+  const Root := '.temp-data/progression-session-' + Conv.IntToStr(Time.TimestampMillis());
+  const Metadata := Fixtures.FixtureMetadata();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := Metadata.Id,
+    WorldSeed := Metadata.Seed, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const World := WorldUnit.WorldSession(
+    Directory := Root, Metadata := Metadata, Cache := [], Clock := 0, CacheLimit := 32
+  );
+  discard Fs.CreateDirAll(Root + '/saves').Unwrap();
+  const SaveBytes := 'previous explicit save';
+  discard Fs.WriteTextAtomic(Savegame.SaveGamePath(World), SaveBytes).Unwrap();
+
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  discard Net.SetTimeout(Server, 5000).Unwrap();
+
+  const Map := Fixtures.FixtureDungeonMap();
+  const Initial := Encounter();
+  for Dirty: boolean in [false, true] do
+    const Session := SessionUnit.ServerSession(
+      World := World, WorldSelected := true, Dirty := Dirty, LastSavedAt := 777,
+      State := Some(Initial), Interior := Some(Map),
+      Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12), Finished := false
+    );
+
+    // An accepted threshold-crossing attack installs health, dice and experience together.
+    const Struck := Request(Session, Protocol.ClientMessage.Attack, Client, Server, Config, Token);
+    const Installed := Struck.Session.State.Unwrap();
+    Test.AssertEquals(4, Installed.Hostiles[0].Health);
+    Test.AssertEquals(1147902781, Installed.RandomState);
+    Test.AssertEquals(13, Installed.Progression.UnarmedExperience);
+    Test.AssertEquals(5, Installed.Progression.BladesExperience);
+    Test.AssertTrue(Struck.Session.Dirty);
+    Test.AssertEquals(777, Struck.Session.LastSavedAt);
+    const Reply := FirstPerson(Struck.Reply);
+    Test.AssertEquals('Unarmed reached level 2.', Reply.CombatLog[1]);
+    Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+
+    // A repeated legal attack earns only the health it removes from the current target.
+    const Again := Request(
+      Struck.Session,
+      Protocol.ClientMessage.Attack,
+      Client,
+      Server,
+      Config,
+      Token
+    );
+    const Later := Again.Session.State.Unwrap();
+    Test.AssertEquals(
+      Installed.Hostiles[0].Health - Later.Hostiles[0].Health,
+      Later.Progression.UnarmedExperience - Installed.Progression.UnarmedExperience
+    );
+
+    // Rejected intentions: a destroyed target and invalid progress leave every installed fact intact.
+    var Dead := Initial;
+    Dead.Hostiles[0] := Dead.Hostiles[0] with Health := 0; end with;
+
+    for Broken: GameState.GameState in [
+      Dead,
+      Initial with Progression := Progress(11, 121); end with
+    ] do
+      const Before := Session with State := Some(Broken); end with;
+      const Failed := Request(Before, Protocol.ClientMessage.Attack, Client, Server, Config, Token);
+      Test.AssertTrue(Failed.Reply is Protocol.ServerMessage.Rejected(_, _));
+      Sessions.AssertUnchanged(Before, Failed.Session);
+    end for;
+  end for;
+
+  // Without an active game session an attack is rejected and creates no state.
+  const Idle := SessionUnit.ServerSession(
+    World := World, WorldSelected := true, Dirty := false, LastSavedAt := 0,
+    State := None, Interior := None,
+    Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12), Finished := false
+  );
+  const IdleReply := Request(Idle, Protocol.ClientMessage.Attack, Client, Server, Config, Token);
+  Test.AssertTrue(IdleReply.Reply is Protocol.ServerMessage.Rejected(_, _));
+  Sessions.AssertUnchanged(Idle, IdleReply.Session);
+
+  // Preparation failure after the candidate earned experience: the oversized reply is rejected and
+  // nothing of the candidate is installed, including the crossed level.
+  const Large := OversizedMap();
+  const LargeState := OversizedState(Large);
+  const Candidate := Combat.ResolveTurn(
+    GameState.AreaView(Metadata := Metadata, Interior := Some(Large)),
+    LargeState,
+    Combat.TurnAction.Attack
+  ).Unwrap();
+  case Candidate of
+    when Combat.TurnOutcome.Continued(const Next, _, _):
+      Test.AssertEquals(13, Next.Progression.UnarmedExperience);
+      const Projected := Projection.ProjectSession(
+        World, GameState.AreaView(Metadata := Metadata, Interior := Some(Large)), Next,
+        SessionUnit.ViewportSize(Width := 20, Height := 12), Projection.NoTurnReport()
+      ).Unwrap().State;
+      Test.AssertTrue(
+        Servers.EncodeServer(Protocol.ServerMessage.State(Projected)).Length() >
+        Protocol.MaximumLineBytes
+      );
+    when Combat.TurnOutcome.Defeated(_):
+      panic('one rat cannot defeat a full-health player');
+  end case;
+
+  for Dirty: boolean in [false, true] do
+    const Huge := SessionUnit.ServerSession(
+      World := World, WorldSelected := true, Dirty := Dirty, LastSavedAt := 555,
+      State := Some(LargeState), Interior := Some(Large),
+      Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12), Finished := false
+    );
+    var Current := Huge;
+    // Repeating the rejected candidate never accumulates hidden experience.
+    for Attempt: integer := 1 to 2 do
+      const Failed := Request(
+        Current,
+        Protocol.ClientMessage.Attack,
+        Client,
+        Server,
+        Config,
+        Token
+      );
+      Test.AssertTrue(
+        Failed.Reply is Protocol.ServerMessage.Rejected(_, Transport.LineTooLongError)
+      );
+      Sessions.AssertUnchanged(Huge, Failed.Session);
+      Test.AssertEquals(11, Failed.Session.State.Unwrap().Progression.UnarmedExperience);
+      Current := Failed.Session;
+    end for;
+
+    Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+
+    // The same retained combat facts resolve successfully in a representable fixture.
+    var Retained := Initial;
+    Retained.RandomState := Current.State.Unwrap().RandomState;
+    Retained.Progression := Current.State.Unwrap().Progression;
+    const Representable := Request(
+      Current with State := Some(Retained); Interior := Some(Map); end with,
+      Protocol.ClientMessage.Attack, Client, Server, Config, Token
+    );
+    Test.AssertEquals(13, Representable.Session.State.Unwrap().Progression.UnarmedExperience);
+  end for;
+
+  // A failed socket write is fatal and never writes a save.
+  discard Net.Close(Server).Unwrap();
+  const Closed := SessionUnit.ServerSession(
+    World := World, WorldSelected := true, Dirty := true, LastSavedAt := 1,
+    State := Some(Initial), Interior := Some(Map),
+    Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12), Finished := false
+  );
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(Closed, Protocol.ClientMessage.Attack, Server, Config, Token) is Error(_)
+  );
+  Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(States.SameState(Encounter(), Initial));
+  discard Net.Close(Client).Unwrap();
+end.

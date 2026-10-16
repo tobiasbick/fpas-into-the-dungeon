@@ -1,0 +1,64 @@
+// Verifies the progression field of the game state: zero start, strict shape validation and exact comparison.
+program ProgressionStateTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Progression as Progression, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Std.Test as Test;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+procedure AssertUntrained(State: GameState.GameState);
+begin
+  Test.AssertEquals(0, State.Progression.UnarmedExperience);
+  Test.AssertEquals(0, State.Progression.BladesExperience);
+end procedure;
+
+begin
+  const Metadata := Fixtures.FixtureMetadata();
+  const Outdoor := GameState.NewGame(Metadata);
+  const Map := Fixtures.FixtureDungeonMap();
+  const Indoor := Fixtures.FixtureDungeonState(Map.Start, Map.StartFacing);
+  Test.AssertTrue(Indoor.Area = Coordinates.AreaKind.Dungeon);
+  AssertUntrained(Outdoor);
+  AssertUntrained(Indoor);
+  Test.AssertTrue(GameState.ValidateStateShape(Metadata, Outdoor) is Ok(_));
+
+  // Valid counters, including both caps, pass shape and full saved-game validation.
+  for Value: Progression.ProgressionState in [
+    Progress(0, 0), Progress(7, 30), Progress(0, 120), Progress(120, 0), Progress(120, 120)
+  ] do
+    const Trained := Indoor with Progression := Value; end with;
+
+    Test.AssertTrue(GameState.ValidateStateShape(Metadata, Trained) is Ok(_));
+    Test.AssertTrue(Fixtures.ValidateFixtureSave(Metadata, Trained) is Ok(_));
+    Test.AssertTrue(
+      Areas.ValidateSaveShape(Metadata, Outdoor with Progression := Value; end with) is Ok(_)
+    );
+  end for;
+
+  // Out-of-range counters are rejected, never clamped.
+  for Value: Progression.ProgressionState in [
+    Progress(-1, 0), Progress(0, -1), Progress(121, 0), Progress(0, 121)
+  ] do
+    const Broken := Outdoor with Progression := Value; end with;
+    const Untouched := Broken;
+    Test.AssertTrue(GameState.ValidateStateShape(Metadata, Broken) is Error(_));
+    Test.AssertTrue(Areas.ValidateSaveShape(Metadata, Broken) is Error(_));
+    Test.AssertTrue(
+      Fixtures.ValidateFixtureSave(Metadata, Indoor with Progression := Value; end with) is Error(_)
+    );
+    Test.AssertTrue(States.SameState(Untouched, Broken));
+  end for;
+
+  // The comparison helper detects a difference in either counter, so rollback tests can rely on it.
+  Test.AssertTrue(States.SameState(Indoor, Indoor with Progression := Progress(0, 0); end with));
+  Test.AssertFalse(States.SameState(Indoor, Indoor with Progression := Progress(1, 0); end with));
+  Test.AssertFalse(States.SameState(Indoor, Indoor with Progression := Progress(0, 1); end with));
+  Test.AssertFalse(
+    States.SameState(
+      Indoor with Progression := Progress(12, 0); end with,
+      Indoor with Progression := Progress(0, 12); end with
+    )
+  );
+end.

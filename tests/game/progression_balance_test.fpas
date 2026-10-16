@@ -1,0 +1,157 @@
+// Pins progression pacing: per-dungeon health budgets, literal level milestones, caps and unchanged opponent values.
+program ProgressionBalanceTest;
+
+uses Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Items as Items, Dungeon.Progression as Progression, Dungeon.Test.Fixtures as Fixtures, Std.Test as Test;
+
+const Unarmed: Progression.SkillKind := Progression.SkillKind.Unarmed;
+const Blades: Progression.SkillKind := Progression.SkillKind.Blades;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+// Awards a target's whole health in the given chunks, as successive hits would.
+function Drain(Value: Progression.ProgressionState; Skill: Progression.SkillKind; Health: integer; Chunks: array of integer): Progression.ProgressionState;
+begin
+  var Current := Value;
+  var Remaining := Health;
+  for Chunk: integer in Chunks do
+    var After := Remaining - Chunk;
+    if After < 0 then
+      After := 0;
+    end if;
+
+    Current := Progression.AwardDamage(Current, Skill, Remaining, After).Unwrap();
+    Remaining := After;
+  end for;
+
+  return Current;
+end function;
+
+// A fresh full-health opponent of the kind directly west of the player.
+function Encounter(Kind: Hostiles.HostileKind; Value: Progression.ProgressionState; Seed: integer; Armed: boolean): GameState.GameState;
+begin
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 4, Y := 3),
+    Coordinates.FacingDirection.West
+  ) with Progression := Value; RandomState := Seed; end with;
+
+  State.Hostiles[0] := State.Hostiles[0] with Kind := Kind; Health := Hostiles.HostileMaximumHealth(
+    Kind
+  ); Alerted := true; end with;
+
+  if Armed then
+    State.Items[1] := State.Items[1] with Location := Items.ItemLocation.EquippedByPlayer(
+      Items.EquipmentSlot.Weapon
+    ); end with;
+  end if;
+
+  return State;
+end function;
+
+// Fights until the opponent falls; the fixture restores player health before each turn without any award.
+function FightToDeath(Start: GameState.GameState): GameState.GameState;
+begin
+  var State := Start;
+  for Turn: integer := 1 to 200 do
+    if State.Hostiles[0].Health > 0 then
+      const Rested := State with Health := GameState.PlayerMaximumHealth; end with;
+
+      Test.AssertTrue(Rested.Progression = State.Progression);
+      case Combat.ResolveTurn(
+        Fixtures.FixtureAreaView(Rested),
+        Rested,
+        Combat.TurnAction.Attack
+      ).Unwrap() of
+        when Combat.TurnOutcome.Continued(const Next, _, _):
+          State := Next;
+        when Combat.TurnOutcome.Defeated(_):
+          panic('a rested player cannot fall to one blow');
+      end case;
+    end if;
+  end for;
+
+  Test.AssertEquals(0, State.Hostiles[0].Health);
+  return State;
+end function;
+
+begin
+  // Opponent values are unchanged by progression.
+  Test.AssertEquals(6, Hostiles.HostileMaximumHealth(Hostiles.HostileKind.GiantRat));
+  Test.AssertEquals(12, Hostiles.HostileMaximumHealth(Hostiles.HostileKind.RestlessSkeleton));
+
+  // One dungeon supplies 18 points regardless of how the hits are grouped; overkill adds nothing.
+  for Rat: array of integer in [[6], [1, 2, 3], [2, 2, 2], [5, 9]] do
+    for Skeleton: array of integer in [[12], [4, 4, 4], [3, 3, 3, 3], [11, 20]] do
+      const Total := Drain(Drain(Progress(0, 0), Blades, 6, Rat), Blades, 12, Skeleton);
+      Test.AssertEquals(18, Total.BladesExperience);
+      Test.AssertEquals(0, Total.UnarmedExperience);
+    end for;
+  end for;
+
+  // Successive dungeon budgets and literal levels for one uncapped skill.
+  const Budgets: array of integer := [18, 36, 54, 72, 90, 108, 120];
+  const Levels: array of integer := [2, 3, 3, 4, 4, 4, 5];
+  var Pure := Progress(0, 0);
+  for Index: integer := 0 to 6 do
+    Pure := Drain(Drain(Pure, Unarmed, 6, [6]), Unarmed, 12, [12]);
+    Test.AssertEquals(Budgets[Index], Pure.UnarmedExperience);
+    Test.AssertEquals(Levels[Index], Progression.SkillBenefitsOf(Pure, Unarmed).Level);
+  end for;
+
+  // The same budgets with actually resolved attacks, misses included, for each skill.
+  for Armed: boolean in [false, true] do
+    var Value := Progress(0, 0);
+    var Seed := 7;
+    for Index: integer := 0 to 6 do
+      const AfterRat := FightToDeath(Encounter(Hostiles.HostileKind.GiantRat, Value, Seed, Armed));
+      const AfterSkeleton := FightToDeath(
+        Encounter(
+          Hostiles.HostileKind.RestlessSkeleton,
+          AfterRat.Progression,
+          AfterRat.RandomState,
+          Armed
+        )
+      );
+      Value := AfterSkeleton.Progression;
+      Seed := AfterSkeleton.RandomState;
+      var Trained := Value.UnarmedExperience;
+      var Idle := Value.BladesExperience;
+      if Armed then
+        Trained := Value.BladesExperience;
+        Idle := Value.UnarmedExperience;
+      end if;
+
+      Test.AssertEquals(Budgets[Index], Trained);
+      Test.AssertEquals(0, Idle);
+    end for;
+  end for;
+
+  // Dividing one target between both skills; capping one mid-fight keeps the other's exact total.
+  const Split := Drain(Drain(Progress(0, 0), Unarmed, 12, [2, 3]), Blades, 7, [4, 9]);
+  Test.AssertEquals(5, Split.UnarmedExperience);
+  Test.AssertEquals(7, Split.BladesExperience);
+  const Capping := Drain(Drain(Progress(117, 40), Blades, 12, [5]), Unarmed, 7, [7]);
+  Test.AssertEquals(120, Capping.UnarmedExperience);
+  Test.AssertEquals(45, Capping.BladesExperience);
+
+  // Rank 1 versus rank 5: d3/d3+2, d6+1/d6+3, 75%/85%; health and armor never change.
+  for Pair: integer in [0, 1] do
+    const Xp := if Pair = 0 then 0 else 120 end if;
+    const Fist := Equipment.DeriveCharacterValues(
+      Encounter(Hostiles.HostileKind.GiantRat, Progress(Xp, Xp), 1, false)
+    );
+    const Blade := Equipment.DeriveCharacterValues(
+      Encounter(Hostiles.HostileKind.GiantRat, Progress(Xp, Xp), 1, true)
+    );
+    Test.AssertEquals(3, Fist.DamageSides);
+    Test.AssertEquals(6, Blade.DamageSides);
+    Test.AssertEquals(if Pair = 0 then 0 else 2 end if, Fist.DamageBonus);
+    Test.AssertEquals(if Pair = 0 then 1 else 3 end if, Blade.DamageBonus);
+    Test.AssertEquals(if Pair = 0 then 6 else 4 end if, Fist.HitThreshold);
+    Test.AssertEquals(Fist.HitThreshold, Blade.HitThreshold);
+    Test.AssertEquals(20, Fist.MaximumHealth);
+    Test.AssertEquals(0, Fist.Armor);
+  end for;
+end.

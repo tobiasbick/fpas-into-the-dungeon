@@ -43,8 +43,11 @@ Continue independently validates the selected save and all its referenced
 dungeon levels. `Create world` opens controlled seed and region inputs with
 server-provided defaults and ranges. `Continue` loads the selected world's
 explicit save or starts at spawn if absent. `Start over` starts fresh in the
-same world and keeps its earlier save. Incompatible worlds and saves show a
-reason; they are never deleted automatically. The list cursor belongs to the
+same world and keeps its earlier save. The catalog is a table with fixed
+columns (world, status, seed, region, save), at most 76 cells wide; rows clip
+by terminal cells. Incompatible worlds and saves are never deleted
+automatically; the reason appears once, for the selected world, wrapped below
+the table. The list cursor belongs to the
 client and always lies within the displayed rows; an empty list has no cursor.
 Paging, a missing preselection and resize reconcile that cursor without
 changing the server-selected world or implicitly queuing a selection request.
@@ -379,10 +382,26 @@ the overlay shows `Resize to 32x8`; Enter and D send no item intention, while
 Escape/I still close it. This is an inventory-specific threshold. Resize and
 authoritative refresh recalculate the visible window without extra scroll state.
 
-`C` opens the character sheet: health, then each server-formatted derived value
-with its source, such as `Damage d6+1 · Rusty short sword`, then the worn
-equipment. `I` switches to the inventory, `Escape` or `C` closes it. The client
-never computes these values.
+`C` opens the character sheet, a read-only scrolling overlay owned by
+`Dungeon.Client.CharacterSheet`. Health and the visible row range stay above the
+body; two hint rows stay below it. The body shows each server-formatted line as
+a label/value row and a source row, for example `Blades L2 XP 12/36` and
+`· Active; next: hit +1`, followed by the worn equipment. The six lines are
+maximum health, hit chance, damage, armor, Unarmed and Blades; skill lines show
+total experience and the next cumulative threshold (see
+[progression](../architecture/progression.md)).
+
+- Body rows are the terminal height minus 6; the body is at most
+  `min(width - 4, 76)` cells wide and clips by terminal cells.
+- `Up`/`Down` or `W`/`S` scroll one row, clamped without wrapping. Other keys,
+  including Space and Enter, do nothing; no key reaches the game while the sheet
+  is open. Opening, closing and scrolling consume no turn.
+- Below 32 by 8 cells only `Resize to 32x8` and the close hint are shown.
+- The UI-only offset is clamped after resizing or an authoritative refresh,
+  kept while the sheet stays open, and reset on a fresh open, close or return to
+  the start screen. A late reply never reopens a closed sheet.
+- `I` switches to the inventory, `Escape` or `C` closes it. Level notices appear
+  in the normal combat log. The client never parses or computes these values.
 
 ## System menu
 

@@ -1,7 +1,7 @@
-// Turn-based combat: player actions, dice, opponent perception, pathfinding, attacks, and defeat.
+// Turn-based combat: player actions, dice, opponent perception, attacks, skill practice, and defeat.
 unit Dungeon.Combat;
 
-uses Dungeon.Consumables as Consumables, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.Exploration.Sight as Sight, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Math as Math;
+uses Dungeon.Combat.Navigation as Navigation, Dungeon.Consumables as Consumables, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.Exploration.Sight as Sight, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Progression as Progression, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Math as Math;
 
 // Upper bound of messages and of structured events reported for one resolved turn.
 public const MaximumTurnLogEntries: integer := 8;
@@ -116,110 +116,6 @@ begin
   return Sight.HasLineOfSight(Map, Hostile, Player) or Sight.HasLineOfSight(Map, Player, Hostile);
 end function;
 
-function Blocked(Map: InteriorUnit.InteriorMap; State: GameState.GameState; Position: Coordinates.InteriorPosition): boolean;
-begin
-  case InteriorUnit.InteriorCellAt(Map, Position) of
-    when Ok(const Cell):
-      begin
-        if Cell = InteriorUnit.InteriorCellKind.Wall then
-          begin
-            return true;
-          end;
-        end if;
-      end;
-    when Error(const Message):
-      begin
-        return true;
-      end;
-  end case;
-
-  return GameState.StandingHostileAt(State, State.AreaId, Position) >= 0;
-end function;
-
-// Returns the first field of a shortest path from Start to Goal, or Start when no path exists.
-// Neighbors are explored north, east, south, west, so equal paths resolve deterministically.
-function NextStepToward(
-  Map: InteriorUnit.InteriorMap;
-  State: GameState.GameState;
-  Start: Coordinates.InteriorPosition;
-  Goal: Coordinates.InteriorPosition
-): Coordinates.InteriorPosition;
-begin
-  const Offsets: array of Coordinates.InteriorPosition := [
-    Coordinates.InteriorPosition(X := 0, Y := -1),
-    Coordinates.InteriorPosition(X := 1, Y := 0),
-    Coordinates.InteriorPosition(X := 0, Y := 1),
-    Coordinates.InteriorPosition(X := -1, Y := 0)
-  ];
-  const FieldCount: integer := Map.Width * Map.Height;
-  // Each visited field remembers the first step taken from Start to reach it.
-  var FirstStep: array of integer := array.Fill(-1, FieldCount);
-  var Queue: array of Coordinates.InteriorPosition := [];
-  for Offset: Coordinates.InteriorPosition in Offsets do
-    begin
-      const Candidate: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
-        X := Start.X + Offset.X, Y := Start.Y +
-        Offset.Y
-      );
-      if Coordinates.SamePosition(Candidate, Goal) then
-        begin
-          return Candidate;
-        end;
-      end if;
-
-      if not Blocked(Map, State, Candidate) then
-        begin
-          const Index: integer := (Candidate.Y * Map.Width) + Candidate.X;
-          if FirstStep[Index] < 0 then
-            begin
-              FirstStep[Index] := Index;
-              Queue.PushInPlace(Candidate);
-            end;
-          end if;
-        end;
-      end if;
-    end;
-  end for;
-  var ReadIndex: integer := 0;
-  while ReadIndex < Queue.Length() do
-    begin
-      const Current: Coordinates.InteriorPosition := Queue[ReadIndex];
-      const CurrentFirst: integer := FirstStep[(Current.Y * Map.Width) + Current.X];
-      ReadIndex := ReadIndex + 1;
-      for Offset: Coordinates.InteriorPosition in Offsets do
-        begin
-          const Candidate: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
-            X := Current.X + Offset.X, Y := Current.Y +
-            Offset.Y
-          );
-          if Coordinates.SamePosition(Candidate, Goal) then
-            begin
-              return Coordinates.InteriorPosition(
-                X := CurrentFirst mod Map.Width, Y := CurrentFirst div
-                Map.Width
-              );
-            end;
-          end if;
-
-          if not Blocked(Map, State, Candidate) and not Coordinates.SamePosition(Candidate, Start) then
-            begin
-              const Index: integer := (Candidate.Y * Map.Width) + Candidate.X;
-              if FirstStep[Index] < 0 then
-                begin
-                  FirstStep[Index] := CurrentFirst;
-                  Queue.PushInPlace(Candidate);
-                end;
-              end if;
-            end;
-          end if;
-        end;
-      end for;
-    end;
-  end while;
-
-  return Start;
-end function;
-
 // Lets one standing opponent in the player's area notice, approach, or attack the player.
 function HostileTurn(
   Progress: TurnProgress;
@@ -287,7 +183,7 @@ begin
       return Hurt;
     end;
   end if;
-  const Next: Coordinates.InteriorPosition := NextStepToward(
+  const Next: Coordinates.InteriorPosition := Navigation.NextStepToward(
     Map,
     Progress.State,
     Hostile.Position,
@@ -346,6 +242,8 @@ begin
     PlayerDefeated := false
   );
   const Values: Equipment.CharacterValues := Equipment.DeriveCharacterValues(Valid);
+  // The skill is captured before the attack; it decides damage and receives the practice.
+  const Skill: Progression.SkillKind := Equipment.ActiveSkill(Valid);
   const HitRoll: DiceRoll := Roll(Valid, 20);
   // Being attacked always alerts the opponent, even when the blow misses.
   const Alerted: HostileRules.GameHostile := Hostile with Alerted := true; end with;
@@ -366,10 +264,17 @@ begin
   const DamageRoll: DiceRoll := Roll(HitRoll.State, Values.DamageSides);
   const Damage: integer := DamageRoll.Value + Values.DamageBonus;
   const Remaining: integer := Math.Max(0, Hostile.Health - Damage);
-  const Struck: TurnProgress := Happened(
+  // Only health actually removed counts, so overkill cannot inflate the award.
+  const Trained: Progression.ProgressionState := try Progression.AwardDamage(
+    Valid.Progression,
+    Skill,
+    Hostile.Health,
+    Remaining
+  );
+  var Struck: TurnProgress := Happened(
     Logged(
       Start with State := WithHostile(
-        DamageRoll.State,
+        DamageRoll.State with Progression := Trained; end with,
         Index,
         Alerted with Health := Remaining; end with
       ); end with, ((('You hit the ' + Name) + ' for ') + Conv.IntToStr(Damage)) +
@@ -377,15 +282,18 @@ begin
     ), CombatEventKind.PlayerHit, Damage, Hostile.Kind
   );
   if Remaining = 0 then
-    begin
-      return Ok(
-        Happened(
-          Logged(Struck, HostileRules.HostileDeathMessage(Hostile.Kind)),
-          CombatEventKind.HostileDefeated,
-          0, Hostile.Kind
-        )
-      );
-    end;
+    Struck := Happened(
+      Logged(Struck, HostileRules.HostileDeathMessage(Hostile.Kind)),
+      CombatEventKind.HostileDefeated,
+      0, Hostile.Kind
+    );
+  end if;
+  const Level: integer := Progression.SkillBenefitsOf(Trained, Skill).Level;
+  if Level > Progression.SkillBenefitsOf(Valid.Progression, Skill).Level then
+    Struck := Logged(
+      Struck,
+      Progression.SkillName(Skill) + ' reached level ' + Conv.IntToStr(Level) + '.'
+    );
   end if;
 
   return Ok(Struck);

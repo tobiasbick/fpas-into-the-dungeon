@@ -1,0 +1,256 @@
+// Renders the real character sheet at bounded sizes and scrolls every progression and equipment row into view.
+program CharacterSheetWindowTest;
+
+uses Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as Catalog, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Contains(Screen: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Row) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function RowOf(Screen: Tui.TuiSurfaceSnapshot; Text: string): integer;
+begin
+  for Row: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Row) then
+      return Row;
+    end if;
+  end for;
+
+  return -1;
+end function;
+
+function Line(Label: string; Value: string; Source: string): Protocol.VisibleCharacterValue;
+begin
+  return Protocol.VisibleCharacterValue(Label := Label, Value := Value, Source := Source);
+end function;
+
+// The server's six lines; the last source holds long multi-cell Unicode text.
+function Sheet(): array of Protocol.VisibleCharacterValue;
+begin
+  return [
+    Line('Maximum health', '20', 'Base'),
+    Line('Hit chance', '75% (d20 ≥ 6)', 'Base'),
+    Line('Damage', 'd6+2', 'Rusty short sword; Blades L2 +1'),
+    Line('Armor', '2', 'Leather jerkin'),
+    Line('Unarmed', 'L1 XP 0/12', 'Next: damage +1'),
+    Line(
+      'Blades',
+      'L2 XP 12/36',
+      'Active; next: hit +1 — Übung 🗡️ macht den Meister, éàü 漢字 漢字 漢字'
+    )
+  ];
+end function;
+
+function Worn(): array of Protocol.VisibleInventoryItem;
+begin
+  return [
+    Protocol.VisibleInventoryItem(
+      Id := 'sword', Name := 'Rusty short sword', Slot := Protocol.VisibleItemSlot.Weapon,
+      Equipped := true, Usable := false
+    ),
+    Protocol.VisibleInventoryItem(
+      Id := 'jerkin', Name := 'Leather jerkin', Slot := Protocol.VisibleItemSlot.Body,
+      Equipped := true, Usable := false
+    )
+  ];
+end function;
+
+function Event(Character: array of Protocol.VisibleCharacterValue): Client.ClientEvent;
+begin
+  return Client.ClientEvent.State(
+    Protocol.VisibleState.MapState(
+      Protocol.MapVisibleState(
+        OriginX := 0, OriginY := 0, Width := 3, Height := 3,
+        Rows := ['ggg', 'ggg', 'ggg'], KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+        PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := Worn(),
+        Health := 17, MaxHealth := 20, Character := Character
+      )
+    )
+  );
+end function;
+
+procedure Drain(Requests: channel of Protocol.ClientMessage);
+begin
+  while true do
+    case Tasks.TryReceive(Requests) of
+      when Ok(Some(Protocol.ClientMessage.Viewport(_, _))):
+        null;
+      when Ok(None), Error(_):
+        return;
+      when Ok(Some(_)):
+        panic('unexpected gameplay intention');
+    end case;
+  end while;
+end procedure;
+
+function Press(App: Tui.TuiApplication; Model: Client.ClientModel; Kind: Tui.TuiKeyKind; Ch: string): Client.ClientModel;
+begin
+  App.InjectKeyForTest(
+    Tui.TuiKeyEvent(
+      kind := Kind,
+      ch := Ch,
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+  return App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 1, 0);
+end function;
+
+function Opened(Width: integer; Height: integer; Requests: channel of Protocol.ClientMessage; App: Tui.TuiApplication): Client.ClientModel;
+begin
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(1);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := Client.NewClientModel(
+    '127.0.0.1', 4040, '', RuntimeData.DefaultClientPreferences(), Requests, Events
+  ) with ViewportWidth := Width; ViewportHeight := Height; ContextPanelVisible := false; MessagePanelVisible := false; end with;
+
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Connected(Catalog.FixtureCatalog(false, false)),
+    Cmd
+  );
+  Model := Client.UpdateClientEvent(Model, Event(Sheet()), Cmd);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Drain(Requests);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'c');
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.CharacterSheetOverlay);
+  Test.AssertEquals(0, Model.CharacterSheetOffset);
+  return Model;
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(64);
+  // Prefixes that fit the narrowest 28-cell body; wider sheets are checked with full texts below.
+  const Expected := [
+    'Maximum health 20', '  · Base', 'Hit chance     75%', 'Damage         d6+2',
+    '  · Rusty short sword', 'Armor          2', '  · Leather jerkin', 'Unarmed        L1 XP 0/12',
+    '  · Next: damage +1', 'Blades         L2 XP 12/36', '  · Active; next: hit', '── Equipment ──',
+    'Rusty short sword', 'Leather jerkin'
+  ];
+
+  // Below the minimum: only the resize hint and close keys; nothing is indexed or sent.
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(31, 8),
+    Tui.TuiSize.Create(32, 7),
+    Tui.TuiSize.Create(31, 7)
+  ] do
+    const App := Tui.TuiApplication.OpenForTest(Size);
+    var Model := Opened(Size.Width, Size.Height, Requests, App);
+    Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Resize to 32x8'));
+    for Key: Tui.TuiKeyKind in [Tui.TuiKeyKind.Down, Tui.TuiKeyKind.Up] do
+      Model := Press(App, Model, Key, '');
+      Test.AssertEquals(0, Model.CharacterSheetOffset);
+    end for;
+
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'i');
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.InventoryOverlay);
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  end for;
+
+  // At and above the minimum every body row is reachable; hints and the frame stay inside the terminal.
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(32, 8), Tui.TuiSize.Create(33, 9), Tui.TuiSize.Create(80, 24),
+    Tui.TuiSize.Create(200, 60)
+  ] do
+    const App := Tui.TuiApplication.OpenForTest(Size);
+    var Model := Opened(Size.Width, Size.Height, Requests, App);
+    var Seen: array of boolean := array.Fill(false, Expected.Length());
+    var Previous := -1;
+    for Step: integer := 0 to 20 do
+      const Screen := App.SurfaceSnapshot();
+      Test.AssertFalse(Contains(Screen, 'Resize to 32x8'));
+      Test.AssertTrue(Contains(Screen, 'Health         17/20'));
+      Test.AssertTrue(Contains(Screen, 'Rows '));
+      const CloseRow := RowOf(Screen, 'Esc/C close');
+      Test.AssertTrue(CloseRow >= 0);
+      Test.AssertTrue(CloseRow + 1 < Screen.Height);
+      Test.AssertTrue('╰' in Screen.LineAt(CloseRow + 1));
+      Test.AssertTrue(Contains(Screen, 'W/S/arrows scroll'));
+      for Index: integer := 0 to Expected.Length() - 1 do
+        if Contains(Screen, Expected[Index]) then
+          Seen[Index] := true;
+        end if;
+      end for;
+
+      Previous := Model.CharacterSheetOffset;
+      Model := Press(App, Model, Tui.TuiKeyKind.Character, 's');
+    end for;
+
+    for Index: integer := 0 to Expected.Length() - 1 do
+      Test.AssertTrue(Seen[Index]);
+    end for;
+
+    if Size.Width >= 80 then
+      // Full server text is shown when it fits; the long Unicode source is clipped by terminal cells.
+      for Step: integer := 0 to 30 do
+        Model := Press(App, Model, Tui.TuiKeyKind.Up, '');
+      end for;
+      var Found := false;
+      for Step: integer := 0 to 20 do
+        if Contains(App.SurfaceSnapshot(), '  · Rusty short sword; Blades L2 +1') then
+          Found := true;
+        end if;
+
+        Model := Press(App, Model, Tui.TuiKeyKind.Down, '');
+      end for;
+
+      Test.AssertTrue(Found);
+    end if;
+
+    // The last row is clamped without wrapping; Up/W return to the first row.
+    Test.AssertEquals(Previous, Model.CharacterSheetOffset);
+    for Step: integer := 0 to 30 do
+      Model := Press(App, Model, Tui.TuiKeyKind.Up, '');
+    end for;
+
+    Test.AssertEquals(0, Model.CharacterSheetOffset);
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'W');
+    Test.AssertEquals(0, Model.CharacterSheetOffset);
+
+    // Space, Enter and other navigation keys send nothing and leave the sheet open.
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, ' ');
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    Model := Press(App, Model, Tui.TuiKeyKind.Left, '');
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'a');
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'm');
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.CharacterSheetOverlay);
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+
+    // Escape closes; a fresh open starts at the first row again.
+    Model := Press(App, Model, Tui.TuiKeyKind.Down, '');
+    Model := Press(App, Model, Tui.TuiKeyKind.Escape, '');
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.NoOverlay);
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'C');
+    Test.AssertEquals(0, Model.CharacterSheetOffset);
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'c');
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.NoOverlay);
+    Drain(Requests);
+  end for;
+
+  // An empty generic array and the protocol maximum of eight lines render with their equipment.
+  for Count: integer in [0, 8] do
+    var Lines: array of Protocol.VisibleCharacterValue := [];
+    for Index: integer := 1 to Count do
+      Lines.PushInPlace(Line('Generic', 'x', 'y'));
+    end for;
+    const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 40));
+    var Model := Opened(80, 40, Requests, App);
+    const Cmd := Tui.TuiCmdOutput.Create();
+    Model := Client.UpdateClientEvent(Model, Event(Lines), Cmd);
+    Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.CharacterSheetOverlay);
+    Test.AssertTrue(Contains(App.SurfaceSnapshot(), '── Equipment ──'));
+    Test.AssertTrue(
+      Contains(App.SurfaceSnapshot(), 'Rows 1-' + (if Count = 0 then '3/3' else '19/19' end if))
+    );
+    Drain(Requests);
+  end for;
+end.

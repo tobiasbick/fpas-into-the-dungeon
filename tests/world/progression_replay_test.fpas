@@ -1,0 +1,203 @@
+// Verifies that saved progression replays exactly: the same intentions after a mid-fight load give the same state and logs.
+program ProgressionReplayTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Progression as Progression, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+
+type Replay = record
+  State: GameState.GameState;
+  Logs: array of string;
+  Defeated: boolean;
+end record;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('save must be loadable');
+  end case;
+end function;
+
+// Resolves the actions in order against fixed geometry, recording every log line.
+function Fight(World: WorldUnit.WorldSession; Map: InteriorUnit.InteriorMap; Start: GameState.GameState; Actions: array of Combat.TurnAction): Replay;
+begin
+  const View := GameState.AreaView(Metadata := World.Metadata, Interior := Some(Map));
+  var Current := Replay(State := Start, Logs := [], Defeated := false);
+  for Action: Combat.TurnAction in Actions do
+    if not Current.Defeated then
+      case Combat.ResolveTurn(View, Current.State, Action) of
+        when Ok(Combat.TurnOutcome.Continued(const Next, const Log, _)):
+          Current.State := Next;
+          Current.Logs := Current.Logs.Concat(Log);
+        when Ok(Combat.TurnOutcome.Defeated(const Log)):
+          Current.Logs := Current.Logs.Concat(Log);
+          Current.Defeated := true;
+        when Error(const Reason):
+          Current.Logs.PushInPlace('rejected: ' + Reason);
+      end case;
+    end if;
+  end for;
+
+  return Current;
+end function;
+
+function SameReplay(Left: Replay; Right: Replay): boolean;
+begin
+  if (Left.Defeated <> Right.Defeated) or (Left.Logs.Length() <> Right.Logs.Length()) then
+    return false;
+  end if;
+
+  for Index: integer := 0 to Left.Logs.Length() - 1 do
+    if Left.Logs[Index] <> Right.Logs[Index] then
+      return false;
+    end if;
+  end for;
+
+  return States.SameState(Left.State, Right.State);
+end function;
+
+function Facing(From: Coordinates.InteriorPosition; Target: Coordinates.InteriorPosition): Coordinates.FacingDirection;
+begin
+  if Target.Y < From.Y then
+    return Coordinates.FacingDirection.North;
+  end if;
+
+  if Target.Y > From.Y then
+    return Coordinates.FacingDirection.South;
+  end if;
+
+  if Target.X > From.X then
+    return Coordinates.FacingDirection.East;
+  end if;
+
+  return Coordinates.FacingDirection.West;
+end function;
+
+begin
+  const Root := '.temp-data/progression-replay-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'replay', 12345, 4, 16).Unwrap();
+  const Outdoor := GameState.NewGame(World.Metadata);
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  const Site := Entrances.EntranceSite(World.Metadata, Region).Unwrap();
+  const Map := Interiors.OpenLevelForEntry(
+    World,
+    Outdoor with Player := Coordinates.PlayerPosition.Outdoor(Site); end with,
+    Identities.DungeonAreaId(World.Metadata, Region)
+  ).Unwrap();
+
+  // Stand next to the generated skeleton on a free floor field, sword carried, both skills partly trained.
+  var Inside := Areas.MaterializeArea(Outdoor, Map);
+  var SkeletonIndex := 0;
+  for Index: integer := 0 to Inside.Hostiles.Length() - 1 do
+    if Inside.Hostiles[Index].Kind = Hostiles.HostileKind.RestlessSkeleton then
+      SkeletonIndex := Index;
+    end if;
+  end for;
+  const Target := Inside.Hostiles[SkeletonIndex].Position;
+  var Stand := Target;
+  for Offset: Coordinates.InteriorPosition in [
+    Coordinates.InteriorPosition(X := 0, Y := -1), Coordinates.InteriorPosition(X := 1, Y := 0),
+    Coordinates.InteriorPosition(X := 0, Y := 1), Coordinates.InteriorPosition(X := -1, Y := 0)
+  ] do
+    const Candidate := Coordinates.InteriorPosition(
+      X := Target.X + Offset.X,
+      Y := Target.Y + Offset.Y
+    );
+    if Coordinates.SamePosition(Stand, Target)
+      and
+      (InteriorUnit.InteriorCellAt(Map, Candidate).Unwrap() = InteriorUnit.InteriorCellKind.Floor)
+      and
+      (GameState.StandingHostileAt(Inside, Map.AreaId, Candidate) < 0)
+    then
+      Stand := Candidate;
+    end if;
+  end for;
+
+  Test.AssertFalse(Coordinates.SamePosition(Stand, Target));
+  var SwordId := '';
+  for Index: integer := 0 to Inside.Items.Length() - 1 do
+    if Inside.Items[Index].Kind = Items.ItemKind.RustyShortSword then
+      SwordId := Inside.Items[Index].Id;
+      Inside.Items[Index] := Inside.Items[Index] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+    end if;
+  end for;
+
+  Inside.Area := Coordinates.AreaKind.Dungeon;
+  Inside.AreaId := Map.AreaId;
+  Inside.Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Stand, Facing := Facing(Stand, Target))
+  );
+  Inside.ReturnLocation := Coordinates.ReturnLocation.ReturnTo(World.Metadata.OutdoorAreaId, Site);
+  Inside.Hostiles[SkeletonIndex] := Inside.Hostiles[SkeletonIndex] with Alerted := true; end with;
+
+  Inside.Progression := Progression.ProgressionState(
+    UnarmedExperience := 10,
+    BladesExperience := 34
+  );
+  Inside := Areas.ValidateSavedGame(World.Metadata, Inside, [Map]).Unwrap();
+  const LevelPath := World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' +
+    Conv.IntToStr(Region.Y) + '/0.json';
+  const LevelBytes := Fs.ReadText(LevelPath).Unwrap();
+
+  // Train Unarmed, save mid-fight, then switch to the sword and continue.
+  const Opening := Fight(World, Map, Inside, [Combat.TurnAction.Attack, Combat.TurnAction.Attack]);
+  Test.AssertFalse(Opening.Defeated);
+  const MidFight := Opening.State;
+  Test.AssertTrue(Savegame.WriteSaveGame(World, MidFight).Unwrap());
+  const SavedBytes := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  const Restored := Loaded(World);
+  Test.AssertTrue(States.SameState(MidFight, Restored));
+  Test.AssertTrue(States.SameState(Restored, Loaded(World)));
+
+  const Rest := [
+    Combat.TurnAction.Equip(SwordId), Combat.TurnAction.Attack, Combat.TurnAction.Attack,
+    Combat.TurnAction.Attack
+  ];
+  const Live := Fight(World, Map, MidFight, Rest);
+  const Replayed := Fight(World, Map, Restored, Rest);
+  Test.AssertTrue(SameReplay(Live, Replayed));
+  // The fight trained both skills by exactly the skeleton health they removed.
+  const Removed := 12 - Live.State.Hostiles[SkeletonIndex].Health;
+  Test.AssertEquals(
+    Removed,
+    (Live.State.Progression.UnarmedExperience - 10) +
+    (Live.State.Progression.BladesExperience - 34)
+  );
+
+  // Reloading and revisiting never award the already lost health again.
+  for Attempt: integer := 1 to 3 do
+    const Again := Loaded(World);
+    Test.AssertTrue(States.SameState(MidFight, Again));
+    Test.AssertTrue(States.SameState(Again, Areas.MaterializeArea(Again, Map)));
+  end for;
+
+  // An invalid state is never written; the prior save and session state stay intact.
+  Test.AssertTrue(
+    Savegame.WriteSaveGame(
+      World,
+      Live.State with Progression := Progression.ProgressionState(
+        UnarmedExperience := 121,
+        BladesExperience := 0
+      ); end with
+    ) is Error(_)
+  );
+  Test.AssertEquals(SavedBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+
+  // Saving outdoors after leaving keeps both counters; mastery survives a round trip.
+  const Outside := Outdoor with VisitedAreas := Live.State.VisitedAreas; Items := Live.State.Items; Hostiles := Live.State.Hostiles; Exploration := Live.State.Exploration; Progression := Live.State.Progression; RandomState := Live.State.RandomState; end with;
+
+  if not Live.Defeated then
+    Test.AssertTrue(Savegame.WriteSaveGame(World, Outside).Unwrap());
+    Test.AssertTrue(States.SameState(Outside, Loaded(World)));
+  end if;
+  const Master := Outdoor with Progression := Progression.ProgressionState(
+    UnarmedExperience := 120,
+    BladesExperience := 120
+  ); end with;
+
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Master).Unwrap());
+  Test.AssertTrue(States.SameState(Master, Loaded(World)));
+  Test.AssertEquals(LevelBytes, Fs.ReadText(LevelPath).Unwrap());
+end.

@@ -50,6 +50,9 @@ keeps its non-violent meaning.
 | Hit | d20 ≥ 6 (75 %) | d20 ≥ 9 + armor (60 % unarmored) | d20 ≥ 12 + armor (45 % unarmored) |
 | Damage | d3 unarmed, d6 + 1 with the rusty short sword | d4 | d2 |
 
+Player hit and damage are level-1 values; the active skill's level adds up to
++2 hit and +2 damage ([progression](progression.md)).
+
 Dice come from a small linear congruential generator whose state is part of
 the authoritative game state. A new game seeds it from the world seed, and a
 loaded game continues from its saved state. Identical actions therefore always
@@ -115,7 +118,7 @@ Introduced with protocol version 11 and extended in versions 12 and 15:
 
 ## Persistence
 
-The save (format 8) holds the player's health, the random generator state, and
+The save (format 9) holds the player's health, the random generator state, and
 the complete record of every opponent of the visited dungeons with identity,
 kind, area, position, health, and alert status. Validation requires exactly one
 record per stored opponent placement, a traversable field in its own area that
@@ -130,10 +133,15 @@ Persisted kinds are `restless_skeleton` and `giant_rat`; a rat's health must be
 `Dungeon.Hostiles` owns opponent kinds and their values; `Dungeon.GameState`
 owns the opponent and health state, collision queries, visible codes, and
 validation. `Dungeon.Combat` owns turns: attacks, dice, the opponent's
-perception, pathfinding, and attacks, and defeat. `Dungeon.Consumables` owns
+perception and attacks, skill practice from player hits, and defeat;
+`Dungeon.Combat.Navigation` owns the opponents' shortest-path step (neighbors
+north, east, south, west). `Dungeon.Consumables` owns
 the pure potion validation, healing and consumed-state change. The server translates
 intentions and outcomes into protocol messages. The client only renders the
 projected opponent, health, combat log, and defeat.
 
-Generated floor finds and healing potions are implemented. Experience, ranged
-attacks, spells, fleeing behavior and real-time combat remain later work.
+Generated floor finds and healing potions are implemented. A successful player
+hit trains the active skill by the health it removed and may log a level
+increase after the hit and any death, before the opponents act; see
+[progression](progression.md). Ranged attacks, spells, fleeing behavior and
+real-time combat remain later work.

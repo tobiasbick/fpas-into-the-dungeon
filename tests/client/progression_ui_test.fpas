@@ -1,0 +1,154 @@
+// Verifies the sheet offset lifecycle: refresh, resize, late replies after closing, and resets, with server-only text.
+program ProgressionUiTest;
+
+uses Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as Catalog, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Line(Label: string; Value: string; Source: string): Protocol.VisibleCharacterValue;
+begin
+  return Protocol.VisibleCharacterValue(Label := Label, Value := Value, Source := Source);
+end function;
+
+function Lines(BladesValue: string; Count: integer): array of Protocol.VisibleCharacterValue;
+begin
+  var Entries: array of Protocol.VisibleCharacterValue := [
+    Line('Maximum health', '20', 'Base'),
+    Line('Hit chance', '75% (d20 ≥ 6)', 'Base'),
+    Line('Damage', 'd3', 'Unarmed'),
+    Line('Armor', '0', 'None'),
+    Line('Unarmed', 'L1 XP 0/12', 'Active; next: damage +1'),
+    Line('Blades', BladesValue, 'Next: damage +1')
+  ];
+  return Entries.Slice(0, Count);
+end function;
+
+function State(Character: array of Protocol.VisibleCharacterValue): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      OriginX := 0, OriginY := 0, Width := 3, Height := 3,
+      Rows := ['ggg', 'ggg', 'ggg'], KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+      PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := [],
+      Health := 20, MaxHealth := 20, Character := Character
+    )
+  );
+end function;
+
+function Key(Kind: Tui.TuiKeyKind; Ch: string): Tui.TuiMsg;
+begin
+  return Tui.TuiMsg.Key(
+    Tui.TuiKeyEvent(
+      kind := Kind,
+      ch := Ch,
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(64);
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(1);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := Client.NewClientModel(
+    '127.0.0.1', 4040, '', RuntimeData.DefaultClientPreferences(), Requests, Events
+  ) with ViewportWidth := 80; ViewportHeight := 10; ContextPanelVisible := false; MessagePanelVisible := false; end with;
+
+  Test.AssertEquals(0, Model.CharacterSheetOffset);
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Connected(Catalog.FixtureCatalog(false, false)),
+    Cmd
+  );
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.State(State(Lines('L1 XP 0/12', 6))),
+    Cmd
+  );
+
+  // Body: 12 character rows, the equipment rule and one empty-equipment line = 14; 4 rows fit at height 10.
+  Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, 'c'), Cmd);
+  for Step: integer := 1 to 20 do
+    Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Down, ''), Cmd);
+  end for;
+
+  Test.AssertEquals(10, Model.CharacterSheetOffset);
+
+  // An authoritative refresh with new experience keeps the open sheet and its valid position.
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.State(State(Lines('L2 XP 12/36', 6))),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.CharacterSheetOverlay);
+  Test.AssertEquals(10, Model.CharacterSheetOffset);
+  Test.AssertEquals('L2 XP 12/36', Model.Character[5].Value);
+  // Fewer lines clamp the position; the client keeps exactly what the server sent.
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.ViewportState(State(Lines('L2 XP 12/36', 2))),
+    Cmd
+  );
+  Test.AssertEquals(2, Model.CharacterSheetOffset);
+  Test.AssertEquals(2, Model.Character.Length());
+
+  // Resizing while scrolled clamps against the new body height.
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.State(State(Lines('L2 XP 12/36', 6))),
+    Cmd
+  );
+  for Step: integer := 1 to 20 do
+    Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Down, ''), Cmd);
+  end for;
+
+  Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(80, 40)), Cmd);
+  Test.AssertEquals(0, Model.CharacterSheetOffset);
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.CharacterSheetOverlay);
+  Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(80, 12)), Cmd);
+  for Step: integer := 1 to 20 do
+    Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Down, ''), Cmd);
+  end for;
+
+  Test.AssertEquals(8, Model.CharacterSheetOffset);
+  // Below the minimum the position is kept and scrolling is ignored.
+  Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(80, 7)), Cmd);
+  Test.AssertEquals(8, Model.CharacterSheetOffset);
+  Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Down, ''), Cmd);
+  Test.AssertEquals(8, Model.CharacterSheetOffset);
+  Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(0, 0)), Cmd);
+  Test.AssertTrue(Model.CharacterSheetOffset >= 0);
+
+  // Closing resets the position; a late viewport reply never reopens the sheet.
+  Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(80, 12)), Cmd);
+  Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Escape, ''), Cmd);
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertEquals(0, Model.CharacterSheetOffset);
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.ViewportState(State(Lines('L1 XP 0/12', 6))),
+    Cmd
+  );
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertEquals('L1 XP 0/12', Model.Character[5].Value);
+
+  // A disconnect clears the session view and its sheet position.
+  Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, 'c'), Cmd);
+  Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Down, ''), Cmd);
+  Test.AssertEquals(1, Model.CharacterSheetOffset);
+  Model := Client.UpdateClientEvent(Model, Client.ClientEvent.Disconnected, Cmd);
+  Test.AssertTrue(Model.Overlay <> Client.ClientOverlay.CharacterSheetOverlay);
+
+  // Nothing above produced a gameplay intention; only viewport refreshes may be queued.
+  while true do
+    case Tasks.TryReceive(Requests) of
+      when Ok(Some(Protocol.ClientMessage.Viewport(_, _))):
+        null;
+      when Ok(None), Error(_):
+        break;
+      when Ok(Some(_)):
+        panic('the character sheet must not send gameplay intentions');
+    end case;
+  end while;
+end.

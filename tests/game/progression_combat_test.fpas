@@ -1,0 +1,218 @@
+// Verifies practice from resolved attacks: lost-health awards, level notices, ordering, caps and unchanged dice.
+program ProgressionCombatTest;
+
+uses Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Items as Items, Dungeon.Progression as Progression, Dungeon.Test.Fixtures as Fixtures, Std.Conv as Conv, Std.Test as Test;
+
+const SwordIndex: integer := 1;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+// An alerted rat directly west of the player; the sword starts carried.
+function Encounter(RatHealth: integer; Value: Progression.ProgressionState; Seed: integer): GameState.GameState;
+begin
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 4, Y := 3),
+    Coordinates.FacingDirection.West
+  );
+  State.Hostiles[0] := State.Hostiles[0] with Kind := Hostiles.HostileKind.GiantRat; Health := RatHealth; Alerted := true; end with;
+
+  State.Items[SwordIndex] := State.Items[SwordIndex] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  State.Progression := Value;
+  State.RandomState := Seed;
+  return State;
+end function;
+
+function Armed(State: GameState.GameState): GameState.GameState;
+begin
+  var Changed := State;
+  Changed.Items[SwordIndex] := Changed.Items[SwordIndex] with Location := Items.ItemLocation.EquippedByPlayer(
+    Items.EquipmentSlot.Weapon
+  ); end with;
+
+  return Changed;
+end function;
+
+function Attack(State: GameState.GameState): Combat.TurnOutcome;
+begin
+  return Combat.ResolveTurn(
+    Fixtures.FixtureAreaView(State),
+    State,
+    Combat.TurnAction.Attack
+  ).Unwrap();
+end function;
+
+function Survived(Outcome: Combat.TurnOutcome): GameState.GameState;
+begin
+  case Outcome of
+    when Combat.TurnOutcome.Continued(const State, _, _):
+      return State;
+    when Combat.TurnOutcome.Defeated(_):
+      panic('expected a surviving turn');
+  end case;
+end function;
+
+function LogOf(Outcome: Combat.TurnOutcome): array of string;
+begin
+  case Outcome of
+    when Combat.TurnOutcome.Continued(_, const Log, _):
+      return Log;
+    when Combat.TurnOutcome.Defeated(const Log):
+      return Log;
+  end case;
+end function;
+
+// Independent dice oracle: the n-th value (1-based) of a seed with the given sides.
+function Draw(Seed: integer; Count: integer): integer;
+begin
+  var Value := Seed;
+  for Index: integer := 1 to Count do
+    Value := ((Value * 1103515245) + 12345) mod 2147483648;
+  end for;
+
+  return Value;
+end function;
+
+function Die(Seed: integer; Position: integer; Sides: integer): integer;
+begin
+  return ((Draw(Seed, Position) div 65536) mod Sides) + 1;
+end function;
+
+procedure AssertProgress(Expected: Progression.ProgressionState; State: GameState.GameState);
+begin
+  Test.AssertEquals(Expected.UnarmedExperience, State.Progression.UnarmedExperience);
+  Test.AssertEquals(Expected.BladesExperience, State.Progression.BladesExperience);
+end procedure;
+
+procedure AssertLog(Expected: array of string; Outcome: Combat.TurnOutcome);
+begin
+  const Log := LogOf(Outcome);
+  Test.AssertEquals(Expected.Length(), Log.Length());
+  for Index: integer := 0 to Expected.Length() - 1 do
+    Test.AssertEquals(Expected[Index], Log[Index]);
+  end for;
+end procedure;
+
+// Crosses one threshold with the pinned seed-1 fist blow (d3=2 plus the level's bonus) against a rat with the given health.
+procedure AssertCrossing(Before: integer; RatHealth: integer; After: integer; Level: integer);
+begin
+  const Outcome := Attack(Encounter(RatHealth, Progress(Before, 7), 1));
+  AssertProgress(Progress(After, 7), Survived(Outcome));
+  // Nonlethal: hit, level, rat. Lethal: hit, death, level.
+  var Position := 2;
+  if RatHealth > 4 then
+    Position := 1;
+  end if;
+
+  Test.AssertEquals(
+    'Unarmed reached level ' + Conv.IntToStr(Level) + '.',
+    LogOf(Outcome)[Position]
+  );
+end procedure;
+
+begin
+  // Pinned seed 1: d20=19, d3=2, rat d20=14, rat d2=2. Practice adds no draw.
+  Test.AssertEquals(19, Die(1, 1, 20));
+  Test.AssertEquals(2, Die(1, 2, 3));
+  const Fist := Attack(Encounter(6, Progress(0, 0), 1));
+  const AfterFist := Survived(Fist);
+  Test.AssertEquals(4, AfterFist.Hostiles[0].Health);
+  Test.AssertEquals(18, AfterFist.Health);
+  Test.AssertEquals(1147902781, AfterFist.RandomState);
+  AssertProgress(Progress(2, 0), AfterFist);
+  AssertLog(['You hit the Giant rat for 2.', 'The Giant rat strikes you for 2.'], Fist);
+
+  // The sword trains Blades only: d6 + 1 against a full rat.
+  const SwordDamage := Die(1, 2, 6) + 1;
+  const Blade := Survived(Attack(Armed(Encounter(6, Progress(0, 0), 1))));
+  Test.AssertEquals(6 - SwordDamage, Blade.Hostiles[0].Health);
+  AssertProgress(Progress(0, SwordDamage), Blade);
+
+  // A nonlethal threshold crossing logs once, after the hit and before the hostile phase.
+  const Crossing := Attack(Encounter(6, Progress(11, 0), 1));
+  AssertProgress(Progress(13, 0), Survived(Crossing));
+  AssertLog(
+    [
+      'You hit the Giant rat for 2.',
+      'Unarmed reached level 2.',
+      'The Giant rat strikes you for 2.'
+    ],
+    Crossing
+  );
+  // The new bonus applies only to the next attack: d3=2 plus +1.
+  const Next := Survived(Attack(Survived(Crossing) with RandomState := 1; end with));
+  Test.AssertEquals(1, Next.Hostiles[0].Health);
+  AssertProgress(Progress(16, 0), Next);
+
+  // Lethal overkill: rolled 2 against 1 health awards 1; log order hit, death, level.
+  const Lethal := Attack(Encounter(1, Progress(11, 0), 1));
+  AssertProgress(Progress(12, 0), Survived(Lethal));
+  AssertLog(
+    [
+      'You hit the Giant rat for 2.',
+      'The Giant rat falls lifeless to the floor.',
+      'Unarmed reached level 2.'
+    ],
+    Lethal
+  );
+  case Lethal of
+    when Combat.TurnOutcome.Continued(_, _, const Events):
+      Test.AssertEquals(2, Events.Length());
+      Test.AssertEquals(2, Events[0].Amount);
+      Test.AssertTrue(Events[1].Kind = Combat.CombatEventKind.HostileDefeated);
+    when Combat.TurnOutcome.Defeated(_):
+      panic('a lethal blow cannot defeat the player');
+  end case;
+
+  // Every boundary: 11->12, 35->36, 71->72, 119->cap, and saturation at 120.
+  AssertCrossing(11, 1, 12, 2);
+  AssertCrossing(35, 6, 38, 3);
+  AssertCrossing(71, 1, 72, 4);
+  AssertCrossing(119, 6, 120, 5);
+  AssertCrossing(118, 6, 120, 5);
+  const Capped := Attack(Encounter(6, Progress(120, 7), 1));
+  AssertProgress(Progress(120, 7), Survived(Capped));
+  AssertLog(['You hit the Giant rat for 4.', 'The Giant rat strikes you for 2.'], Capped);
+  const Again := Attack(Survived(Capped) with RandomState := 1; end with);
+  AssertProgress(Progress(120, 7), Survived(Again));
+
+  // A miss awards nothing.
+  var MissSeed := 0;
+  while Die(MissSeed, 1, 20) >= 6 do
+    MissSeed := MissSeed + 1;
+  end while;
+  const Missed := Survived(Attack(Encounter(6, Progress(11, 3), MissSeed)));
+  AssertProgress(Progress(11, 3), Missed);
+  Test.AssertEquals(6, Missed.Hostiles[0].Health);
+
+  // Mixed skills against one target: the fist hit trains Unarmed, the later sword hit Blades.
+  const Mixed := Survived(Attack(Encounter(6, Progress(0, 0), 1)));
+  const Wielding := Equipment.EquipItem(Mixed, Mixed.Items[SwordIndex].Id).Unwrap().State with RandomState := 1; end with;
+  const Finished := Survived(Attack(Wielding));
+  AssertProgress(Progress(2, 4 - Finished.Hostiles[0].Health), Finished);
+  Test.AssertEquals(
+    6,
+    Finished.Progression.UnarmedExperience + Finished.Progression.BladesExperience +
+    Finished.Hostiles[0].Health
+  );
+
+  // A level increase followed by player defeat keeps the state-less defeat outcome.
+  const Doomed := Attack(Encounter(6, Progress(11, 0), 1) with Health := 1; end with);
+  case Doomed of
+    when Combat.TurnOutcome.Defeated(const Log):
+      Test.AssertEquals('You hit the Giant rat for 2.', Log[0]);
+      Test.AssertEquals('Unarmed reached level 2.', Log[1]);
+      Test.AssertEquals('You have fallen.', Log[Log.Length() - 1]);
+    when Combat.TurnOutcome.Continued(_, _, _):
+      panic('the rat blow must defeat a player with 1 health');
+  end case;
+
+  // Rejected attacks on a destroyed opponent award nothing and consume no dice.
+  const Dead := Encounter(0, Progress(5, 5), 1);
+  Test.AssertTrue(
+    Combat.ResolveTurn(Fixtures.FixtureAreaView(Dead), Dead, Combat.TurnAction.Attack) is Error(_)
+  );
+end.

@@ -1,0 +1,113 @@
+// Verifies that protocol 15 carries progression as bounded generic character lines and rejects client-supplied experience.
+program ProgressionProtocolTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Std.Test as Test;
+
+function Line(Label: string; Value: string; Source: string): Protocol.VisibleCharacterValue;
+begin
+  return Protocol.VisibleCharacterValue(Label := Label, Value := Value, Source := Source);
+end function;
+
+function Hall(Character: array of Protocol.VisibleCharacterValue): Protocol.FirstPersonVisibleState;
+begin
+  return Protocol.FirstPersonVisibleState(
+    Title := 'Initial dungeon', Status := 'Nothing in reach', Width := 3, Height := 3,
+    Rows := ['###', '#.#', '###'], KnowledgeRows := ['vvv', 'vvv', 'vvv'], PlayerX := 1,
+    PlayerY := 1,
+    Facing := Protocol.FirstPersonFacing.West, Inventory := [], Health := 20, MaxHealth := 20,
+    Character := Character, CombatLog := ['Blades reached level 2.'], CombatEvents := []
+  );
+end function;
+
+function Encoded(Character: array of Protocol.VisibleCharacterValue): string;
+begin
+  return ServerMessages.EncodeServer(
+    Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(Hall(Character)))
+  );
+end function;
+
+function Decoded(Text: string): Protocol.FirstPersonVisibleState;
+begin
+  case ServerMessages.DecodeServer(Text).Unwrap() of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      return Value;
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_)), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a first-person state');
+  end case;
+end function;
+
+function Lines(Count: integer): array of Protocol.VisibleCharacterValue;
+begin
+  var Entries: array of Protocol.VisibleCharacterValue := [];
+  for Index: integer := 1 to Count do
+    Entries.PushInPlace(Line('Line', 'Value', 'Source'));
+  end for;
+
+  return Entries;
+end function;
+
+begin
+  Test.AssertEquals(15, Protocol.ProtocolVersion);
+  Test.AssertEquals(8, Protocol.MaximumCharacterValues);
+  Test.AssertEquals(64, Protocol.MaximumCharacterTextLength);
+
+  // The six server lines round-trip unchanged, in order, with the existing hit glyph.
+  const Sheet := [
+    Line('Maximum health', '20', 'Base'),
+    Line('Hit chance', '80% (d20 ≥ 5)', 'Base; Blades L3 +1 hit'),
+    Line('Damage', 'd6+2', 'Rusty short sword; Blades L3 +1'),
+    Line('Armor', '2', 'Leather jerkin'),
+    Line('Unarmed', 'L1 XP 0/12', 'Next: damage +1'),
+    Line('Blades', 'L5 XP 120/120', 'Active; mastered')
+  ];
+  const Back := Decoded(Encoded(Sheet));
+  Test.AssertEquals(6, Back.Character.Length());
+  for Index: integer := 0 to 5 do
+    Test.AssertTrue(Back.Character[Index] = Sheet[Index]);
+  end for;
+
+  Test.AssertEquals('Blades reached level 2.', Back.CombatLog[0]);
+
+  // Generic bounds: 0 and 8 lines and 64-character text pass; 9 lines or 65 characters fail.
+  Test.AssertEquals(0, Decoded(Encoded([])).Character.Length());
+  Test.AssertEquals(8, Decoded(Encoded(Lines(8))).Character.Length());
+  const Longest := 'x'.RepeatStr(64);
+  Test.AssertTrue(
+    Decoded(Encoded([Line(Longest, Longest, Longest)])).Character[0].Source = Longest
+  );
+  const Escaped := '"\\'.RepeatStr(21);
+  Test.AssertEquals(
+    Escaped,
+    Decoded(Encoded([Line('Blades', 'L2 XP 12/36', Escaped)])).Character[0].Source
+  );
+  const Valid := Encoded([Line('Blades', 'L2 XP 12/36', 'Active; next: hit +1')]);
+  for Broken: string in [
+    Valid.Replace('"source":"Active; next: hit +1"', '"source":"' + 'x'.RepeatStr(65) + '"'),
+    Valid.Replace('"label":"Blades"', '"label":"' + 'x'.RepeatStr(65) + '"'),
+    Valid.Replace('"value":"L2 XP 12/36"', '"value":""'),
+    Valid.Replace('"source":"Active; next: hit +1"', '"source":"Active","level":2'),
+    Valid.Replace('"source":"Active; next: hit +1"', '"source":3'),
+    Valid.Replace(',"source":"Active; next: hit +1"', '')
+  ] do
+    Test.AssertFalse(Broken = Valid);
+    Test.AssertTrue(ServerMessages.DecodeServer(Broken) is Error(_));
+  end for;
+  const Nine := Encoded(
+    Lines(8)
+  ).Replace(
+    '{"label":"Line","value":"Value","source":"Source"}]',
+    '{"label":"Line","value":"Value","source":"Source"},{"label":"Line","value":"Value","source":"Source"}]'
+  );
+  Test.AssertTrue(ServerMessages.DecodeServer(Nine) is Error(_));
+
+  // Clients cannot submit experience, skills or derived values with an intention.
+  Test.AssertTrue(ClientMessages.DecodeClient('{"type":"attack"}') is Ok(_));
+  for Forged: string in [
+    '{"type":"attack","experience":12}',
+    '{"type":"attack","skill":"blades"}',
+    '{"type":"wait","experience":1}',
+    '{"type":"experience","skill":"blades","amount":120}'
+  ] do
+    Test.AssertTrue(ClientMessages.DecodeClient(Forged) is Error(_));
+  end for;
+end.

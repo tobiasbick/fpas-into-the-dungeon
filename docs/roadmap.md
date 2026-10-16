@@ -354,12 +354,15 @@ slots remain outside this slice.
 The user accepted the complete equipment, character-sheet, and combat-animation
 slice.
 
-### 13b. Experience and levels — NEXT
+### 13b. Experience and levels — DONE
 
-14b and the client/server review are accepted. The
-[13b implementation plan](plans/13b-experience-and-levels.md) fixes the rules
-and orders thirteen small checkpoints with positive, negative and edge-case
-tests. Planning is complete; gameplay implementation has not started.
+All thirteen checkpoints were implemented with positive, negative and
+edge-case tests; formatting, all workspace checks and the complete suite pass
+(122/122 programs). The user accepted 13b on 2026-10-16, and its temporary plan
+is removed. The lasting contract is [progression](architecture/progression.md).
+Acceptance also covered a tabular world catalog with one wrapped reason and a
+fix for the client exit on `Refresh worlds` (focus on a control that the waiting
+screen does not render).
 
 The character learns by doing, with independent Unarmed and Blades skills.
 Only health actually removed by a successful player attack earns experience
@@ -372,19 +375,19 @@ Maximum health, armor, opponents and generated content remain unchanged.
 
 - [x] Detail the rules, state/storage boundaries and ordered checkpoints in a
   temporary implementation plan, with exact thresholds and test expectations.
-- [ ] Establish the permanent progression contract and canonical terminology;
+- [x] Establish the permanent progression contract and canonical terminology;
   implement and test the pure skill model.
-- [ ] Add validated progress to GameState and savegame format 9. Preserve older
+- [x] Add validated progress to GameState and savegame format 9. Preserve older
   saves without migration; compatible world and level files remain usable.
-- [ ] Derive weapon-dependent benefits, isolate existing hostile navigation,
+- [x] Derive weapon-dependent benefits, isolate existing hostile navigation,
   and award practice once per resolved hit with bounded level-up messages.
-- [ ] Prove full server commit/rollback, save/replay, Start over and reconnect
+- [x] Prove full server commit/rollback, save/replay, Start over and reconnect
   behavior, including invalid data, overkill and mastery.
-- [ ] Project both skills as six entries in the existing character array on
+- [x] Project both skills as six entries in the existing character array on
   protocol 15; provide a bounded, scrollable read-only character sheet on C.
-- [ ] Verify complete TCP play, deterministic pacing, formatting, all workspace
+- [x] Verify complete TCP play, deterministic pacing, formatting, all workspace
   checks and the complete suite; synchronize permanent documentation.
-- [ ] Review the finished slice with the user and obtain explicit acceptance
+- [x] Review the finished slice with the user and obtain explicit acceptance
   before marking it DONE and removing its temporary plan.
 
 The slice adds no overall character level, classes, allocated skill points,
@@ -619,7 +622,7 @@ generated floor finds and a Healing potion. Opponent death drops remain deferred
   or benchmark-code defect.
 - [x] The user explicitly accepted 14b on 2026-10-16. The prior deferred terminal
   review no longer blocks completion, and the accepted implementation plan is
-  removed. 13b is the next gameplay slice, before 14c. The client/server review
+  removed. 13b followed as the next gameplay slice, before 14c. The client/server review
   is complete: R03/R04
   connection isolation/socket cleanup, R05 recoverable preparation errors,
   R06 bounded inventories, R07 bounded catalog inspection, R09 detailed
@@ -645,7 +648,7 @@ generated floor finds and a Healing potion. Opponent death drops remain deferred
   all **21 projects** checked, with unchanged generator fingerprints and formats.
   The user accepted the review on 2026-10-16, and its temporary plan is removed.
   Lasting contracts remain in the [architecture overview](architecture/overview.md)
-  and product documentation. Progression (13b) is the next gameplay slice before
+  and product documentation. Progression (13b) followed as the next gameplay slice before
   14c.
 
 Generated loot has stable identities derived from its source and is created

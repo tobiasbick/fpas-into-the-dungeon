@@ -50,11 +50,12 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `8` is an exact JSON object containing the selected world ID,
+Savegame format `9` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
-server-owned item state, the player's health, every opponent, and the
-dice generator state. Outdoor positions use signed world coordinates.
+server-owned item state, the player's health, every opponent, the
+dice generator state, and the `progression` object with the two cumulative
+skill experience counters (see [progression](progression.md)). Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
 their return location contains the outdoor area and the exact entrance site of
 the dungeon's region.
@@ -64,9 +65,11 @@ the dungeon's region.
 First entry materializes the map's placements and records the visit. Loading
 restores the list and entities together; revisiting never recreates taken items
 or defeated opponents. Interior discovery and dungeon entities may reference
-only visited areas. Saves without the required field are rejected; the format
-is 8 after 14b checkpoint 03 adds the giant rat. Format 7 saves remain intact
-and cannot be continued; recreate progress explicitly through Start over.
+only visited areas. Saves without a required field are rejected. Format 8
+added the giant rat; format 9 (13b) adds `progression`. The version is checked
+before the payload, so an obsolete save reports its version. Format 8 and older
+saves remain intact and cannot be continued; recreate progress explicitly
+through Start over.
 
 Outdoor discovery is stored sparsely as canonically ordered signed chunk
 records. Each record contains `chunk_x`, `chunk_y`, and exactly 128 rows of 128

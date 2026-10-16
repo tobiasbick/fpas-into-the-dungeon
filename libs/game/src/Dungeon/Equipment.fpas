@@ -1,7 +1,7 @@
-// Derived character values from base values plus worn items, and the rules for wearing and dropping items.
+// Derived character values from base values, worn items and the active skill, and the rules for wearing and dropping items.
 unit Dungeon.Equipment;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Std.Conv as Conv;
+uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Progression as Progression, Std.Conv as Conv;
 
 // Lowest d20 roll with which the player hits before any modifier.
 public const BaseHitThreshold: integer := 6;
@@ -48,7 +48,24 @@ begin
   return (('d' + Conv.IntToStr(Sides)) + '+') + Conv.IntToStr(Bonus);
 end function;
 
-// Derives the character's values from base values and the items worn in the given state.
+// Returns the skill an attack in this state trains and benefits from: Blades with a worn sword,
+// otherwise Unarmed. Carried items and armor never select a skill.
+public function ActiveSkill(State: GameState.GameState): Progression.SkillKind;
+begin
+  case GameState.EquippedItem(State, ItemRules.EquipmentSlot.Weapon) of
+    when Some(const Weapon):
+      if Weapon.Kind = ItemRules.ItemKind.RustyShortSword then
+        return Progression.SkillKind.Blades;
+      end if;
+    when None:
+      null;
+  end case;
+
+  return Progression.SkillKind.Unarmed;
+end function;
+
+// Derives the character's values from base values, the items worn and the active skill's benefits.
+// Precondition: the state's progression is validated; only the active skill contributes.
 public function DeriveCharacterValues(State: GameState.GameState): CharacterValues;
 begin
   var Values: CharacterValues := CharacterValues(
@@ -88,6 +105,12 @@ begin
         null;
       end;
   end case;
+  const Benefits: Progression.SkillBenefits := Progression.SkillBenefitsOf(
+    State.Progression,
+    ActiveSkill(State)
+  );
+  Values.HitThreshold := Values.HitThreshold - Benefits.HitBonus;
+  Values.DamageBonus := Values.DamageBonus + Benefits.DamageBonus;
 
   return Values;
 end function;
@@ -106,11 +129,75 @@ begin
   end case;
 end function;
 
-// Returns the character sheet lines in a fixed order: health, hit chance, damage, armor.
+// Names the active skill's level and bonus, such as `Blades L2 +1`.
+function SkillBonusText(Skill: Progression.SkillKind; Level: integer; Bonus: integer): string;
+begin
+  return Progression.SkillName(Skill) + ' L' + Conv.IntToStr(Level) + ' +' + Conv.IntToStr(Bonus);
+end function;
+
+// Formats one skill's total experience, next threshold, active marker and next increment.
+function SkillLine(State: GameState.GameState; Skill: Progression.SkillKind): CharacterValueLine;
+begin
+  const Experience: integer := Progression.SkillExperience(State.Progression, Skill);
+  const Level: integer := Progression.SkillBenefitsOf(State.Progression, Skill).Level;
+  const Active: boolean := ActiveSkill(State) = Skill;
+  var Value: string := 'L' + Conv.IntToStr(Level) + ' XP ' + Conv.IntToStr(Experience) + '/';
+  var Source: string := '';
+  case Progression.NextThreshold(State.Progression, Skill) of
+    when Some(const Threshold):
+      Value := Value + Conv.IntToStr(Threshold);
+      // The increment gained at the next level: damage at 2 and 4, hit at 3 and 5.
+      var Increment: string := 'hit +1';
+      if (Level = 1) or (Level = 3) then
+        Increment := 'damage +1';
+      end if;
+
+      Source := 'Next: ' + Increment;
+      if Active then
+        Source := 'Active; next: ' + Increment;
+      end if;
+    when None:
+      Value := Value + Conv.IntToStr(Progression.MaximumExperience);
+      Source := 'Mastered';
+      if Active then
+        Source := 'Active; mastered';
+      end if;
+  end case;
+
+  return CharacterValueLine(
+    Label := Progression.SkillName(Skill),
+    Value := Value,
+    Source := Source
+  );
+end function;
+
+// Returns the character sheet lines in a fixed order: health, hit chance, damage, armor, Unarmed, Blades.
+// Sources name the worn items and the active skill's bonuses; every text fits the protocol bounds.
 public function CharacterValueLines(State: GameState.GameState): array of CharacterValueLine;
 begin
   const Values: CharacterValues := DeriveCharacterValues(State);
   const HitPercent: integer := ((21 - Values.HitThreshold) * 100) div 20;
+  const Skill: Progression.SkillKind := ActiveSkill(State);
+  const Benefits: Progression.SkillBenefits := Progression.SkillBenefitsOf(
+    State.Progression,
+    Skill
+  );
+  var HitSource: string := 'Base';
+  if Benefits.HitBonus > 0 then
+    HitSource := 'Base; ' + SkillBonusText(Skill, Benefits.Level, Benefits.HitBonus) + ' hit';
+  end if;
+  var DamageSource: string := WornSource(State, ItemRules.EquipmentSlot.Weapon, '');
+  if Benefits.DamageBonus > 0 then
+    const Bonus: string := SkillBonusText(Skill, Benefits.Level, Benefits.DamageBonus);
+    if DamageSource = '' then
+      DamageSource := Bonus;
+    else
+      DamageSource := DamageSource + '; ' + Bonus;
+    end if;
+  elsif DamageSource = '' then
+    DamageSource := 'Unarmed';
+  end if;
+
   return [
     CharacterValueLine(
       Label := 'Maximum health',
@@ -120,18 +207,20 @@ begin
     CharacterValueLine(
       Label := 'Hit chance',
       Value := ((Conv.IntToStr(HitPercent) + '% (d20 ≥ ') + Conv.IntToStr(Values.HitThreshold)) +
-      ')', Source := 'Base'
+      ')', Source := HitSource
     ),
     CharacterValueLine(
       Label := 'Damage',
       Value := DamageText(Values.DamageSides, Values.DamageBonus),
-      Source := WornSource(State, ItemRules.EquipmentSlot.Weapon, 'Unarmed')
+      Source := DamageSource
     ),
     CharacterValueLine(
       Label := 'Armor',
       Value := Conv.IntToStr(Values.Armor),
       Source := WornSource(State, ItemRules.EquipmentSlot.Body, 'None')
-    )
+    ),
+    SkillLine(State, Progression.SkillKind.Unarmed),
+    SkillLine(State, Progression.SkillKind.Blades)
   ];
 end function;
 

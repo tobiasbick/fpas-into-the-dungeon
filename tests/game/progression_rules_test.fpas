@@ -1,0 +1,133 @@
+// Verifies the pure progression model: counters, literal level table, thresholds, validation and awards.
+program ProgressionRulesTest;
+
+uses Dungeon.Progression as Progression, Std.Test as Test;
+
+const Unarmed: Progression.SkillKind := Progression.SkillKind.Unarmed;
+const Blades: Progression.SkillKind := Progression.SkillKind.Blades;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+function Award(Value: Progression.ProgressionState; Skill: Progression.SkillKind; Before: integer; After: integer): Progression.ProgressionState;
+begin
+  return Progression.AwardDamage(Value, Skill, Before, After).Unwrap();
+end function;
+
+procedure AssertSame(Expected: Progression.ProgressionState; Actual: Progression.ProgressionState);
+begin
+  Test.AssertEquals(Expected.UnarmedExperience, Actual.UnarmedExperience);
+  Test.AssertEquals(Expected.BladesExperience, Actual.BladesExperience);
+end procedure;
+
+procedure AssertBenefits(Experience: integer; Level: integer; Hit: integer; Damage: integer; Next: integer);
+begin
+  for Skill: Progression.SkillKind in [Unarmed, Blades] do
+    var Value := Progress(0, 0);
+    if Skill = Unarmed then
+      Value.UnarmedExperience := Experience;
+    else
+      Value.BladesExperience := Experience;
+    end if;
+    const Benefits := Progression.SkillBenefitsOf(Value, Skill);
+    Test.AssertEquals(Level, Benefits.Level);
+    Test.AssertEquals(Hit, Benefits.HitBonus);
+    Test.AssertEquals(Damage, Benefits.DamageBonus);
+    case Progression.NextThreshold(Value, Skill) of
+      when Some(const Threshold):
+        Test.AssertEquals(Next, Threshold);
+      when None:
+        Test.AssertEquals(0, Next);
+    end case;
+  end for;
+end procedure;
+
+procedure AssertRejected(Value: Progression.ProgressionState; Skill: Progression.SkillKind; Before: integer; After: integer);
+begin
+  const Untouched := Value;
+  Test.AssertTrue(Progression.AwardDamage(Value, Skill, Before, After) is Error(_));
+  AssertSame(Untouched, Value);
+end procedure;
+
+begin
+  // new progression is untrained in both skills
+  begin
+    AssertSame(Progress(0, 0), Progression.NewProgression());
+    Test.AssertTrue(Progression.ValidateProgression(Progression.NewProgression()) is Ok(_));
+    Test.AssertEquals('Unarmed', Progression.SkillName(Unarmed));
+    Test.AssertEquals('Blades', Progression.SkillName(Blades));
+  end;
+
+  // literal level table at every boundary
+  begin
+    AssertBenefits(0, 1, 0, 0, 12);
+    AssertBenefits(11, 1, 0, 0, 12);
+    AssertBenefits(12, 2, 0, 1, 36);
+    AssertBenefits(35, 2, 0, 1, 36);
+    AssertBenefits(36, 3, 1, 1, 72);
+    AssertBenefits(71, 3, 1, 1, 72);
+    AssertBenefits(72, 4, 1, 2, 120);
+    AssertBenefits(119, 4, 1, 2, 120);
+    AssertBenefits(120, 5, 2, 2, 0);
+  end;
+
+  // awards train only the named skill by lost health
+  begin
+    AssertSame(Progress(3, 0), Award(Progress(0, 0), Unarmed, 6, 3));
+    AssertSame(Progress(0, 5), Award(Progress(0, 0), Blades, 12, 7));
+    AssertSame(Progress(3, 9), Award(Award(Progress(0, 0), Unarmed, 6, 3), Blades, 12, 3));
+    AssertSame(Progress(7, 4), Award(Award(Progress(3, 4), Unarmed, 4, 2), Unarmed, 2, 0));
+  end;
+
+  // overkill and equal health
+  begin
+    // A rolled 7 against 2 remaining health is represented as 2 to 0.
+    AssertSame(Progress(0, 2), Award(Progress(0, 0), Blades, 2, 0));
+    AssertSame(Progress(4, 5), Award(Progress(4, 5), Blades, 0, 0));
+    AssertSame(Progress(4, 5), Award(Progress(4, 5), Unarmed, 6, 6));
+  end;
+
+  // several thresholds in one award
+  begin
+    const Value := Award(Progress(11, 0), Unarmed, 80, 0);
+    AssertSame(Progress(91, 0), Value);
+    Test.AssertEquals(4, Progression.SkillBenefitsOf(Value, Unarmed).Level);
+  end;
+
+  // cap saturates and discards further awards
+  begin
+    AssertSame(Progress(0, 120), Award(Progress(0, 119), Blades, 6, 0));
+    AssertSame(Progress(0, 120), Award(Progress(0, 119), Blades, 1, 0));
+    AssertSame(Progress(0, 120), Award(Progress(0, 120), Blades, 12, 0));
+    AssertSame(Progress(120, 120), Award(Progress(120, 120), Unarmed, 5, 1));
+  end;
+
+  // maximum health delta does not overflow
+  begin
+    AssertSame(Progress(120, 0), Award(Progress(0, 0), Unarmed, 9223372036854775807, 0));
+    AssertSame(Progress(0, 120), Award(Progress(0, 1), Blades, 9223372036854775807, 0));
+  end;
+
+  // invalid counters are rejected without repair
+  begin
+    Test.AssertTrue(Progression.ValidateProgression(Progress(-1, 0)) is Error(_));
+    Test.AssertTrue(Progression.ValidateProgression(Progress(0, -1)) is Error(_));
+    Test.AssertTrue(Progression.ValidateProgression(Progress(121, 0)) is Error(_));
+    Test.AssertTrue(Progression.ValidateProgression(Progress(0, 121)) is Error(_));
+    Test.AssertTrue(Progression.ValidateProgression(Progress(120, 0)) is Ok(_));
+    Test.AssertTrue(Progression.ValidateProgression(Progress(0, 120)) is Ok(_));
+    AssertRejected(Progress(-1, 0), Blades, 6, 3);
+    AssertRejected(Progress(0, 121), Unarmed, 6, 3);
+    AssertRejected(Progress(121, 0), Unarmed, 0, 0);
+  end;
+
+  // invalid health is rejected
+  begin
+    AssertRejected(Progress(1, 2), Unarmed, 6, -1);
+    AssertRejected(Progress(1, 2), Blades, -1, -2);
+    AssertRejected(Progress(1, 2), Blades, 3, 4);
+    AssertRejected(Progress(1, 2), Unarmed, 0, 1);
+  end;
+end.

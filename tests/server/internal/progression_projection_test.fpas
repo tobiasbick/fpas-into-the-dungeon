@@ -1,0 +1,179 @@
+// Verifies the six projected character lines with literal progression text in both view families.
+program ProgressionProjectionTest;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Progression as Progression, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as SessionUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+
+function Progress(UnarmedXp: integer; BladesXp: integer): Progression.ProgressionState;
+begin
+  return Progression.ProgressionState(UnarmedExperience := UnarmedXp, BladesExperience := BladesXp);
+end function;
+
+function Wearing(State: GameState.GameState; Index: integer; Slot: Items.EquipmentSlot): GameState.GameState;
+begin
+  var Changed := State;
+  Changed.Items[Index] := Changed.Items[Index] with Location := Items.ItemLocation.EquippedByPlayer(
+    Slot
+  ); end with;
+
+  return Changed;
+end function;
+
+function Carrying(Value: Progression.ProgressionState): GameState.GameState;
+begin
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 9, Y := 1),
+    Coordinates.FacingDirection.West
+  ) with Progression := Value; end with;
+
+  State.Items[1] := State.Items[1] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  State.Items[2] := State.Items[2] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  return State;
+end function;
+
+function Armed(Value: Progression.ProgressionState): GameState.GameState;
+begin
+  return Wearing(Carrying(Value), 1, Items.EquipmentSlot.Weapon);
+end function;
+
+// Requires the exact label, value and source of all six lines.
+procedure AssertSheet(State: GameState.GameState; Expected: array of string);
+begin
+  const Lines := Equipment.CharacterValueLines(State);
+  Test.AssertEquals(6, Lines.Length());
+  for Index: integer := 0 to 5 do
+    Test.AssertEquals(Expected[Index * 3], Lines[Index].Label);
+    Test.AssertEquals(Expected[(Index * 3) + 1], Lines[Index].Value);
+    Test.AssertEquals(Expected[(Index * 3) + 2], Lines[Index].Source);
+    Test.AssertTrue(Lines[Index].Label.Length() <= Protocol.MaximumCharacterTextLength);
+    Test.AssertTrue(Lines[Index].Value.Length() <= Protocol.MaximumCharacterTextLength);
+    Test.AssertTrue(Lines[Index].Source.Length() <= Protocol.MaximumCharacterTextLength);
+  end for;
+end procedure;
+
+function Projected(World: WorldUnit.WorldSession; View: GameState.AreaView; State: GameState.GameState): Protocol.VisibleState;
+begin
+  return Projection.ProjectSession(
+    World, View, State, SessionUnit.ViewportSize(Width := 20, Height := 12),
+    Projection.NoTurnReport()
+  ).Unwrap().State;
+end function;
+
+function CharacterOf(Value: Protocol.VisibleState): array of Protocol.VisibleCharacterValue;
+begin
+  case Value of
+    when Protocol.VisibleState.FirstPersonState(const Fields):
+      return Fields.Character;
+    when Protocol.VisibleState.MapState(const Fields):
+      return Fields.Character;
+  end case;
+end function;
+
+begin
+  // The plan's example: sword wielded, Unarmed 0 and Blades 12.
+  AssertSheet(
+    Armed(Progress(0, 12)), [
+      'Maximum health', '20', 'Base',
+      'Hit chance', '75% (d20 ≥ 6)', 'Base',
+      'Damage', 'd6+2', 'Rusty short sword; Blades L2 +1',
+      'Armor', '0', 'None',
+      'Unarmed', 'L1 XP 0/12', 'Next: damage +1',
+      'Blades', 'L2 XP 12/36', 'Active; next: hit +1'
+    ]
+  );
+  // Untrained and unarmed keeps the previous level-1 sources.
+  AssertSheet(
+    Carrying(Progress(0, 0)), [
+      'Maximum health', '20', 'Base',
+      'Hit chance', '75% (d20 ≥ 6)', 'Base',
+      'Damage', 'd3', 'Unarmed',
+      'Armor', '0', 'None',
+      'Unarmed', 'L1 XP 0/12', 'Active; next: damage +1',
+      'Blades', 'L1 XP 0/12', 'Next: damage +1'
+    ]
+  );
+  // Mixed skills: active Unarmed level 3 with a trained but inactive Blades skill and armor.
+  AssertSheet(
+    Wearing(Carrying(Progress(36, 72)), 2, Items.EquipmentSlot.Body), [
+      'Maximum health', '20', 'Base',
+      'Hit chance', '80% (d20 ≥ 5)', 'Base; Unarmed L3 +1 hit',
+      'Damage', 'd3+1', 'Unarmed L3 +1',
+      'Armor', '2', 'Leather jerkin',
+      'Unarmed', 'L3 XP 36/72', 'Active; next: damage +1',
+      'Blades', 'L4 XP 72/120', 'Next: hit +1'
+    ]
+  );
+  AssertSheet(
+    Carrying(Progress(12, 0)), [
+      'Maximum health', '20', 'Base',
+      'Hit chance', '75% (d20 ≥ 6)', 'Base',
+      'Damage', 'd3+1', 'Unarmed L2 +1',
+      'Armor', '0', 'None',
+      'Unarmed', 'L2 XP 12/36', 'Active; next: hit +1',
+      'Blades', 'L1 XP 0/12', 'Next: damage +1'
+    ]
+  );
+  // Mastery in both skills, active and inactive.
+  AssertSheet(
+    Armed(Progress(120, 120)), [
+      'Maximum health', '20', 'Base',
+      'Hit chance', '85% (d20 ≥ 4)', 'Base; Blades L5 +2 hit',
+      'Damage', 'd6+3', 'Rusty short sword; Blades L5 +2',
+      'Armor', '0', 'None',
+      'Unarmed', 'L5 XP 120/120', 'Mastered',
+      'Blades', 'L5 XP 120/120', 'Active; mastered'
+    ]
+  );
+
+  // Both view families project the same lines through the strict encoder; read-only refreshes change nothing.
+  const Root := '.temp-data/progression-projection-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(
+    Root,
+    'progress',
+    Fixtures.FixtureMetadata().Seed,
+    4,
+    16
+  ).Unwrap();
+  const Metadata := Fixtures.FixtureMetadata();
+  const Inside := Armed(Progress(0, 12));
+  const InsideView := Fixtures.FixtureAreaView(Inside);
+  const Seen := Exploration.RevealCurrentArea(InsideView, Inside).Unwrap();
+  const Outside := GameState.NewGame(World.Metadata) with Progression := Progress(7, 30); end with;
+  const OutsideView := GameState.AreaView(Metadata := World.Metadata, Interior := None);
+  for Pair: integer in [0, 1] do
+    var State := Seen;
+    var View := InsideView;
+    var WorldValue := World with Metadata := Metadata; end with;
+
+    if Pair = 1 then
+      State := Outside;
+      View := OutsideView;
+      WorldValue := World;
+    end if;
+    const Untouched := State;
+    const First := Projected(WorldValue, View, State);
+    const Second := Projected(WorldValue, View, State);
+    Test.AssertTrue(States.SameState(Untouched, State));
+    const Expected := Equipment.CharacterValueLines(State);
+    for Value: Protocol.VisibleState in [First, Second] do
+      case Messages.DecodeServer(
+        Messages.EncodeServer(Protocol.ServerMessage.State(Value))
+      ).Unwrap() of
+        when Protocol.ServerMessage.State(const Decoded):
+          const Lines := CharacterOf(Decoded);
+          Test.AssertEquals(6, Lines.Length());
+          for Index: integer := 0 to 5 do
+            Test.AssertEquals(Expected[Index].Label, Lines[Index].Label);
+            Test.AssertEquals(Expected[Index].Value, Lines[Index].Value);
+            Test.AssertEquals(Expected[Index].Source, Lines[Index].Source);
+          end for;
+        when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+          panic('expected a state round trip');
+      end case;
+    end for;
+  end for;
+
+  Test.AssertEquals('L1 XP 7/12', Equipment.CharacterValueLines(Outside)[4].Value);
+end.
