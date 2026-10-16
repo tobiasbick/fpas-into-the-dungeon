@@ -1,0 +1,119 @@
+// Verifies strict use intentions and the required inventory capability in both visible-state families.
+program ItemUseProtocolTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients, Dungeon.Protocol.ServerMessages as Servers, Std.Conv as Conv, Std.Test as Test;
+
+function Potion(Id: string): Protocol.VisibleInventoryItem;
+begin
+  return Protocol.VisibleInventoryItem(
+    Id := Id, Name := 'Healing potion', Slot := Protocol.VisibleItemSlot.NoSlot,
+    Equipped := false, Usable := true
+  );
+end function;
+
+function State(Inventory: array of Protocol.VisibleInventoryItem; Indoors: boolean): Protocol.VisibleState;
+begin
+  if Indoors then
+    return Protocol.VisibleState.FirstPersonState(
+      Protocol.FirstPersonVisibleState(
+        Title := 'Dungeon', Status := 'Nothing in reach', Width := 3, Height := 3,
+        Rows := ['###', '#.#', '###'], KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+        PlayerX := 1, PlayerY := 1, Facing := Protocol.FirstPersonFacing.North,
+        Inventory := Inventory, Health := 20, MaxHealth := 20, Character := [],
+        CombatLog := [], CombatEvents := []
+      )
+    );
+  end if;
+
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      OriginX := 0, OriginY := 0, Width := 1, Height := 1, Rows := ['g'], KnowledgeRows := ['v'],
+      PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := Inventory,
+      Health := 20, MaxHealth := 20, Character := []
+    )
+  );
+end function;
+
+function Encode(Inventory: array of Protocol.VisibleInventoryItem; Indoors: boolean): string;
+begin
+  return Servers.EncodeServer(Protocol.ServerMessage.State(State(Inventory, Indoors)));
+end function;
+
+function InventoryOf(Message: Protocol.ServerMessage): array of Protocol.VisibleInventoryItem;
+begin
+  case Message of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(const Value)):
+      return Value.Inventory;
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      return Value.Inventory;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a visible state');
+  end case;
+end function;
+
+begin
+  Test.AssertEquals(15, Protocol.ProtocolVersion);
+  Test.AssertEquals(
+    '{"type":"use_item","item_id":"potion"}',
+    Clients.EncodeClient(Protocol.ClientMessage.UseItem('potion'))
+  );
+  for Id: string in ['p', 'x'.RepeatStr(128), 'é"'#10] do
+    Test.AssertTrue(
+      Clients.DecodeClient(Clients.EncodeClient(Protocol.ClientMessage.UseItem(Id))).Unwrap() =
+      Protocol.ClientMessage.UseItem(Id)
+    );
+  end for;
+
+  for Invalid: string in [
+    '{"type":"use_item"}', '{"type":"use_item","item_id":""}',
+    '{"type":"use_item","item_id":null}', '{"type":"use_item","item_id":7}',
+    '{"type":"use_item","item_id":true}', '{"type":"use_item","item_id":[]}',
+    '{"type":"use_item","item_id":{}}',
+    '{"type":"use_item","item_id":"a","heal":6}',
+    '{"type":"use_item","item_id":"a","kind":"healing_potion"}',
+    '{"type":"use_item","item_id":"a","item_id":"b"}',
+    '{"type":"use_item","type":"use_item","item_id":"a"}',
+    '{"type":"use_item","item_id":"' + 'x'.RepeatStr(129) + '"}'
+  ] do
+    Test.AssertTrue(Clients.DecodeClient(Invalid) is Error(_));
+  end for;
+
+  for Indoors: boolean in [false, true] do
+    Test.AssertEquals(0, InventoryOf(Servers.DecodeServer(Encode([], Indoors)).Unwrap()).Length());
+    const Entry := Potion('potion');
+    const Encoded := Encode([Entry], Indoors);
+    Test.AssertTrue('"usable":true' in Encoded);
+    Test.AssertTrue(InventoryOf(Servers.DecodeServer(Encoded).Unwrap())[0] = Entry);
+    for Replacement: string in [
+      '', ',"usable":null', ',"usable":"true"', ',"usable":1',
+      ',"usable":[]', ',"usable":{}', ',"usable":true,"extra":0',
+      ',"usable":true,"usable":false'
+    ] do
+      Test.AssertTrue(
+        Servers.DecodeServer(Encoded.Replace(',"usable":true', Replacement)) is Error(_)
+      );
+    end for;
+
+    Test.AssertTrue(
+      Servers.DecodeServer(Encoded.Replace('"slot":""', '"slot":"weapon"')) is Error(_)
+    );
+    Test.AssertTrue(
+      Servers.DecodeServer(Encoded.Replace('"equipped":false', '"equipped":true')) is Error(_)
+    );
+    const Coin := Entry with Id := 'coin'; Name := 'Ancient coin'; Usable := false; end with;
+
+    Test.AssertFalse(InventoryOf(Servers.DecodeServer(Encode([Coin], Indoors)).Unwrap())[0].Usable);
+    var Full: array of Protocol.VisibleInventoryItem := [];
+    for Index: integer := 1 to 64 do
+      Full.PushInPlace(Potion('x'.RepeatStr(125) + Conv.IntToStr(Index)));
+    end for;
+    const Decoded := InventoryOf(Servers.DecodeServer(Encode(Full, Indoors)).Unwrap());
+    Test.AssertEquals(64, Decoded.Length());
+    for Index: integer := 0 to 63 do
+      Test.AssertTrue(Decoded[Index] = Full[Index]);
+    end for;
+
+    Full.PushInPlace(Potion('overflow'));
+    Test.AssertTrue(Servers.DecodeServer(Encode(Full, Indoors)) is Error(_));
+  end for;
+end.

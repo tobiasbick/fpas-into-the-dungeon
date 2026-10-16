@@ -1,0 +1,402 @@
+// Plays generated contents over TCP, replays an unsaved potion turn after reconnect, and resumes an explicit save.
+program DungeonContentsNetworkTest;
+
+uses Dungeon.Client.Animation as Animation, Dungeon.Client.Raycast as Raycast, Dungeon.Client.Raycast.Sprites as Sprites, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Test.Levels as Levels, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.Terrain.Entrances as Entrances, Dungeon.World.Catalog as Catalog, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Math as Math, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
+
+function ServeOne(Listener: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Connection := try Net.AcceptWithCancellation(Listener, Token);
+  const Configured := try Net.SetTimeout(Connection, 120000);
+  const ResultValue := Server.ServeConnection(Connection, Config, Token);
+  const Closed := try Net.Close(Connection);
+  return ResultValue;
+end function;
+
+function Status(Logs: channel of Logging.ServerLogEvent; Area: string; Dirty: boolean): Logging.ServerDashboardStatus;
+begin
+  while true do
+    const Value := Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap();
+    case Value.Snapshot of
+      when Some(const Snapshot):
+        if Snapshot.Active and (Snapshot.Area = Area) and (Snapshot.Dirty = Dirty) then
+          return Snapshot;
+        end if;
+      when None:
+        null;
+    end case;
+  end while;
+
+  panic('matching authoritative dashboard snapshot missing');
+end function;
+
+function InventoryHas(View: Protocol.FirstPersonVisibleState; Id: string): boolean;
+begin
+  for Item: Protocol.VisibleInventoryItem in View.Inventory do
+    if Item.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+procedure Rejected(Client: Wire.WireClient; Code: string);
+begin
+  Test.AssertTrue(Client.Last is Protocol.ServerMessage.Rejected(_, _));
+  case Client.Last of
+    when Protocol.ServerMessage.Rejected(const Actual, _):
+      Test.AssertEquals(Code, Actual);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected stable rejection');
+  end case;
+end procedure;
+
+function Stored(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  return Levels.DecodeStoredSave(
+    World,
+    Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap()
+  ).Unwrap();
+end function;
+
+function LevelText(World: WorldUnit.WorldSession): string;
+begin
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  return Fs.ReadText(
+    World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y) +
+    '/0.json'
+  ).Unwrap();
+end function;
+
+// Independent literal LCG accounting: potion uses no draw; each hit/miss accounts for its own dice.
+function PotionDice(Before: GameState.GameState; After: Protocol.FirstPersonVisibleState): integer;
+begin
+  // Independently pinned natural encounter: one adjacent skeleton must act exactly once.
+  // The rat is still distant/dormant; omitted enemy phases cannot pass by reporting no events.
+  Test.AssertEquals(17, Before.Health);
+  Test.AssertEquals(1756806705, Before.RandomState);
+  Test.AssertEquals(1, After.CombatEvents.Length());
+  Test.AssertEquals('h', After.CombatEvents[0].HostileCode);
+  Test.AssertTrue(After.CombatEvents[0].Kind = Protocol.VisibleCombatEventKind.HostileHit);
+  Test.AssertEquals(4, After.CombatEvents[0].Amount);
+  Test.AssertEquals(16, After.Health);
+  var Dice := Before.RandomState;
+  var Damage := 0;
+  for Fact: Protocol.VisibleCombatEvent in After.CombatEvents do
+    Test.AssertTrue(
+      (Fact.Kind = Protocol.VisibleCombatEventKind.HostileHit)
+      or
+      (Fact.Kind = Protocol.VisibleCombatEventKind.HostileMiss)
+    );
+    Dice := ((Dice * 1103515245) + 12345) mod 2147483648;
+    const Roll := ((Dice div 65536) mod 20) + 1;
+    const Threshold := if Fact.HostileCode = 'h' then 11 else 14 end if;
+    Test.AssertEquals(Roll >= Threshold, Fact.Kind = Protocol.VisibleCombatEventKind.HostileHit);
+    if Fact.Kind = Protocol.VisibleCombatEventKind.HostileHit then
+      Dice := ((Dice * 1103515245) + 12345) mod 2147483648;
+      const Sides := if Fact.HostileCode = 'h' then 4 else 2 end if;
+      Test.AssertEquals(((Dice div 65536) mod Sides) + 1, Fact.Amount);
+      Damage := Damage + Fact.Amount;
+    end if;
+  end for;
+  const Healed := Math.Min(6, 20 - Before.Health);
+  Test.AssertEquals(3, Healed);
+  Test.AssertEquals(
+    'You drink the healing potion and recover ' + Conv.IntToStr(Healed) + ' health.',
+    After.CombatLog[0]
+  );
+  Test.AssertEquals(Before.Health + Healed - Damage, After.Health);
+  Test.AssertEquals(842764951, Dice);
+  return Dice;
+end function;
+
+function Different(A: Tui.TuiCellGrid; B: Tui.TuiCellGrid): boolean;
+begin
+  for Index: integer := 0 to A.Cells.Length() - 1 do
+    if A.Cells[Index] <> B.Cells[Index] then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+// Production animation and renderer consume the actual network defeat event, retaining its kind.
+procedure DeathArt(Standing: Protocol.FirstPersonVisibleState; Fallen: Protocol.FirstPersonVisibleState; Code: string);
+begin
+  const Ahead := Routes.FieldAhead(Standing);
+  Test.AssertEquals(Code, Standing.Rows[Ahead.Y][Ahead.X]);
+  var Seen := false;
+  for Sprite: Sprites.Sprite in Sprites.VisibleSprites(Standing) do
+    if Sprite.Code = Code then
+      Seen := true;
+      const Other := Sprites.HostileSprite(
+        if Code = 'r' then 'h' else 'r' end if,
+        Ahead.X,
+        Ahead.Y
+      );
+      Test.AssertTrue(Sprite.HeightFraction <> Other.HeightFraction);
+    end if;
+  end for;
+
+  Test.AssertTrue(Seen);
+  var Defeated := false;
+  for Fact: Protocol.VisibleCombatEvent in Fallen.CombatEvents do
+    if Fact.Kind = Protocol.VisibleCombatEventKind.HostileDefeated then
+      Test.AssertEquals(Code, Fact.HostileCode);
+      Defeated := true;
+    end if;
+  end for;
+
+  Test.AssertTrue(Defeated);
+  const Playback := Animation.StartAnimation(Fallen.CombatEvents, false);
+  const Frame := Animation.AnimationFrameAt(
+    Animation.AdvanceAnimation(Playback, Animation.AnimationPhaseMilliseconds)
+  );
+  Test.AssertEquals(Code, Frame.Effect.FallenCode);
+  Test.AssertEquals(Code, Frame.Effect.TargetCode);
+  Test.AssertTrue(Frame.Effect.FallenAhead);
+  const Plain := Raycast.RenderFirstPersonGrid(Fallen, 61, 25);
+  Test.AssertTrue(
+    Different(
+      Plain, Raycast.ComposeFirstPersonGrid(
+        Fallen, Raycast.RenderFirstPersonScene(Fallen, 61, 25),
+        Frame.Effect with Swing := -1.0; end with
+      )
+    )
+  );
+end procedure;
+
+begin
+  const Root := '.temp-data/contents-network-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(2048);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := Some(Logs), WorldsRoot := Root, WorldId := 'missing',
+    WorldSeed := 9462, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Listener).Unwrap().Port;
+  var PreviousSaveText := '';
+  // No test fixture edits gameplay: this session creates the world and obtains/equips its own finds.
+  scope
+    const Worker := go ServeOne(Listener, Config, Token);
+    var Client := Wire.ConnectClient(Port, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Welcome(15, _));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.CreateWorld(9462, 4), Token);
+    Test.AssertEquals(20, Wire.MapOf(Client).Health);
+    const World := Catalog.OpenExistingWorld(Root, 'world-1', 32).Unwrap();
+    const Map := Routes.SpawnDungeonMap(World.Metadata);
+    Client := Wire.WalkOutdoors(Client, World.Metadata.SpawnEntrance, Token);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Test.AssertEquals(Map.DisplayName, Wire.FirstPersonOf(Client).Title);
+    const OriginalLevel := LevelText(World);
+    const Dashboard := Status(Logs, Map.DisplayName, true);
+    Test.AssertEquals(World.Metadata.Id, Dashboard.WorldId);
+    Test.AssertEquals(7, Dashboard.Generator);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ExplorationMap(0, 0, 31, 21), Token);
+    case Client.Last of
+      when Protocol.ServerMessage.ExplorationMap(const View):
+        Test.AssertEquals(Map.DisplayName, View.LabelText);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected named exploration map');
+    end case;
+
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Viewport(20, 10), Token);
+    for Slot: integer in [1, 2, 3] do
+      Client := Wire.WalkTo(Client, Map, Map.Items[Slot].Position, Token).Unwrap();
+      Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+      Test.AssertTrue(InventoryHas(Wire.FirstPersonOf(Client), Map.Items[Slot].ItemId));
+      if Slot < 3 then
+        Client := Wire.Exchange(
+          Client,
+          Protocol.ClientMessage.Equip(Map.Items[Slot].ItemId),
+          Token
+        );
+      end if;
+    end for;
+
+    Client := Wire.FaceOpponent(Client, Map, Map.Hostiles[0].Position, Token);
+    for Attempt: integer := 1 to 8 do
+      if Wire.FirstPersonOf(Client).Health = 20 then
+        Client := Wire.Exchange(Client, Protocol.ClientMessage.Wait, Token);
+      end if;
+    end for;
+
+    Test.AssertTrue(Wire.FirstPersonOf(Client).Health < 20);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token);
+    Wire.RequireSaved(Client);
+    const Before := Stored(World);
+    Test.AssertTrue(
+      Before.Items[1].Location = Items.ItemLocation.EquippedByPlayer(Items.EquipmentSlot.Weapon)
+    );
+    Test.AssertTrue(
+      Before.Items[2].Location = Items.ItemLocation.EquippedByPlayer(Items.EquipmentSlot.Body)
+    );
+    Test.AssertTrue(Before.Items[3].Location = Items.ItemLocation.CarriedByPlayer);
+    Test.AssertTrue(Before.Hostiles[0].Health > 0);
+    Test.AssertTrue(Before.Hostiles[1].Health > 0);
+    const BeforeText := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+    PreviousSaveText := BeforeText;
+    const Clean := Status(Logs, Map.DisplayName, false);
+    Test.AssertTrue(Clean.SavePresent);
+    Test.AssertTrue(Clean.LastSavedAt > 0);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.UseItem(Map.Items[3].ItemId), Token);
+    const Drank := Wire.FirstPersonOf(Client);
+    Test.AssertFalse(InventoryHas(Drank, Map.Items[3].ItemId));
+    const ExpectedDice := PotionDice(Before, Drank);
+    const AfterLine := Messages.EncodeServer(Client.Last);
+    // Unsaved consumption must not alter the explicit save, even on disconnect.
+    Test.AssertEquals(BeforeText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+    Test.AssertEquals(BeforeText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    // Restart the production connection loop, Continue, and replay the exact earlier potion turn.
+    const AgainWorker := go ServeOne(Listener, Config, Token);
+    Client := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.SelectWorld(World.Metadata.Id),
+      Token
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    Test.AssertEquals(Before.Health, Wire.FirstPersonOf(Client).Health);
+    Test.AssertTrue(InventoryHas(Wire.FirstPersonOf(Client), Map.Items[3].ItemId));
+    const LoadedClean := Status(Logs, Map.DisplayName, false);
+    Test.AssertEquals(0, LoadedClean.LastSavedAt);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.UseItem(Map.Items[3].ItemId), Token);
+    Test.AssertEquals(AfterLine, Messages.EncodeServer(Client.Last));
+    const Dirty := Status(Logs, Map.DisplayName, true);
+    Test.AssertTrue(Dirty.SavePresent);
+    Test.AssertEquals(LoadedClean.LastSavedAt, Dirty.LastSavedAt);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.UseItem(Map.Items[3].ItemId), Token);
+    Rejected(Client, 'item_use_rejected');
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.UseItem('other:item:3'), Token);
+    Rejected(Client, 'item_use_rejected');
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ListWorlds(0, false), Token);
+    Rejected(Client, 'discard_required');
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token);
+    Rejected(Client, 'overwrite_required');
+    Test.AssertEquals(BeforeText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Wire.RequireSaved(Client);
+    const Committed := Status(Logs, Map.DisplayName, false);
+    Test.AssertTrue(Committed.LastSavedAt > 0);
+    const Accepted := Stored(World);
+    Test.AssertEquals(ExpectedDice, Accepted.RandomState);
+    Test.AssertEquals(Drank.Health, Accepted.Health);
+    Test.AssertTrue(Accepted.Items[3].Location = Items.ItemLocation.Consumed);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Viewport(20, 10), Token);
+    const BeforeSkeleton := Wire.FirstPersonOf(Client);
+    Client := Wire.FightAhead(Client, Token).Unwrap();
+    DeathArt(BeforeSkeleton, Wire.FirstPersonOf(Client), 'h');
+    Client := Wire.FaceOpponent(Client, Map, Map.Hostiles[1].Position, Token);
+    const BeforeRat := Wire.FirstPersonOf(Client);
+    Client := Wire.FightAhead(Client, Token).Unwrap();
+    DeathArt(BeforeRat, Wire.FirstPersonOf(Client), 'r');
+    Test.AssertFalse('bones' in Wire.FirstPersonOf(Client).CombatLog[1]);
+    Client := Wire.WalkTo(Client, Map, Map.Exit, Token).Unwrap();
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Wire.RequireSaved(Client);
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(AgainWorker).Unwrap());
+    Test.AssertEquals(OriginalLevel, LevelText(World));
+  end scope;
+  // A third connection continues outdoors, revisits the retained level, and proves terminal origins.
+  const World := Catalog.OpenExistingWorld(Root, 'world-1', 32).Unwrap();
+  const Map := Levels.SpawnLevel(World);
+  const Saved := Stored(World);
+  const Baseline := Levels.DecodeStoredSave(World, PreviousSaveText).Unwrap();
+  for Index: integer := 0 to Baseline.Items.Length() - 1 do
+    var Expected := Baseline.Items[Index];
+    if Index = 3 then
+      Expected.Location := Items.ItemLocation.Consumed;
+    end if;
+
+    Test.AssertTrue(Expected = Saved.Items[Index]);
+  end for;
+  const StoredLevel := LevelText(World);
+  Test.AssertTrue(Saved.Items[3].Location = Items.ItemLocation.Consumed);
+  Test.AssertEquals(Map.Items.Length(), Saved.Items.Length());
+  for Index: integer := 0 to 1 do
+    Test.AssertEquals(0, Saved.Hostiles[Index].Health);
+  end for;
+
+  scope
+    const Worker := go ServeOne(Listener, Config, Token);
+    var Client := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.SelectWorld(World.Metadata.Id),
+      Token
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    Test.AssertEquals(Saved.Health, Wire.MapOf(Client).Health);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Interact, Token);
+    Test.AssertEquals(Map.DisplayName, Wire.FirstPersonOf(Client).Title);
+    Test.AssertFalse(InventoryHas(Wire.FirstPersonOf(Client), Map.Items[3].ItemId));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Wire.RequireSaved(Client);
+    const Revisited := Stored(World);
+    Test.AssertEquals(Saved.RandomState, Revisited.RandomState);
+    Test.AssertEquals(Saved.Health, Revisited.Health);
+    Test.AssertTrue(Revisited.Items[3].Location = Items.ItemLocation.Consumed);
+    for Index: integer := 0 to Saved.Items.Length() - 1 do
+      Test.AssertTrue(Saved.Items[Index] = Revisited.Items[Index]);
+    end for;
+
+    for Index: integer := 0 to Saved.Hostiles.Length() - 1 do
+      Test.AssertTrue(Saved.Hostiles[Index] = Revisited.Hostiles[Index]);
+    end for;
+
+    for Index: integer := 0 to 1 do
+      Test.AssertEquals(0, Revisited.Hostiles[Index].Health);
+    end for;
+
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Wait, Token);
+    const LastSave := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+    Test.AssertEquals(LastSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  end scope;
+
+  // Restoring an actual earlier explicit save also works through Continue after later progress was saved.
+  Test.AssertTrue(PreviousSaveText <> Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), PreviousSaveText).Unwrap());
+  const Earlier := Stored(World);
+  Test.AssertTrue(Earlier.Hostiles[0].Health > 0);
+  Test.AssertTrue(Earlier.Hostiles[1].Health > 0);
+  scope
+    const Worker := go ServeOne(Listener, Config, Token);
+    var Client := Wire.Exchange(
+      Wire.ConnectClient(Port, Token),
+      Protocol.ClientMessage.SelectWorld(World.Metadata.Id),
+      Token
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    Test.AssertEquals(Earlier.Health, Wire.FirstPersonOf(Client).Health);
+    Test.AssertTrue(InventoryHas(Wire.FirstPersonOf(Client), Map.Items[3].ItemId));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ListWorlds(0, false), Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Worlds(_));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.StartNewGame, Token);
+    Test.AssertEquals(20, Wire.MapOf(Client).Health);
+    Test.AssertEquals(0, Wire.MapOf(Client).Inventory.Length());
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.SaveGame, Token);
+    Rejected(Client, 'overwrite_required');
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ListWorlds(0, false), Token);
+    Rejected(Client, 'discard_required');
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ListWorlds(0, true), Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Worlds(_));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    Test.AssertEquals(Earlier.Health, Wire.FirstPersonOf(Client).Health);
+    Test.AssertTrue(InventoryHas(Wire.FirstPersonOf(Client), Map.Items[3].ItemId));
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  Test.AssertEquals(PreviousSaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertEquals(StoredLevel, LevelText(World));
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+  Test.AssertTrue(Tasks.CloseChannel(Logs));
+end.

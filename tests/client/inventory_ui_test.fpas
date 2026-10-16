@@ -36,6 +36,17 @@ begin
   );
 end function;
 
+function Potion(Id: string): Protocol.VisibleInventoryItem;
+begin
+  return Protocol.VisibleInventoryItem(
+    Id := Id,
+    Name := 'Healing potion',
+    Slot := Protocol.VisibleItemSlot.NoSlot,
+    Equipped := false,
+    Usable := true
+  );
+end function;
+
 begin
   const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
   const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(1);
@@ -73,7 +84,7 @@ begin
           Id := 'example:dungeon:0:0:item:0',
           Name := 'Ancient coin',
           Slot := Protocol.VisibleItemSlot.NoSlot,
-          Equipped := false
+          Equipped := false, Usable := false
         )
       ])
     ), Cmd
@@ -150,7 +161,7 @@ begin
       Id := 'coin',
       Name := 'Ancient coin',
       Slot := Protocol.VisibleItemSlot.NoSlot,
-      Equipped := false
+      Equipped := false, Usable := false
     )
   ];
   Model := ClientUnit.UpdateClientEvent(
@@ -198,6 +209,60 @@ begin
   Test.AssertFalse(ScreenContains(ShortApp.SurfaceSnapshot(), 'Environment'));
   Test.AssertTrue(ScreenContains(ShortApp.SurfaceSnapshot(), 'At your feet: Ancient coin'));
   ShortApp.Close();
+  // Authoritative refreshes keep identity, even for identical names, and clamp a removed selection.
+  const Potions := [Potion('first'), Potion('middle'), Potion('last')];
+  for Selected: integer := 0 to 2 do
+    var Remaining: array of Protocol.VisibleInventoryItem := [];
+    for Index: integer := 0 to 2 do
+      if Index <> Selected then
+        Remaining.PushInPlace(Potions[Index]);
+      end if;
+    end for;
+    const Before := Model with Inventory := Potions; InventorySelection := Selected; end with;
+    const After := ClientUnit.UpdateClientEvent(
+      Before,
+      ClientUnit.ClientEvent.State(MapState(Remaining)),
+      Cmd
+    );
+    Test.AssertEquals(if Selected = 2 then 1 else Selected end if, After.InventorySelection);
+    Test.AssertEquals(
+      Remaining[After.InventorySelection].Id,
+      After.Inventory[After.InventorySelection].Id
+    );
+    Test.AssertFalse('Picked up:' in After.PrimaryStatus);
+  end for;
+  const SelectedLast := Model with Inventory := Potions; InventorySelection := 2; end with;
+  const Reordered := ClientUnit.UpdateClientEvent(
+    SelectedLast,
+    ClientUnit.ClientEvent.State(MapState([Potions[2], Potions[0]])),
+    Cmd
+  );
+  Test.AssertEquals(0, Reordered.InventorySelection);
+  Test.AssertEquals('last', Reordered.Inventory[0].Id);
+  const Unchanged := ClientUnit.UpdateClientEvent(
+    SelectedLast,
+    ClientUnit.ClientEvent.State(MapState(Potions)),
+    Cmd
+  );
+  Test.AssertEquals(2, Unchanged.InventorySelection);
+  const Only := Model with Inventory := [Potions[1]]; InventorySelection := 0; end with;
+  const Empty := ClientUnit.UpdateClientEvent(
+    Only,
+    ClientUnit.ClientEvent.State(MapState([])),
+    Cmd
+  );
+  Test.AssertEquals(0, Empty.InventorySelection);
+  Test.AssertEquals(0, Empty.Inventory.Length());
+  for Invalid: integer in [-1, 99] do
+    const Before := Model with Inventory := Potions; InventorySelection := Invalid; end with;
+    const After := ClientUnit.UpdateClientEvent(
+      Before,
+      ClientUnit.ClientEvent.State(MapState(Potions)),
+      Cmd
+    );
+    Test.AssertEquals(if Invalid < 0 then 0 else 2 end if, After.InventorySelection);
+  end for;
+
   discard Tasks.CloseChannel(Requests);
   discard Tasks.CloseChannel(Events);
 end.

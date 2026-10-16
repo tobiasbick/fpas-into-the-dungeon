@@ -1,8 +1,8 @@
-// Measures first-entry level creation and complete save and load for a chosen number of visited dungeons.
+// Measures first entry and full save/load with floor finds, transferred gear and terminal potions.
 // Usage: fpas run tools/persistence-bench/persistence-bench.fpasprj -- <visited dungeons> [repetitions]
 program PersistenceBench;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as PlacementRules, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Args as Args, Std.Console as Console, Std.Conv as Conv, Std.Fs as Fs, Std.Math as Math, Std.Parse as Parse, Std.Path as PathOps, Std.Time as Time;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Args as Args, Std.Console as Console, Std.Conv as Conv, Std.Fs as Fs, Std.Math as Math, Std.Parse as Parse, Std.Path as PathOps, Std.Time as Time;
 
 // Returns the first Count entrance regions, ring by ring around the spawn region.
 function EntranceRegions(Metadata: Terrain.WorldMetadata; Count: integer): array of Entrances.RegionCoordinate;
@@ -88,6 +88,7 @@ begin
   var State: GameState.GameState := GameState.NewGame(Metadata);
   var Maps: array of InteriorUnit.InteriorMap := [];
   var EntryMillis: integer := 0;
+  var ConsumedCount: integer := 0;
   // Visit every dungeon once: discovery, a destroyed or surviving opponent, carried coins, and swords
   // transferred onto the next dungeon's entry field.
   for Index: integer := 0 to Regions.Length() - 1 do
@@ -138,6 +139,15 @@ begin
         end;
       end if;
 
+      // Fixture setup consumes the guaranteed potion in alternating areas; all other
+      // potions remain on their original floors. No combat is included in the timing.
+      if Index mod 2 = 0 then
+        const Potion := ItemIndex(Inside, Map.Items[3].ItemId);
+        Inside.Items[Potion] := Inside.Items[Potion] with Location := ItemRules.ItemLocation.Consumed; end with;
+
+        ConsumedCount := ConsumedCount + 1;
+      end if;
+
       if Index > 0 then
         begin
           const Sword: integer := ItemIndex(Inside, Maps[Index - 1].Items[1].ItemId);
@@ -158,10 +168,13 @@ begin
   Console.WriteLn(
     (
       ((('visited=' + Conv.IntToStr(Count)) + ' items=') + Conv.IntToStr(State.Items.Length())) +
-      ' first_entry_total_ms='
+      ' consumed='
     ) +
+    Conv.IntToStr(ConsumedCount) + ' hostiles=' + Conv.IntToStr(State.Hostiles.Length()) +
+    ' first_entry_total_ms=' +
     Conv.IntToStr(EntryMillis)
   );
+  const ExpectedSave := Savegame.EncodeSaveGame(Metadata.Id, State);
   for Round: integer := 1 to Repetitions do
     begin
       const SaveStarted: integer := Time.MonotonicMillis();
@@ -172,6 +185,12 @@ begin
       const LoadMillis: integer := Time.ElapsedMillis(LoadStarted);
       case Loaded of
         when Savegame.SaveGameLoad.Loaded(const LoadedState, const View):
+          // Outside both measured intervals: verify every entity, terminal location,
+          // visit, discovery cell and random-state value survived the round trip.
+          if Savegame.EncodeSaveGame(Metadata.Id, LoadedState) <> ExpectedSave then
+            panic('loaded state differs from the saved benchmark fixture');
+          end if;
+
           Console.WriteLn(
             (
               ((('round=' + Conv.IntToStr(Round)) + ' save_ms=') + Conv.IntToStr(SaveMillis)) +

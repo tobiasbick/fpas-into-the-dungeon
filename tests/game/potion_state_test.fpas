@@ -1,0 +1,151 @@
+// Verifies terminal potion identity, rule exclusion, origin validation and the inventory capacity boundary.
+program PotionStateTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Std.Conv as Conv, Std.Test as Test;
+
+begin
+  const Metadata := Fixtures.FixtureMetadata();
+  const Map := Fixtures.WithPotion(Fixtures.FixtureDungeonMap());
+  const Fresh := Areas.MaterializeArea(GameState.NewGame(Metadata), Map);
+  const Id := Map.AreaId + ':item:3';
+  Test.AssertEquals(Id, Fresh.Items[3].Id);
+  Test.AssertEquals('Healing potion', Items.ItemDisplayName(Fresh.Items[3].Kind));
+  Test.AssertEquals(
+    'p',
+    GameState.InteriorVisibleCodeForState(
+      Map,
+      Fresh with AreaId := Map.AreaId; end with,
+      Map.Items[3].Position
+    ).Unwrap()
+  );
+  Test.AssertTrue(Items.ItemSlot(Items.ItemKind.HealingPotion) is None);
+  var Carried := Fresh;
+  Carried.Items[3] := Carried.Items[3] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  Test.AssertEquals(1, GameState.InventoryItems(Carried).Length());
+  Test.AssertTrue(Equipment.EquipItem(Carried, Id) is Error(_));
+  var Consumed := Carried;
+  Consumed.Items[3] := Consumed.Items[3] with Location := Items.ItemLocation.Consumed; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Consumed, [Map]) is Ok(_));
+  Test.AssertEquals(4, Consumed.Items.Length());
+  Test.AssertEquals(Id, Consumed.Items[3].Id);
+  Test.AssertTrue(Consumed.Items[3].Kind = Items.ItemKind.HealingPotion);
+  Test.AssertEquals(0, GameState.InventoryItems(Consumed).Length());
+  Test.AssertTrue(GameState.EquippedItem(Consumed, Items.EquipmentSlot.Weapon) is None);
+  Test.AssertTrue(GameState.EquippedItem(Consumed, Items.EquipmentSlot.Body) is None);
+  Test.AssertEquals(
+    '.',
+    GameState.InteriorVisibleCodeForState(
+      Map,
+      Consumed with AreaId := Map.AreaId; end with,
+      Map.Items[3].Position
+    ).Unwrap()
+  );
+  Test.AssertTrue(States.SameState(Consumed, Areas.MaterializeArea(Consumed, Map)));
+  var Inside := Fixtures.FixtureDungeonState(
+    Map.Items[3].Position,
+    Coordinates.FacingDirection.East
+  );
+  Inside.Items := Consumed.Items;
+  const View := GameState.AreaView(Metadata := Metadata, Interior := Some(Map));
+  const FloorInside := Inside with Items := Fresh.Items; end with;
+  const Beside := FloorInside with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(
+      Position := Coordinates.InteriorPosition(
+        X := Map.Items[3].Position.X + 1,
+        Y := Map.Items[3].Position.Y
+      ),
+      Facing := Coordinates.FacingDirection.West
+    )
+  ); end with;
+
+  case Interaction.Interact(View, Beside).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals('Healing potion', Title);
+      Test.AssertTrue(Text.Length() > 0);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.TransitionRequested(_):
+      panic('potion inspection must not change state');
+  end case;
+
+  case Interaction.Interact(View, FloorInside).Unwrap() of
+    when Interaction.InteractionOutcome.StateChanged(const Picked):
+      Test.AssertEquals(Id, Picked.Items[3].Id);
+      Test.AssertTrue(Picked.Items[3].Location = Items.ItemLocation.CarriedByPlayer);
+      Test.AssertEquals(1, GameState.InventoryItems(Picked).Length());
+      Test.AssertTrue(
+        Equipment.DropItem(View, Picked, Id).Unwrap().State.Items[3].Location =
+        Items.ItemLocation.InInterior(Map.AreaId, Map.Items[3].Position)
+      );
+    when Interaction.InteractionOutcome.Described(_, _), Interaction.InteractionOutcome.TransitionRequested(_):
+      panic('potion pickup must return updated state');
+  end case;
+
+  Test.AssertFalse('Healing potion' in Interaction.InteractionHint(Inside));
+  case Interaction.Interact(View, Inside).Unwrap() of
+    when Interaction.InteractionOutcome.Described(const Title, const Text):
+      Test.AssertEquals('', Title);
+      Test.AssertFalse('Healing potion' in Text);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.TransitionRequested(_):
+      panic('consumed potion must not be picked up');
+  end case;
+
+  Test.AssertTrue(Equipment.DropItem(View, Inside, Id) is Error(_));
+  Test.AssertTrue(Equipment.EquipItem(Inside, Id) is Error(_));
+  Test.AssertTrue(Equipment.UnequipItem(Inside, Id) is Error(_));
+  for Kind: Items.ItemKind in [
+    Items.ItemKind.AncientCoin,
+    Items.ItemKind.RustyShortSword,
+    Items.ItemKind.LeatherJerkin
+  ] do
+    var Invalid := Consumed;
+    Invalid.Items[3] := Invalid.Items[3] with Kind := Kind; end with;
+
+    Test.AssertTrue(GameState.ValidateStateShape(Metadata, Invalid) is Error(_));
+  end for;
+
+  for Slot: Items.EquipmentSlot in [Items.EquipmentSlot.Weapon, Items.EquipmentSlot.Body] do
+    var Invalid := Carried;
+    Invalid.Items[3] := Invalid.Items[3] with Location := Items.ItemLocation.EquippedByPlayer(Slot); end with;
+
+    Test.AssertTrue(GameState.ValidateStateShape(Metadata, Invalid) is Error(_));
+  end for;
+  var Missing := Consumed with Items := Consumed.Items.Slice(0, 3); end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Missing, [Map]) is Error(_));
+  var Duplicate := Consumed;
+  Duplicate.Items.PushInPlace(Consumed.Items[3]);
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Duplicate, [Map]) is Error(_));
+  var Foreign := Consumed;
+  Foreign.Items[3] := Foreign.Items[3] with Id := Map.AreaId + ':item:999'; end with;
+
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Foreign, [Map]) is Error(_));
+  // Consumed records occupy no inventory capacity, even alongside both worn slots.
+  var Full := Consumed;
+  Full.Items[1] := Full.Items[1] with Location := Items.ItemLocation.EquippedByPlayer(
+    Items.EquipmentSlot.Weapon
+  ); end with;
+
+  Full.Items[2] := Full.Items[2] with Location := Items.ItemLocation.EquippedByPlayer(
+    Items.EquipmentSlot.Body
+  ); end with;
+
+  for Index: integer := 0 to 61 do
+    Full.Items.PushInPlace(
+      Items.GameItem(
+        Id := Map.AreaId + ':item:' + Conv.IntToStr(Index + 4),
+        Kind := Items.ItemKind.HealingPotion, Location := Items.ItemLocation.CarriedByPlayer
+      )
+    );
+  end for;
+
+  Test.AssertEquals(64, GameState.InventoryItems(Full).Length());
+  Test.AssertTrue(GameState.InventoryIsFull(Full));
+  Test.AssertTrue(GameState.ValidateStateShape(Metadata, Full) is Ok(_));
+  Full.Items[3] := Full.Items[3] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  Test.AssertEquals(65, GameState.InventoryItems(Full).Length());
+  Test.AssertTrue(GameState.ValidateStateShape(Metadata, Full) is Error(_));
+  // Materialization itself never consumes or otherwise changes existing potion state.
+  Test.AssertTrue(States.SameState(Fresh, Areas.MaterializeArea(Fresh, Map)));
+end.

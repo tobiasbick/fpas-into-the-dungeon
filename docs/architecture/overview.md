@@ -81,6 +81,9 @@ these projects.
   the current interior map and builds area views from it. Entry opens the target
   level through the world layer; loading
   installs the already validated view returned by the world layer.
+  Turn replies prepare discovery, projection and a bounded UTF-8 response
+  before installing a replacement state. Preparation failures reject the turn
+  and retain the installed session; successful sends mark progress unsaved.
 - `libs/game` owns the authoritative world model, rules, and simulation,
   including the deterministic outdoor terrain generator. It has one unit per
   concern, layered without cycles:
@@ -94,8 +97,10 @@ these projects.
   - `Dungeon.Interior` with `.Generation`, `.Generation.Content` and `.Generation.Validation`:
     interior geometry and its validation; the deterministic dungeon generator;
     the structural rules shared by the generator and stored levels. `Content`
-    derives dungeon names using independent seeds; the immutable map retains
-    its display name for storage, projections and diagnostics.
+    derives dungeon names and bounded optional loot using private domain seeds;
+    the generator places its selected original slots without consuming geometry
+    draws. The immutable map retains its display name for storage, projections
+    and diagnostics.
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
     read-only queries; the `AreaView` type pairs world metadata with a supplied
     current interior map.
@@ -105,7 +110,9 @@ these projects.
     map-free save shape check and full saved-state checks against all supplied
     visited maps and placements, without loading or generating geometry.
   - `Dungeon.Movement`, `Dungeon.Interaction`,
-    `Dungeon.Equipment`, `Dungeon.Combat`: the rules that change the state.
+    `Dungeon.Equipment`, `Dungeon.Consumables`, `Dungeon.Combat`: the rules that
+    change the state. Consumables validates and applies pure potion healing;
+    Combat orders the resulting turn and hostile phase.
   - `Dungeon.Exploration` with `.Model` and `.Sight`: discovery masks,
     outdoor sight and discovery updates, and interior line of sight.
 - `libs/world` owns validated world, chunk, and savegame persistence,

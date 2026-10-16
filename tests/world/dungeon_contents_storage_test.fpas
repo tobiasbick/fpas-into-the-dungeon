@@ -1,0 +1,351 @@
+// Exercises real item/turn rules across two stored dungeons, restart, terminal records and explicit-save rewind.
+program DungeonContentsStorageTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Content as Content, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.Levels as Levels, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Catalog as Catalog, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+
+function LevelPath(World: WorldUnit.WorldSession; Region: Entrances.RegionCoordinate): string;
+begin
+  return World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y) +
+    '/0.json';
+end function;
+
+// Find an actual entrance with a slot-5 potion and omitted slot 4, outside the spawn region.
+function GapRegion(World: WorldUnit.WorldSession): Entrances.RegionCoordinate;
+begin
+  const Spawn := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  for Y: integer := -10 to 10 do
+    for X: integer := -10 to 10 do
+      if (X <> Spawn.X) or (Y <> Spawn.Y) then
+        if (Content.OptionalLoot(World.Metadata.Seed, X, Y, 4).Unwrap() is None)
+          and
+          (
+            Content.OptionalLoot(World.Metadata.Seed, X, Y, 5).Unwrap() is Some(Items.ItemKind.HealingPotion)
+          )
+        then
+          const Region := Entrances.RegionCoordinate(X := X, Y := Y);
+          if Entrances.EntranceSite(World.Metadata, Region) is Some(_) then
+            return Region;
+          end if;
+        end if;
+      end if;
+    end for;
+  end for;
+
+  panic('bounded fixture search must find a natural potion slot gap');
+end function;
+
+function ItemIndex(State: GameState.GameState; Id: string): integer;
+begin
+  for Index: integer := 0 to State.Items.Length() - 1 do
+    if State.Items[Index].Id = Id then
+      return Index;
+    end if;
+  end for;
+
+  panic('expected original item identity');
+end function;
+
+// Pose/entrance setup omits walking; pickup, combat, dropping, use and transitions call production rules.
+function At(State: GameState.GameState; Position: Coordinates.InteriorPosition): GameState.GameState;
+begin
+  return State with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Position, Facing := Coordinates.FacingDirection.East)
+  ); end with;
+end function;
+
+function Enter(World: WorldUnit.WorldSession; State: GameState.GameState; Region: Entrances.RegionCoordinate): GameState.GameState;
+begin
+  const Outside := State with Player := Coordinates.PlayerPosition.Outdoor(
+    Entrances.EntranceSite(World.Metadata, Region).Unwrap()
+  ); end with;
+  const Map := Interiors.OpenLevelForEntry(
+    World,
+    Outside,
+    Identities.DungeonAreaId(World.Metadata, Region)
+  ).Unwrap();
+  return Movement.ActivateAreaTransition(
+    Levels.LevelView(World, Outside, Map),
+    Outside,
+    Some(Map)
+  ).Unwrap().State;
+end function;
+
+function Leave(World: WorldUnit.WorldSession; State: GameState.GameState; Map: InteriorUnit.InteriorMap): GameState.GameState;
+begin
+  return Levels.LeaveLevel(World, At(State, Map.Exit), Map).Unwrap();
+end function;
+
+function PickUp(World: WorldUnit.WorldSession; State: GameState.GameState; Map: InteriorUnit.InteriorMap; Id: string): GameState.GameState;
+begin
+  const Item := State.Items[ItemIndex(State, Id)];
+  case Item.Location of
+    when Items.ItemLocation.InInterior(const AreaId, const Position):
+      Test.AssertEquals(Map.AreaId, AreaId);
+      const Ready := At(State, Position);
+      case Interaction.Interact(Levels.LevelView(World, Ready, Map), Ready).Unwrap() of
+        when Interaction.InteractionOutcome.StateChanged(const Changed):
+          Test.AssertTrue(
+            Changed.Items[ItemIndex(Changed, Id)].Location = Items.ItemLocation.CarriedByPlayer
+          );
+          return Changed;
+        when Interaction.InteractionOutcome.Described(_, _), Interaction.InteractionOutcome.TransitionRequested(_):
+          panic('standing on the potion must pick it up');
+      end case;
+    when Items.ItemLocation.CarriedByPlayer, Items.ItemLocation.EquippedByPlayer(_), Items.ItemLocation.Consumed:
+      panic('pickup fixture requires an original floor item');
+  end case;
+end function;
+
+function Turn(World: WorldUnit.WorldSession; State: GameState.GameState; Map: InteriorUnit.InteriorMap; Action: Combat.TurnAction): GameState.GameState;
+begin
+  case Combat.ResolveTurn(Levels.LevelView(World, State, Map), State, Action).Unwrap() of
+    when Combat.TurnOutcome.Continued(const Changed, _, _):
+      return Changed;
+    when Combat.TurnOutcome.Defeated(_):
+      panic('prepared persistence encounter must survive');
+  end case;
+end function;
+
+// One-health targets and seed 1 pin a successful real attack; placement kinds and IDs stay original.
+function Kill(World: WorldUnit.WorldSession; State: GameState.GameState; Map: InteriorUnit.InteriorMap; Index: integer; Slot: integer): GameState.GameState;
+begin
+  var Ready := State with RandomState := 1; end with;
+
+  Ready.Hostiles[Index] := Ready.Hostiles[Index] with Health := 1; Alerted := true; Position := Map.Hostiles[
+    Slot
+  ].Position; end with;
+
+  Ready := At(
+    Ready,
+    Map.Hostiles[Slot].Position with X := Map.Hostiles[Slot].Position.X - 1; end with
+  );
+  const Changed := Turn(World, Ready, Map, Combat.TurnAction.Attack);
+  Test.AssertEquals(0, Changed.Hostiles[Index].Health);
+  Test.AssertTrue(Changed.RandomState <> Ready.RandomState);
+  return Changed;
+end function;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, const View):
+      Test.AssertTrue(GameState.ValidateGameState(View, State) is Ok(_));
+      if State.Area = Coordinates.AreaKind.Dungeon then
+        Test.AssertEquals(State.AreaId, View.Interior.Unwrap().AreaId);
+      else
+        Test.AssertTrue(View.Interior is None);
+      end if;
+
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('complete dungeon-contents save must load');
+  end case;
+end function;
+
+procedure SavedExactly(World: WorldUnit.WorldSession; State: GameState.GameState);
+begin
+  Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+  Test.AssertTrue(States.SameState(State, Loaded(World)));
+end procedure;
+
+// Rejected writes retain the good save; rejected loads retain the exact bad bytes for diagnosis.
+procedure RejectState(World: WorldUnit.WorldSession; Bad: GameState.GameState; GoodText: string);
+begin
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Bad) is Error(_));
+  Test.AssertEquals(GoodText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  const Broken := Savegame.EncodeSaveGame(World.Metadata.Id, Bad);
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), Broken).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+  Test.AssertEquals(Broken, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), GoodText).Unwrap());
+end procedure;
+
+begin
+  const Root := '.temp-data/contents-storage-' + Conv.IntToStr(Time.TimestampMillis());
+  const World := WorldUnit.OpenWorld(Root, 'contents', 12345, 4, 16).Unwrap();
+  const FirstRegion := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  const SecondRegion := GapRegion(World);
+  const First := Levels.SpawnLevel(World);
+  const FirstBytes := Fs.ReadText(LevelPath(World, FirstRegion)).Unwrap();
+  var State := Enter(
+    World,
+    GameState.NewGame(World.Metadata) with Health := 14; end with,
+    FirstRegion
+  );
+  for Placement: Items.ItemPlacement in First.Items do
+    if Placement.Kind = Items.ItemKind.HealingPotion then
+      State := PickUp(World, State, First, Placement.ItemId);
+    end if;
+  end for;
+
+  State := Kill(World, State, First, 0, 0);
+  // Save during combat: rat still alive/alerted, skeleton terminal; dice and carried potions resume exactly.
+  State.Hostiles[1] := State.Hostiles[1] with Alerted := true; end with;
+
+  Test.AssertTrue(State.Hostiles[1].Health > 0);
+  SavedExactly(World, State);
+  const Restarted := Catalog.OpenExistingWorld(Root, World.Metadata.Id, 16).Unwrap();
+  Test.AssertTrue(States.SameState(State, Loaded(Restarted)));
+  State := Kill(Restarted, Loaded(Restarted), First, 1, 1);
+  SavedExactly(Restarted, State);
+  const Earlier := State;
+  const EarlierText := Fs.ReadText(Savegame.SaveGamePath(Restarted)).Unwrap();
+  State := Enter(Restarted, Leave(Restarted, State, First), SecondRegion);
+  const Second := Interiors.ReadLevel(Restarted, State.AreaId).Unwrap();
+  Test.AssertEquals(5, Second.Items.Length());
+  const OptionalId := Second.AreaId + ':item:5';
+  Test.AssertEquals(OptionalId, Second.Items[4].ItemId);
+  Test.AssertTrue(Second.Items[4].Kind = Items.ItemKind.HealingPotion);
+  Test.AssertTrue(Second.Items[3].ItemId <> OptionalId);
+  const SecondBytes := Fs.ReadText(LevelPath(Restarted, SecondRegion)).Unwrap();
+  Test.AssertEquals(EarlierText, Fs.ReadText(Savegame.SaveGamePath(Restarted)).Unwrap());
+  const CarriedId := First.Items[3].ItemId;
+  // The guaranteed potion travels to another dungeon, is dropped, saved/reloaded, and picked up again.
+  State := At(State, Second.Start);
+  const DiceBeforeDrop := State.RandomState;
+  State := Turn(Restarted, State, Second, Combat.TurnAction.Drop(CarriedId));
+  Test.AssertEquals(DiceBeforeDrop, State.RandomState);
+  Test.AssertTrue(
+    State.Items[ItemIndex(State, CarriedId)].Location =
+    Items.ItemLocation.InInterior(Second.AreaId, Second.Start)
+  );
+  SavedExactly(Restarted, State);
+  State := PickUp(Restarted, Loaded(Restarted), Second, CarriedId);
+  State := Kill(Restarted, State, Second, First.Hostiles.Length(), 0);
+  State := Kill(Restarted, State, Second, First.Hostiles.Length() + 1, 1);
+  for Placement: Items.ItemPlacement in Second.Items do
+    if Placement.Kind = Items.ItemKind.HealingPotion then
+      State := PickUp(Restarted, State, Second, Placement.ItemId);
+    end if;
+  end for;
+
+  // Consume the transferred potion and the genuine optional slot 5, then every remaining potion.
+  for Id: string in [CarriedId, OptionalId] do
+    State.Health := 14;
+    const Before := State;
+    State := Turn(Restarted, State, Second, Combat.TurnAction.UseItem(Id));
+    Test.AssertEquals(20, State.Health);
+    Test.AssertEquals(Before.RandomState, State.RandomState);
+    Test.AssertTrue(State.Items[ItemIndex(State, Id)].Location = Items.ItemLocation.Consumed);
+  end for;
+
+  for Index: integer := 0 to State.Items.Length() - 1 do
+    if (State.Items[Index].Kind = Items.ItemKind.HealingPotion)
+      and
+      (State.Items[Index].Location = Items.ItemLocation.CarriedByPlayer)
+    then
+      State.Health := 14;
+      State := Turn(Restarted, State, Second, Combat.TurnAction.UseItem(State.Items[Index].Id));
+    end if;
+  end for;
+
+  SavedExactly(Restarted, State);
+  State := Leave(Restarted, State, Second);
+  SavedExactly(Restarted, State);
+  const Final := State;
+  const FinalText := Fs.ReadText(Savegame.SaveGamePath(Restarted)).Unwrap();
+  Test.AssertEquals(First.Items.Length() + Second.Items.Length(), State.Items.Length());
+  for Item: Items.GameItem in State.Items do
+    if Item.Kind = Items.ItemKind.HealingPotion then
+      Test.AssertTrue(Item.Location = Items.ItemLocation.Consumed);
+    end if;
+  end for;
+
+  Test.AssertEquals(0, GameState.InventoryItems(State).Length());
+  for Opponent: Hostiles.GameHostile in State.Hostiles do
+    Test.AssertEquals(0, Opponent.Health);
+  end for;
+  // A fresh world session reloads outdoors, revisits both maps, and preserves every terminal record.
+  const Reopened := Catalog.OpenExistingWorld(Root, World.Metadata.Id, 16).Unwrap();
+  State := Loaded(Reopened);
+  Test.AssertTrue(States.SameState(Final, State));
+  for Region: Entrances.RegionCoordinate in [FirstRegion, SecondRegion] do
+    State := Enter(Reopened, State, Region);
+    for Index: integer := 0 to Final.Items.Length() - 1 do
+      Test.AssertTrue(Final.Items[Index] = State.Items[Index]);
+    end for;
+
+    for Index: integer := 0 to Final.Hostiles.Length() - 1 do
+      Test.AssertTrue(Final.Hostiles[Index] = State.Hostiles[Index]);
+    end for;
+
+    State := Leave(Reopened, State, Interiors.ReadLevel(Reopened, State.AreaId).Unwrap());
+  end for;
+
+  Test.AssertEquals(FinalText, Fs.ReadText(Savegame.SaveGamePath(Reopened)).Unwrap());
+  // Terminal records remain mandatory: missing, duplicate, invented slot4 and wrong origins reject.
+  const OptionalIndex := ItemIndex(Final, OptionalId);
+  RejectState(
+    Reopened, Final with Items := Final.Items.Slice(
+      0,
+      OptionalIndex
+    ).Concat(
+      Final.Items.Slice(OptionalIndex + 1, Final.Items.Length() - OptionalIndex - 1)
+    ); end with, FinalText
+  );
+  var Bad := Final;
+  Bad.Items.PushInPlace(Final.Items[OptionalIndex]);
+  RejectState(Reopened, Bad, FinalText);
+  Bad := Final;
+  Bad.Items[OptionalIndex] := Bad.Items[OptionalIndex] with Id := Second.AreaId + ':item:4'; end with;
+
+  RejectState(Reopened, Bad, FinalText);
+  Bad := Final;
+  Bad.Items[OptionalIndex] := Bad.Items[OptionalIndex] with Kind := Items.ItemKind.AncientCoin; Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  RejectState(Reopened, Bad, FinalText);
+  RejectState(
+    Reopened,
+    Final with Hostiles := Final.Hostiles.Slice(1, Final.Hostiles.Length() - 1); end with,
+    FinalText
+  );
+  Bad := Final;
+  Bad.Hostiles.PushInPlace(Final.Hostiles[0]);
+  RejectState(Reopened, Bad, FinalText);
+  Bad := Final;
+  Bad.Hostiles[0] := Bad.Hostiles[0] with Kind := Hostiles.HostileKind.GiantRat; end with;
+
+  RejectState(Reopened, Bad, FinalText);
+  // Start over reuses immutable files, materializes original items/health, and leaves the explicit save intact.
+  var Fresh := Enter(Reopened, GameState.NewGame(Reopened.Metadata), FirstRegion);
+  Fresh := Enter(Reopened, Leave(Reopened, Fresh, First), SecondRegion);
+  Test.AssertEquals(Final.Items.Length(), Fresh.Items.Length());
+  for Map: InteriorUnit.InteriorMap in [First, Second] do
+    for Placement: Items.ItemPlacement in Map.Items do
+      const Restored := Fresh.Items[ItemIndex(Fresh, Placement.ItemId)];
+      Test.AssertTrue(Restored.Kind = Placement.Kind);
+      Test.AssertTrue(
+        Restored.Location = Items.ItemLocation.InInterior(Map.AreaId, Placement.Position)
+      );
+    end for;
+  end for;
+
+  for Item: Items.GameItem in Fresh.Items do
+    Test.AssertTrue(Item.Location is Items.ItemLocation.InInterior(_, _));
+  end for;
+
+  for Opponent: Hostiles.GameHostile in Fresh.Hostiles do
+    Test.AssertEquals(Hostiles.HostileMaximumHealth(Opponent.Kind), Opponent.Health);
+    Test.AssertFalse(Opponent.Alerted);
+  end for;
+
+  Test.AssertEquals(FinalText, Fs.ReadText(Savegame.SaveGamePath(Reopened)).Unwrap());
+  Test.AssertTrue(States.SameState(Final, Loaded(Reopened)));
+  // Restoring the earlier explicit save rewinds consumption/visits while retaining the newer level file.
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(Reopened), EarlierText).Unwrap());
+  var Rewound := Loaded(Reopened);
+  Test.AssertTrue(States.SameState(Earlier, Rewound));
+  Test.AssertEquals(1, Rewound.VisitedAreas.Length());
+  Rewound := Enter(Reopened, Leave(Reopened, Rewound, First), SecondRegion);
+  Test.AssertEquals(Final.Items.Length(), Rewound.Items.Length());
+  Test.AssertTrue(
+    Rewound.Items[ItemIndex(Rewound, CarriedId)].Location = Items.ItemLocation.CarriedByPlayer
+  );
+  Test.AssertTrue(
+    Rewound.Items[ItemIndex(Rewound, OptionalId)].Location =
+    Items.ItemLocation.InInterior(Second.AreaId, Second.Items[4].Position)
+  );
+  Test.AssertEquals(EarlierText, Fs.ReadText(Savegame.SaveGamePath(Reopened)).Unwrap());
+  Test.AssertEquals(FirstBytes, Fs.ReadText(LevelPath(Reopened, FirstRegion)).Unwrap());
+  Test.AssertEquals(SecondBytes, Fs.ReadText(LevelPath(Reopened, SecondRegion)).Unwrap());
+end.

@@ -1,0 +1,196 @@
+// Exhausts the fixed loot table and pins slot-domain vectors without touching geometry or combat state.
+program DungeonContentsTest;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Interior.Generation.Content as Content, Dungeon.Items as Items, Dungeon.Random as Random, Dungeon.Terrain.Placement as Placement, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Std.Test as Test;
+
+const MinimumInteger: integer := -9223372036854775807 - 1;
+const MaximumInteger: integer := 9223372036854775807;
+
+// Literal outcomes: '-' empty, c coin, p potion, s sword, a armor; no production table is consulted.
+procedure AssertLoot(Expected: string; Actual: option of Items.ItemKind);
+begin
+  case Expected of
+    when '-':
+      Test.AssertTrue(Actual is None);
+    when 'c':
+      Test.AssertTrue(Actual is Some(Items.ItemKind.AncientCoin));
+    when 'p':
+      Test.AssertTrue(Actual is Some(Items.ItemKind.HealingPotion));
+    when 's':
+      Test.AssertTrue(Actual is Some(Items.ItemKind.RustyShortSword));
+    when 'a':
+      Test.AssertTrue(Actual is Some(Items.ItemKind.LeatherJerkin));
+    else
+      panic('unknown independent loot expectation');
+  end case;
+end procedure;
+
+type LootVector = record
+  Seed: integer;
+  X: integer;
+  Y: integer;
+  Outcomes: string;
+end record;
+
+function Vector(Seed: integer; X: integer; Y: integer; Outcomes: string): LootVector;
+begin
+  return LootVector(Seed := Seed, X := X, Y := Y, Outcomes := Outcomes);
+end function;
+
+// Geometry, names and placement kinds/fields compare exactly; world identity scopes only entity IDs.
+procedure AssertSameLayout(Expected: InteriorUnit.InteriorMap; Actual: InteriorUnit.InteriorMap);
+begin
+  Test.AssertEquals(Expected.DisplayName, Actual.DisplayName);
+  Test.AssertEquals(Expected.Width, Actual.Width);
+  Test.AssertEquals(Expected.Height, Actual.Height);
+  Test.AssertTrue(Expected.Start = Actual.Start);
+  Test.AssertTrue(Expected.StartFacing = Actual.StartFacing);
+  Test.AssertTrue(Expected.Exit = Actual.Exit);
+  Test.AssertEquals(Expected.Cells.Length(), Actual.Cells.Length());
+  for Index: integer := 0 to Expected.Cells.Length() - 1 do
+    Test.AssertTrue(Expected.Cells[Index] = Actual.Cells[Index]);
+  end for;
+
+  Test.AssertEquals(Expected.Items.Length(), Actual.Items.Length());
+  for Index: integer := 0 to Expected.Items.Length() - 1 do
+    Test.AssertTrue(Expected.Items[Index].Kind = Actual.Items[Index].Kind);
+    Test.AssertTrue(Expected.Items[Index].Position = Actual.Items[Index].Position);
+    var Slot := Index;
+    if (Index = 4) and (Expected.Items[Index].ItemId = Items.ItemPlacementId(Expected.AreaId, 5)) then
+      Slot := 5;
+    end if;
+
+    Test.AssertEquals(Items.ItemPlacementId(Expected.AreaId, Slot), Expected.Items[Index].ItemId);
+    Test.AssertEquals(Items.ItemPlacementId(Actual.AreaId, Slot), Actual.Items[Index].ItemId);
+  end for;
+
+  Test.AssertEquals(Expected.Hostiles.Length(), Actual.Hostiles.Length());
+  for Index: integer := 0 to Expected.Hostiles.Length() - 1 do
+    Test.AssertTrue(Expected.Hostiles[Index].Kind = Actual.Hostiles[Index].Kind);
+    Test.AssertTrue(Expected.Hostiles[Index].Position = Actual.Hostiles[Index].Position);
+  end for;
+end procedure;
+
+begin
+  // All 100 exact expectations, including both sides of every range boundary.
+  const Expected := '------------------------------' + 'cccccccccccccccccccccccccccccc' +
+    'pppppppppppppppppppppppppppppp' + 'sssss' + 'aaaaa';
+  Test.AssertEquals(100, Expected.Length());
+  var Counts := [0, 0, 0, 0, 0];
+  for Roll: integer := 0 to 99 do
+    const Actual := Content.LootForRoll(Roll).Unwrap();
+    AssertLoot(Expected[Roll], Actual);
+    case Actual of
+      when None:
+        Counts[0] := Counts[0] + 1;
+      when Some(Items.ItemKind.AncientCoin):
+        Counts[1] := Counts[1] + 1;
+      when Some(Items.ItemKind.HealingPotion):
+        Counts[2] := Counts[2] + 1;
+      when Some(Items.ItemKind.RustyShortSword):
+        Counts[3] := Counts[3] + 1;
+      when Some(Items.ItemKind.LeatherJerkin):
+        Counts[4] := Counts[4] + 1;
+    end case;
+  end for;
+
+  Test.AssertEquals(30, Counts[0]);
+  Test.AssertEquals(30, Counts[1]);
+  Test.AssertEquals(30, Counts[2]);
+  Test.AssertEquals(5, Counts[3]);
+  Test.AssertEquals(5, Counts[4]);
+  for Roll: integer in [-1, 100, MinimumInteger, MaximumInteger] do
+    Test.AssertTrue(Content.LootForRoll(Roll) is Error(_));
+  end for;
+
+  // Independently calculated (domain seed -> successor -> roll) anchors for the two domains.
+  // Seed0 at (0,0): 2003 -> 580374288 ->55; 2011 ->818561656 ->90.
+  // Seed1 at (0,0): 9922 ->1206635731 ->11; 9930 ->1444823099 ->46.
+  // The slot-5 value is not a second draw on slot4's successor.
+  Test.AssertEquals(55, Random.DrawBelow(2003, 100).Value);
+  Test.AssertEquals(580374288, Random.DrawBelow(2003, 100).State);
+  Test.AssertEquals(90, Random.DrawBelow(2011, 100).Value);
+  Test.AssertEquals(818561656, Random.DrawBelow(2011, 100).State);
+  Test.AssertEquals(11, Random.DrawBelow(9922, 100).Value);
+  Test.AssertEquals(46, Random.DrawBelow(9930, 100).Value);
+  const Vectors := [
+    Vector(0, 0, 0, 'cs'),
+    Vector(1, 0, 0, '-c'),
+    Vector(12345, 0, 0, 'p-'),
+    Vector(12345, -7, 4, 's-'),
+    Vector(-987654321, 3, -9, 'p-'),
+    Vector(-2147483648, -1, -1, 'cp'),
+    Vector(2147483647, 1, -2, 'cp'),
+    Vector(MinimumInteger, MinimumInteger, MaximumInteger, 'p-'),
+    Vector(MaximumInteger, MaximumInteger, MinimumInteger, 'p-'),
+    Vector(0, -1, 0, '-p'),
+    Vector(0, 0, -1, 'p-'),
+    Vector(132, 0, 0, 'pa'),
+    Vector(2147483648, 0, 0, 'cs')
+  ];
+  // Two slots in each vector are literal outcomes, rather than comparisons between production calls.
+  for Entry: LootVector in Vectors do
+    AssertLoot(Entry.Outcomes[0], Content.OptionalLoot(Entry.Seed, Entry.X, Entry.Y, 4).Unwrap());
+    AssertLoot(Entry.Outcomes[1], Content.OptionalLoot(Entry.Seed, Entry.X, Entry.Y, 5).Unwrap());
+  end for;
+
+  for Slot: integer in [3, 6, -1, 0, MinimumInteger, MaximumInteger] do
+    Test.AssertTrue(
+      Content.OptionalLoot(MinimumInteger, MinimumInteger, MaximumInteger, Slot) is Error(_)
+    );
+  end for;
+
+  // A missing slot4 never suppresses or renumbers slot5; unrelated queries and reverse order are inert.
+  for Iteration: integer := 1 to 4 do
+    AssertLoot('c', Content.OptionalLoot(1, 0, 0, 5).Unwrap());
+    AssertLoot('-', Content.OptionalLoot(1, 0, 0, 4).Unwrap());
+    Test.AssertEquals('Silent Depths', Content.DungeonName(12345, -7, 4));
+    for Index: integer := Vectors.Length() - 1 downto 0 do
+      const Entry := Vectors[Index];
+      AssertLoot(Entry.Outcomes[1], Content.OptionalLoot(Entry.Seed, Entry.X, Entry.Y, 5).Unwrap());
+      AssertLoot(Entry.Outcomes[0], Content.OptionalLoot(Entry.Seed, Entry.X, Entry.Y, 4).Unwrap());
+    end for;
+  end for;
+
+  // Different world identities cannot enter the selection; they scope only generated entity identities.
+  const FirstWorld := Placement.NewWorldMetadata('first-world', 12345, 4).Unwrap();
+  const SecondWorld := Placement.NewWorldMetadata('second-world', 12345, 4).Unwrap();
+  Test.AssertTrue(FirstWorld.Id <> SecondWorld.Id);
+  AssertLoot('p', Content.OptionalLoot(FirstWorld.Seed, 0, 0, 4).Unwrap());
+  AssertLoot('p', Content.OptionalLoot(SecondWorld.Seed, 0, 0, 4).Unwrap());
+  AssertLoot('-', Content.OptionalLoot(FirstWorld.Seed, 0, 0, 5).Unwrap());
+  AssertLoot('-', Content.OptionalLoot(SecondWorld.Seed, 0, 0, 5).Unwrap());
+  const Before := Generation.GenerateDungeon(12345, -7, 4, 'first-world:dungeon:-7:4').Unwrap();
+  const State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 9, Y := 1),
+    Coordinates.FacingDirection.West
+  ) with RandomState := 1; end with;
+  const StateCopy := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 9, Y := 1),
+    Coordinates.FacingDirection.West
+  ) with RandomState := 1; end with;
+
+  for Entry: LootVector in Vectors do
+    AssertLoot(Entry.Outcomes[1], Content.OptionalLoot(Entry.Seed, Entry.X, Entry.Y, 5).Unwrap());
+    AssertLoot(Entry.Outcomes[0], Content.OptionalLoot(Entry.Seed, Entry.X, Entry.Y, 4).Unwrap());
+  end for;
+  const After := Generation.GenerateDungeon(12345, -7, 4, Before.AreaId).Unwrap();
+  AssertSameLayout(Before, After);
+  Test.AssertEquals(Before.AreaId, After.AreaId);
+  const OtherWorldMap := Generation.GenerateDungeon(
+    12345,
+    -7,
+    4,
+    'second-world:dungeon:-7:4'
+  ).Unwrap();
+  AssertSameLayout(Before, OtherWorldMap);
+  Test.AssertTrue(Before.Items[0].ItemId <> OtherWorldMap.Items[0].ItemId);
+  Test.AssertEquals('Silent Depths', Before.DisplayName);
+  Test.AssertEquals(5, After.Items.Length());
+  Test.AssertTrue(States.SameState(StateCopy, State));
+  Test.AssertEquals(1, State.RandomState);
+  // The next combat roll is still seed1's d20=19, independent of every content query above.
+  const NextDraw := Random.DrawBelow(State.RandomState, 20);
+  Test.AssertEquals(18, NextDraw.Value);
+  Test.AssertEquals(1103527590, NextDraw.State);
+end.

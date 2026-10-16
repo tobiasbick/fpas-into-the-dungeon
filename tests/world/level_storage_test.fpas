@@ -1,7 +1,7 @@
 // Covers immutable dungeon level files: strict format, read-only access, first-visit creation, and failures.
 program LevelStorageTest;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Interior.Generation as Generation, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
 
 function EnsureTestRoot(Path: string): result of (boolean, string);
 begin
@@ -380,4 +380,43 @@ begin
   );
   // The stored file's bytes are unchanged by every rejected operation above.
   Test.AssertEquals(StoredText, Fs.ReadText(SpawnPath).Unwrap());
+  // Stored selection is authoritative: this valid fixture deliberately differs from seed output.
+  // Slot 4 is absent and slot 5 is a potion; reading/entry never rebuilds names or original kinds.
+  Test.AssertEquals(6, Generated.Items.Length());
+  const Fixture := Generated with DisplayName := 'Stored contents fixture'; Items := Generated.Items.Slice(
+    0,
+    4
+  ).Concat([
+    Generated.Items[5] with Kind := Items.ItemKind.HealingPotion; end with
+  ]); end with;
+  const FixtureText := Encoding.EncodeLevel(Metadata, Fixture);
+  Test.AssertTrue(FixtureText <> StoredText);
+  Test.AssertTrue(Fs.WriteTextAtomic(SpawnPath, FixtureText).Unwrap());
+  Test.AssertEquals(
+    FixtureText,
+    Encoding.EncodeLevel(Metadata, Unwrapped(Interiors.ReadLevel(World, SpawnAreaId)))
+  );
+  Test.AssertEquals(
+    FixtureText,
+    Encoding.EncodeLevel(
+      Metadata,
+      Unwrapped(Interiors.OpenLevelForEntry(World, AtSpawnEntrance, SpawnAreaId))
+    )
+  );
+  const ReadMaps := Interiors.ReadVisitedLevels(World, Visited).Unwrap();
+  Test.AssertEquals(1, ReadMaps.Length());
+  Test.AssertEquals(FixtureText, Encoding.EncodeLevel(Metadata, ReadMaps[0]));
+  for InvalidText: string in [
+    FixtureText.Replace(SpawnAreaId + ':item:5', SpawnAreaId + ':item:6'),
+    FixtureText.Replace(SpawnAreaId + ':item:5', SpawnAreaId + ':item:05'),
+    FixtureText.Replace(SpawnAreaId + ':item:5', SpawnAreaId + ':item:3')
+  ] do
+    Test.AssertTrue(Fs.WriteTextAtomic(SpawnPath, InvalidText).Unwrap());
+    Test.AssertTrue(IsInvalid(Interiors.ReadLevel(World, SpawnAreaId)));
+    Test.AssertTrue(IsInvalid(Interiors.OpenLevelForEntry(World, AtSpawnEntrance, SpawnAreaId)));
+    Test.AssertEquals(InvalidText, Fs.ReadText(SpawnPath).Unwrap());
+  end for;
+
+  Test.AssertTrue(Fs.WriteTextAtomic(SpawnPath, FixtureText).Unwrap());
+  Test.AssertEquals(FixtureText, Fs.ReadText(SpawnPath).Unwrap());
 end.

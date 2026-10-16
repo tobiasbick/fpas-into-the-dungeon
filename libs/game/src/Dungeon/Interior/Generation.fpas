@@ -261,27 +261,36 @@ begin
   return Order;
 end function;
 
-function HostilePlacements(
-  AreaId: string;
-  Rooms: array of GeneratedRoom;
-  Order: array of integer;
-  Count: integer
-): array of HostileRules.HostilePlacement;
+// Takes the first two safe room centers in walking-distance order; validation rejects shortages.
+function HostilePlacements(Map: InteriorUnit.InteriorMap; Rooms: array of GeneratedRoom; Order: array of integer): array of HostileRules.HostilePlacement;
 begin
+  const Kinds := [HostileRules.HostileKind.RestlessSkeleton, HostileRules.HostileKind.GiantRat];
   var Placements: array of HostileRules.HostilePlacement := [];
-  for Index: integer := 0 to Math.Min(Count, Order.Length()) - 1 do
-    begin
-      Placements.PushInPlace(
-        HostileRules.HostilePlacement(
-          Id := HostileRules.HostilePlacementId(AreaId, Index),
-          Kind := HostileRules.HostileKind.RestlessSkeleton,
-          Position := RoomCenter(Rooms[Order[Index]])
-        )
+  for RoomIndex: integer in Order do
+    if Placements.Length() < Kinds.Length() then
+      const Index := Placements.Length();
+      const Candidate := HostileRules.HostilePlacement(
+        Id := HostileRules.HostilePlacementId(Map.AreaId, Index),
+        Kind := Kinds[Index], Position := RoomCenter(Rooms[RoomIndex])
       );
-    end;
+      if not Validation.HostileSeesStart(Map, Candidate) then
+        Placements.PushInPlace(Candidate);
+      end if;
+    end if;
   end for;
 
   return Placements;
+end function;
+
+// Original slots survive omissions; these content draws never consume geometry state.
+function SelectedItems(Seed: integer; RegionX: integer; RegionY: integer): array of option of ItemRules.ItemKind;
+begin
+  return [
+    Some(ItemRules.ItemKind.AncientCoin), Some(ItemRules.ItemKind.RustyShortSword),
+    Some(ItemRules.ItemKind.LeatherJerkin), Some(ItemRules.ItemKind.HealingPotion),
+    Content.OptionalLoot(Seed, RegionX, RegionY, 4).Unwrap(),
+    Content.OptionalLoot(Seed, RegionX, RegionY, 5).Unwrap()
+  ];
 end function;
 
 function HoldsHostile(Room: GeneratedRoom; Hostiles: array of HostileRules.HostilePlacement): boolean;
@@ -301,7 +310,10 @@ end function;
 
 function CornerIsFree(Corner: Coordinates.InteriorPosition; Map: InteriorUnit.InteriorMap; Items: array of ItemRules.ItemPlacement): boolean;
 begin
-  if Coordinates.SamePosition(Corner, Map.Exit) or Coordinates.SamePosition(Corner, Map.Start) then
+  if (Map.Cells[FieldIndex(Corner)] <> InteriorUnit.InteriorCellKind.Floor)
+    or
+    Coordinates.SamePosition(Corner, Map.Exit) or Coordinates.SamePosition(Corner, Map.Start)
+  then
     begin
       return false;
     end;
@@ -330,14 +342,9 @@ begin
   return true;
 end function;
 
-// Places coin, sword, and jerkin on free room corners, preferring rooms without exit or opponent.
-function ItemPlacements(Map: InteriorUnit.InteriorMap; Rooms: array of GeneratedRoom): array of ItemRules.ItemPlacement;
+// Places every selected original slot on free room corners, preferring rooms without exit or opponent.
+function ItemPlacements(Map: InteriorUnit.InteriorMap; Rooms: array of GeneratedRoom; Selected: array of option of ItemRules.ItemKind): result of (array of ItemRules.ItemPlacement, string);
 begin
-  const Kinds: array of ItemRules.ItemKind := [
-    ItemRules.ItemKind.AncientCoin,
-    ItemRules.ItemKind.RustyShortSword,
-    ItemRules.ItemKind.LeatherJerkin
-  ];
   var Preferred: array of GeneratedRoom := [];
   var Others: array of GeneratedRoom := [Rooms[0]];
   for Index: integer := 1 to Rooms.Length() - 1 do
@@ -367,28 +374,39 @@ begin
     end;
   end for;
   var Items: array of ItemRules.ItemPlacement := [];
-  for Corner: Coordinates.InteriorPosition in Corners do
-    begin
-      if (Items.Length() < Kinds.Length()) and CornerIsFree(Corner, Map, Items) then
-        begin
-          const Index: integer := Items.Length();
-          Items.PushInPlace(
-            ItemRules.ItemPlacement(
-              ItemId := ItemRules.ItemPlacementId(Map.AreaId, Index),
-              Kind := Kinds[Index],
-              Position := Corner
-            )
-          );
-        end;
-      end if;
-    end;
+  var NextCorner := 0;
+  for Slot: integer := 0 to Selected.Length() - 1 do
+    case Selected[Slot] of
+      when None:
+        null;
+      when Some(const Kind):
+        while NextCorner < Corners.Length() do
+          if CornerIsFree(Corners[NextCorner], Map, Items) then
+            break;
+          end if;
+
+          NextCorner := NextCorner + 1;
+        end while;
+
+        if NextCorner = Corners.Length() then
+          return Error('generated dungeon has insufficient free item corners');
+        end if;
+
+        Items.PushInPlace(
+          ItemRules.ItemPlacement(
+            ItemId := ItemRules.ItemPlacementId(Map.AreaId, Slot),
+            Kind := Kind, Position := Corners[NextCorner]
+          )
+        );
+        NextCorner := NextCorner + 1;
+    end case;
   end for;
 
-  return Items;
+  return Ok(Items);
 end function;
 
 // Builds one candidate layout from an attempt seed and applies every acceptance rule.
-function GenerateAttempt(AttemptSeed: integer; AreaId: string; DisplayName: string): result of (InteriorUnit.InteriorMap, string);
+function GenerateAttempt(AttemptSeed: integer; AreaId: string; DisplayName: string; Selected: array of option of ItemRules.ItemKind): result of (InteriorUnit.InteriorMap, string);
 begin
   const Empty: Layout := Layout(
     State := AttemptSeed, Cells := array.Fill(
@@ -414,7 +432,6 @@ begin
   );
   var Cells: array of InteriorUnit.InteriorCellKind := Connected.Cells;
   Cells[FieldIndex(Exit)] := InteriorUnit.InteriorCellKind.ExitField;
-  const CountDraw: Random.RandomDraw := Random.DrawBelow(Connected.State, 2);
   const Order: array of integer := RoomsFarthestFirst(
     Connected.Rooms,
     WalkingDistances(Cells, Start)
@@ -423,12 +440,10 @@ begin
     AreaId := AreaId, DisplayName := DisplayName, Width := Validation.GeneratedDungeonWidth,
     Height := Validation.GeneratedDungeonHeight, Cells := Cells, Start := Start,
     StartFacing := Coordinates.FacingDirection.East, Exit := Exit, Items := [],
-    Hostiles := HostilePlacements(
-      AreaId, Connected.Rooms, Order, 1 +
-      CountDraw.Value
-    )
+    Hostiles := []
   );
-  Map.Items := ItemPlacements(Map, Connected.Rooms);
+  Map.Hostiles := HostilePlacements(Map, Connected.Rooms, Order);
+  Map.Items := try ItemPlacements(Map, Connected.Rooms, Selected);
   return Validation.ValidateGeneratedDungeon(Map);
 end function;
 
@@ -438,6 +453,7 @@ end function;
 public function GenerateDungeon(Seed: integer; RegionX: integer; RegionY: integer; AreaId: string): result of (InteriorUnit.InteriorMap, string);
 begin
   const DisplayName: string := Content.DungeonName(Seed, RegionX, RegionY);
+  const Selected := SelectedItems(Seed, RegionX, RegionY);
   var LastError: string := 'generated dungeon was not attempted';
   for Attempt: integer := 0 to GenerationAttempts - 1 do
     begin
@@ -450,7 +466,7 @@ begin
         ) +
         (Attempt * 15485863), Random.RandomStateModulus
       );
-      case GenerateAttempt(AttemptSeed, AreaId, DisplayName) of
+      case GenerateAttempt(AttemptSeed, AreaId, DisplayName, Selected) of
         when Ok(const Map):
           begin
             return Ok(Map);

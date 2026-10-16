@@ -486,7 +486,7 @@ closing the final terminal review for 14s. See the
 [server console documentation](product/server-console.md) for operation and
 controls.
 
-### 14b. Dungeon contents — NEXT
+### 14b. Dungeon contents — IN REVIEW
 
 The [14b implementation plan](plans/14b-dungeon-contents.md) fixes twelve small,
 ordered checkpoints with positive, negative and edge-case tests. It adds stored,
@@ -501,22 +501,97 @@ generated floor finds and a Healing potion. Opponent death drops remain deferred
   map and server dashboard without regeneration during rendering or load.
   Checkpoint 02 passed formatting, all 20 project checks and the complete
   workspace suite (70/70 programs) on 2026-10-15, with positive, negative and
-  boundary coverage. Current generator is 7 and level format 2; protocol 14,
-  world format 3 and save format 7 remain unchanged. Checkpoint 03 is next.
-- [ ] Support both opponent kinds through rules, strict storage/wire mappings,
+  boundary coverage. That checkpoint retained protocol 14 and save format 7.
+  Generator 7, level format 2 and world format 3 remain current.
+- [x] Support both opponent kinds through rules, strict storage/wire mappings,
   Fog of War, sprites and kind-correct combat/death animation.
-- [ ] Keep coin, sword and jerkin; guarantee one potion and roll two optional
-  floor-find slots with stable original identities, including empty slot gaps.
-- [ ] Use a carried potion from inventory to heal up to six health points before
+  Checkpoint 03 introduces protocol 15 and save format 8. The generator still
+  places skeletons until checkpoint 09. Formatting, all 20 project checks and
+  the full suite pass (76/76 programs); independent subagent review and its
+  follow-up corrections are complete on 2026-10-16.
+- [x] Add Healing potion identity and the terminal consumed location, with
+  full origin validation in save format 8, inventory exclusion, visible `p`
+  and distinct floor/map art (checkpoint 04). Stored levels can include the
+  explicit potion slot 3; generation still emits three base items until 09.
+  Formatting, all 20 project checks and the complete suite pass (79/79 programs)
+  on 2026-10-16; independent subagent review found no actionable defects.
+- [x] Resolve carried-potion use as one authoritative turn (checkpoint 05):
+  capped healing before the hostile phase, actual healing log, exact item
+  consumption and unchanged state/dice on rejection. Checkpoint 06 adds the
+  protocol/session path below; checkpoint 07 adds player controls. All 20 project
+  checks and the complete suite pass (80/80 programs) on 2026-10-16;
+  independent subagent review found no relevant defects or missing coverage.
+- [x] Expose strict `use_item` and required inventory `usable` in both visible
+  state families (checkpoint 06). The server uses the existing turn path;
+  accepted use marks unsaved progress, while rule/preparation failures retain
+  the installed session. Checkpoint 07 adds inventory keyboard use.
+  Formatting, all 20 project checks and the complete suite pass (85/85 programs)
+  on 2026-10-16; independent subagent review found no relevant defects or
+  missing required coverage.
+- [x] Make inventory `Enter` use a projected consumable before equip/unequip
+  (checkpoint 07), show its action and health, retain selection by item ID and
+  preserve pending/modal guards and `D` dropping. Only server replies change
+  health or inventory. Generated potion placement remains checkpoint 09.
+  Formatting, all 20 project checks and the final complete suite pass (86/86
+  programs) on 2026-10-16. Independent subagent review found a transport-failure
+  animation lifecycle issue; it is fixed, regression-tested and rechecked with
+  no open relevant findings.
+- [x] Implement bounded optional loot selection independently of geometry and
+  combat (checkpoint 08): exhaustively tested fixed 100-roll table, private
+  normalized seed derivation and separate domains for slots 4/5. Placement
+  integration remains checkpoint 09.
+  Formatting, all 20 project checks and the complete suite pass (87/87 programs)
+  on 2026-10-16. Independent subagent review recalculated all 13 pinned vectors
+  and found no relevant defects or missing required coverage.
+- [x] Integrate final generated contents (checkpoint 09): one skeleton and one
+  rat in the farthest safe rooms, four guaranteed floor finds and optional
+  original slots 4/5 without renumbering. Strict stored validation accepts 4..6
+  finds without rerolling; generic authored maps retain their own counts.
+  The three final fingerprints retain their previous geometry and endpoints.
+  Formatting, all 20 project checks and the final complete suite pass (88/88
+  programs) on 2026-10-16. Independent review and follow-up review are complete;
+  the stale schema count and old expected-three save assertions are corrected.
+  No relevant findings remain.
+- [x] Use a carried potion from inventory to heal up to six health points before
   the opponents act once. Reject use at full health or of an invalid item without
   changing state, dice, time or unsaved-progress status.
-- [ ] Persist consumed potion records and prove cross-area drop/pickup/use,
-  explicit save/load, reconnect, revisit and Start over without duplication.
-- [ ] Use protocol 15, generator 7, level format 2 and save format 8; keep world
+- [x] Verify immutable levels and resumable cross-area item state (checkpoint 10):
+  real pickup/drop/use and attacks, save/reopen/load during combat and outdoors,
+  optional slot-5 potion with slot 4 absent, all potions consumed, defeated
+  opponents, revisit, Start over and earlier-save rewind. Stored bytes stay
+  unchanged; corrupt origins/slots, obsolete formats and I/O failures preserve
+  saves and levels. A filesystem trace confirms one read per visited level on
+  save/load. All 11 world-test programs, formatting, all 20 project checks and
+  the final complete suite pass (89/89 programs) on 2026-10-16. Independent
+  review found no relevant defects or required coverage gaps. The complete
+  client/server and reconnect sequence follows in checkpoint 11 below.
+- [x] Exercise the complete client/server contents loop (checkpoint 11): natural
+  TCP play with gear, potion use and both opponents; exact unsaved-turn replay
+  after reconnect; explicit save/Continue/revisit and earlier-save rewind.
+  Actual network combat facts drive kind-correct client death art; stored names
+  match map labels and dashboard facts. Old formats, rejected use, capacity,
+  later defeat, failed load/send, duplicate names and dirty shutdown are covered.
+  Formatting, all 20 project checks and the final complete suite pass (91/91
+  programs) on 2026-10-16. Independent review found a missing explicit enemy-phase
+  assertion; fixed literal health/damage/RNG anchors close it, and follow-up
+  review confirms no open findings. Checkpoint 12 closes automated verification
+  below; terminal review remains deliberately open.
+- [x] Use protocol 15, generator 7, level format 2 and save format 8; keep world
   format 3 and runtime settings unchanged. Preserve incompatible files and report
   why their worlds/saves cannot continue; do not migrate or delete them.
-- [ ] Cover pure rules, stored formats, protocol rejection, real keyboard input
-  and TCP play; run complete verification and obtain explicit user acceptance.
+- [x] Cover pure rules, stored formats, protocol rejection, real keyboard input
+  and TCP play. Final checkpoint 12: formatting, all 20 project checks and the
+  complete suite pass (91/91 programs) on 2026-10-16. The
+  [persistence measurements](architecture/persistence-measurements.md) cover
+  1/10/100 visits with fresh and consumed items, baseline controls and phase
+  investigation. Documentation is aligned; independent review corrected two
+  stale placement/coin claims and clarified the phase timings to include
+  self-contained validation. Follow-up review confirms no open relevant findings
+  or benchmark-code defect.
+- [ ] User terminal review and explicit acceptance remain deliberately open.
+  The user cannot perform this review in the cloud and explicitly deferred it.
+  Automated coverage does not replace acceptance; keep the plan and IN REVIEW
+  status, and do not mark DONE. 13b follows acceptance, before 14c.
 
 Generated loot has stable identities derived from its source and is created
 only once. Persist consumed items as consumed rather than deleting their

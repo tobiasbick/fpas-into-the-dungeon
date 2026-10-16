@@ -1,0 +1,81 @@
+// Verifies use capabilities and full inventory projections, including the generated view's UTF-8 budget.
+program ItemUseProjectionTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior.Generation as Generation, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as SessionUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.World as WorldUnit, Std.Conv as Conv, Std.Net.Utf8 as Utf8, Std.Test as Test, Std.Time as Time;
+
+begin
+  const Metadata := Fixtures.FixtureMetadata();
+  const Map := Generation.GenerateDungeon(Metadata.Seed, 0, 0, Fixtures.FixtureAreaId()).Unwrap();
+  Test.AssertEquals(31, Map.Width);
+  Test.AssertEquals(21, Map.Height);
+  const World := WorldUnit.WorldSession(
+    Directory := '.temp-data/use-projection-' + Conv.IntToStr(Time.TimestampMillis()),
+    Metadata := Metadata,
+    Cache := [],
+    Clock := 0,
+    CacheLimit := 64
+  );
+  var Outside := Areas.MaterializeArea(GameState.NewGame(Metadata), Map);
+  // Full inventory uses escaped Unicode IDs at the wire text bound; kinds still determine capability.
+  for Index: integer := 0 to 63 do
+    Outside.Items.PushInPlace(
+      Items.GameItem(
+        Id := 'é"\'.RepeatStr(40) + 'x'.RepeatStr(6) + Conv.IntToStr(Index),
+        Kind := if Index = 0 then Items.ItemKind.HealingPotion
+          else Items.ItemKind.AncientCoin
+          end if,
+        Location := Items.ItemLocation.CarriedByPlayer
+      )
+    );
+  end for;
+  const Inside := Outside with Area := Coordinates.AreaKind.Dungeon; AreaId := Map.AreaId; Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Map.Start, Facing := Map.StartFacing)
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    Metadata.OutdoorAreaId,
+    Metadata.SpawnEntrance
+  ); end with;
+  var Log: array of string := [];
+  var Events: array of Combat.CombatEvent := [];
+  for Index: integer := 1 to 8 do
+    Log.PushInPlace('"\'#10.RepeatStr(53) + 'x');
+    Events.PushInPlace(
+      Combat.CombatEvent(
+        Kind := Combat.CombatEventKind.HostileHit,
+        Amount := 999,
+        HostileKind := Hostiles.HostileKind.GiantRat
+      )
+    );
+  end for;
+  const Report := Projection.TurnReport(Log := Log, Events := Events);
+  for Indoors: boolean in [false, true] do
+    const State := if Indoors then Inside else Outside end if;
+    const View := GameState.AreaView(
+      Metadata := Metadata,
+      Interior := if Indoors then Some(Map) else None end if
+    );
+    const Projected := Projection.ProjectSession(
+      World,
+      View,
+      State,
+      SessionUnit.ViewportSize(Width := 80, Height := 24),
+      Report
+    ).Unwrap();
+    const Line := Servers.EncodeServer(Protocol.ServerMessage.State(Projected.State));
+    Test.AssertTrue(Utf8.Encode(Line).Length() <= 65536);
+    Test.AssertTrue(Servers.DecodeServer(Line) is Ok(_));
+    case Projected.State of
+      when Protocol.VisibleState.FirstPersonState(const Fields):
+        Test.AssertEquals(64, Fields.Inventory.Length());
+        Test.AssertTrue(Fields.Inventory[0].Usable);
+        Test.AssertFalse(Fields.Inventory[1].Usable);
+        Test.AssertEquals(8, Fields.CombatLog.Length());
+        Test.AssertEquals(8, Fields.CombatEvents.Length());
+        Test.AssertEquals(20, Fields.Health);
+      when Protocol.VisibleState.MapState(const Fields):
+        Test.AssertEquals(64, Fields.Inventory.Length());
+        Test.AssertTrue(Fields.Inventory[0].Usable);
+        Test.AssertFalse(Fields.Inventory[1].Usable);
+        Test.AssertEquals(20, Fields.Health);
+    end case;
+  end for;
+end.

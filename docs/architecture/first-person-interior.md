@@ -18,7 +18,8 @@ Item placements carry their identity, kind, and initial position. Opponent
 placements form an array with the same information; an empty array is valid.
 Placement identities are unique across items and opponents. Opponents occupy
 distinct floor fields away from items, the start, and the exit. Generated
-dungeons place one or two restless skeletons and the coin, sword, and jerkin.
+dungeons place one restless skeleton and one giant rat, plus guaranteed coin,
+sword, jerkin and healing potion finds and optional original item slots 4/5.
 First entry materializes item kinds and opponents from these placements;
 opponents start dormant at full health.
 
@@ -45,7 +46,7 @@ succeeds.
 
 ## Protocol and server projection
 
-Protocol version `10` carries distinct intentions for a relative one-field step
+Protocol version `10` introduced distinct intentions for a relative one-field step
 (`forward`, `backward`, `left`, or `right`) and a 90-degree turn (`left` or
 `right`). Outdoor cardinal movement remains a separate message.
 
@@ -108,7 +109,7 @@ view.
 ## Persistence and lifecycle
 
 Dungeon geometry is world data: world and chunk format `3`, generator version
-`6`, and level-file format `1`. The current savegame format `7`
+`7`, and level-file format `2`. The current savegame format `8`
 persists the active interior area ID, local field, cardinal facing, and exact
 outdoor return location, together with accumulated discovery and item state.
 Reconnecting does not restore it implicitly: the

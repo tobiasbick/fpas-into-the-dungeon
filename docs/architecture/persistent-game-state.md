@@ -37,7 +37,7 @@ opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
 the supplied current map.
 
-The protocol-14 welcome supplies a bounded catalog with world identities,
+The protocol-15 welcome supplies a bounded catalog with world identities,
 original parameters, compatibility, save classifications and creation defaults.
 Continue loads a valid explicit save or starts at spawn when no save exists.
 An incompatible or unreadable save rejects Continue and remains on disk. Start
@@ -50,7 +50,7 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `7` is an exact JSON object containing the selected world ID,
+Savegame format `8` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
 server-owned item state, the player's health, every opponent, and the
@@ -65,7 +65,8 @@ First entry materializes the map's placements and records the visit. Loading
 restores the list and entities together; revisiting never recreates taken items
 or defeated opponents. Interior discovery and dungeon entities may reference
 only visited areas. Saves without the required field are rejected; the format
-remains 7 as this feature branch's single savegame version bump.
+is 8 after 14b checkpoint 03 adds the giant rat. Format 7 saves remain intact
+and cannot be continued; recreate progress explicitly through Start over.
 
 Outdoor discovery is stored sparsely as canonically ordered signed chunk
 records. Each record contains `chunk_x`, `chunk_y`, and exactly 128 rows of 128
@@ -76,13 +77,27 @@ separate states: visibility is derived after start or load, and remembered
 means discovered but not currently visible.
 
 Every item record contains its stable ID, kind, and location. The current item
-location is either a validated field in a visited dungeon or the player's
-inventory. Every item placement of every visited dungeon must occur exactly
+location is a validated field in a visited dungeon, carried inventory, a worn
+slot or the terminal consumed state. Only `healing_potion` may be consumed:
+its location must be exactly `{"kind":"consumed"}`, with no payload fields.
+The ID and kind stay in the item array, even after consumption in another area.
+Consumed records do not count toward the 64 carried/worn limit and are not
+projected. Every item placement of every visited dungeon must occur exactly
 once, so malformed, missing, duplicate, unknown, or misplaced item state
 rejects the complete savegame. There is no separate client inventory file.
+Save format stays 8 for checkpoint 04; no schema reader, migration, implicit
+repair or automatic deletion is added. Revisit and save/load retain consumed
+records and never create replacements. Checkpoint 05 adds a pure healing rule
+that marks the selected carried potion consumed before the hostile phase;
+checkpoint 06 exposes it through the active session. Accepted use marks progress
+unsaved and retains the last successful save timestamp. Rejections, including
+failed response preparation, preserve the installed session. The rule never
+saves or deletes files, including when the resulting turn ends in defeat.
 
 Each opponent record contains its stable ID, kind, area, field, health, and
 alert status. A destroyed opponent stays recorded with zero health. Health
+is bounded by kind: `restless_skeleton` accepts 0..12, `giant_rat` accepts 0..6.
+Unknown kind strings are rejected. Health
 outside its range, an unknown or missing opponent, an opponent on a wall,
 and a dice state outside `0 <= state < 2^31` invalidate the save. Saving
 during a fight is allowed; the combat log and a defeat are never saved.
@@ -115,6 +130,43 @@ is rejected (`world_data_error`, `storage_error`). The catalog remains usable.
 A wrong path type is an I/O failure, including a file occupying the `saves`
 directory. Only explicit replacement or explicit local maintenance removes
 saved data. See the [level storage contract](dungeon-level-storage.md).
+
+## Cross-area resume and rewind
+
+Checkpoint 10 verifies storage with the final generated contents. The same
+original potion ID survives pickup, transfer, dropping and consumption in a
+second dungeon, including optional slot 5 when slot 4 is absent. Terminal
+consumed items and defeated opponents must remain present exactly once.
+Complete-state comparisons after reopening a world cover health, RNG,
+discovery, visits, item locations and opponent state, including a save made
+with a living alerted rat.
+
+Revisit does not restore terminal records. Start over materializes original
+floor placements and full dormant opponents for a new game while preserving
+the previous explicit save and level bytes. Loading an earlier explicit save
+rewinds the mutable state and visited list; a later-created level file is
+reused and materialized only when that earlier game enters it.
+
+Storage tests use controlled poses and one-health opponents to isolate these
+rules. Checkpoint 11 adds a natural TCP play sequence with world creation,
+equipment, both opponent kinds and potion use, without preparing player health
+or opponent state. Disconnecting after unsaved consumption and continuing
+replays the same potion turn byte for byte, including combat facts and dice.
+An explicit earlier save can restore the carried potion and living opponents
+after later progress was saved. Start over and overwrite/discard guards retain
+the earlier file until replacement is explicitly requested.
+
+Separate session cases cover full inventory then consume/pickup, defeat on a
+later turn after drinking, failed loads, preparation errors and failed sends.
+TCP rejection cases retain health, items, RNG and the old explicit save. A real
+listener test stops with an active dirty game and confirms that shutdown keeps
+the save bytes. No autosave, migration, format change or additional cache is
+introduced by these verification cases.
+
+The final persistence smoke benchmark retains consumed records alongside fresh
+floor finds at 1, 10 and 100 visits, and verifies the complete encoded state
+after every load. See [persistence measurements](persistence-measurements.md)
+for the baseline comparison, timing boundaries and compiler identity.
 
 ## Client preferences
 

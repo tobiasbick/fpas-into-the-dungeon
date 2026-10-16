@@ -1,0 +1,95 @@
+// Verifies a saved rat encounter through the production handshake, load, attack and TCP response.
+program RatNetworkTest;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Server as ServerUnit, Dungeon.Server.Config as ConfigUnit, Dungeon.Test.Levels as Levels, Dungeon.Test.Wire as Wire, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+function ServeOne(Listener: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Connection := try Net.AcceptWithCancellation(Listener, Token);
+  const Configured := try Net.SetTimeout(Connection, 30000);
+  const Served := ServerUnit.ServeConnection(Connection, Config, Token);
+  const Closed := try Net.Close(Connection);
+  return Served;
+end function;
+
+begin
+  const Root := '.temp-data/rat-network-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'rats', 12345, 4, 32).Unwrap();
+  const Map := Levels.SpawnLevel(World);
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  const Path := World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' +
+    Conv.IntToStr(Region.Y) + '/0.json';
+  const Stored := Encoding.EncodeLevel(World.Metadata, Map);
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Stored).Unwrap());
+  var State := Levels.EnterSpawnLevel(World, GameState.NewGame(World.Metadata)).Unwrap() with RandomState := 1; end with;
+
+  for I: integer := 0 to State.Hostiles.Length() - 1 do
+    State.Hostiles[I] := State.Hostiles[I] with Health := 0; end with;
+  end for;
+
+  State.Hostiles[1] := State.Hostiles[1] with Health := 1; Alerted := true; end with;
+  const Target := State.Hostiles[1].Position;
+  var Pose := Coordinates.FirstPersonPose(
+    Position := Target,
+    Facing := Coordinates.FacingDirection.North
+  );
+  for Facing: Coordinates.FacingDirection in [
+    Coordinates.FacingDirection.North,
+    Coordinates.FacingDirection.East,
+    Coordinates.FacingDirection.South,
+    Coordinates.FacingDirection.West
+  ] do
+    var Candidate := Target;
+    case Facing of
+      when Coordinates.FacingDirection.North:
+        Candidate.Y := Candidate.Y + 1;
+      when Coordinates.FacingDirection.East:
+        Candidate.X := Candidate.X - 1;
+      when Coordinates.FacingDirection.South:
+        Candidate.Y := Candidate.Y - 1;
+      when Coordinates.FacingDirection.West:
+        Candidate.X := Candidate.X + 1;
+    end case;
+
+    if InteriorUnit.InteriorCellAt(Map, Candidate).Unwrap() = InteriorUnit.InteriorCellKind.Floor then
+      Pose := Coordinates.FirstPersonPose(Position := Candidate, Facing := Facing);
+    end if;
+  end for;
+
+  Test.AssertFalse(Coordinates.SamePosition(Pose.Position, Target));
+  State.Player := Coordinates.PlayerPosition.FirstPerson(Pose);
+  State := Exploration.RevealCurrentArea(Levels.LevelView(World, State, Map), State).Unwrap();
+  Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+  const Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root,
+    WorldId := 'rats', WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  scope
+    const ServerTask: task of result of (boolean, string) := go ServeOne(Listener, Config, Token);
+    var Client := Wire.ConnectClient(Net.ListenerLocalAddress(Listener).Unwrap().Port, Token);
+    Test.AssertTrue(Client.Last is Protocol.ServerMessage.Welcome(15, _));
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+    Test.AssertEquals('r', Wire.FirstPersonOf(Client).Rows[Target.Y][Target.X]);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Attack, Token);
+    const Fight := Wire.FirstPersonOf(Client);
+    Test.AssertEquals(20, Fight.Health);
+    Test.AssertEquals(2, Fight.CombatEvents.Length());
+    Test.AssertEquals(2, Fight.CombatEvents[0].Amount);
+    Test.AssertEquals('r', Fight.CombatEvents[0].HostileCode);
+    Test.AssertTrue(Fight.CombatEvents[1].Kind = Protocol.VisibleCombatEventKind.HostileDefeated);
+    Test.AssertEquals('r', Fight.CombatEvents[1].HostileCode);
+    Test.AssertEquals('.', Fight.Rows[Target.Y][Target.X]);
+    Test.AssertFalse('bones' in Fight.CombatLog[1]);
+    Wire.CloseClient(Client, Token);
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+  end scope;
+
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+  Test.AssertEquals(Stored, Fs.ReadText(Path).Unwrap());
+  Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+end.

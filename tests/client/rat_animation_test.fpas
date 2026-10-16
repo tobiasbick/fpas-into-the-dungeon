@@ -1,0 +1,141 @@
+// Verifies distinct standing/fallen rat art, kind-targeted effects and simultaneous combat playback.
+program RatAnimationTest;
+
+uses Dungeon.Client.Animation as AnimationUnit, Dungeon.Client.Raycast as Raycast, Dungeon.Client.Raycast.Sprites as Sprites, Dungeon.Protocol as Protocol, Std.Test as Test, Std.Tui as Tui;
+
+function Hall(Code: string): Protocol.FirstPersonVisibleState;
+begin
+  return Protocol.FirstPersonVisibleState(
+    Title := 'Rat hall', Status := 'Ready', Width := 7, Height := 3,
+    Rows := ['#######', '#.' + Code + '...#', '#######'],
+    KnowledgeRows := ['vvvvvvv', 'vvvvvvv', 'vvvvvvv'],
+    PlayerX := 1, PlayerY := 1, Facing := Protocol.FirstPersonFacing.East, Inventory := [],
+    Health := 20, MaxHealth := 20, Character := [], CombatLog := [], CombatEvents := []
+  );
+end function;
+
+function Changed(A: Tui.TuiCellGrid; B: Tui.TuiCellGrid): integer;
+begin
+  var Count := 0;
+  for I: integer := 0 to A.Cells.Length() - 1 do
+    if A.Cells[I] <> B.Cells[I] then
+      Count := Count + 1;
+    end if;
+  end for;
+
+  return Count;
+end function;
+
+function Fact(Kind: Protocol.VisibleCombatEventKind; Amount: integer; Code: string): Protocol.VisibleCombatEvent;
+begin
+  return Protocol.VisibleCombatEvent(Kind := Kind, Amount := Amount, HostileCode := Code);
+end function;
+
+begin
+  const Rat := Hall('r');
+  const Skeleton := Hall('h');
+  const Empty := Hall('.');
+  const RatSprite := Sprites.VisibleSprites(Rat)[0];
+  const SkeletonSprite := Sprites.VisibleSprites(Skeleton)[0];
+  Test.AssertEquals('r', RatSprite.Code);
+  Test.AssertTrue(RatSprite.HeightFraction < SkeletonSprite.HeightFraction);
+  const RatGrid := Raycast.RenderFirstPersonGrid(Rat, 61, 25);
+  // Wall depth must occlude the shorter rat just as it occludes an upright figure.
+  const BehindWall := Rat with Rows := ['#######', '#.#r..#', '#######']; end with;
+  const EmptyBehindWall := BehindWall with Rows := ['#######', '#.#...#', '#######']; end with;
+
+  Test.AssertEquals(
+    0, Changed(
+      Raycast.RenderFirstPersonGrid(BehindWall, 61, 25),
+      Raycast.RenderFirstPersonGrid(EmptyBehindWall, 61, 25)
+    )
+  );
+  // A stale dynamic marker in a remembered field cannot become a visible billboard.
+  const Remembered := Rat with KnowledgeRows := ['vvvvvvv', 'vvrvvvv', 'vvvvvvv']; end with;
+
+  Test.AssertEquals(0, Sprites.VisibleSprites(Remembered).Length());
+  Test.AssertEquals(
+    0, Changed(
+      Raycast.RenderFirstPersonGrid(Remembered, 61, 25),
+      Raycast.RenderFirstPersonGrid(
+        Empty with KnowledgeRows := Remembered.KnowledgeRows; end with,
+        61,
+        25
+      )
+    )
+  );
+  Test.AssertTrue(Changed(RatGrid, Raycast.RenderFirstPersonGrid(Empty, 61, 25)) > 0);
+  Test.AssertTrue(Changed(RatGrid, Raycast.RenderFirstPersonGrid(Skeleton, 61, 25)) > 0);
+  const Playback := AnimationUnit.StartAnimation(
+    [
+      Fact(Protocol.VisibleCombatEventKind.PlayerHit, 2, 'r'),
+      Fact(Protocol.VisibleCombatEventKind.HostileDefeated, 0, 'r'),
+      Fact(Protocol.VisibleCombatEventKind.HostileHit, 3, 'h')
+    ], false
+  );
+  const Phase := AnimationUnit.AnimationPhaseMilliseconds;
+  const Impact := AnimationUnit.AnimationFrameAt(AnimationUnit.AdvanceAnimation(Playback, Phase));
+  Test.AssertEquals('r', Impact.Effect.TargetCode);
+  Test.AssertEquals('r', Impact.Effect.FallenCode);
+  Test.AssertTrue(Impact.Effect.FallenAhead);
+  Test.AssertTrue(Impact.Effect.Flash);
+  // A rat hit cannot flash a standing skeleton in the final projection.
+  Test.AssertEquals(
+    0, Changed(
+      Raycast.ComposeFirstPersonGrid(
+        Skeleton, Raycast.RenderFirstPersonScene(Skeleton, 61, 25),
+        Impact.Effect with FallenAhead := false; end with
+      ),
+      Raycast.RenderFirstPersonGrid(Skeleton, 61, 25)
+    )
+  );
+  // Reconstruct the vanished target from its event, never from a remaining actor's code.
+  const Fallen := Sprites.NoFirstPersonEffect() with FallenAhead := true; FallenCode := Impact.Effect.FallenCode; TargetCode := 'r'; end with;
+
+  Test.AssertEquals(
+    0, Changed(
+      RatGrid, Raycast.ComposeFirstPersonGrid(
+        Empty,
+        Raycast.RenderFirstPersonScene(Empty, 61, 25), Fallen
+      )
+    )
+  );
+  Test.AssertTrue(
+    Changed(
+      RatGrid, Raycast.ComposeFirstPersonGrid(
+        Empty,
+        Raycast.RenderFirstPersonScene(Empty, 61, 25), Fallen with FallenCode := 'h'; end with
+      )
+    ) > 0
+  );
+  const Lunge := AnimationUnit.AnimationFrameAt(
+    AnimationUnit.AdvanceAnimation(Playback, 2 * Phase + (Phase div 2))
+  );
+  Test.AssertTrue('h' in Lunge.Effect.ActorCodes);
+  Test.AssertFalse('r' in Lunge.Effect.ActorCodes);
+  Test.AssertEquals('-3', Lunge.PlayerText);
+  // Two actors' hit amounts are shown together rather than silently losing the second hit.
+  const Mixed := AnimationUnit.StartAnimation(
+    [
+      Fact(Protocol.VisibleCombatEventKind.HostileHit, 3, 'h'),
+      Fact(Protocol.VisibleCombatEventKind.HostileHit, 2, 'r')
+    ],
+    false
+  );
+  const MixedFrame := AnimationUnit.AnimationFrameAt(
+    AnimationUnit.AdvanceAnimation(Mixed, Phase div 2)
+  );
+  Test.AssertEquals('-5', MixedFrame.PlayerText);
+  Test.AssertTrue('r' in MixedFrame.Effect.ActorCodes);
+  Test.AssertTrue('h' in MixedFrame.Effect.ActorCodes);
+  for Width: integer in [0, 1, 4, 61] do
+    for Height: integer in [0, 1, 3, 25] do
+      Test.AssertEquals(
+        Width * Height, Raycast.ComposeFirstPersonGrid(
+          Empty,
+          Raycast.RenderFirstPersonScene(Empty, Width, Height), Impact.Effect
+        ).Cells.Length()
+      );
+    end for;
+  end for;
+end.

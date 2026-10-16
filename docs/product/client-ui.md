@@ -289,16 +289,30 @@ each frame only composes sprites and texts.
 
 Defeat returns to the session start screen with a `You have fallen` overlay
 containing the server's summary. `Continue` closes it with `New game` focused,
-so the player can load the last explicit save or start again.
+or `Cancel` while the world-catalog refresh is still pending. The player can
+then load the last explicit save or start again. Disconnect and connection
+failure stop animation and return to the start screen; late ticks cannot resume
+it. This includes a viewport request deferred behind an inventory action.
 
 ## Equipment
 
 `I` opens the inventory overlay. It lists every carried and worn item with its
-slot or `cannot be worn`; W/S or Up/Down select, `Enter` asks the server to wear
-or remove the selection, `D` asks the server to drop it on the occupied dungeon
-floor field, and `Escape` or `I` closes it. The overlay stays open
-while the change is resolved, so the new state is visible at once. Changing gear
-or dropping takes a turn, so an adjacent opponent may strike in between.
+slot, worn state or use capability, plus projected health and the selected
+Enter action. W/S or Up/Down select; `Enter` asks the server to use a usable
+item, otherwise wear or remove gear. `D` asks the server to drop the selected
+item on the occupied dungeon floor field, and `Escape` or `I` closes the overlay.
+Items without a projected action do not send an Enter request. Full-health use
+is still sent so the server can decide and explain rejection.
+
+The overlay stays open through the reply. Accepted state changes update health
+and inventory together; a rejection retains the potion, selection and server
+reason. The client never heals or removes an item optimistically and consumption
+never announces pickup. Only active visible sessions can queue actions, with
+no request pending and a writable request channel. Other overlays keep their
+input ownership. Explicit navigation wraps; a refresh retains the selected ID
+when present, otherwise clamps the previous index, including an empty list.
+Using, changing or dropping an item takes a turn, so an adjacent opponent may
+strike in between. Hostile animation events still play, with no player swing.
 
 `C` opens the character sheet: health, then each server-formatted derived value
 with its source, such as `Damage d6+1 · Rusty short sword`, then the worn
@@ -389,6 +403,8 @@ The client UI foundation is complete when:
 - client projects do not import server-owned game rules; and
 - the implementation and this document describe the same behavior.
 
-Title artwork, complete inventory, combat UI, textured or final
-first-person styling, and accessibility conventions are deferred until their
-corresponding gameplay slices are planned.
+Inventory use, gear controls, kind-specific combat art and death animation now
+have headless and TCP coverage. The final 14b visual/keyboard review in a real
+terminal remains deliberately open: it cannot be performed in this cloud
+environment. Accessibility conventions and further first-person styling remain
+later work.

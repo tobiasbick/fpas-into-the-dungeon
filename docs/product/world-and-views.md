@@ -84,13 +84,28 @@ define quests, experience, or levels.
   without necessarily changing game state.
 - **Item** is a server-owned game object with stable identity, kind, and exactly
   one authoritative location.
+- **Floor find** is an item initially placed on ordinary dungeon floor. It keeps
+  its identity through pickup, dropping and consumption.
+- **Original item slot** is the stable number used in a generated item's ID.
+  Slots 0..3 are required; 4/5 are optional. Empty slots are omitted without
+  renumbering later finds.
 - **Inventory** is the set of items whose authoritative location is the player.
   The visible inventory is only a client-safe projection of that set.
+- **Usable** is the server-projected capability of a carried consumable. It is
+  independent of current health; the server can reject a request at full health.
 - **Ancient coin** is a collectible item placed in every generated dungeon.
   It proves inspection, pickup, projection, and persistence without defining a
   broader loot system.
 - **Equipment** is the set of items the player wears. A worn item is still part
   of the inventory; its location records the slot it occupies.
+- **Healing potion** is a non-equippable item represented by a crimson flask
+  and the exploration-map marker `!`. Its stored kind is `healing_potion`.
+  Its rule restores up to six health points, capped at derived maximum health,
+  before the opponents act. Inventory `I`/`Enter` uses a carried potion.
+  Every generated dungeon guarantees one; optional finds may add more.
+- **Consumed** is a terminal potion location with no field, owner or slot.
+  The item retains its original identity for save validation while appearing
+  in neither inventory nor floor projections. It uses no inventory capacity.
 - **Slot** is the body location for one worn item: **weapon** or **body**. An
   item kind fits at most one slot, and each slot holds at most one item.
 - **Rusty short sword** is the first weapon and **Leather jerkin** the first
@@ -102,18 +117,23 @@ define quests, experience, or levels.
 - **Opponent** is a hostile actor with stable server-owned identity, kind,
   area, position, health, and alert status. A standing opponent blocks its
   field; a destroyed one stays recorded but is never projected.
-- **Restless skeleton** is the first opponent. Every generated dungeon places one
-  or two in the rooms farthest from its start.
+- **Restless skeleton** is the first opponent. Each generated dungeon places one
+  in its farthest eligible room outside the exit room.
+- **Giant rat** is the second opponent, with six health, a d2 attack and distinct
+  floor-level art. Each generated dungeon places one in the next farthest
+  eligible room. Neither opponent may initially see the start.
 - **Health** is the player's current and full hit points. Reaching zero means
   defeat.
-- **Turn** is one time-consuming player action (step, attack, wait, or a change
-  of equipment) followed
-  by the opponents' actions. Turning, interaction, and saving are not
-  turns.
+- **Turn** is one accepted time-consuming player action: a step, attack, wait,
+  wearing/removing or dropping an item, or using a potion. In a dungeon it is
+  followed by one opponent phase. Turning, inspection, pickup, saving and
+  rejected intentions do not advance time. Outdoors a step heals one point;
+  potion use heals without an opponent phase or additional step healing.
 - **Attack** is the player intention that strikes the field directly ahead.
 - **Combat log** is the ordered list of messages describing one resolved turn.
 - **Combat event** is one structured fact of a resolved turn, such as a hit and
-  its damage. Combat events drive the client's animation and never change state.
+  its damage and involved opponent kind. Combat events drive the client's
+  animation and never change state.
 - **Defeat** ends the current game session when the player's health reaches
   zero. The connection remains, and the player may load or start a game.
 - **Visible state** is the server-produced, client-safe projection of the
@@ -168,7 +188,9 @@ area.
   world knowledge. It may be panned independently of the player and does not
   replace the primary view or issue movement intentions.
 - **Inventory overlay** lists carried and worn items with a client-owned
-  selection; `Enter` asks the server to wear or remove the selected item.
+  selection and projected health; `Enter` asks the server to use, wear or remove
+  the selected item according to its projected capability. Selection follows
+  stable identity across refreshes and clamps when that identity disappears.
 - **Character sheet** is the overlay that shows health, the server-formatted
   derived values with their sources, and the equipment.
 - **Combat animation** is the client-only playback of one turn's combat events
@@ -212,9 +234,10 @@ an entrance remains ordinary outdoor movement; `Enter` requests a
 server-authoritative interaction, which activates the transition on that field.
 
 Each entrance leads to a named generated dungeon: a 31 by 21 area of
-rooms and corridors with a start beside one visible exit field, one or two
-restless skeletons, and an Ancient coin, a Rusty short sword, and a Leather
-jerkin. Its level is generated and stored on the first visit and read back
+rooms and corridors with a start beside one visible exit field, a Restless
+skeleton, a Giant rat, and guaranteed Ancient coin, Rusty short sword, Leather
+jerkin and Healing potion finds, plus optional original item slots 4/5.
+Its level is generated and stored on the first visit and read back
 afterwards. Items can be inspected from the field before them, picked up with
 `Enter`, worn, dropped with `D`, and carried into other dungeons. The server
 accepts the exit interaction only on the exit field and then returns the player

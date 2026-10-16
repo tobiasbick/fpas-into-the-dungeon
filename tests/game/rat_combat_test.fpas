@@ -1,0 +1,160 @@
+// Verifies kind-specific combat, exact dice, mixed turn order, death facts and health bounds.
+program RatCombatTest;
+
+uses Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interaction as Interaction, Dungeon.Items as Items, Dungeon.Movement as Movement, Std.Test as Test;
+
+function Encounter(Health: integer): GameState.GameState;
+begin
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 4, Y := 3),
+    Coordinates.FacingDirection.West
+  );
+  State.Hostiles[0] := State.Hostiles[0] with Kind := Hostiles.HostileKind.GiantRat; Health := Health; Alerted := true; end with;
+
+  return State;
+end function;
+
+function Resolve(State: GameState.GameState; Action: Combat.TurnAction): Combat.TurnOutcome;
+begin
+  return Combat.ResolveTurn(Fixtures.FixtureAreaView(State), State, Action).Unwrap();
+end function;
+
+begin
+  Test.AssertEquals(6, Hostiles.HostileMaximumHealth(Hostiles.HostileKind.GiantRat));
+  Test.AssertEquals(12, Hostiles.HostileHitThreshold(Hostiles.HostileKind.GiantRat));
+  Test.AssertEquals(2, Hostiles.HostileDamageSides(Hostiles.HostileKind.GiantRat));
+  Test.AssertEquals('Giant rat', Hostiles.HostileDisplayName(Hostiles.HostileKind.GiantRat));
+  Test.AssertEquals('r', Hostiles.HostileVisibleCode(Hostiles.HostileKind.GiantRat));
+  Test.AssertEquals('h', Hostiles.HostileVisibleCode(Hostiles.HostileKind.RestlessSkeleton));
+  for Health: integer in [0, 1, 6] do
+    Test.AssertTrue(
+      GameState.ValidateGameState(Fixtures.FixtureAreaView(Encounter(Health)), Encounter(Health)) is Ok(_)
+    );
+  end for;
+
+  Test.AssertTrue(
+    GameState.ValidateGameState(Fixtures.FixtureAreaView(Encounter(7)), Encounter(7)) is Error(_)
+  );
+  // Independently pinned seed 1: d20=19, d3=2, d20=14, d2=2.
+  const Initial := Encounter(6) with RandomState := 1; end with;
+  const Untouched := Initial;
+  Test.AssertTrue(
+    Movement.StepFirstPerson(
+      Fixtures.FixtureAreaView(Initial),
+      Initial,
+      Coordinates.RelativeStep.Forward
+    ) is Error(_)
+  );
+  case Interaction.Interact(Fixtures.FixtureAreaView(Initial), Initial).Unwrap() of
+    when Interaction.InteractionOutcome.Described(_, const Text):
+      Test.AssertTrue('rat' in Text);
+      Test.AssertFalse('bones' in Text);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.TransitionRequested(_):
+      panic('inspecting an opponent must not change the state');
+  end case;
+
+  case Resolve(Initial, Combat.TurnAction.Attack) of
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+      Test.AssertEquals(4, State.Hostiles[0].Health);
+      Test.AssertEquals(18, State.Health);
+      Test.AssertEquals(1147902781, State.RandomState);
+      Test.AssertEquals(2, Events.Length());
+      Test.AssertTrue(
+        Events[0] =
+        Combat.CombatEvent(
+          Kind := Combat.CombatEventKind.PlayerHit,
+          Amount := 2,
+          HostileKind := Hostiles.HostileKind.GiantRat
+        )
+      );
+      Test.AssertTrue(
+        Events[1] =
+        Combat.CombatEvent(
+          Kind := Combat.CombatEventKind.HostileHit,
+          Amount := 2,
+          HostileKind := Hostiles.HostileKind.GiantRat
+        )
+      );
+      Test.AssertTrue('Giant rat' in Log[0]);
+    when Combat.TurnOutcome.Defeated(_):
+      panic('full health encounter must continue');
+  end case;
+
+  Test.AssertTrue(States.SameState(Initial, Untouched));
+  // A dead target remains recorded and does not retaliate; its kind survives in the facts.
+  case Resolve(Encounter(1) with RandomState := 1; end with, Combat.TurnAction.Attack) of
+    when Combat.TurnOutcome.Continued(const State, const Log, const Events):
+      Test.AssertEquals(0, State.Hostiles[0].Health);
+      Test.AssertEquals(20, State.Health);
+      Test.AssertEquals(377401575, State.RandomState);
+      Test.AssertEquals(2, Events.Length());
+      Test.AssertTrue(Events[1].Kind = Combat.CombatEventKind.HostileDefeated);
+      Test.AssertTrue(Events[1].HostileKind = Hostiles.HostileKind.GiantRat);
+      Test.AssertFalse('bones' in Log[1]);
+      Test.AssertEquals('The Giant rat falls lifeless to the floor.', Log[1]);
+      Test.AssertEquals(
+        '.',
+        GameState.InteriorVisibleCodeForState(
+          Fixtures.FixtureDungeonMap(),
+          State,
+          State.Hostiles[0].Position
+        ).Unwrap()
+      );
+    when Combat.TurnOutcome.Defeated(_):
+      panic('dead rat cannot retaliate');
+  end case;
+
+  // Every d20 boundary is checked independently, with and without armor. No RNG on a miss beyond hit.
+  for Armor: integer in [0, 2] do
+    for Seed: integer := 0 to 80 do
+      var State := Encounter(6) with RandomState := Seed; end with;
+
+      if Armor = 2 then
+        State.Items[2] := State.Items[2] with Location := Items.ItemLocation.EquippedByPlayer(
+          Items.EquipmentSlot.Body
+        ); end with;
+      end if;
+      const First := ((Seed * 1103515245) + 12345) mod 2147483648;
+      const Hit := ((First div 65536) mod 20) + 1;
+      const Second := ((First * 1103515245) + 12345) mod 2147483648;
+      const Damage := ((Second div 65536) mod 2) + 1;
+      case Resolve(State, Combat.TurnAction.Wait) of
+        when Combat.TurnOutcome.Continued(const Next, _, const Events):
+          if Hit >= 12 + Armor then
+            Test.AssertEquals(20 - Damage, Next.Health);
+            Test.AssertEquals(Second, Next.RandomState);
+            Test.AssertTrue(Events[0].Kind = Combat.CombatEventKind.HostileHit);
+          else
+            Test.AssertEquals(20, Next.Health);
+            Test.AssertEquals(First, Next.RandomState);
+            Test.AssertTrue(Events[0].Kind = Combat.CombatEventKind.HostileMiss);
+          end if;
+        when Combat.TurnOutcome.Defeated(_):
+          panic('single turn cannot defeat full-health player');
+      end case;
+    end for;
+  end for;
+  // Two adjacent kinds act in stored order: skeleton seed1 hit/d4=3, rat roll14/d2=2.
+  var Mixed := Encounter(6) with RandomState := 1; end with;
+
+  Mixed.Hostiles[0] := Mixed.Hostiles[0] with Kind := Hostiles.HostileKind.RestlessSkeleton; Health := 12; end with;
+
+  Mixed.Hostiles.PushInPlace(
+    Mixed.Hostiles[0] with Id := Mixed.AreaId + ':hostile:1'; Kind := Hostiles.HostileKind.GiantRat; Health := 6; Position := Coordinates.InteriorPosition(
+      X := 5,
+      Y := 3
+    ); end with
+  );
+  case Resolve(Mixed, Combat.TurnAction.Wait) of
+    when Combat.TurnOutcome.Continued(const State, _, const Events):
+      Test.AssertEquals(15, State.Health);
+      Test.AssertEquals(1147902781, State.RandomState);
+      Test.AssertEquals(2, Events.Length());
+      Test.AssertTrue(Events[0].HostileKind = Hostiles.HostileKind.RestlessSkeleton);
+      Test.AssertEquals(3, Events[0].Amount);
+      Test.AssertTrue(Events[1].HostileKind = Hostiles.HostileKind.GiantRat);
+      Test.AssertEquals(2, Events[1].Amount);
+    when Combat.TurnOutcome.Defeated(_):
+      panic('mixed full-health encounter must continue');
+  end case;
+end.

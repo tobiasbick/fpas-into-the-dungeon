@@ -1,6 +1,6 @@
 # Into the Dungeon
 
-Explore a generated world, enter dungeons, and fight restless skeletons — all in
+Explore a generated world, enter dungeons, and fight skeletons and giant rats — all in
 your terminal. Into the Dungeon is a client-server role-playing game written in
 [Functional Pascal](https://github.com/tobiasbick/functional-pascal).
 
@@ -24,16 +24,17 @@ run headless or with a full-terminal dashboard.
   layout is fixed on first entry and retained when you revisit it.
 - Discover the world through Fog of War and open a pannable exploration map.
 - Inspect and collect ancient coins, equip a rusty short sword and leather
-  jerkin, and drop carried items.
-- Fight restless skeletons in turn-based combat, with health, armor, combat
+  jerkin, find and use healing potions, and drop carried items.
+- Fight restless skeletons and giant rats in turn-based combat, with health, armor, combat
   messages, and animations. Walking outdoors gradually restores health.
 - Create separate worlds, continue a saved game, or start over in an existing
   world. Saves retain discovery, inventory, equipment, and visited dungeon state.
 - Monitor the server through status panels, a live log, filters, and settings
   for new-world defaults.
 
-The server currently accepts **one connected player at a time**. More opponent
-kinds, healing potions, and deeper dungeon levels are still planned.
+Each dungeon has one skeleton, one giant rat, four guaranteed floor finds and
+up to two optional finds. The server currently accepts **one connected player
+at a time**. Deeper dungeon levels are still planned.
 
 ## Quick start
 
@@ -91,20 +92,23 @@ fpas run apps/server/server.fpasprj
 | Q / E | Turn left / right by 90 degrees inside a dungeon |
 | Enter | Interact: inspect, pick up, or use an entrance or exit |
 | Space / Z | Attack ahead / wait one turn inside a dungeon |
-| I | Inventory; Enter wears or removes gear, D drops the selected item |
+| I | Inventory; Enter uses a consumable or wears/removes gear, D drops the selected item |
 | C | Character sheet with health, equipment, and derived values |
 | M | Exploration map; WASD or arrows pan, Home centers, M or Esc closes |
 | F2 / F3 | Toggle the client's context / message panels |
 | Ctrl+P | System menu, including Save and Choose world |
 | Alt+X | Quit |
 
-In dungeons, movement, attacking, waiting, and changing or dropping equipment
-advance a turn. Turning and inspecting do not. The in-game system menu also
-lists the controls.
+In dungeons, successful steps, attacks, waiting, wearing/removing or dropping
+items, and potion use advance a turn. A carried potion restores up to six health
+points before the opponents act once. At full health the server rejects use
+without consuming the potion or a turn. Turning, inspecting and rejected actions
+do not advance time. The in-game system menu also lists the controls.
 
 ## Screenshots
 
-These images come from the current TUI renderer at 144 × 45 terminal cells.
+These images were captured before the final 14b contents at 144 × 45 terminal
+cells; they do not constitute the still-open 14b terminal review.
 The gameplay images use a newly created world with seed `12345`, normal Fog of
 War, and real server responses. Font appearance can vary between terminals.
 
@@ -160,8 +164,10 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 `server.toml`; existing worlds keep their original parameters. Each new world
 gets its own identity, even when another world uses the same seed.
 
-Worlds, levels, saves, and the protocol are versioned. This checkpoint uses
-**generator 7** and **level format 2**. Generator-6 worlds remain on disk but
+Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 3**,
+**generator 7**, **level format 2**, **protocol 15** and **save format 8**.
+Format-7 saves remain intact but cannot be continued with this server.
+Generator-6 worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds
 can still be continued. Incompatible data is rejected without migration or
 automatic deletion. Obsolete runtime configuration also produces an error
@@ -170,11 +176,22 @@ asking you to delete or recreate that configuration.
 ## Development and next steps
 
 Generated dungeons (14a) and world management with the server dashboard (14s)
-are complete. Dungeon contents (14b) is in progress: the regression foundation
-and stored dungeon names are implemented. The next small checkpoint introduces
-the Giant rat; healing potions and generated floor finds follow later. Multiple
-dungeon levels belong to 14c. Settlements, multiplayer, and LLM integration
-remain later work.
+are complete. Dungeon contents (14b) is **IN REVIEW**: named dungeons now
+naturally contain a skeleton, a giant rat, equipment and healing potions.
+Optional floor finds keep stable original slot identities. Combat, storage,
+protocol, rendering and inventory `I`/`Enter` potion use are implemented.
+Storage tests now cover potion transfer between dungeons, terminal items,
+explicit save/reopen/load, revisit, Start over and earlier-save rewind without
+replacing level files. TCP tests also cover the complete contents loop, combat
+art, reconnect before saving, Continue, old-data rejection and shutdown without
+autosave. All 91 test programs and 20 project checks pass. The
+[persistence smoke measurements](docs/architecture/persistence-measurements.md)
+cover 1/10/100 visited dungeons and explain the additional validation cost.
+Independent review findings are corrected and the documentation is aligned.
+The manual terminal review remains deliberately open because it cannot be
+performed in this cloud environment. After acceptance, progression (13b) is the
+next gameplay slice, before multiple dungeon levels (14c). Settlements, multiplayer, and LLM
+integration remain later work.
 
 See the [roadmap](docs/roadmap.md) and the
 [14b implementation plan](docs/plans/14b-dungeon-contents.md) for the current
@@ -190,7 +207,7 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-The current complete suite contains **70 test programs**, covering game rules,
+The current complete suite contains **91 test programs**, covering game rules,
 deterministic generation, storage, protocol validation, TUI rendering and input,
 and real TCP sessions.
 

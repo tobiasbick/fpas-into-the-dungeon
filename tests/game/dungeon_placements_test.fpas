@@ -1,0 +1,184 @@
+// Pins final generated slot identities and rejects malformed stored placements without rerolling contents.
+program DungeonPlacementsTest;
+
+uses Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Items as Items, Dungeon.Test.Fixtures as Fixtures, Std.Test as Test;
+
+procedure Accepted(Map: InteriorUnit.InteriorMap);
+begin
+  Test.AssertTrue(Validation.ValidateGeneratedDungeon(Map) is Ok(_));
+end procedure;
+
+procedure Rejected(Map: InteriorUnit.InteriorMap);
+begin
+  Test.AssertTrue(Validation.ValidateGeneratedDungeon(Map) is Error(_));
+end procedure;
+
+begin
+  const Six := Generation.GenerateDungeon(0, 0, 0, 'six').Unwrap();
+  Accepted(Six);
+  Test.AssertEquals(6, Six.Items.Length());
+  Test.AssertTrue(Six.Items[4].Kind = Items.ItemKind.AncientCoin);
+  Test.AssertTrue(Six.Items[5].Kind = Items.ItemKind.RustyShortSword);
+  Test.AssertEquals('six:item:4', Six.Items[4].ItemId);
+  Test.AssertEquals('six:item:5', Six.Items[5].ItemId);
+  // Literal corner expectations were calculated independently of the production generator.
+  Test.AssertEquals(21, Six.Items[4].Position.X);
+  Test.AssertEquals(14, Six.Items[4].Position.Y);
+  Test.AssertEquals(26, Six.Items[5].Position.X);
+  Test.AssertEquals(14, Six.Items[5].Position.Y);
+  const Gap := Generation.GenerateDungeon(1, 0, 0, 'gap').Unwrap();
+  Accepted(Gap);
+  Test.AssertEquals(5, Gap.Items.Length());
+  Test.AssertEquals('gap:item:5', Gap.Items[4].ItemId);
+  Test.AssertTrue(Gap.Items[4].Kind = Items.ItemKind.AncientCoin);
+  Test.AssertEquals(5, Gap.Items[4].Position.X);
+  Test.AssertEquals(8, Gap.Items[4].Position.Y);
+  const PotionGap := Generation.GenerateDungeon(0, -1, 0, 'potion-gap').Unwrap();
+  Test.AssertEquals('potion-gap:item:5', PotionGap.Items[4].ItemId);
+  Test.AssertTrue(PotionGap.Items[4].Kind = Items.ItemKind.HealingPotion);
+  Test.AssertEquals(14, PotionGap.Items[4].Position.X);
+  Test.AssertEquals(15, PotionGap.Items[4].Position.Y);
+
+  const ArmorFind := Generation.GenerateDungeon(132, 0, 0, 'armor').Unwrap();
+  Test.AssertEquals(6, ArmorFind.Items.Length());
+  Test.AssertTrue(ArmorFind.Items[4].Kind = Items.ItemKind.HealingPotion);
+  Test.AssertTrue(ArmorFind.Items[5].Kind = Items.ItemKind.LeatherJerkin);
+  Test.AssertEquals('armor:item:5', ArmorFind.Items[5].ItemId);
+  Test.AssertEquals(8, ArmorFind.Items[5].Position.X);
+  Test.AssertEquals(1, ArmorFind.Items[5].Position.Y);
+
+  // Seed 9188 ranks center (8,9) second, but it sees start (4,10).
+  // The rat must use the next safe room (22,5), preserving the valid attempt-0 geometry.
+  const Skipped := Generation.GenerateDungeon(9188, 0, 0, 'skip').Unwrap();
+  Accepted(Skipped);
+  Test.AssertEquals(4, Skipped.Start.X);
+  Test.AssertEquals(10, Skipped.Start.Y);
+  Test.AssertEquals(6, Skipped.Hostiles[0].Position.X);
+  Test.AssertEquals(3, Skipped.Hostiles[0].Position.Y);
+  Test.AssertEquals(22, Skipped.Hostiles[1].Position.X);
+  Test.AssertEquals(5, Skipped.Hostiles[1].Position.Y);
+  const UnsafeCenter := Skipped.Hostiles[1] with Position := Skipped.Start with X := 8; Y := 9; end with; end with;
+
+  Test.AssertTrue(Validation.HostileSeesStart(Skipped, UnsafeCenter));
+
+  // Stored content is structural: zero, one or two optional finds need no seed comparison.
+  // Fixed domains cannot both roll empty; explicit stored fixtures still accept all counts.
+  const Four := Six with Items := Six.Items.Slice(0, 4); end with;
+
+  Accepted(Four);
+  Accepted(Six with Items := Six.Items.Slice(0, 5); end with);
+  var StoredGap := Four;
+  StoredGap.Items.PushInPlace(Six.Items[5]);
+  Accepted(StoredGap);
+  for Kind: Items.ItemKind in [
+    Items.ItemKind.AncientCoin, Items.ItemKind.RustyShortSword,
+    Items.ItemKind.LeatherJerkin, Items.ItemKind.HealingPotion
+  ] do
+    var SameKind := Six;
+    SameKind.Items[4] := SameKind.Items[4] with Kind := Kind; end with;
+
+    SameKind.Items[5] := SameKind.Items[5] with Kind := Kind; end with;
+
+    Accepted(SameKind);
+  end for;
+
+  // Every required slot and kind is checked, including slot 3 when an optional item could replace it.
+  for Index: integer := 0 to 3 do
+    Rejected(
+      Six with Items := Six.Items.Slice(0, Index).Concat(
+        Six.Items.Slice(Index + 1, 5 - Index)
+      ); end with
+    );
+    var WrongKind := Six;
+    var Kind := Items.ItemKind.AncientCoin;
+    if Index = 0 then
+      Kind := Items.ItemKind.HealingPotion;
+    end if;
+
+    WrongKind.Items[Index] := WrongKind.Items[Index] with Kind := Kind; end with;
+
+    Rejected(WrongKind);
+  end for;
+
+  Rejected(Four with Items := Four.Items.Slice(0, 3); end with);
+  var Reordered := Six;
+  Reordered.Items[4] := Six.Items[5];
+  Reordered.Items[5] := Six.Items[4];
+  Rejected(Reordered);
+  for BadId: string in ['six:item:4', 'six:item:6', 'six:item:05', 'other:item:5', ''] do
+    var Bad := Six;
+    Bad.Items[5] := Bad.Items[5] with ItemId := BadId; end with;
+
+    Rejected(Bad);
+  end for;
+  var Seventh := Six;
+  Seventh.Items.PushInPlace(Six.Items[0] with ItemId := 'six:item:6'; end with);
+  Rejected(Seventh);
+  var Overlap := Six;
+  Overlap.Items[3] := Overlap.Items[3] with Position := Six.Items[0].Position; end with;
+
+  Rejected(Overlap);
+  Overlap.Items[3] := Overlap.Items[3] with Position := Six.Hostiles[1].Position; end with;
+
+  Rejected(Overlap);
+  Overlap.Items[3] := Overlap.Items[3] with Position := Six.Start; end with;
+
+  Rejected(Overlap);
+  Overlap.Items[3] := Overlap.Items[3] with Position := Six.Exit; end with;
+
+  Rejected(Overlap);
+
+  // Hostile count, slot/kind pairing, ordering, canonical IDs, overlap and initial perception.
+  Rejected(Six with Hostiles := []; end with);
+  Rejected(Six with Hostiles := Six.Hostiles.Slice(0, 1); end with);
+  var ExtraHostile := Six;
+  ExtraHostile.Hostiles.PushInPlace(Six.Hostiles[0]);
+  Rejected(ExtraHostile);
+  for Index: integer := 0 to 1 do
+    var Bad := Six;
+    Bad.Hostiles[Index] := Bad.Hostiles[Index] with Kind := Six.Hostiles[1 - Index].Kind; end with;
+
+    Rejected(Bad);
+    Bad := Six;
+    Bad.Hostiles[Index] := Bad.Hostiles[Index] with Id := 'other:hostile:0'; end with;
+
+    Rejected(Bad);
+  end for;
+
+  Rejected(Six with Hostiles := [Six.Hostiles[1], Six.Hostiles[0]]; end with);
+  var BadHostile := Six;
+  BadHostile.Hostiles[1] := BadHostile.Hostiles[1] with Position := Six.Hostiles[0].Position; end with;
+
+  Rejected(BadHostile);
+  // The first room extends east from start; this free floor is adjacent and visible.
+  BadHostile.Hostiles[1] := BadHostile.Hostiles[1] with Position := Six.Start with X := Six.Start.X +
+    1; end with; end with;
+
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(BadHostile) is Ok(_));
+  Test.AssertTrue(Validation.HostileSeesStart(BadHostile, BadHostile.Hostiles[1]));
+  Rejected(BadHostile);
+
+  // Seed 80 rejects attempt 0 for floor share; attempt 1 has these unchanged endpoints/placements.
+  const Retried := Generation.GenerateDungeon(80, 0, 0, 'retry').Unwrap();
+  Accepted(Retried);
+  Test.AssertEquals(16, Retried.Start.X);
+  Test.AssertEquals(10, Retried.Start.Y);
+  Test.AssertEquals(4, Retried.Hostiles[0].Position.X);
+  Test.AssertEquals(15, Retried.Hostiles[0].Position.Y);
+  Test.AssertEquals(27, Retried.Hostiles[1].Position.X);
+  Test.AssertEquals(6, Retried.Hostiles[1].Position.Y);
+  Test.AssertEquals(5, Retried.Items.Length());
+  Accepted(Generation.GenerateDungeon(0, 0, 0, 'x'.RepeatStr(118)).Unwrap());
+  // An impossible identity runs through the bounded retry path and returns a normal error.
+  case Generation.GenerateDungeon(0, 0, 0, 'x'.RepeatStr(119)) of
+    when Error(const Reason):
+      Test.AssertTrue(Reason.StartsWith('dungeon generation failed after 16 attempts: '));
+    when Ok(_):
+      panic('overlong generated placement identities must reject');
+  end case;
+  // Counts/kinds above belong to generated levels; the small authored rules fixture stays generic.
+  const Authored := Fixtures.FixtureDungeonMap();
+  Test.AssertEquals(3, Authored.Items.Length());
+  Test.AssertEquals(1, Authored.Hostiles.Length());
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(Authored) is Ok(_));
+end.

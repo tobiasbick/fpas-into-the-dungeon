@@ -1,0 +1,82 @@
+// Verifies the exact UTF-8 framing boundary over TCP, including JSON escapes and rejected writes.
+program TransportLimitsTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.Transport as Transport, Std.Json as Json, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks, Std.Test as Test;
+
+function SendRaw(Connection: Net.Connection; Text: string; Token: Tasks.CancellationToken): boolean;
+begin
+  const Bytes := Utf8.Encode(Text + #10);
+  var Offset := 0;
+  while Offset < Bytes.Length() do
+    const Written := Net.SendBytesWithCancellation(
+      Connection,
+      Bytes.Slice(Offset, Bytes.Length() - Offset),
+      Token
+    ).Unwrap();
+    Test.AssertTrue(Written > 0);
+    Offset := Offset + Written;
+  end while;
+
+  return true;
+end function;
+
+begin
+  Test.AssertEquals(65536, Protocol.MaximumLineBytes);
+  const JsonText := Json.Stringify(
+    Json.JsonValue.Object(['text': Json.JsonValue.String('é'.RepeatStr(32000) + '"'#10'\')])
+  );
+  Test.AssertTrue('\n' in JsonText);
+  Test.AssertTrue('\"' in JsonText);
+  const Line := JsonText + ' '.RepeatStr(65536 - Utf8.Encode(JsonText).Length());
+  Test.AssertEquals(65536, Utf8.Encode(Line).Length());
+  Test.AssertTrue(Line.Length() < 65536);
+  Test.AssertTrue(Json.Parse(Line) is Ok(_));
+  const Oversized := Line + ' ';
+  Test.AssertEquals(65537, Utf8.Encode(Oversized).Length());
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  Test.AssertTrue(Net.SetTimeout(Client, 5000).Unwrap());
+  Test.AssertTrue(Net.SetTimeout(Server, 5000).Unwrap());
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  var Reader := Transport.NewLineReader(Server);
+  scope
+    const Sent: task of result of (boolean, string) := go Transport.WriteLine(Client, Line, Token);
+    const Read := Transport.ReadLine(Reader, Token).Unwrap();
+    Test.AssertEquals(Line, Read.Line);
+    Reader := Read.Reader;
+    Test.AssertTrue(Tasks.Wait(Sent).Unwrap());
+  end scope;
+
+  case Transport.WriteLine(Client, Oversized, Token) of
+    when Error(const Reason):
+      Test.AssertEquals(Transport.LineTooLongError, Reason);
+    when Ok(_):
+      panic('65537-byte write must fail');
+  end case;
+
+  // A rejected write emitted no prefix: the next frame is still complete and separate.
+  Test.AssertTrue(Transport.WriteLine(Client, 'after rejection', Token).Unwrap());
+  const After := Transport.ReadLine(Reader, Token).Unwrap();
+  Test.AssertEquals('after rejection', After.Line);
+  Reader := After.Reader;
+  scope
+    const Sent: task of boolean := go SendRaw(Client, Oversized, Token);
+    case Transport.ReadLine(Reader, Token) of
+      when Error(const Reason):
+        Test.AssertEquals(Transport.LineTooLongError, Reason);
+      when Ok(_):
+        panic('65537-byte received frame must fail');
+    end case;
+
+    Test.AssertTrue(Tasks.Wait(Sent));
+  end scope;
+
+  Test.AssertTrue(Net.Close(Client).Unwrap());
+  Test.AssertTrue(Net.Close(Server).Unwrap());
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+end.

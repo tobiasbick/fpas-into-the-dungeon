@@ -75,8 +75,9 @@ atomic write wins.
 
 ## Generation and visible cells
 
-Generator version 6 evaluates several smooth deterministic integer fields from
-the seed and absolute world coordinate. Very broad and regional noise establish
+Generator version 7 retains the outdoor terrain algorithm introduced in
+version 6. It evaluates several smooth deterministic integer fields from the
+seed and absolute world coordinate. Very broad and regional noise establish
 continentalness; regional elevation and coast detail shape land and water at
 smaller scales. A ridge transform raises narrow connected land bands above sea
 level instead of leaving every low-elevation region as disconnected islands.

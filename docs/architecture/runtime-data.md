@@ -12,6 +12,7 @@ default data root is:
 │   └── <world-id>/
 │       ├── world.json
 │       ├── chunks/
+│       ├── dungeons/<rx>_<ry>/0.json
 │       └── saves/
 │           └── default.json
 ├── logs/
@@ -74,11 +75,13 @@ stored default. Neither this option nor `world_id` creates a world. A missing or
 incompatible selection leaves the connected world catalog available. Use `--data-dir PATH` to select a different data root before
 configuration is loaded.
 
-Runtime configuration, world, chunk, and savegame formats support only their
-current schema and generator version. After an incompatible development change,
-select a new world id or delete the obsolete configuration or world data as
-instructed by the reported error. Configuration is never deleted automatically.
-Invalid or incompatible worlds and saves remain visible and are preserved.
+Runtime configuration, world, chunk, level and savegame formats support only
+their current schema and generator version. Current versions are world format
+3, generator 7, level format 2 and save format 8; protocol 15 connects the client
+and server. Obsolete runtime configuration reports an error asking the user to
+delete or recreate that configuration. Invalid or incompatible worlds and saves
+remain visible and are preserved; create a new world for incompatible world
+data. No data is deleted automatically.
 Storage errors remain distinct from missing or incompatible data. Recreate a
 world through the client or start over in a compatible world; replacing an
 existing save requires explicit confirmation. No migration is provided.

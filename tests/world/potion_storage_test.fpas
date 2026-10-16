@@ -1,0 +1,204 @@
+// Verifies strict potion/consumed persistence, cross-area origins and full-capacity saves without respawning records.
+program PotionStorageTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+
+function LevelPath(World: WorldUnit.WorldSession; Region: Entrances.RegionCoordinate): string;
+begin
+  return World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y) +
+    '/0.json';
+end function;
+
+// Creates a structurally valid level fixture in this test's own fresh runtime directory.
+function PotionLevel(World: WorldUnit.WorldSession; Region: Entrances.RegionCoordinate): InteriorUnit.InteriorMap;
+begin
+  const AreaId := Identities.DungeonAreaId(World.Metadata, Region);
+  const Outside := GameState.NewGame(World.Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Entrances.EntranceSite(World.Metadata, Region).Unwrap()
+  ); end with;
+  const Generated := Interiors.OpenLevelForEntry(World, Outside, AreaId).Unwrap();
+  const Map := Generated with Items := Generated.Items.Slice(0, 4); end with;
+  const Text := Encoding.EncodeLevel(World.Metadata, Map);
+  Test.AssertTrue(Fs.WriteTextAtomic(LevelPath(World, Region), Text).Unwrap());
+  return Interiors.ReadLevel(World, AreaId).Unwrap();
+end function;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('potion save must be loadable');
+  end case;
+end function;
+
+procedure PreservedInvalid(World: WorldUnit.WorldSession; Text: string);
+begin
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), Text).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+  Test.AssertEquals(Text, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+end procedure;
+
+begin
+  const Root := '.temp-data/potion-storage-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'potions', 12345, 4, 16).Unwrap();
+  const Spawn := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  var Regions: array of Entrances.RegionCoordinate := [Spawn];
+  for Offset: integer := 1 to 256 do
+    if Regions.Length() < 17 then
+      const Region := Entrances.RegionCoordinate(X := Spawn.X + Offset, Y := Spawn.Y);
+      if Entrances.EntranceSite(World.Metadata, Region) is Some(_) then
+        Regions.PushInPlace(Region);
+      end if;
+    end if;
+  end for;
+
+  Test.AssertEquals(17, Regions.Length());
+  const First := PotionLevel(World, Regions[0]);
+  const Second := PotionLevel(World, Regions[1]);
+  const FirstBytes := Fs.ReadText(LevelPath(World, Regions[0])).Unwrap();
+  const SecondBytes := Fs.ReadText(LevelPath(World, Regions[1])).Unwrap();
+  Test.AssertTrue(First.Items[3].Kind = Items.ItemKind.HealingPotion);
+  Test.AssertEquals(First.AreaId + ':item:3', First.Items[3].ItemId);
+  var State := Areas.MaterializeArea(
+    Areas.MaterializeArea(GameState.NewGame(World.Metadata), First),
+    Second
+  );
+  // Floor, carried and terminal locations round-trip through real full validation and filesystem writes.
+  for Location: Items.ItemLocation in [
+    Items.ItemLocation.InInterior(First.AreaId, First.Items[3].Position),
+    Items.ItemLocation.CarriedByPlayer,
+    Items.ItemLocation.Consumed
+  ] do
+    State.Items[3] := State.Items[3] with Location := Location; end with;
+
+    Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+    Test.AssertTrue(States.SameState(State, Loaded(World)));
+  end for;
+
+  // The first area's potion can lie in the second area, retain its original identity and later be terminal.
+  State.Items[3] := State.Items[3] with Location := Items.ItemLocation.InInterior(
+    Second.AreaId,
+    Second.Start
+  ); end with;
+
+  Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+  Test.AssertTrue(States.SameState(State, Loaded(World)));
+  State.Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Second.Start, Facing := Second.StartFacing)
+  );
+  State.Area := Coordinates.AreaKind.Dungeon;
+  State.AreaId := Second.AreaId;
+  State.ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    World.Metadata.OutdoorAreaId,
+    Entrances.EntranceSite(World.Metadata, Regions[1]).Unwrap()
+  );
+  State.Items[3] := State.Items[3] with Location := Items.ItemLocation.Consumed; end with;
+
+  Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+  const Restored := Loaded(World);
+  Test.AssertEquals(First.Items[3].ItemId, Restored.Items[3].Id);
+  Test.AssertTrue(Restored.Items[3].Location = Items.ItemLocation.Consumed);
+  Test.AssertTrue(
+    States.SameState(
+      Restored,
+      Areas.MaterializeArea(Areas.MaterializeArea(Restored, First), Second)
+    )
+  );
+  Test.AssertEquals(FirstBytes, Fs.ReadText(LevelPath(World, Regions[0])).Unwrap());
+  Test.AssertEquals(SecondBytes, Fs.ReadText(LevelPath(World, Regions[1])).Unwrap());
+  const Valid := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  for LocationText: string in [
+    '{"kind":"consumed","x":1}',
+    '{"kind":"consumed","y":1}',
+    '{"kind":"consumed","area_id":"' + Second.AreaId + '"}',
+    '{"kind":"consumed","slot":"body"}',
+    '{"kind":"consumed","owner":"player"}',
+    '{"kind":"consumed","kind":"consumed"}',
+    '{"kind":null}',
+    '{"kind":"unknown"}',
+    '{"kind":"equipped","slot":"weapon"}',
+    '{"kind":"equipped","slot":"body"}'
+  ] do
+    const Broken := Valid.Replace('{"kind":"consumed"}', LocationText);
+    Test.AssertFalse(Broken = Valid);
+    PreservedInvalid(World, Broken);
+  end for;
+
+  PreservedInvalid(World, Valid.Replace('"format_version":8', '"format_version":7'));
+  for KindText: string in ['ancient_coin', 'rusty_short_sword', 'leather_jerkin', 'unknown_potion'] do
+    const Broken := Valid.Replace('"kind":"healing_potion"', '"kind":"' + KindText + '"');
+    Test.AssertFalse(Broken = Valid);
+    PreservedInvalid(World, Broken);
+  end for;
+  var Missing := State with Items := State.Items.Slice(
+    0,
+    3
+  ).Concat(State.Items.Slice(4, State.Items.Length() - 4)); end with;
+
+  PreservedInvalid(World, Savegame.EncodeSaveGame(World.Metadata.Id, Missing));
+  var Duplicate := State;
+  Duplicate.Items.PushInPlace(State.Items[3]);
+  PreservedInvalid(World, Savegame.EncodeSaveGame(World.Metadata.Id, Duplicate));
+  var Foreign := State;
+  Foreign.Items[3] := Foreign.Items[3] with Id := First.AreaId + ':item:999'; end with;
+
+  PreservedInvalid(World, Savegame.EncodeSaveGame(World.Metadata.Id, Foreign));
+  // The extended level contract remains strict about potion kind and its original slot.
+  Test.AssertTrue(
+    Encoding.DecodeLevel(
+      FirstBytes.Replace('"kind":"healing_potion"', '"kind":"ancient_coin"'),
+      World.Metadata,
+      First.AreaId
+    ) is Error(_)
+  );
+  Test.AssertTrue(
+    Encoding.DecodeLevel(FirstBytes.Replace(':item:3', ':item:4'), World.Metadata, First.AreaId) is Error(_)
+  );
+  Test.AssertTrue(
+    Encoding.DecodeLevel(
+      FirstBytes.Replace('"kind":"healing_potion"', '"kind":"unknown_potion"'),
+      World.Metadata,
+      First.AreaId
+    ) is Error(_)
+  );
+  // 68 original entities: 64 carried/worn entries plus four consumed potions. Full save checks all origins.
+  var Full := Areas.MaterializeArea(
+    Areas.MaterializeArea(GameState.NewGame(World.Metadata), First),
+    Second
+  );
+  for Index: integer := 2 to 16 do
+    Full := Areas.MaterializeArea(Full, PotionLevel(World, Regions[Index]));
+  end for;
+  var TerminalCount := 0;
+  for Index: integer := 0 to Full.Items.Length() - 1 do
+    var Location := Items.ItemLocation.CarriedByPlayer;
+    if (Full.Items[Index].Kind = Items.ItemKind.HealingPotion) and (TerminalCount < 4) then
+      Location := Items.ItemLocation.Consumed;
+      TerminalCount := TerminalCount + 1;
+    end if;
+
+    Full.Items[Index] := Full.Items[Index] with Location := Location; end with;
+  end for;
+
+  Full.Items[1] := Full.Items[1] with Location := Items.ItemLocation.EquippedByPlayer(
+    Items.EquipmentSlot.Weapon
+  ); end with;
+
+  Full.Items[2] := Full.Items[2] with Location := Items.ItemLocation.EquippedByPlayer(
+    Items.EquipmentSlot.Body
+  ); end with;
+
+  Test.AssertEquals(68, Full.Items.Length());
+  Test.AssertEquals(64, GameState.InventoryItems(Full).Length());
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Full).Unwrap());
+  Test.AssertTrue(States.SameState(Full, Loaded(World)));
+  const FullBytes := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  Full.Items[3] := Full.Items[3] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  Test.AssertEquals(65, GameState.InventoryItems(Full).Length());
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Full) is Error(_));
+  Test.AssertEquals(FullBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+end.

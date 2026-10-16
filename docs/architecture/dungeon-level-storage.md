@@ -36,8 +36,8 @@ fields must be integral and within their stated bounds.
 | `rows` | Exactly 21 strings, each exactly 31 ASCII characters: `#`, `.`, `x`. |
 | `start` | Exact object `{ "x": integer, "y": integer, "facing": string }`. |
 | `exit` | Exact object `{ "x": integer, "y": integer }`. |
-| `items` | Exactly three placement objects, defined below. |
-| `hostiles` | One or two placement objects, defined below. |
+| `items` | Four required placements and optional original slots 4/5, in ascending slot order. |
+| `hostiles` | Exactly two placements: skeleton slot 0 and giant rat slot 1. |
 
 Positions use `0 <= x < 31` and `0 <= y < 21`. Facing uses the existing strings
 `north`, `east`, `south`, `west`; the generated start in 14a must be `east`, one
@@ -50,16 +50,27 @@ an independent random stream. Readers validate its shape but never regenerate
 or compare it with a newly generated name. Projections and diagnostics use the
 name of the retained map. Duplicate display names are allowed; area identities
 remain unique. Level format 1 and generator-6 worlds are incompatible, remain
-untouched and require user recreation/deletion. Save format 7 and protocol 14
-are unchanged by this checkpoint; item and opponent counts below still apply.
+untouched and cannot be continued with this server; create a new world for the
+current version. The current save format is 8 and protocol is 15. Guaranteed
+potions, optional original slots and both opponent kinds share those versions.
 
 Each placement is exactly `{ "id": string, "kind": string, "x": integer,
-"y": integer }`. Items occur in index order 0, 1, 2, with IDs
-`<area>:item:<index>` and kinds `ancient_coin`, `rusty_short_sword`,
-`leather_jerkin`, respectively. Hostiles occur in index order starting at 0,
-with IDs `<area>:hostile:<index>` and kind `restless_skeleton`. A placement has
+"y": integer }`. Items occur in ascending original slot order, with IDs `<area>:item:<slot>`.
+Required slots 0..3 have kinds `ancient_coin`, `rusty_short_sword`,
+`leather_jerkin`, `healing_potion`, respectively. Slots 4/5 are optional and may
+have any of those four kinds; missing slot 4 never renumbers slot 5. Four through
+six placements are accepted, including `[0,1,2,3,5]`. Missing or reordered
+required slots, duplicates, unknown slots and noncanonical IDs reject.
+Exactly two hostiles occur in order: slot 0 is `restless_skeleton`, slot 1 is
+`giant_rat`, with IDs `<area>:hostile:<slot>`. Selection, names, room corners
+and distance ordering are not regenerated on read; stored validation checks
+kinds, identities, ordinary floor placement, overlap and initial sight.
+A placement has
 no current health, alert status, ownership, equipment slot, or discovery data.
 Identity strings must also fit the existing 128-character inventory-ID bound.
+Consumed potions are savegame records, never immutable level placements:
+the original potion placement remains intact and is matched by ID and kind
+even when its mutable item has no location payload.
 
 Move the existing item-kind, hostile-kind, and facing JSON string conversions
 into a small shared world-layer encoding unit used by saves and levels. Keep
@@ -213,7 +224,7 @@ Do not classify failures by text prefixes. Test that a missing level remains a
 typed level failure and never deletes the save, including during catalog
 inspection.
 
-Protocol 14 reports inspection failures in the world catalog delivered with
+Protocol 15 reports inspection failures in the world catalog delivered with
 `Welcome`; the connection and world selection remain usable. Explicit load/save
 failures reject the operation and leave the existing session state unchanged.
 Use stable rejection codes `world_data_error` for missing/invalid levels,
@@ -255,3 +266,32 @@ and previous save bytes. Use private pure helpers or narrow test seams for
 deterministic failures; avoid timing races or a general storage abstraction.
 Also prove that two visits create only one file, an older save reuses that file
 without inheriting later mutable state, and save/load performs zero generation.
+
+## Dungeon-contents persistence verification
+
+Checkpoint 10 exercises the final generated placements through real pickup,
+attack, drop and potion-use rules, with deterministic pose/health setup in
+storage tests. It includes a natural optional potion at original slot 5 while
+slot 4 is absent. The potion can be carried from one dungeon, dropped in a
+second, saved and loaded there, picked up and consumed. Consumption retains
+its original identity even when it happens away from the origin level.
+
+The tests reopen a world session, load during combat and outdoors, revisit both
+dungeons with all potions consumed and opponents defeated, and compare complete
+state including health and combat RNG. Start over restores the original floor
+placements and full dormant opponents without writing the old explicit save.
+Restoring an earlier save rewinds visits and consumption while reusing level
+files that already exist.
+
+A valid stored fixture deliberately changes a generated name and optional
+contents; reads and entry retain its bytes rather than rerolling. Missing,
+malformed, obsolete or corrupt optional placements reject reads, saves, loads
+and catalog inspection without repair, deletion or replacement. Missing,
+duplicate and foreign terminal records still fail full origin validation.
+Catalog inspection distinguishes an incompatible save from a referenced-level
+world-data error and retains unusable entries in the listing.
+
+A two-area filesystem trace confirmed one read of each visited level per save
+and per load, including the current indoor level. The existing load path
+retains its supplied current map; it performs no second read for the returned
+view. The temporary trace program adds no production counters or test-only API.

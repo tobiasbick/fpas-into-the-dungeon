@@ -1,0 +1,118 @@
+// Verifies mixed-kind combat over a real TCP reply and rat visibility/remembered-field stripping.
+program RatSessionTest;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as SessionUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+
+function FirstPerson(Message: Protocol.ServerMessage): Protocol.FirstPersonVisibleState;
+begin
+  case Message of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      return Value;
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_)), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected first person reply');
+  end case;
+end function;
+
+begin
+  const Metadata := Fixtures.FixtureMetadata();
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 4, Y := 3),
+    Coordinates.FacingDirection.West
+  ) with RandomState := 1; end with;
+
+  State.Hostiles[0] := State.Hostiles[0] with Kind := Hostiles.HostileKind.GiantRat; Health := 1; Alerted := true; end with;
+
+  State.Hostiles.PushInPlace(
+    State.Hostiles[0] with Id := State.AreaId + ':hostile:1'; Kind := Hostiles.HostileKind.RestlessSkeleton; Health := 12; Position := Coordinates.InteriorPosition(
+      X := 5,
+      Y := 3
+    ); end with
+  );
+  const Map := Fixtures.FixtureDungeonMap();
+  const View := Fixtures.FixtureAreaView(State);
+  const Seen := Exploration.RevealCurrentArea(View, State).Unwrap();
+  const Before := Projection.ProjectExplorationMap(
+    Seen,
+    View,
+    0,
+    0,
+    Map.Width,
+    Map.Height
+  ).Unwrap();
+  Test.AssertEquals('r', Before.Rows[3][3]);
+  // Turning away retains the discovered floor, never its dynamic rat marker.
+  const Away := Seen with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(
+      Position := Coordinates.InteriorPosition(X := 4, Y := 3),
+      Facing := Coordinates.FacingDirection.East
+    )
+  ); end with;
+  const Remembered := Projection.ProjectExplorationMap(
+    Away,
+    View,
+    0,
+    0,
+    Map.Width,
+    Map.Height
+  ).Unwrap();
+  Test.AssertEquals('r', Remembered.KnowledgeRows[3][3]);
+  Test.AssertEquals('.', Remembered.Rows[3][3]);
+  const World := WorldUnit.WorldSession(
+    Directory := '.temp-data/unused-rat-session',
+    Metadata := Metadata,
+    Cache := [],
+    Clock := 0,
+    CacheLimit := 32
+  );
+  const Hidden := FirstPerson(
+    Protocol.ServerMessage.State(
+      Projection.ProjectSession(
+        World, View, Away,
+        SessionUnit.ViewportSize(Width := 20, Height := 12), Projection.NoTurnReport()
+      ).Unwrap().State
+    )
+  );
+  Test.AssertEquals('.', Hidden.Rows[3][3]);
+  const Session := SessionUnit.ServerSession(
+    World := World, WorldSelected := true, Dirty := false,
+    State := Some(Seen), Interior := Some(Map),
+    Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12), Finished := false
+  );
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := '.temp-data/unused-rat-session',
+    WorldId := Metadata.Id, WorldSeed := Metadata.Seed, DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  Test.AssertTrue(Net.SetTimeout(Client, 5000).Unwrap());
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Played := Handling.HandleSessionMessage(
+    Session,
+    Protocol.ClientMessage.Attack,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  const Read := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  const Reply := FirstPerson(Messages.DecodeServer(Read.Line).Unwrap());
+  Test.AssertTrue(Played.Dirty);
+  Test.AssertEquals(0, Played.State.Unwrap().Hostiles[0].Health);
+  Test.AssertEquals(16, Reply.Health);
+  Test.AssertEquals(3, Reply.CombatEvents.Length());
+  Test.AssertEquals('r', Reply.CombatEvents[0].HostileCode);
+  Test.AssertEquals('r', Reply.CombatEvents[1].HostileCode);
+  Test.AssertTrue(Reply.CombatEvents[1].Kind = Protocol.VisibleCombatEventKind.HostileDefeated);
+  Test.AssertEquals('h', Reply.CombatEvents[2].HostileCode);
+  Test.AssertTrue(Reply.CombatEvents[2].Kind = Protocol.VisibleCombatEventKind.HostileHit);
+  Test.AssertEquals('.', Reply.Rows[3][3]);
+  Test.AssertTrue(Net.Close(Client).Unwrap());
+  Test.AssertTrue(Net.Close(Server).Unwrap());
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+end.

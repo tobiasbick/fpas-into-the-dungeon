@@ -34,12 +34,12 @@ only after `new_game` or `load_game`.
 Client: hello, list_worlds, select_world, create_world, new_game, load_game,
          save_game, overwrite_save, viewport, move,
          first_person_step, first_person_turn, interact, exploration_map,
-         attack, wait, equip, unequip, disconnect
+         attack, wait, equip, unequip, drop_item, use_item, disconnect
 Server: welcome, worlds, state, interaction, exploration_map,
         save_completed, defeated, rejected, error
 ```
 
-The current protocol version `14` is included in the handshake. `hello` includes the initial
+The current protocol version `15` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.
@@ -47,6 +47,11 @@ Player intentions are request-response: every accepted or rejected movement,
 turn, or interaction receives one server message before the next intention is
 sent. An interaction can return a replacement visible state or a read-only
 description.
+
+Inventory entries in either state family require `id`, `name`, `slot`,
+`equipped` and boolean `usable`. `use_item` carries only `type` and a bounded
+`item_id`; capability and healing remain server-owned. See
+[items and inventory](items-and-inventory.md) for rejection and commit behavior.
 
 Session selection and save intentions are also request-response operations.
 The server acknowledges a save only after the atomic replacement succeeds.
@@ -71,3 +76,34 @@ precedence described in [runtime-data.md](runtime-data.md).
 The slice is complete when the workspace checks, protocol and game tests pass,
 the TUI has a headless state/render test, a loopback integration test crosses a
 real TCP connection, and client/server shutdown leaves no blocked tasks.
+
+## Dungeon-contents integration verification
+
+Checkpoint 11 drives the production connection loop over TCP: create a world,
+enter its generated named dungeon, collect and equip its sword and jerkin,
+pick up and drink its potion during combat, defeat its skeleton and giant rat,
+save, reconnect, Continue and revisit. The natural-play fixture uses ordinary
+routes and no health, opponent or item edits. Independent literal dice
+accounting checks the potion turn's healing, enemy damage and persisted RNG.
+
+The actual received combat facts feed the client animation and raycaster;
+standing/fallen markers and sprite heights retain the opponent kind. The
+first-person title, exploration-map label and typed dashboard snapshot use the
+stored name. A second existing two-dungeon test deliberately gives different
+area IDs the same stored display name and verifies their separate origins,
+visits and map labels through load and travel. Existing adapter/keyboard tests
+continue to cover inventory `I`/`Enter` against real server replies.
+
+Reconnect before saving restores the earlier carried potion and repeats its
+turn exactly. Explicit saves retain consumed/defeated records across revisit;
+restoring an earlier file and Start over exercise the overwrite/discard guards.
+Old protocol 14, world/level/save versions, invalid item IDs, full-health use,
+failed saves and failed loads retain the established rejection or connection
+failure policy. Internal cases compare the entire installed session on
+rejection, including state, geometry, dirty/save facts and the bounded cache.
+A failed send yields an error for connection teardown and writes no progress.
+
+These automated programs run real sockets and production server workers.
+The listener/dashboard test also cancels the server with an active dirty game
+and checks that shutdown preserves the previous save. Final performance smoke
+checks and visual terminal acceptance remain checkpoint 12.

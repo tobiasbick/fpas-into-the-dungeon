@@ -48,11 +48,11 @@ stored names; stories and LLM content remain outside this stage.
   dungeon area. World identities contain no colon, so the identity parses back
   into its region.
 
-Entrances change chunk content and the metadata schema, so the world generator
-version rises from 5 to 6 and the world format version from 2 to 3. Existing
-worlds are rejected with the usual instruction to delete or recreate them.
-Stage 14b checkpoint 02 raises the generator to 7 for dungeon names; outdoor
-terrain and entrance fingerprints stay unchanged. World format remains 3.
+In 14a, entrances changed chunk content and the metadata schema: generator 5
+became 6 and world format 2 became 3. Stage 14b raises the generator to 7 for
+dungeon names; outdoor terrain and entrance fingerprints stay unchanged. World
+format remains 3. Incompatible worlds stay intact and cannot be continued with
+this server; create a new world for the current version.
 
 ## Area view instead of a global map
 
@@ -88,19 +88,80 @@ already persisted algorithm.
    connected rooms are the acceptance requirement.
 3. Make the top-left floor field of the first room the exit; the player starts
    on the field east of it, facing east.
-4. Place one or two restless skeletons at the centers of the rooms farthest
-   from the start by walking distance.
-5. Place the ancient coin, the rusty short sword, and the leather jerkin on
-   room corners, taking rooms that hold neither the exit nor a skeleton first.
+4. Order rooms outside the exit room by walking distance from the start,
+   farthest first, with room index breaking ties. Skip centers that could see
+   the start. Place a restless skeleton in the first eligible room (hostile
+   slot 0) and a giant rat in the second (slot 1); reject an attempt with fewer
+   than two safe rooms.
+5. Place the guaranteed ancient coin, rusty short sword, leather jerkin and
+   healing potion (original item slots 0..3), followed by selected optional
+   slots 4/5, on distinct ordinary floor corners. Prefer rooms without exit or
+   opponents; keep room order and top-left, top-right, bottom-left, bottom-right
+   corner order. Skip occupied corners and endpoints. Reject insufficient
+   corners rather than omitting a selected find.
 
 A layout is accepted when it passes the existing map validation (bounds, a
 single exit, every walkable field connected to the start) and has at least four
-rooms, a floor share between 25 % and 60 %, and no skeleton that could see the
+rooms, a floor share between 25 % and 60 %, and no opponent that could see the
 start. Otherwise the next attempt runs; after 16 failed attempts generation
 reports an error, which is a generator defect.
 
 A fingerprint test pins the output of fixed regions. Changing generator output
 requires raising the world generator version.
+
+## Pure content selection
+
+`Dungeon.Interior.Generation.Content` owns names and the fixed optional-loot
+table. Content seeds normalize the world seed and numeric region coordinates
+modulo `M = 2147483648` before multiplication:
+
+```text
+S = PositiveModulo(
+      PositiveModulo(seed, M) * 7919
+    + PositiveModulo(region_x, M) * 104729
+    + PositiveModulo(region_y, M) * 1299709
+    + domain, M)
+```
+
+The private helper keeps intermediates within signed 64-bit bounds, including
+negative and extreme inputs. Domain 1009 retains the existing two-draw name
+selection. `OptionalLoot(seed, region_x, region_y, slot)` accepts only original
+slot 4 or 5 and draws once below 100 from domain 2003 or 2011 respectively.
+Each slot starts from its own derived seed, including when the other is empty;
+query order, world identity, geometry draws and the persisted combat RNG do not
+participate. The result is `result of (option of ItemKind, string)`.
+
+`LootForRoll(roll)` exposes the exact bounded table for exhaustive verification:
+
+| Roll | Result | Weight |
+| --- | --- | --- |
+| 0..29 | No item | 30 |
+| 30..59 | Ancient coin | 30 |
+| 60..89 | Healing potion | 30 |
+| 90..94 | Rusty short sword | 5 |
+| 95..99 | Leather jerkin | 5 |
+
+Invalid rolls and slots return errors; they are never clamped, wrapped or
+rerolled. Selection happens once before geometry attempts and never advances
+geometry or combat state. Slots retain original identities when another is
+empty: `[0,1,2,3,5]` is valid. Stored validation accepts four through six finds,
+requires the kinds of slots 0..3 and ordered optional slots 4/5, and never
+recalculates their selection from the world seed.
+
+The two fixed domains provide independent queries, but their outcomes are
+correlated by the specified linear generator: successor states differ by
+238187368 modulo 2^31. Raw draws differ by 3634/3635 or -29134/-29133, so rolls
+modulo 100 differ by 34/35/66/67. Thus both optional slots cannot be empty or
+have the same kind under this table. Generated dungeons have five or six finds;
+stored structural validation also permits four finds or two equal optional
+kinds. Separate original IDs always distinguish equal-kind finds.
+
+Final 14b fingerprints include the name, geometry, endpoints and every
+placement kind, identity and position. The three pinned regions keep their
+checkpoint-02 attempt-0 geometry and endpoints exactly; changes add rat slot 1,
+potion slot 3 and optional finds. The existing generator-version bump from 6
+to 7 covers these changes once for the feature branch. Geometry dimensions,
+room/corridor random draws and the 16-attempt seed schedule are unchanged.
 
 ## Materialization and persistence
 
@@ -133,7 +194,9 @@ and carried items stay recorded, so re-entering never restores them.
   A file left after an interrupted first entry is safe to reuse.
 
 - Item and opponent identities are `<area>:item:<n>` and `<area>:hostile:<n>`.
-- Savegame format 7 drops the NPC and adds the visited areas.
+- In 14a, savegame format 7 removed the NPC and added visited areas. The current
+  format 8 adds rat state and terminal potion locations; obsolete saves are
+  rejected and preserved.
 - Loading or writing a savegame runs the complete validation: every visited
   area's level file is read and validated once, and every item and opponent
   must match exactly one origin placement of a visited area by identity and
@@ -184,14 +247,22 @@ visited dungeon, 21 and 17 ms with 10, and 260 ms with 100 (save 144 KB). Work
 grows linearly with the visited dungeons, about 2.6 ms each per operation; peak
 memory stays between 18 and 46 MB. First entry, generation plus round-trip
 check plus atomic storage, takes about 7 to 8 ms per dungeon. No caching or
-other optimization was added.
+other optimization was added. These are historical 14a measurements, not a
+current timing guarantee. The [14b persistence measurements](persistence-measurements.md)
+record final-content smoke runs, same-session controls and the regression
+investigation.
 
 ## Protocol and client
 
 The 14a slice introduced protocol version 13, removing the dialogue messages
 and the NPC and tablet field codes and adding the drop-item intention. The
-current protocol version 14 adds world management without changing these
-dungeon messages. Generated dungeons use their stored display name in the
+world-management protocol version 14 was extended to version 15 by 14b
+checkpoint 03: rat markers and kind-carrying combat events. Save format is now
+8. Generated dungeons place a skeleton and a rat, with four guaranteed items
+and optional original slots 4/5. Checkpoint 04 added the potion marker and
+terminal item state without another version bump. Consumed potions retain their
+original identities and cannot reappear during materialization or load.
+Generated dungeons use their stored display name in the
 first-person title, context panel, exploration map and server dashboard. The raycaster, the exploration
 map, and the context panel already work
 with any interior size; tests cover a 31 by 21 dungeon.
@@ -211,10 +282,21 @@ introduced.
 ## Deferred
 
 Stage 14s lets the client create worlds with overridden parameters, list and
-continue existing worlds, and adds the server console. Stage 14b checkpoint 02
-implements deterministic stored dungeon names. Further 14b checkpoints add
-opponent kinds, loot tables, a first consumable item and persistent consumed-item state.
-Stage 13b follows 14b with progression;
+continue existing worlds, and adds the server console. Stage 14b checkpoints
+02 through 09 implement stored dungeon names, both generated opponent kinds,
+potion identity, persistent consumed-item state, the authoritative healing
+turn with its protocol/session path and inventory controls, and final generated
+floor finds with bounded optional selection. Checkpoint 10 verifies immutable
+levels and resumable cross-area item state, including consumed optional slot 5,
+Start over and earlier-save rewind. Checkpoint 11 verifies the complete TCP
+contents loop, actual kind-carrying combat animation, named exploration maps,
+authoritative dashboard facts and failure paths. Checkpoint 12 completes
+automated verification, documentation and the
+[persistence smoke measurements](persistence-measurements.md). All 91 test
+programs and 20 project checks pass; 14b is IN REVIEW. Manual terminal review
+and explicit user acceptance remain deliberately open because the review is
+unavailable in this cloud environment.
+After acceptance, stage 13b follows 14b with progression;
 14c then adds separate level areas and paired stairs without changing the
 first-person view family. Settlements with NPCs and
 dialogue belong to stage 15; LLM-generated content to stage 17.

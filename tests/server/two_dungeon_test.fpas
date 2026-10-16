@@ -258,11 +258,14 @@ begin
     (Conv.IntToStr(Second.Region.X) + '_') + Conv.IntToStr(Second.Region.Y),
     '0.json'
   ]);
-  var Edited: InteriorUnit.InteriorMap := SecondMap;
+  var Edited: InteriorUnit.InteriorMap := SecondMap with DisplayName := First.DisplayName; end with;
+
   Edited.Cells[(Edit[0].Y * Edited.Width) + Edit[0].X] := InteriorUnit.InteriorCellKind.Floor;
   const Stored: string := Fs.ReadText(SecondPath).Unwrap();
   Test.AssertTrue(RowsJson(SecondMap) in Stored);
-  const EditedText: string := Stored.Replace(RowsJson(SecondMap), RowsJson(Edited));
+  const EditedText: string := Encoding.EncodeLevel(World.Metadata, Edited);
+  Test.AssertTrue(First.AreaId <> Edited.AreaId);
+  Test.AssertEquals(First.DisplayName, Edited.DisplayName);
   Test.AssertTrue(Encoding.DecodeLevel(EditedText, World.Metadata, SecondId) is Ok(_));
   Test.AssertTrue(Fs.WriteTextAtomic(SecondPath, EditedText).Unwrap());
   // After a restart, loading shows the edited field: the stored level is used, not regenerated.
@@ -278,6 +281,26 @@ begin
       Token
     );
     Test.AssertEquals('.', Wire.FirstPersonOf(Client).Rows[Edit[0].Y][Edit[0].X]);
+    Test.AssertEquals(First.DisplayName, Wire.FirstPersonOf(Client).Title);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.ExplorationMap(0, 0, 31, 21), Token);
+    case Client.Last of
+      when Protocol.ServerMessage.ExplorationMap(const MapView):
+        Test.AssertEquals(First.DisplayName, MapView.LabelText);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+        panic('expected second dungeon exploration map with duplicate display name');
+    end case;
+
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Viewport(20, 10), Token);
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Wire.RequireSaved(Client);
+    Test.AssertEquals(
+      SecondId,
+      Levels.DecodeStoredSave(
+        World,
+        Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap()
+      ).Unwrap().AreaId
+    );
+    Client := Wire.Exchange(Client, Protocol.ClientMessage.Viewport(20, 10), Token);
     // The dropped coin lies once at the drop field and can be picked up again.
     Client := Wire.WalkTo(Client, Edited, SecondMap.Start, Token).Unwrap();
     Test.AssertEquals(
@@ -301,6 +324,7 @@ begin
       Token
     );
     Test.AssertEquals(First.Start.X, Wire.FirstPersonOf(Client).PlayerX);
+    Test.AssertEquals(First.DisplayName, Wire.FirstPersonOf(Client).Title);
     Client := Wire.WalkTo(Client, First, Coin.Position, Token).Unwrap();
     Test.AssertFalse('Pick up' in Wire.FirstPersonOf(Client).Status);
     Wire.RequireSaved(Wire.Exchange(Client, Protocol.ClientMessage.OverwriteSaveGame, Token));
@@ -314,6 +338,9 @@ begin
     Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap()
   ).Unwrap();
   Test.AssertEquals(2, Saved.VisitedAreas.Length());
+  Test.AssertTrue(GameState.HasVisitedArea(Saved, First.AreaId));
+  Test.AssertTrue(GameState.HasVisitedArea(Saved, SecondId));
+  Test.AssertEquals(First.AreaId, Saved.AreaId);
   Test.AssertEquals(1, ItemCount(Saved, Coin.ItemId));
   Test.AssertEquals(First.Items.Length() + SecondMap.Items.Length(), Saved.Items.Length());
   Test.AssertEquals(1, GameState.InventoryItems(Saved).Length());

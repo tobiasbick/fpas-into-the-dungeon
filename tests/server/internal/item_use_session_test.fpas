@@ -1,0 +1,332 @@
+// Verifies item-use commits, rejections, preparation failures and dashboard facts without replacing installed state.
+program ItemUseSessionTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Diagnostics as Diagnostics, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as SessionUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type ExchangeResult = record
+  Session: SessionUnit.ServerSession;
+  Reply: Protocol.ServerMessage;
+end record;
+
+function Request(Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage; Client: Net.Connection; Server: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): ExchangeResult;
+begin
+  const Request := Clients.DecodeClient(
+    Clients.EncodeClient(Message)
+  ).Unwrap();
+  const Changed := Handling.HandleSessionMessage(Session, Request, Server, Config, Token).Unwrap();
+  const Read := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  return ExchangeResult(Session := Changed, Reply := Servers.DecodeServer(Read.Line).Unwrap());
+end function;
+
+function Exchange(Session: SessionUnit.ServerSession; Id: string; Client: Net.Connection; Server: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): ExchangeResult;
+begin
+  return Request(Session, Protocol.ClientMessage.UseItem(Id), Client, Server, Config, Token);
+end function;
+
+procedure AssertUnchanged(Before: SessionUnit.ServerSession; After: SessionUnit.ServerSession);
+begin
+  case Before.State of
+    when Some(const StateValue):
+      Test.AssertTrue(States.SameState(StateValue, After.State.Unwrap()));
+    when None:
+      Test.AssertTrue(After.State is None);
+  end case;
+
+  Test.AssertEquals(Before.Dirty, After.Dirty);
+  Test.AssertEquals(Before.LastSavedAt, After.LastSavedAt);
+  Test.AssertEquals(Before.Finished, After.Finished);
+  Test.AssertEquals(Before.WorldSelected, After.WorldSelected);
+  Test.AssertEquals(Before.World.Directory, After.World.Directory);
+  Test.AssertEquals(Before.World.Clock, After.World.Clock);
+  Test.AssertTrue(Before.World.Metadata = After.World.Metadata);
+  Test.AssertEquals(Before.World.CacheLimit, After.World.CacheLimit);
+  Test.AssertEquals(Before.World.Cache.Length(), After.World.Cache.Length());
+  for Index: integer := 0 to Before.World.Cache.Length() - 1 do
+    Test.AssertEquals(Before.World.Cache[Index].LastUsed, After.World.Cache[Index].LastUsed);
+    const A := Before.World.Cache[Index].Chunk;
+    const B := After.World.Cache[Index].Chunk;
+    Test.AssertTrue(A.Coordinate = B.Coordinate);
+    Test.AssertEquals(A.Cells.Length(), B.Cells.Length());
+    for CellIndex: integer := 0 to A.Cells.Length() - 1 do
+      Test.AssertTrue(A.Cells[CellIndex] = B.Cells[CellIndex]);
+    end for;
+  end for;
+
+  Test.AssertTrue(Before.Viewport = After.Viewport);
+  case Before.Interior of
+    when Some(const Map):
+      Test.AssertEquals(
+        Encoding.EncodeLevel(Before.World.Metadata, Map),
+        Encoding.EncodeLevel(After.World.Metadata, After.Interior.Unwrap())
+      );
+    when None:
+      Test.AssertTrue(After.Interior is None);
+  end case;
+end procedure;
+
+procedure AssertRejected(Reply: Protocol.ServerMessage; ExpectedCode: string);
+begin
+  Test.AssertTrue(Reply is Protocol.ServerMessage.Rejected(_, _));
+  case Reply of
+    when Protocol.ServerMessage.Rejected(const Code, const Reason):
+      Test.AssertEquals(ExpectedCode, Code);
+      Test.AssertTrue(Reason.Length() > 0);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected rejection');
+  end case;
+end procedure;
+
+function FirstPerson(Reply: Protocol.ServerMessage): Protocol.FirstPersonVisibleState;
+begin
+  case Reply of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      return Value;
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_)), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected first person state');
+  end case;
+end function;
+
+begin
+  const Root := '.temp-data/item-use-session-' + Conv.IntToStr(Time.TimestampMillis());
+  const Metadata := Fixtures.FixtureMetadata();
+  const Map := Fixtures.WithPotion(Fixtures.FixtureDungeonMap());
+  const Id := Map.Items[3].ItemId;
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := 4, Y := 3),
+    Coordinates.FacingDirection.West
+  ) with Health := 1; RandomState := 1; end with;
+
+  State.Items := Areas.MaterializeArea(GameState.NewGame(Metadata), Map).Items;
+  State.Items[3] := State.Items[3] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  State.Hostiles[0] := State.Hostiles[0] with Alerted := true; end with;
+  const View := GameState.AreaView(Metadata := Metadata, Interior := Some(Map));
+  State := Exploration.RevealCurrentArea(View, State).Unwrap();
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, State, [Map]) is Ok(_));
+  const World := WorldUnit.WorldSession(
+    Directory := Root,
+    Metadata := Metadata,
+    Cache := [],
+    Clock := 0,
+    CacheLimit := 256
+  );
+  const Session := SessionUnit.ServerSession(
+    World := World, WorldSelected := true, State := Some(State), Interior := Some(Map),
+    Dirty := false, LastSavedAt := 123456, Finished := false,
+    Viewport := SessionUnit.ViewportSize(Width := 20, Height := 12)
+  );
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := Metadata.Id,
+    WorldSeed := Metadata.Seed, DungeonRegionChunks := 4, ChunkCacheLimit := 256,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  Test.AssertTrue(Net.SetTimeout(Client, 5000).Unwrap());
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  // No active game: the use intention is rejected before reaching the rule.
+  const Inactive := Session with State := None; Interior := None; end with;
+  const NotStarted := Exchange(Inactive, Id, Client, Server, Config, Token);
+  AssertRejected(NotStarted.Reply, 'session_not_started');
+  Test.AssertTrue(NotStarted.Session.State is None);
+  Test.AssertTrue(NotStarted.Session.Interior is None);
+  Test.AssertEquals(Inactive.Dirty, NotStarted.Session.Dirty);
+  Test.AssertEquals(Inactive.LastSavedAt, NotStarted.Session.LastSavedAt);
+
+  // Accepted seed1 use heals 1->7, then exactly one skeleton hit deals3.
+  const Played := Exchange(Session, Id, Client, Server, Config, Token);
+  const Visible := FirstPerson(Played.Reply);
+  Test.AssertEquals(4, Visible.Health);
+  Test.AssertEquals(0, Visible.Inventory.Length());
+  Test.AssertEquals(2, Visible.CombatLog.Length());
+  Test.AssertEquals('You drink the healing potion and recover 6 health.', Visible.CombatLog[0]);
+  Test.AssertEquals(1, Visible.CombatEvents.Length());
+  Test.AssertTrue(Visible.CombatEvents[0].Kind = Protocol.VisibleCombatEventKind.HostileHit);
+  Test.AssertEquals(3, Visible.CombatEvents[0].Amount);
+  const Accepted := Played.Session.State.Unwrap();
+  Test.AssertEquals(377401575, Accepted.RandomState);
+  Test.AssertTrue(Accepted.Items[3].Location = Items.ItemLocation.Consumed);
+  Test.AssertTrue(Played.Session.Dirty);
+  Test.AssertEquals(123456, Played.Session.LastSavedAt);
+  Test.AssertEquals(Map.AreaId, Played.Session.Interior.Unwrap().AreaId);
+  const Status := Diagnostics.SessionStatus(Played.Session);
+  Test.AssertTrue(Status.Active);
+  Test.AssertTrue(Status.Dirty);
+  Test.AssertEquals(Map.DisplayName, Status.Area);
+  Test.AssertEquals(123456, Status.LastSavedAt);
+  const Repeated := Exchange(Played.Session, Id, Client, Server, Config, Token);
+  AssertRejected(Repeated.Reply, 'item_use_rejected');
+  AssertUnchanged(Played.Session, Repeated.Session);
+  for Dirty: boolean in [false, true] do
+    const Before := Session with Dirty := Dirty; end with;
+    const Unknown := Exchange(Before, 'unknown', Client, Server, Config, Token);
+    AssertRejected(Unknown.Reply, 'item_use_rejected');
+    AssertUnchanged(Before, Unknown.Session);
+    const Full := Before with State := Some(State with Health := 20; end with); end with;
+
+    case Projection.ProjectSession(
+      World,
+      View,
+      Full.State.Unwrap(),
+      Full.Viewport,
+      Projection.NoTurnReport()
+    ).Unwrap().State of
+      when Protocol.VisibleState.FirstPersonState(const Fields):
+        Test.AssertTrue(Fields.Inventory[0].Usable);
+      when Protocol.VisibleState.MapState(_):
+        panic('expected carried potion capability');
+    end case;
+    const Refused := Exchange(Full, Id, Client, Server, Config, Token);
+    AssertRejected(Refused.Reply, 'item_use_rejected');
+    AssertUnchanged(Full, Refused.Session);
+  end for;
+
+  // Local capacity fixture: extra carried identities isolate play rules; full origin saves are covered separately.
+  // Failed pickup is inert at 64; consumption frees one entry and pickup can fill it again.
+  var CapacityState := State with Health := 14; Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(
+      Position := Map.Items[0].Position,
+      Facing := Coordinates.FacingDirection.West
+    )
+  ); end with;
+
+  CapacityState.Hostiles[0] := CapacityState.Hostiles[0] with Health := 0; end with;
+
+  for Index: integer := 1 to 63 do
+    CapacityState.Items.PushInPlace(
+      Items.GameItem(
+        Id := 'capacity:' + Conv.IntToStr(Index), Kind := Items.ItemKind.AncientCoin,
+        Location := Items.ItemLocation.CarriedByPlayer
+      )
+    );
+  end for;
+  const Capacity := Session with State := Some(CapacityState); end with;
+
+  Test.AssertEquals(64, GameState.InventoryItems(CapacityState).Length());
+  const NoRoom := Request(Capacity, Protocol.ClientMessage.Interact, Client, Server, Config, Token);
+  AssertRejected(NoRoom.Reply, 'interaction_rejected');
+  AssertUnchanged(Capacity, NoRoom.Session);
+  const Freed := Exchange(Capacity, Id, Client, Server, Config, Token);
+  Test.AssertEquals(63, FirstPerson(Freed.Reply).Inventory.Length());
+  Test.AssertEquals(20, FirstPerson(Freed.Reply).Health);
+  Test.AssertEquals(CapacityState.RandomState, Freed.Session.State.Unwrap().RandomState);
+  const Picked := Request(
+    Freed.Session,
+    Protocol.ClientMessage.Interact,
+    Client,
+    Server,
+    Config,
+    Token
+  );
+  Test.AssertEquals(64, FirstPerson(Picked.Reply).Inventory.Length());
+  Test.AssertTrue(
+    Picked.Session.State.Unwrap().Items[0].Location = Items.ItemLocation.CarriedByPlayer
+  );
+  Test.AssertTrue(Picked.Session.State.Unwrap().Items[3].Location = Items.ItemLocation.Consumed);
+  Test.AssertEquals(Session.LastSavedAt, Picked.Session.LastSavedAt);
+  Test.AssertTrue(Picked.Session.Dirty);
+
+  // A later combat turn may defeat the player after a successful potion use; no progress is autosaved.
+  Test.AssertTrue(Fs.CreateDirAll(World.Directory + '/saves').Unwrap());
+  const Sentinel := 'previous explicit save bytes';
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), Sentinel).Unwrap());
+  var Mortal := Played.Session;
+  var Ended := false;
+  for Attempt: integer := 1 to 40 do
+    if not Ended then
+      const Next := Request(Mortal, Protocol.ClientMessage.Wait, Client, Server, Config, Token);
+      Mortal := Next.Session;
+      if Next.Reply is Protocol.ServerMessage.Defeated(_) then
+        Ended := true;
+      else
+        Test.AssertTrue(Mortal.State.Unwrap().Items[3].Location = Items.ItemLocation.Consumed);
+      end if;
+    end if;
+  end for;
+
+  Test.AssertTrue(Ended);
+  Test.AssertTrue(Mortal.State is None);
+  Test.AssertTrue(Mortal.Interior is None);
+  Test.AssertFalse(Mortal.Dirty);
+  Test.AssertFalse(Mortal.Finished);
+  Test.AssertEquals(Session.LastSavedAt, Mortal.LastSavedAt);
+  Test.AssertEquals(Sentinel, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  const AfterDefeat := Exchange(Mortal, Id, Client, Server, Config, Token);
+  AssertRejected(AfterDefeat.Reply, 'session_not_started');
+  Test.AssertTrue(AfterDefeat.Session.State is None);
+  // Continue failures leave an idle session idle; an active game's explicit load request is rejected intact.
+  const ActiveLoad := Request(
+    Played.Session,
+    Protocol.ClientMessage.LoadGame,
+    Client,
+    Server,
+    Config,
+    Token
+  );
+  AssertRejected(ActiveLoad.Reply, 'session_already_started');
+  AssertUnchanged(Played.Session, ActiveLoad.Session);
+  const Idle := Mortal with Dirty := true; end with;
+  const BadLoad := Request(Idle, Protocol.ClientMessage.LoadGame, Client, Server, Config, Token);
+  AssertRejected(BadLoad.Reply, 'save_incompatible');
+  AssertUnchanged(Idle, BadLoad.Session);
+  Test.AssertEquals(Sentinel, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  // Outdoor candidate heals successfully, then projection fails on a blocked chunk file.
+  // No candidate health, consumption, dirty status or save timestamp may become installed.
+  const Outside := State with Area := Coordinates.AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.Spawn
+  ); ReturnLocation := Coordinates.ReturnLocation.NoReturnLocation; Health := 10; end with;
+  const Chunk := Coordinates.ChunkCoordinate(
+    X := Coordinates.ChunkForCoordinate(Metadata.Spawn.X),
+    Y := Coordinates.ChunkForCoordinate(Metadata.Spawn.Y)
+  );
+  Test.AssertTrue(Fs.CreateDirAll(WorldUnit.WorldChunkPath(World, Chunk)).Unwrap());
+  for Dirty: boolean in [false, true] do
+    const Before := Session with State := Some(Outside); Interior := None; Dirty := Dirty; end with;
+    const Failed := Exchange(Before, Id, Client, Server, Config, Token);
+    AssertRejected(Failed.Reply, 'item_use_rejected');
+    AssertUnchanged(Before, Failed.Session);
+  end for;
+  // An oversized outdoor response also rejects before sending, rather than omitting inventory.
+  var Packed := Outside;
+  for Index: integer := 1 to 63 do
+    Packed.Items.PushInPlace(
+      Items.GameItem(
+        Id := '"\'.RepeatStr(60) + Conv.IntToStr(Index), Kind := Items.ItemKind.AncientCoin,
+        Location := Items.ItemLocation.CarriedByPlayer
+      )
+    );
+  end for;
+
+  Test.AssertEquals(64, GameState.InventoryItems(Packed).Length());
+  const Huge := Session with World := World with Directory := Root + '/oversized'; end with; State := Some(
+    Packed
+  ); Interior := None; Viewport := SessionUnit.ViewportSize(Width := 240, Height := 120); end with;
+  const Failed := Exchange(Huge, Id, Client, Server, Config, Token);
+  AssertRejected(Failed.Reply, 'item_use_rejected');
+  Test.AssertTrue(
+    Failed.Reply is Protocol.ServerMessage.Rejected('item_use_rejected', Transport.LineTooLongError)
+  );
+  AssertUnchanged(Huge, Failed.Session);
+  Test.AssertTrue(Net.Close(Client).Unwrap());
+  Test.AssertTrue(Net.Close(Server).Unwrap());
+  // Sending the prepared healing turn fails: the caller must discard the session and keep the explicit save.
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(
+      Session,
+      Protocol.ClientMessage.UseItem(Id),
+      Server,
+      Config,
+      Token
+    ) is Error(_)
+  );
+  Test.AssertEquals(Sentinel, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(States.SameState(State, Session.State.Unwrap()));
+  Test.AssertFalse(Session.Dirty);
+  Test.AssertEquals(123456, Session.LastSavedAt);
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+end.

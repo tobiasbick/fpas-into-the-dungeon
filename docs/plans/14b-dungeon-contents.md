@@ -1,7 +1,11 @@
 # 14b: Dungeon contents
 
-Status: checkpoints 01 and 02 complete; checkpoint 03 is next. Stored dungeon
-names are implemented. Prepared on 2026-10-15 after acceptance of 14a and 14s. Follow the
+Status: **14b IN REVIEW**. All twelve checkpoints have automated implementation
+and verification evidence; independent review findings are corrected. Final user
+terminal review and explicit acceptance remain deliberately open because the
+review cannot be performed in this cloud environment. Keep this plan; do not
+mark DONE or start 13b under this checkpoint.
+Prepared on 2026-10-15 after acceptance of 14a and 14s. Follow the
 numbered steps in order. Each step is a
 small review checkpoint; do not combine the whole feature into one delivery.
 Only the game repository belongs to this work. Commit and push require a
@@ -21,8 +25,8 @@ Baseline: `feat/generated-dungeons` at `f605c1c`, with protocol 14, world format
 run passed 68 test programs, zero failures, on 2026-10-15. This is baseline
 evidence, not evidence that 14b has been implemented or tested.
 
-The current generator creates a 31 by 21 dungeon, one or two skeletons and
-three fixed items. Its structural validator requires those exact kinds/counts.
+At the baseline the generator creates a 31 by 21 dungeon, one or two skeletons
+and three fixed items. Its structural validator requires those exact kinds/counts.
 Items have floor, carried and equipped locations; saves require exactly one
 mutable record per original placement. Combat contains skeleton-specific dice
 and death text. The client draws every hostile, including a falling defeated
@@ -372,11 +376,11 @@ Checkpoint 02 evidence (2026-10-15):
   `test --std-lib .temp-data/dashboard-toolchain/lib --timeout 600 --jobs 1
   dungeon.fpasworkspace` passed **70/70 programs, zero failures** outside the
   socket sandbox. Diff, purpose comments and documentation links pass.
-  No FPAS files changed; no commit/push. Checkpoint 03 has not started.
+  No FPAS files changed; no commit/push. This evidence predates checkpoint 03.
 
 ### 03. Support a giant rat through combat, storage and rendering
 
-- [ ] Add the rat kind, stats/name/death text and kind-to-code mapping. Replace
+- [x] Add the rat kind, stats/name/death text and kind-to-code mapping. Replace
   skeleton-only combat constants with kind queries; keep AI and RNG ownership.
 - Move save format to 8 when introducing the persisted rat kind. Move protocol
   to 15; add rat code and mandatory typed hostile facts, including
@@ -391,9 +395,42 @@ Checkpoint 02 evidence (2026-10-15):
 - Exit: real TCP fixture combat and client animation tests distinguish both
   kinds without adding monster statistics or AI rules to the client.
 
+Checkpoint 03 evidence (2026-10-16):
+
+- `Dungeon.Hostiles` owns rat health 6, d20 threshold 12 plus armor, d2 damage,
+  `giant_rat` persistence mapping, visible `r`, inspection and death text.
+  Combat facts retain the target/actor kind and mixed kinds act in stored order.
+- Save format is 8 and protocol 15 requires `hostile_code` on every combat
+  event. Unknown/missing/duplicate codes and invalid hit/miss/defeat amounts
+  reject. Level format 2, generator 7, world format 3 and generation output
+  are unchanged; automatic rat placement remains checkpoint 09.
+- Six new programs protect independent combat vectors and armored thresholds,
+  rat level/save round trips and rejected-save preservation, strict wire fields,
+  kind-specific standing/fallen sprites and effects, masked/remembered fields,
+  mixed-kind TCP replies and a production handshake/load/attack session.
+  Empty-width/height rendering returns an empty grid rather than invalid clamp
+  bounds. The existing independent field-code contract now exercises both kinds.
+- Validation used the ignored `.temp-data/rat-toolchain` release compiler and
+  copied matching library, originally built from FPAS `33814ef3`. Compiler
+  SHA-256: `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  No FPAS repository files changed.
+- `fpas fmt --check apps libs tests tools`,
+  `fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace`
+  (all 20 members), and `git diff --check` pass. The complete
+  `fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1
+  dungeon.fpasworkspace` run passed **76/76 programs, zero failures**.
+  After review added explicit occlusion/memory and named-code checks to two
+  programs, their focused rerun passed **2/2**, and formatting/workspace checks
+  passed again. No production code changed after the full suite started.
+- Intermediate focused runs exposed the zero-height renderer issue and stale
+  event/version fixtures; both were corrected before the full green run.
+  Independent subagent review requested documentation version corrections and
+  the two explicit edge checks. All were addressed; follow-up review found no
+  remaining blockers. No commit or push. This evidence predates checkpoint 04.
+
 ### 04. Add potion identity and persistent consumed state
 
-- [ ] Add Healing potion, `Consumed` and strict shared kind/location mappings
+- [x] Add Healing potion, `Consumed` and strict shared kind/location mappings
   within this feature's save format 8. Update every location match in game,
   world, server, tests and tools.
   Potions use visible code `p`; update its producer, alphabet and floor art now.
@@ -406,9 +443,53 @@ Checkpoint 02 evidence (2026-10-15):
 - Exit: full save/load and materialization validation retain terminal records;
   there is no usable-item intention yet and no temporary migration path.
 
+Checkpoint 04 evidence (2026-10-16):
+
+- Added `HealingPotion`, persisted as `healing_potion`, without an equipment
+  slot, and the payload-free terminal `Consumed` location. Only potions can
+  use it. The exact location JSON is `{"kind":"consumed"}`; missing/unknown
+  kind, duplicate keys and extra coordinates/area/slot/owner fields reject.
+  Full saved-state validation retains every original identity and kind,
+  including consumed records, rather than removing or rematerializing them.
+- Updated every location match in game, persistence, server and tests. Consumed
+  records appear in neither inventory, worn slots, floor codes nor interaction
+  targets and do not use capacity. Existing inspection/pickup/drop can handle
+  an ordinary potion; consumed potions reject those operations.
+- Added visible code `p`, a crimson flask sprite and map `!`; both masked
+  projections strip all remembered floor-item markers. Outdoor path codes
+  remain unchanged. The independent field-code contract covers the potion.
+- Stored level validation accepts three required base placements plus optional
+  exact slot 3 `healing_potion`, enabling real full-save fixtures. The generator
+  still emits three base items and its fingerprints remain unchanged. World 3,
+  generator 7, level 2, protocol 15 and save 8 remain current. No use intention,
+  healing rule, usable flag, random loot or generated potion placement is added.
+- New `potion_state_test` covers terminal validation, interaction exclusion,
+  inspection/pickup/drop, materialization, missing/duplicate/foreign origin and
+  64/65 inventory bounds. `potion_storage_test` covers real floor/carried/consumed
+  round trips, consumption-state fixtures in another visited area, immutable
+  level bytes, malformed saves preserved intact, and complete save/load of
+  17 visited levels with 64 carried/worn plus four consumed records.
+  `potion_projection_test` covers wire rows, inventory exclusion and both
+  remembered-field projections. Existing floor-render, map UI and named-code
+  contract tests were extended.
+- Reused the ignored `.temp-data/rat-toolchain` release compiler/library from
+  FPAS `33814ef3`, SHA-256
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  `fpas fmt --check apps libs tests tools`,
+  `fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace`
+  (all 20 members), and `git diff --check` pass. Final complete
+  `fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1
+  dungeon.fpasworkspace` passed **79/79 programs, zero failures**.
+  An intermediate check caught incompatible bindings in grouped case arms;
+  unused payloads now use `_`, and all subsequent checks/tests pass.
+- Independent subagent review compared this checkpoint with the preserved
+  checkpoint-03 source snapshot and found no actionable defects or missing
+  required coverage. Documentation and roadmap are updated. FPAS files remain
+  unchanged; no commit/push. This evidence predates checkpoint 05.
+
 ### 05. Resolve item use as one authoritative turn
 
-- [ ] Add `Consumables.UseItem` and `TurnAction.UseItem`, with heal-before-hostiles
+- [x] Add `Consumables.UseItem` and `TurnAction.UseItem`, with heal-before-hostiles
   ordering, actual-healing log, kind-safe validation and no potion RNG draw.
 - Positive: health 10 becomes 16 before enemy action; health 18 heals only 2;
   a potion is consumed once, freeing capacity; outdoors use heals without a
@@ -420,9 +501,42 @@ Checkpoint 02 evidence (2026-10-15):
   outcomes and count hostile actions rather than only inspecting the log text.
 - Exit: accepted use follows the same continued/defeated turn outcomes as attack.
 
+Implementation evidence on 2026-10-16:
+
+- `Dungeon.Consumables.UseItem` accepts only a carried Healing potion below the
+  derived maximum. It restores at most six points, reports the actual amount,
+  marks only the selected ID consumed and draws no dice. The unit remains an
+  internal game-library implementation; no test-only export was added.
+- `Combat.TurnAction.UseItem` applies that change before the existing single
+  hostile phase and returns the existing continued/defeated outcomes. Outdoors
+  it adds no hostile phase or step healing. Rule errors return before any
+  opponent acts. Protocol/session, inventory controls and generation are
+  unchanged; those remain checkpoints 06 onward.
+- New `consumables_test.fpas` covers health 10->16, 18->20 and 1->7, complete
+  expected state and RNG, capacity 64->63, two identically named potions used
+  by separate IDs, stale repeats, outdoors with stored alerted opponents, and
+  unknown/floor/consumed/non-consumable/full-health rejection. Independently
+  pinned hit/miss vectors assert exact hostile events and random state. The
+  health-one mixed encounter survives after healing before two hits; a fully
+  validated three-attacker authored fixture reaches defeat after damage 1+2+4.
+- Reused the ignored `.temp-data/rat-toolchain` compiler/library from FPAS
+  `33814ef3`, SHA-256
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  Formatting, `fpas fmt --check apps libs tests tools`,
+  `fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace`
+  (all 20 members), and `git diff --check` pass. The focused new test passes;
+  the complete `fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600
+  --jobs 1 dungeon.fpasworkspace` passed **80/80 programs, zero failures**.
+  The initial focused run caught an incorrect expected existing combat-log
+  suffix in the test; its expectation was corrected before the successful runs.
+- Independent read-only subagent review against the checkpoint-04 source
+  snapshot found no relevant defects or missing required coverage. Architecture,
+  product terms, README and roadmap are updated. The FPAS repository remains
+  unchanged; no commit/push. This evidence predates checkpoint 06.
+
 ### 06. Expose strict use intentions and server projections
 
-- [ ] Add `use_item` and required inventory `usable`, update exact encode/decode
+- [x] Add `use_item` and required inventory `usable`, update exact encode/decode
   and validation for both visible-state families. Handle via existing active
   session/turn commit path; stable rule rejection code is `item_use_rejected`.
 - Positive: client-message and both inventory-state round trips, session use,
@@ -440,9 +554,52 @@ Checkpoint 02 evidence (2026-10-15):
   retain installed state, map, RNG, dirty flag and last successful save time.
 - Exit: real TCP use obeys the rule and no client state mutation is trusted.
 
+Implementation evidence on 2026-10-16:
+
+- Protocol 15 now encodes/strictly decodes `use_item` with only `type` and a
+  1..128-character `item_id`. Both inventory projections require boolean
+  `usable`; usable entries cannot be slotted or worn. Projection derives the
+  flag from the authoritative kind, including at full health. Existing message
+  case arms and authored inventory values explicitly include the new contract.
+- The server requires an active session and dispatches through `PlayTurn` with
+  `item_use_rejected`. Turn preparation reveals and projects the candidate and
+  checks its encoded UTF-8 size before sending. Only a successful send installs
+  state/world cache and marks progress dirty; rule/preparation failures return
+  the original session, retaining map, RNG, dirty flag and last save timestamp.
+  Send failures still return an error and close the connection. Dashboard facts
+  and the client adapter's state/defeat response classification use this path.
+- New `item_use_protocol_test` covers exact encoding, strict field/type and
+  duplicate rejection, ID bounds, both state families, required capability,
+  slot/wear consistency and 0/64/65 inventory entries. `transport_limits_test`
+  exercises actual TCP framing at 65536 UTF-8 bytes with Unicode and JSON
+  escapes, rejects 65537-byte reads/writes, and proves rejected writes emit no
+  prefix. `item_use_projection_test` checks a generated 31-by-21 view with full
+  inventory, log and event counts within the existing budget, plus full outdoor
+  inventory projection and full-health capability.
+- New internal `item_use_session_test` pins heal-before-hit health/RNG and
+  events, consumed identity, dashboard facts and stale/full-health rejection.
+  Blocked outdoor storage and an oversized candidate response both preserve the
+  installed session. `item_use_network_test` drives the production client
+  adapter and server through handshake, premature use, load, partial healing,
+  repeated ID rejection and refresh; stored level/save bytes remain unchanged.
+- Reused the ignored `.temp-data/rat-toolchain` compiler/library from FPAS
+  `33814ef3`, SHA-256
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  Formatting, `fpas fmt --check apps libs tests tools`,
+  `fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace`
+  (all 20 members), and `git diff --check` pass. Focused protocol, projection,
+  session and TCP tests pass. The complete
+  `fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1
+  dungeon.fpasworkspace` passed **85/85 programs, zero failures**.
+- Independent read-only subagent review against the checkpoint-05 snapshot
+  found no relevant defects or missing required coverage. Documentation is
+  updated. World format 3, generator 7, level format 2, protocol 15 and save
+  format 8 remain unchanged, as does the FPAS repository. No commit/push;
+  this evidence predates checkpoint 07.
+
 ### 07. Make inventory use playable with existing controls
 
-- [ ] Enter chooses use/equip/unequip from projected capability and wear state;
+- [x] Enter chooses use/equip/unequip from projected capability and wear state;
   keep D/drop, modal isolation, pending guards and overlay ownership. Rename
   obsolete equipment-only request helpers instead of retaining wrappers.
 - Positive: actual headless Enter queues exactly one UseItem; accepted state
@@ -456,9 +613,60 @@ Checkpoint 02 evidence (2026-10-15):
   No optimistic healing, pickup announcement on consumption or inferred rules.
 - Exit: potion use is reachable through real keyboard routing and server replies.
 
+Implementation evidence on 2026-10-16:
+
+- `SelectedItemRequest` replaces the equipment-only helper without a wrapper.
+  Inventory Enter selects `UseItem` from projected `usable` before existing
+  equip/unequip actions. It uses neither item names nor a client healing rule.
+  The overlay shows current health and the selected Enter action; `D` still
+  drops the same selected identity. Requests need an active visible session,
+  no pending request and a writable channel. Only server replies replace
+  inventory and health; rejection leaves the selected potion and server reason.
+- Authoritative refreshes retain the selected item by stable ID, including
+  identical names and reordered entries. A removed ID clamps its previous
+  index to the remaining list; an empty inventory selects zero. Explicit
+  navigation continues to wrap.
+- Extended `inventory_ui_test` covers first/middle/last/only removal, unchanged
+  and reordered identities and invalid-selection recovery. `equipment_ui_test`
+  retains equip/unequip and drop tests, adding use capability at full health,
+  rejection, action labels and dropping the same potion. New
+  `item_use_ui_test` drives headless I/Enter in both view families, asserts one
+  exact item-ID request, pending guards, accepted/rejected model and screen
+  updates, no optimistic changes or pickup announcement, lookalike names,
+  inactive/invalid/empty/modal/closed/full-channel cases and 60/1/0-size views.
+- The existing `item_use_network_test` now injects headless I/Enter through the
+  production client adapter and server, then installs the real reply in the
+  model. It verifies pending unchanged health/inventory, partial healing,
+  removal with the overlay retained, stale wire rejection and unchanged stored
+  save/level bytes.
+- Lifecycle tests cover interrupted hostile playback and late ticks after
+  defeat/disconnect. They exposed incorrect focus when closing a defeat report
+  during a pending catalog refresh; focus now targets Cancel. Disconnect and
+  server-error events return to the start screen with no active visible state.
+  Independent review found an additional reachable transport-failure path:
+  resize during pending use, hostile animation in its reply, deferred viewport,
+  then `BackgroundFailed`. That handler now also stops playback and returns to
+  the start screen. The regression exercises this sequence and proves late
+  ticks neither resume playback nor schedule ticks; confirmed state is retained.
+- Formatting, all 20 workspace project checks, `git diff --check`, all 18 client
+  test programs and the focused real keyboard/TCP test pass. The independent
+  subagent rechecked the lifecycle correction and found no remaining relevant
+  defects or missing required coverage. The final complete
+  `fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1
+  dungeon.fpasworkspace` passed **86/86 programs, zero failures** after that
+  correction. `fpas fmt --check apps libs tests tools` and
+  `fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace`
+  also pass for the final source.
+- Reused the ignored `.temp-data/rat-toolchain` compiler/library from FPAS
+  `33814ef3`, SHA-256
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  Documentation and roadmap are updated. World format 3, generator 7, level
+  format 2, protocol 15 and save format 8 remain unchanged, as does the FPAS
+  repository. No commit/push; this evidence predates checkpoint 08.
+
 ### 08. Implement bounded loot selection with independent draws
 
-- [ ] Add the fixed roll table and two slot-specific draws to the content module.
+- [x] Add the fixed roll table and two slot-specific draws to the content module.
   Do not wire it to placement until its deterministic contract is proven.
 - Positive: exhaust all 100 rolls and verify exact weights/outcomes; pin hand
   checked seed/region/domain vectors and reproducible optional outcomes.
@@ -470,9 +678,44 @@ Checkpoint 02 evidence (2026-10-15):
   not only two calls to the same implementation or probabilistic distribution.
 - Exit: exact table/seed behavior is testable without filesystem or combat.
 
+Implementation evidence on 2026-10-16:
+
+- `Dungeon.Interior.Generation.Content` now provides `LootForRoll` and
+  `OptionalLoot` with the planned result types and strict roll/slot bounds.
+  The fixed table returns empty/coin/potion/sword/jerkin with weights
+  30/30/30/5/5. Slots 4 and 5 each draw once from their own domain (2003/2011).
+  A private normalized seed helper is shared with the unchanged name domain
+  1009; name tables remain private. No geometry/combat draw, world identity,
+  filesystem state or query order participates in selection.
+- New `dungeon_contents_test.fpas` checks every roll against a literal
+  100-entry expectation and counts the actual outcomes. Invalid -1/100 and
+  signed extremes reject; slots 3/6 and other invalid values reject. Thirteen
+  literal seed/region vectors pin both slot outcomes, including negative regions,
+  signed 32/64-bit extrema, modulus normalization and a rare armor outcome.
+  Independent domain-seed/successor/roll anchors document the arithmetic.
+  Slot 4 empty with slot 5 present, reversed/repeated queries, name isolation,
+  distinct world IDs, unchanged layout and full game-state/RNG preservation
+  are covered without filesystem or combat-rule calls. Existing independent
+  name and generation fingerprints also pass unchanged.
+- Reused the ignored `.temp-data/rat-toolchain` compiler/library from FPAS
+  `33814ef3`, SHA-256
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  The focused test, formatting, `fpas fmt --check apps libs tests tools`,
+  `fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace`
+  (all 20 members), and `git diff --check` pass. The complete
+  `fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1
+  dungeon.fpasworkspace` passed **87/87 programs, zero failures**.
+- Independent read-only subagent review compared the checkpoint-07 snapshot,
+  recalculated all 13 vectors and verified the signed-64-bit intermediate bound.
+  It found no relevant defects or missing required coverage. Documentation and
+  roadmap are updated. Production changes are confined to the content unit;
+  placement, generator fingerprints, world format 3, generator 7, level format 2,
+  protocol 15 and save format 8 remain unchanged, as does the FPAS repository.
+  No commit/push; checkpoint 09 has not started.
+
 ### 09. Integrate final opponent and floor placements
 
-- [ ] Generate the guaranteed four items, optional slots and two fixed-kind
+- [x] Generate the guaranteed four items, optional slots and two fixed-kind
   opponents. Adapt strict generated-level validation to this final contract;
   never impose generated counts on generic authored maps used by rule tests.
 - Positive: valid maps across a fixed seed/region matrix, expected counts/kinds,
@@ -486,9 +729,68 @@ Checkpoint 02 evidence (2026-10-15):
   checkpoint; generator stays 7 for 14b. Never refresh a hash merely to go green.
 - Exit: newly generated playable dungeons naturally expose every new feature.
 
+Checkpoint 09 implementation notes (2026-10-16):
+
+- The generator selects slots once outside geometry attempts, retains original
+  suffixes, fills free corners in the existing room/corner order, and returns
+  an error instead of silently dropping a selected item if corners run out.
+  Opponents use the first two safe centers in farthest-first walking order,
+  outside the exit room. No safe pair rejects the attempt; no safety relaxation.
+- Strict stored validation requires exactly skeleton slot 0 and rat slot 1,
+  required item kinds 0..3 and ascending optional original slots 4/5. It accepts
+  all four supported optional kinds and zero/one/two optional placements without
+  rerolling. Generic authored maps and their three-item/one-opponent fixture
+  remain valid under generic validation.
+- The three final full-text fingerprints were calculated with an independent
+  integer/geometry reference, first checked against all three old fingerprints.
+  Each uses the same attempt 0, terrain, start and exit as checkpoint 02.
+  Differences add rat slot 1, guaranteed potion 3 and optional finds, while
+  retaining the first three item positions. Generator 7 was already raised
+  once for 14b; no further version bump or geometry-stream change is made.
+- Reachability clarification of the fixed contract: domains 2003/2011 differ
+  by 8, so successor states differ by 238187368 modulo 2^31. The possible raw
+  differences are 3634/3635/-29134/-29133, hence roll differences modulo 100
+  are 34/35/66/67. Both optional slots cannot be empty or of the same kind.
+  Tests cover zero optional finds and equal optional kinds through explicit
+  structurally valid stored fixtures; generator cases cover one/two finds,
+  missing slot 4 with slot 5 retained, and optional kinds matching guaranteed
+  finds. The mandated domains/table stay unchanged.
+- At least four non-touching rooms of minimum size 3 by 3 supply sixteen
+  distinct corners. Start/exit exclude at most two; hostile centers are never
+  corners. Thus valid generated geometry always has at least fourteen free
+  corners for at most six finds. The shortage guard remains explicit; forcing
+  it would require invalid generator internals or a test-only production API.
+  The four-room minimum, 40 placement tries and 16-attempt bound are unchanged.
+  A pinned seed-80 retry case verifies attempt 0 floor-share rejection and
+  attempt-1 placements; seed 9188 proves that an unsafe second-ranked room is
+  skipped for the next safe center without changing the successful attempt.
+  Seed 132 pins optional potion/jerkin placement, and placement-ID length
+  boundaries exercise accepted identities and the exhausted retry path.
+- Existing potion storage tests keep their intended four-item level fixtures
+  by omitting optional placements explicitly, while rat storage/network and
+  potion client/server tests now use natural guaranteed generated placements.
+  Two existing drop/revisit save assertions now compare entity counts with
+  the immutable source level, preserving their no-duplication check with optional
+  finds. The first full run exposed their old expected-three assumptions; both
+  focused corrections pass. No production change was needed.
+- Independent read-only review against the checkpoint-08 snapshot found one
+  stale documentation field-schema count; it is corrected. The reviewer also
+  independently checked the unsafe-room fixture, optional kinds, all 32768
+  upper RNG values with both carry cases, and the corner-count invariant.
+  The two later save-count corrections were independently rechecked. No relevant
+  defects or required test gaps remain.
+- Final verification passed: formatting, all 20 workspace project checks,
+  `git diff --check` and the complete suite (88/88 programs, zero failures),
+  including both corrected save tests. The new placement test also passed
+  separately after its safety, optional-kind and ID-boundary additions.
+  README, roadmap, canonical terms and relevant architecture/storage docs now
+  describe final generation. World format 3, generator 7, level format 2,
+  protocol 15 and save format 8 remain unchanged, as does the FPAS repository.
+  No commit/push; checkpoint 10 has not started.
+
 ### 10. Prove immutable levels and resumable cross-area item state
 
-- [ ] Extend `level_storage_test`, `visited_savegame_test`,
+- [x] Extend `level_storage_test`, `visited_savegame_test`,
   `dropped_item_savegame_test`, `persistence_failure_test` and catalog tests.
 - Positive: generated format-2 round trip, first-entry atomic publication,
   kill/pickup/use/save/restart/load; carry/drop/pick up a potion in another
@@ -504,9 +806,64 @@ Checkpoint 02 evidence (2026-10-15):
 - Exit: full validation still requires every original mutable entity exactly
   once, including terminal consumed/defeated records, with one read per level.
 
+Checkpoint 10 implementation notes (2026-10-16):
+
+- Added `dungeon_contents_storage_test`: two naturally generated stored levels,
+  including an actual entrance whose optional potion has original slot 5 with
+  slot 4 absent. It calls production pickup, combat, drop, use and transition
+  rules; pose setup omits route walking and one-health targets with seed 1
+  make kills deterministic. Full TCP routing remains checkpoint 11.
+- Save/reopen/load compares every state field during combat and outdoors.
+  Tests transfer a potion to another dungeon, drop/save/load/pick up/consume it,
+  consume all remaining potions, retain defeated opponents, revisit both areas,
+  Start over without writing the old save, and rewind to an earlier explicit
+  save while retaining newer immutable levels. Counts and original IDs remain
+  exact through optional-slot gaps and terminal records.
+- Missing/duplicate consumed slot 5, invented slot 4, wrong item kinds and
+  missing/duplicate/wrong-kind defeated opponents reject both save and load;
+  rejected writes preserve the good save and rejected loads preserve bad bytes.
+  Existing drop/revisit tests now compare more complete state and verify
+  fresh original placements, health and RNG retention.
+- Extended level storage with a valid stored name/content fixture deliberately
+  different from generation and explicit corrupt optional-slot cases. Extended
+  the persistence-failure matrix and catalog with malformed/old levels,
+  old saves/world metadata, corrupt optional identities, missing levels and
+  wrong path types. No failed operation repairs, deletes or replaces data.
+- The existing production paths needed no change. Code inspection confirms that
+  reads never call generation, full validation uses supplied maps, and the load
+  result reuses its already read current map. An isolated `strace -f -e
+  trace=openat` probe independently measured exactly `[1,1]` level reads for
+  each of save and load in a two-visited-area indoor state with a consumed
+  potion. The temporary program was removed; no production counters or exports
+  were added. The first standalone probe invocation lacked project imports;
+  invocation through the owning world-test project passed.
+- Independent read-only review against the checkpoint-09 snapshot found no
+  relevant defects or required coverage gaps. It checked the real-rule fixtures,
+  every field of the state comparison, terminal-origin rejection, preserved
+  bytes, the no-generation path and the filesystem trace independently.
+- Final verification passed on 2026-10-16: all 11 world-test programs,
+  formatting, all 20 workspace project checks, the complete suite (89/89
+  programs, zero failures) and `git diff --check`. Commands used:
+
+  ```text
+  .temp-data/rat-toolchain/fpas fmt --check apps libs tests tools
+  .temp-data/rat-toolchain/fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace
+  .temp-data/rat-toolchain/fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1 tests/world/world-tests.fpasprj
+  .temp-data/rat-toolchain/fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1 dungeon.fpasworkspace
+  git diff --check
+  ```
+
+  The matching game-local compiler/library from earlier checkpoints were reused;
+  compiler SHA-256 remains
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  README, roadmap and storage/persistence/generated-dungeon docs are updated.
+  World format 3, generator 7, level format 2, protocol 15 and save format 8
+  remain unchanged. No FPAS repository edits, commit or push; checkpoint 11
+  has not started.
+
 ### 11. Exercise the complete client/server loop and failure paths
 
-- [ ] Add `tests/server/dungeon_contents_network_test.fpas` using existing
+- [x] Add `tests/server/dungeon_contents_network_test.fpas` using existing
   `Dungeon.Test.Levels`, `Routes` and `Wire` helpers; keep real-process session
   coverage. Add focused cases to client/server internal tests where needed.
 - Positive: create current world, enter named dungeon, collect/equip/use,
@@ -524,9 +881,83 @@ Checkpoint 02 evidence (2026-10-15):
 - Exit: end-to-end assertions check health, IDs, RNG, files and dirty state,
   not just successful message exchange. Existing response limits stay intact.
 
+Checkpoint 11 implementation notes (2026-10-16):
+
+- Added `dungeon_contents_network_test`, reusing Levels/Routes/Wire and the
+  production TCP connection loop. Seed 9462 creates a fresh world through the
+  protocol, collects/equips its generated sword and jerkin, collects the potion,
+  meets the skeleton, drinks when injured, fights both original opponents and
+  resumes/revisits the explicit save. No natural-play health/hostile/item edits.
+  The only save-file replacement restores bytes of an actual earlier save.
+- Independent literal LCG accounting checks each potion-turn hit/miss, capped
+  healing, damage and final persisted RNG. Reconnecting before saving restores
+  the carried potion and replays the whole response byte for byte. Repeated or
+  foreign use plus discard/overwrite refusals are followed by a save whose
+  health, item and RNG assertions confirm that rejections did not take turns.
+- The actual network projections supply named title/map labels and kind-carrying
+  animation/raycaster inputs. Standing sprite heights and fallen event markers
+  distinguish rat/skeleton. Typed dashboard checks cover world, generator,
+  stored area name, dirty state and save timestamps. Existing
+  `item_use_network_test` retains real client-adapter and headless I/Enter
+  keyboard coverage; existing client tests retain pending/modal checks.
+- Added `dungeon_contents_failures_test`: real TCP rejection of world format 2,
+  generator-6 worlds/levels, level format 1 and save format 7 without installation
+  or file changes; full-health/foreign use and failed save with unchanged
+  installed projection/RNG/items and preserved bytes. Existing
+  `server_contract_test` verifies the old version-14 handshake;
+  `save_failure_test` retains genuine save-path I/O coverage.
+- Extended `item_use_session_test`: full 64-entry local inventory, rejected
+  pickup, consumption freeing one entry and successful pickup; later fatal
+  combat turn after drinking; refused active load, failed idle load and failed
+  prepared send. Whole-session rejection comparisons include every state/map
+  field, selection/lifecycle flags, dirty/save facts, metadata and cache cells.
+  Capacity extras and the no-autosave sentinel are explicit local test fixtures;
+  full real-origin capacity/save checks remain in the world tests.
+- Extended `two_dungeon_test` with two equal stored display names and distinct
+  IDs through map projection, load, transfer and revisit. Extended the actual
+  listener/dashboard test to cancel with active dirty progress and retain the
+  previous save bytes. Disconnect/shutdown never implicitly save.
+- Focused development runs caught test-only mistakes: an incorrect sprite type,
+  the world metadata version key, the missing state projection after a save
+  acknowledgement, and an unexported cache-codec import. They were corrected
+  using the actual public records and existing projection request; no production
+  export, compatibility relaxation or timeout increase was added. The five
+  changed/new test programs then passed focused verification (the internal
+  session case was rerun separately after its correction).
+- Independent read-only review against the checkpoint-10 snapshot found one
+  test gap: deriving the number of potion-turn dice only from reported events
+  would allow a completely omitted hostile phase. The corrected test pins the
+  natural Before fixture (HP 17, RNG 1756806705), exactly one skeleton hit for 4,
+  healing 3, After HP 16 and final RNG 842764951. The focused TCP test passed;
+  independent follow-up review confirmed the fix and no other relevant findings.
+  Queue ordering, fallen-art isolation, complete session comparison and the
+  remaining coverage were independently checked. The production logic needed
+  no change.
+- Final verification passed on 2026-10-16: formatting, all 20 workspace project
+  checks, `git diff --check` and the complete suite (91/91 programs, zero
+  failures). The initial complete run also passed 91/91; after the review fix,
+  both the focused TCP case and a fresh complete run passed. No review findings
+  remain open. Commands used for the final run:
+
+  ```text
+  .temp-data/rat-toolchain/fpas fmt --check apps libs tests tools
+  .temp-data/rat-toolchain/fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace
+  .temp-data/rat-toolchain/fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --file tests/server/dungeon_contents_network_test.fpas tests/server/server-tests.fpasprj
+  .temp-data/rat-toolchain/fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1 dungeon.fpasworkspace
+  git diff --check
+  ```
+
+  The matching game-local compiler/library remain unchanged; compiler SHA-256
+  is `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`.
+  README, roadmap and relevant architecture/persistence docs are updated.
+  World format 3, generator 7, level format 2, protocol 15 and save format 8
+  remain unchanged. No FPAS repository edits, commit or push; checkpoint 12
+  has not started. Final bench smoke checks and user terminal review remain
+  that next checkpoint; this does not mark 14b accepted or DONE.
+
 ### 12. Finish documentation, verification and user review
 
-- [ ] Update roadmap, product terms/UI, README controls/current-version warning,
+- [x] Update roadmap, product terms/UI, README controls/current-version warning,
   generated-dungeon/level-storage/persistence/combat/inventory/equipment docs and
   this plan. Remove stale current-behavior claims about three fixed items,
   skeleton-only combat, the generic dungeon title and deletion of obsolete data.
@@ -541,12 +972,74 @@ Checkpoint 02 evidence (2026-10-15):
 - Smoke-check the existing persistence bench at 1/10/100 visited dungeons with
   new/consumed items; compare to its baseline and investigate a material
   regression before adding any optimization or changing expectations.
-- User terminal review: names, distinct rat/skeleton sprites and death frames,
+- [ ] User terminal review (deliberately open; unavailable in this cloud):
+  names, distinct rat/skeleton sprites and death frames,
   potion discovery/inspection, I/Enter use, partial/full-health behavior, combat
   response, save/restart/Continue and 14s dashboard/menu responsiveness.
+  The user explicitly deferred this gate on 2026-10-16. Automated/headless
+  coverage does not replace it; do not request cloud acceptance or mark DONE.
 - Exit: mark 14b IN REVIEW only after all implementation gates pass; mark DONE
   only after explicit acceptance. Remove this plan after acceptance under the
   project policy. 13b is then the next gameplay slice, before 14c.
+
+Checkpoint 12 automated evidence (2026-10-16):
+
+- Updated README controls/current versions, canonical turns and inventory terms,
+  client UI, roadmap and architecture documents. Historical 13a fixture
+  coordinates and 14a measurements are explicitly historical. Older screenshots
+  do not count as the open 14b terminal review. Removed stale current-version,
+  fixed-coin-count and world-data deletion instructions; runtime configuration
+  retains its required delete/recreate instruction. Repeated names, original
+  slot gaps, terminal records and earlier-save/Start-over behavior stay documented.
+- The existing persistence tool now marks alternating guaranteed potions as
+  consumed in its constructed fixture, retains other fresh finds, reports
+  consumed/opponent counts and compares the complete encoded state after each
+  load, outside the timing intervals. No production rules, exports, manifests,
+  format versions or runtime settings changed in this checkpoint.
+- [Persistence measurements](../architecture/persistence-measurements.md) record
+  exact commands, compiler identity, 1/10/100 visits, raw ranges/medians, peak
+  RSS and investigation. Final common-filesystem controls pass all 36 save/load
+  rounds; current 100-visit medians are 558.5 ms save / 542 ms load, with 539
+  items, 50 consumed and 200 opponents. Baseline controls and public-API phase
+  probes locate added work in decoding/full validation of more entities.
+  Initial overlap/RAM-filesystem comparisons are excluded from final timings.
+  No cache, optimization, relaxed validation or performance expectation changed.
+- Formatting and format verification pass; all 20 workspace projects check and
+  the final serial suite passes **91/91 test programs, zero failures**. All 87
+  changed/new FPAS files have purpose comments; all 317 public declarations
+  have preceding documentation. All 83 local Markdown targets/anchors resolve.
+- Exact final verification commands:
+
+  ```text
+  .temp-data/rat-toolchain/fpas fmt apps libs tests tools
+  .temp-data/rat-toolchain/fpas fmt --check apps libs tests tools
+  .temp-data/rat-toolchain/fpas check --std-lib .temp-data/rat-toolchain/lib dungeon.fpasworkspace
+  .temp-data/rat-toolchain/fpas test --std-lib .temp-data/rat-toolchain/lib --timeout 600 --jobs 1 dungeon.fpasworkspace
+  git diff --check
+  ```
+
+  Compiler source FPAS `33814ef3`, SHA-256
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`,
+  with its copied matching library. The compiler repository remains clean.
+- Failed development checks: a benchmark draft attempted a private-unit import
+  (FP4116), then retained a stale alias/incorrect metadata field (FP3003). The
+  final fixture uses the existing public item model and `Metadata.Id`, without
+  adding exports. The optional system `time` executable was absent (exit 127);
+  peak RSS uses Python `os.wait4`. A temporary phase-probe workspace initially
+  listed uncopied members (FP4106); its temporary manifest was narrowed to the
+  copied libraries/tool. These corrected setup/draft checks produced no
+  production change or test relaxation. The workspace suite has no failed run.
+- Independent subagent review found two documentation errors: free corners in
+  rooms without opponents are preferred, not exclusive; optional finds may add
+  coins, so persistence guarantees one record per original ID. Both are fixed.
+  Follow-up review recalculated the final medians/ranges, counts and size/RSS
+  comparisons and checked IN REVIEW with acceptance open. Its phase-label
+  finding is corrected: `DecodeSaveGameState` includes parsing plus
+  self-contained shape/identity validation, not isolated decoder time. No
+  benchmark-code defect or open relevant review finding remains.
+- World format 3, generator 7, level format 2, protocol 15 and save format 8
+  remain final. The user explicitly leaves terminal review/acceptance open;
+  14b is IN REVIEW, not DONE. No FPAS repository edits, commit, push or 13b work.
 
 ## Verification commands and execution rules
 
@@ -582,12 +1075,12 @@ and obtain agreement before an FPAS fix; never silently work around it here.
 
 ## Completion checklist
 
-- [ ] All twelve checkpoints have implementation and verification evidence.
-- [ ] Names and contents are deterministic; visited immutable files stay fixed.
-- [ ] Both opponents have correct rules, persistence, projections and art.
-- [ ] Loot identities survive empty slots, transfer, consume and save/load.
-- [ ] Accepted potion use heals once before one enemy phase; rejection is inert.
-- [ ] Strict protocol/level/save versions reject old and malformed data intact.
-- [ ] Positive, negative and edge cases pass through pure, storage, wire and UI seams.
-- [ ] Complete suite is green; final counts and bench observations are recorded.
+- [x] All twelve checkpoints have automated implementation and verification evidence.
+- [x] Names and contents are deterministic; visited immutable files stay fixed.
+- [x] Both opponents have correct rules, persistence, projections and art.
+- [x] Loot identities survive empty slots, transfer, consume and save/load.
+- [x] Accepted potion use heals once before one enemy phase; rejection is inert.
+- [x] Strict protocol/level/save versions reject old and malformed data intact.
+- [x] Positive, negative and edge cases pass through pure, storage, wire and UI seams.
+- [x] Complete suite is green; final counts and bench observations are recorded.
 - [ ] User accepts the running feature; only then remove this plan and mark DONE.

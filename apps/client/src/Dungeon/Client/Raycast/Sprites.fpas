@@ -15,6 +15,12 @@ public type FirstPersonEffect = record
   public Sink: real;
   // Draws the opponent on the field ahead even though the state no longer contains it.
   public FallenAhead: boolean;
+  // Marker retained by the defeat event after the target has left the final rows.
+  public FallenCode: string;
+  // Only this target kind receives player impact, dodge and collapse effects.
+  public TargetCode: string;
+  // Only kinds that acted receive the opponent lunge.
+  public ActorCodes: array of string;
   // Progress of the player's swing from 0 to 1; negative values draw no swing.
   public Swing: real;
   // Whether the swing shows a blade instead of a fist.
@@ -30,7 +36,23 @@ public type Sprite = record
   public Art: array of string;
   // Opponent figures receive the frame's animation effect.
   public Hostile: boolean;
+  // Opponent marker, or empty for an item.
+  public Code: string;
 end record;
+
+// Builds the same kind-specific figure for both standing and fallen opponents.
+public function HostileSprite(Code: string; X: integer; Y: integer): Sprite;
+begin
+  var Height: real := 0.9;
+  if Code = Protocol.InteriorRatCode then
+    Height := 0.32;
+  end if;
+
+  return Sprite(
+    WorldX := Conv.IntToReal(X) + 0.5, WorldY := Conv.IntToReal(Y) + 0.5,
+    HeightFraction := Height, Art := Art.HostileArt(Code), Hostile := true, Code := Code
+  );
+end function;
 
 // Collects visible opponent and item fields as billboards.
 public function VisibleSprites(Value: Protocol.FirstPersonVisibleState): array of Sprite;
@@ -41,16 +63,10 @@ begin
       for X: integer := 0 to Value.Width - 1 do
         begin
           const Code: string := Rays.FieldAt(Value, X, Y);
-          if Code = Protocol.InteriorHostileCode then
+          if Protocol.IsHostileCode(Code) then
             begin
               Sprites.PushInPlace(
-                Sprite(
-                  WorldX := Conv.IntToReal(X) + 0.5,
-                  WorldY := Conv.IntToReal(Y) + 0.5,
-                  HeightFraction := 0.9,
-                  Art := Art.HostileArt(),
-                  Hostile := true
-                )
+                HostileSprite(Code, X, Y)
               );
             end;
           end if;
@@ -63,7 +79,7 @@ begin
                   WorldY := Conv.IntToReal(Y) + 0.5,
                   HeightFraction := 0.1,
                   Art := Art.ItemArt(),
-                  Hostile := false
+                  Hostile := false, Code := ''
                 )
               );
             end;
@@ -77,10 +93,20 @@ begin
                   WorldY := Conv.IntToReal(Y) + 0.5,
                   HeightFraction := 0.11,
                   Art := Art.WeaponArt(),
-                  Hostile := false
+                  Hostile := false, Code := ''
                 )
               );
             end;
+          end if;
+
+          if Code = Protocol.InteriorPotionCode then
+            Sprites.PushInPlace(
+              Sprite(
+                WorldX := Conv.IntToReal(X) + 0.5,
+                WorldY := Conv.IntToReal(Y) + 0.5, HeightFraction := 0.16,
+                Art := Art.PotionArt(), Hostile := false, Code := ''
+              )
+            );
           end if;
 
           if Code = Protocol.InteriorArmorCode then
@@ -91,7 +117,7 @@ begin
                   WorldY := Conv.IntToReal(Y) + 0.5,
                   HeightFraction := 0.14,
                   Art := Art.ArmorArt(),
-                  Hostile := false
+                  Hostile := false, Code := ''
                 )
               );
             end;
@@ -139,11 +165,14 @@ begin
     end;
   end if;
   var HeightFraction: real := Item.HeightFraction;
-  if Item.Hostile then
+  if Item.Hostile and (Item.Code = Effect.TargetCode) then
     begin
       Lateral := Lateral + Effect.Shift;
-      HeightFraction := HeightFraction * Effect.Scale;
     end;
+  end if;
+
+  if Item.Hostile and (Item.Code in Effect.ActorCodes) then
+    HeightFraction := HeightFraction * Effect.Scale;
   end if;
   const ArtHeight: integer := Item.Art.Length();
   const ArtWidth: integer := Item.Art[0].Length();
@@ -154,7 +183,7 @@ begin
   const CenterX: real := (Conv.IntToReal(Width - 1) / 2.0) * (1.0 + (Lateral / Depth));
   const Left: real := CenterX - (SpriteWidth / 2.0);
   var Top: real := FloorLine - SpriteHeight;
-  if Item.Hostile then
+  if Item.Hostile and (Item.Code = Effect.TargetCode) then
     begin
       // A sinking figure keeps its size and disappears below the floor line.
       Top := Top + (SpriteHeight * Effect.Sink);
@@ -187,7 +216,7 @@ begin
                       const Color: integer := Art.ArtPixel(Item.Art[ArtY][ArtX]);
                       if Color <> 0 then
                         begin
-                          if Item.Hostile and Effect.Flash then
+                          if (Item.Hostile and (Item.Code = Effect.TargetCode)) and Effect.Flash then
                             begin
                               Drawn[(Row * Width) + Column] := PixelOps.Rgb(255, 250, 236);
                             end;
@@ -221,6 +250,7 @@ begin
     Scale := 1.0,
     Sink := 0.0,
     FallenAhead := false,
+    FallenCode := '', TargetCode := '', ActorCodes := [],
     Swing := -1.0,
     Armed := false
   );

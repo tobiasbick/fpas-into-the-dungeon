@@ -83,8 +83,39 @@ begin
   return Next;
 end function;
 
-// Returns the intention for Enter on the selected item: unequip when worn, equip when it has a slot.
-public function SelectedEquipmentRequest(State: Model.ClientModel): option of Protocol.ClientMessage;
+// Keeps the selected identity across an authoritative refresh; if removed, clamps its old index.
+// Explicit navigation still wraps through MoveInventorySelection; an empty inventory selects 0.
+public function ReconcileInventorySelection(Previous: Model.ClientModel; Updated: Model.ClientModel): Model.ClientModel;
+begin
+  var Next := Updated;
+  if (Previous.InventorySelection >= 0)
+    and
+    (Previous.InventorySelection < Previous.Inventory.Length())
+  then
+    const Id := Previous.Inventory[Previous.InventorySelection].Id;
+    for Index: integer := 0 to Updated.Inventory.Length() - 1 do
+      if Updated.Inventory[Index].Id = Id then
+        Next.InventorySelection := Index;
+        return Next;
+      end if;
+    end for;
+  end if;
+
+  Next.InventorySelection := Previous.InventorySelection;
+  if Next.InventorySelection >= Updated.Inventory.Length() then
+    Next.InventorySelection := Updated.Inventory.Length() - 1;
+  end if;
+
+  if Next.InventorySelection < 0 then
+    Next.InventorySelection := 0;
+  end if;
+
+  return Next;
+end function;
+
+// Returns Enter's server intention from projected capability: use, then remove or wear.
+// No name or health rule is inferred here; the server validates every request.
+public function SelectedItemRequest(State: Model.ClientModel): option of Protocol.ClientMessage;
 begin
   if (State.InventorySelection < 0) or (State.InventorySelection >= State.Inventory.Length()) then
     begin
@@ -92,6 +123,10 @@ begin
     end;
   end if;
   const Item: Protocol.VisibleInventoryItem := State.Inventory[State.InventorySelection];
+  if Item.Usable then
+    return Some(Protocol.ClientMessage.UseItem(Item.Id));
+  end if;
+
   if Item.Equipped then
     begin
       return Some(Protocol.ClientMessage.Unequip(Item.Id));
@@ -128,6 +163,10 @@ begin
     end;
   end if;
 
+  if Item.Usable then
+    return Prefix + Item.Name + ' — usable';
+  end if;
+
   if Item.Equipped then
     begin
       return ((Prefix + Item.Name) + ' — worn as ') + SlotLabel(Item.Slot);
@@ -136,11 +175,32 @@ begin
 
   if Item.Slot = Protocol.VisibleItemSlot.NoSlot then
     begin
-      return (Prefix + Item.Name) + ' — cannot be worn';
+      return (Prefix + Item.Name) + ' — no Enter action';
     end;
   end if;
 
   return ((Prefix + Item.Name) + ' — ') + SlotLabel(Item.Slot);
+end function;
+
+function SelectedActionLabel(State: Model.ClientModel): string;
+begin
+  if (State.InventorySelection < 0) or (State.InventorySelection >= State.Inventory.Length()) then
+    return 'Enter: No action';
+  end if;
+  const Item := State.Inventory[State.InventorySelection];
+  if Item.Usable then
+    return 'Enter: Use';
+  end if;
+
+  if Item.Equipped then
+    return 'Enter: Remove';
+  end if;
+
+  if Item.Slot <> Protocol.VisibleItemSlot.NoSlot then
+    return 'Enter: Wear';
+  end if;
+
+  return 'Enter: No action';
 end function;
 
 // Renders the inventory overlay with the current selection and its controls.
@@ -170,10 +230,16 @@ begin
 
   Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(''));
   Content.PushInPlace(
-    Tui.TuiElementBuilders.MakeLabel('W/S or arrows select  Enter wear/remove  D drop  Esc close')
+    Tui.TuiElementBuilders.MakeLabel(
+      'Health ' + Conv.IntToStr(State.Health) + '/' + Conv.IntToStr(State.MaxHealth)
+    )
+  );
+  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(SelectedActionLabel(State)));
+  Content.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel('W/S or arrows select  D drop  Esc close')
   );
   Content.PushInPlace(
-    Tui.TuiElementBuilders.MakeLabel('Changing or dropping gear takes one turn.')
+    Tui.TuiElementBuilders.MakeLabel('Using, changing or dropping an item takes one turn.')
   );
   return Tui.TuiElementBuilders.MakeOverlay(
     'Inventory',

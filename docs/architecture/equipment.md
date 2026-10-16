@@ -15,8 +15,9 @@ equipped items; the combat rules read only these derived values.
 | Maximum health | 20 | — | — |
 
 - A weapon replaces the unarmed damage dice; it does not add to them.
-- Armor raises the threshold an opponent must roll: the restless skeleton hits
-  on d20 ≥ 9 + armor, so the jerkin lowers its chance from 60 % to 50 %.
+- Armor raises the threshold an opponent must roll: the skeleton hits on
+  d20 ≥ 9 + armor, the rat on d20 ≥ 12 + armor. The jerkin lowers their hit
+  chances from 60 % to 50 % and from 45 % to 35 %, respectively.
 - Unarmed damage drops from d4 + 1 to d3 so that finding a weapon matters.
   Unarmed, the skeleton falls after about eight turns; with the sword after
   about four.
@@ -32,7 +33,13 @@ The item model keeps one location per item. A new location variant,
 **equipped by the player in a slot**, joins the existing interior placement
 and carried state, so an item is never both carried and worn.
 
-| Item | Kind | Slot | Initial field |
+The coordinates below belong to the historical 13a authored fixture, which
+still tests generic maps. Current generated dungeons place four guaranteed
+finds and optional slots 4/5 on free room corners. Rooms without opponents are
+preferred; remaining finds use other free corners when needed. See
+[generated contents](generated-dungeons.md). Healing potions cannot be worn.
+
+| Item | Kind | Slot | Fixture field |
 |---|---|---|---|
 | Ancient coin | treasure | none | `8, 1` |
 | Rusty short sword | weapon | weapon | `7, 4` |
@@ -70,7 +77,11 @@ or `You take off the leather jerkin.`
 items must be unequipped first; see
 [items and inventory](items-and-inventory.md).
 
-## Protocol version 12
+## Protocol history and current contract
+
+Version 12 introduced the equipment fields and events below. The current
+protocol is 15; combat events now require the opponent kind as `hostile_code`
+(`h` or `r`), and potion floor fields use `p`.
 
 - Client intentions `equip` and `unequip`, each with an `item_id`.
 - Inventory entries gain `slot` (`weapon`, `body`, or empty for items that
@@ -86,19 +97,25 @@ items must be unequipped first; see
 - The interior alphabet gains `w` for a weapon and `a` for armor lying on a
   visible field. `i` remains the code for other items.
 
+Protocol 15 also requires boolean `usable` on every inventory entry. Equipment
+entries always project false; a usable entry has no slot and cannot be worn.
+See [items and inventory](items-and-inventory.md) for potion use.
+
 ## Persistence
 
-Savegame format 7 stores equipped items as their own location variant with
-their slot. Validation requires exactly the three known items with matching
-identity and kind, at most one item per slot, and a slot that fits the item.
-Format 5 and older are rejected according to the current-version-only policy.
+Savegame format 8 stores equipped items as their own location variant with
+their slot. Validation requires exactly one record per original item placement
+with matching identity and kind, at most one item per slot, and a slot that fits
+the item. Format 7 and older saves are rejected and preserved without migration.
 
 ## Client presentation
 
 - **Inventory overlay** on `I`: lists carried and worn items with their slot.
-  `W`/`S` or the arrow keys select, `Enter` equips or unequips the selection,
-  `Escape` or `I` closes. Items without a slot show that they cannot be worn.
-  The overlay stays open after a change so the result is visible.
+  `W`/`S` or the arrow keys select, `Enter` uses a projected usable item or
+  equips/unequips gear, and `Escape` or `I` closes. The selected Enter action
+  and current health are shown. Items with neither capability nor slot have
+  no Enter action. The overlay stays open after a change or rejection;
+  selection follows the same identity or clamps after its removal.
 - **Character sheet** on `C`: health and the projected derived values with
   their sources, followed by the equipment. `Escape` or `C` closes.
 - The context panel replaces `Equipment: Not available` with the weapon and
@@ -114,10 +131,13 @@ already final.
 
 - Up to three phases of 160 ms, so at most 480 ms: a blade or fist swing from
   the lower right of the view, then a white hit flash with a rising damage
-  number or a sideways dodge with `miss`, then the skeleton's lunge. The red
+  number or a sideways dodge with `miss`, then the opponents' lunge. The red
   damage frame and the player's damage number wait for that lunge. A destroyed
-  skeleton is already gone from the state, so the client draws it on the field
-  ahead once more and lets it sink into the floor.
+  opponent is already gone from the state, so the client uses the event's
+  `hostile_code` to draw the correct rat or skeleton on the field ahead once
+  more and lets it sink into the floor. Impact effects target the reported kind;
+  lunges apply to acting kinds. Simultaneous enemy hit amounts are added for
+  the player's rising damage text.
 - **Clock:** the client asks the TUI host for its frames with
   `Cmd.RequestTick(40)`. Each `TuiMsg.Tick` advances the animation by the
   elapsed time and requests the next frame until the animation ends. A key
@@ -145,5 +165,6 @@ builds the inventory overlay, character sheet, and equipment summaries,
 `Dungeon.Client.Raycast` draws scenes, sprites, and effects. The client never
 derives game values.
 
-Item rarity, durability, shops, loot tables, two-handed weapons, further slots,
-experience, and levels remain outside this slice.
+Item rarity, durability, shops, broader loot tables, two-handed weapons and
+further equipment slots remain deferred. Progression (13b) follows acceptance
+of 14b, before deeper dungeon levels (14c).

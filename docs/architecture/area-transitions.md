@@ -63,9 +63,9 @@ exit reuse the same selected world session and chunk cache.
 
 ## Versions and lifecycle
 
-World and chunk format version `3`, generator version `6`, level-file format
-`1`, protocol version `13`, and savegame format `7` are required. Development data from older schemas is
-rejected without migrations, fallbacks, or compatibility paths. The retained
+World and chunk format version `3`, generator version `7`, level-file format
+`2`, protocol version `15`, and savegame format `8` are required. Development
+data from older schemas is rejected and preserved without migration or repair. The retained
 return location is part of the authoritative savegame, so a saved interior can
 be loaded and later return to its exact outdoor coordinate. Connecting alone
 does not implicitly start or load a session.

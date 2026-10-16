@@ -1,7 +1,7 @@
 // Verifies that saves retain first-visit entities and reject invalid visit lists.
 program VisitedSavegameTest;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.Levels as Levels, Dungeon.Hostiles as Hostiles, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
 
 begin
   const Root: string := '.temp-data/visited-save-test-' + Conv.IntToStr(Time.TimestampMillis());
@@ -27,6 +27,10 @@ begin
   var Changed: GameState.GameState := Entered;
   Changed.Items[0] := Changed.Items[0] with Location := ItemRules.ItemLocation.CarriedByPlayer; end with;
 
+  Changed.Items[3] := Changed.Items[3] with Location := ItemRules.ItemLocation.Consumed; end with;
+
+  Changed.Health := 14;
+  Changed.RandomState := 123456;
   Changed.Hostiles[0] := Changed.Hostiles[0] with Health := 0; Alerted := true; end with;
 
   Changed.Player := Coordinates.PlayerPosition.FirstPerson(
@@ -41,10 +45,20 @@ begin
       Test.AssertTrue(GameState.ValidateGameState(View, State) is Ok(_));
       Test.AssertTrue(GameState.HasVisitedArea(State, Map.AreaId));
       const Again: GameState.GameState := Levels.EnterSpawnLevel(World, State).Unwrap();
-      Test.AssertEquals(3, Again.Items.Length());
+      Test.AssertEquals(Map.Items.Length(), Again.Items.Length());
       Test.AssertEquals(Map.Hostiles.Length(), Again.Hostiles.Length());
       Test.AssertTrue(Again.Items[0] = Changed.Items[0]);
       Test.AssertTrue(Again.Hostiles[0] = Changed.Hostiles[0]);
+      Test.AssertEquals(Changed.Health, Again.Health);
+      Test.AssertEquals(Changed.RandomState, Again.RandomState);
+      for Index: integer := 0 to Changed.Items.Length() - 1 do
+        Test.AssertTrue(Changed.Items[Index] = Again.Items[Index]);
+      end for;
+
+      for Index: integer := 0 to Changed.Hostiles.Length() - 1 do
+        Test.AssertTrue(Changed.Hostiles[Index] = Again.Hostiles[Index]);
+      end for;
+
       Test.AssertTrue(Savegame.WriteSaveGame(World, Again).Unwrap());
       case Savegame.LoadSaveGame(World).Unwrap() of
         when Savegame.SaveGameLoad.Loaded(const Indoor, const IndoorView):
@@ -79,6 +93,23 @@ begin
   Test.AssertTrue(
     (Savegame.WriteSaveGame(World, Outside with VisitedAreas := []; end with) is Error(_))
   );
+  Test.AssertEquals(Before, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  // Starting over rematerializes original placements without changing the earlier explicit save.
+  const Reset := Levels.EnterSpawnLevel(World, Fresh).Unwrap();
+  for Index: integer := 0 to Map.Items.Length() - 1 do
+    Test.AssertEquals(Map.Items[Index].ItemId, Reset.Items[Index].Id);
+    Test.AssertTrue(Reset.Items[Index].Kind = Map.Items[Index].Kind);
+    Test.AssertTrue(
+      Reset.Items[Index].Location =
+      ItemRules.ItemLocation.InInterior(Map.AreaId, Map.Items[Index].Position)
+    );
+  end for;
+
+  for Opponent: Hostiles.GameHostile in Reset.Hostiles do
+    Test.AssertEquals(Hostiles.HostileMaximumHealth(Opponent.Kind), Opponent.Health);
+    Test.AssertFalse(Opponent.Alerted);
+  end for;
+
   Test.AssertEquals(Before, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
   Test.AssertTrue(Savegame.WriteSaveGame(World, Fresh).Unwrap());
   case Savegame.LoadSaveGame(World).Unwrap() of

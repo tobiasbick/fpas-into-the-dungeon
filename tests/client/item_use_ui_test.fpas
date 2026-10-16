@@ -1,0 +1,394 @@
+// Verifies keyboard potion use, server-owned changes, modal/pending guards and animation lifecycle.
+program ItemUseUiTest;
+
+uses Dungeon.Test.Catalog as CatalogUnit, Dungeon.Client as ClientUnit, Dungeon.Client.Animation as Animation, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Potion(Id: string): Protocol.VisibleInventoryItem;
+begin
+  return Protocol.VisibleInventoryItem(
+    Id := Id,
+    Name := 'Healing potion',
+    Slot := Protocol.VisibleItemSlot.NoSlot,
+    Equipped := false,
+    Usable := true
+  );
+end function;
+
+function Visible(Inventory: array of Protocol.VisibleInventoryItem; Health: integer; Indoors: boolean; Events: array of Protocol.VisibleCombatEvent): Protocol.VisibleState;
+begin
+  if Indoors then
+    return Protocol.VisibleState.FirstPersonState(
+      Protocol.FirstPersonVisibleState(
+        Title := 'Potion hall', Status := 'Nothing in reach', Width := 5, Height := 3,
+        Rows := ['#####', '#.r.#', '#####'], KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'],
+        PlayerX := 3, PlayerY := 1, Facing := Protocol.FirstPersonFacing.West,
+        Inventory := Inventory, Health := Health, MaxHealth := 20, Character := [],
+        CombatLog := ['You drink the healing potion and recover 6 health.'], CombatEvents := Events
+      )
+    );
+  end if;
+
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      OriginX := 0, OriginY := 0, Width := 1, Height := 1, Rows := ['g'], KnowledgeRows := ['v'],
+      PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := Inventory,
+      Health := Health, MaxHealth := 20, Character := []
+    )
+  );
+end function;
+
+function Ready(Requests: channel of Protocol.ClientMessage; Events: channel of ClientUnit.ClientEvent; Inventory: array of Protocol.VisibleInventoryItem; Indoors: boolean): ClientUnit.ClientModel;
+begin
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  Model.ViewportWidth := 120;
+  Model.ViewportHeight := 30;
+  Model.RequestedWorldWidth := if Indoors then 78 else 39 end if;
+  Model.RequestedWorldHeight := 25;
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Connected(CatalogUnit.FixtureCatalog(false, false)),
+    Cmd
+  );
+  return ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.State(Visible(Inventory, 10, Indoors, [])),
+    Cmd
+  );
+end function;
+
+function Key(Kind: Tui.TuiKeyKind; Text: string): Tui.TuiKeyEvent;
+begin
+  return Tui.TuiKeyEvent(
+    kind := Kind,
+    ch := Text,
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+end function;
+
+function Press(App: Tui.TuiApplication; Model: ClientUnit.ClientModel; Kind: Tui.TuiKeyKind; Text: string): ClientUnit.ClientModel;
+begin
+  App.InjectKeyForTest(Key(Kind, Text));
+  return App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+end function;
+
+procedure AssertEmpty(Requests: channel of Protocol.ClientMessage);
+begin
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+end procedure;
+
+function ScreenContains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Y: integer := 0 to Snapshot.Height - 1 do
+    if Text in Snapshot.LineAt(Y) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(4);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 30));
+  const Pair := [Potion('first'), Potion('second')];
+  for Indoors: boolean in [false, true] do
+    var Model := Ready(Requests, Events, Pair, Indoors);
+    AssertEmpty(Requests);
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'i');
+    Model := Press(App, Model, Tui.TuiKeyKind.Down, '');
+    Test.AssertEquals(1, Model.InventorySelection);
+    Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Enter: Use'));
+    Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health 10/20'));
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    Test.AssertTrue(
+      Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.UseItem('second')
+    );
+    AssertEmpty(Requests);
+    Test.AssertTrue(Model.Pending);
+    Test.AssertTrue(Model.PendingChangesProgress);
+    Test.AssertFalse(Model.Dirty);
+    Test.AssertEquals(10, Model.Health);
+    Test.AssertEquals(2, Model.Inventory.Length());
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    AssertEmpty(Requests);
+    Model := ClientUnit.UpdateClientEvent(
+      Model,
+      ClientUnit.ClientEvent.State(Visible([Pair[0]], 16, Indoors, [])),
+      Cmd
+    );
+    Test.AssertFalse(Model.Pending);
+    Test.AssertTrue(Model.Dirty);
+    Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+    Test.AssertEquals(0, Model.InventorySelection);
+    Test.AssertEquals('first', Model.Inventory[0].Id);
+    Test.AssertEquals(16, Model.Health);
+    Test.AssertFalse('Picked up:' in Model.PrimaryStatus);
+    Test.AssertFalse(Model.Animation.Active);
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+    Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'Health 16/20'));
+    // Rejection preserves the selected identity, health and dirty state and displays the server reason.
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    Test.AssertTrue(
+      Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.UseItem('first')
+    );
+    Model := ClientUnit.UpdateClientEvent(
+      Model,
+      ClientUnit.ClientEvent.Rejected('item_use_rejected', 'server says no'),
+      Cmd
+    );
+    Test.AssertFalse(Model.Pending);
+    Test.AssertFalse(Model.PendingChangesProgress);
+    Test.AssertTrue(Model.Dirty);
+    Test.AssertEquals(16, Model.Health);
+    Test.AssertEquals('first', Model.Inventory[Model.InventorySelection].Id);
+    Test.AssertEquals('server says no', Model.Status);
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+    Test.AssertTrue(ScreenContains(App.SurfaceSnapshot(), 'server says no'));
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    discard Tasks.TryReceive(Requests).Unwrap().Unwrap();
+    Model := ClientUnit.UpdateClientEvent(
+      Model,
+      ClientUnit.ClientEvent.State(Visible([], 20, Indoors, [])),
+      Cmd
+    );
+    Test.AssertEquals(0, Model.Inventory.Length());
+    Test.AssertEquals(0, Model.InventorySelection);
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    AssertEmpty(Requests);
+  end for;
+  const Base := Ready(Requests, Events, Pair, true) with Overlay := ClientUnit.ClientOverlay.InventoryOverlay; end with;
+
+  AssertEmpty(Requests);
+  // Usability is never inferred from the display name, and invalid selections queue nothing.
+  const Lookalike := Potion('not-usable') with Usable := false; end with;
+  var Ignored := Press(App, Base with Inventory := [Lookalike]; end with, Tui.TuiKeyKind.Enter, '');
+  AssertEmpty(Requests);
+  Test.AssertFalse(Ignored.Pending);
+  for Selection: integer in [-1, 2] do
+    Ignored := Press(
+      App,
+      Base with InventorySelection := Selection; end with,
+      Tui.TuiKeyKind.Enter,
+      ''
+    );
+    AssertEmpty(Requests);
+  end for;
+
+  for Phase: ClientUnit.ClientConnectionPhase in [
+    ClientUnit.ClientConnectionPhase.Offline,
+    ClientUnit.ClientConnectionPhase.Disconnected, ClientUnit.ClientConnectionPhase.Connecting,
+    ClientUnit.ClientConnectionPhase.AwaitingSession, ClientUnit.ClientConnectionPhase.Failed
+  ] do
+    Ignored := Press(App, Base with ConnectionPhase := Phase; end with, Tui.TuiKeyKind.Enter, '');
+    AssertEmpty(Requests);
+    Test.AssertFalse(Ignored.Pending);
+  end for;
+
+  Ignored := Press(App, Base with HasVisibleState := false; end with, Tui.TuiKeyKind.Enter, '');
+  AssertEmpty(Requests);
+  Test.AssertFalse(Ignored.Pending);
+  Ignored := Press(App, Base with Pending := true; end with, Tui.TuiKeyKind.Enter, '');
+  AssertEmpty(Requests);
+  Test.AssertTrue(Ignored.Pending);
+  for Overlay: ClientUnit.ClientOverlay in [
+    ClientUnit.ClientOverlay.DescriptionOverlay, ClientUnit.ClientOverlay.CharacterSheetOverlay,
+    ClientUnit.ClientOverlay.ContextOverlay, ClientUnit.ClientOverlay.MessageOverlay,
+    ClientUnit.ClientOverlay.ExplorationMapOverlay, ClientUnit.ClientOverlay.SystemMenuOverlay
+  ] do
+    Ignored := Press(App, Base with Overlay := Overlay; end with, Tui.TuiKeyKind.Enter, '');
+    AssertEmpty(Requests);
+    Test.AssertFalse(Ignored.Pending);
+  end for;
+  const Full: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  Test.AssertTrue(Tasks.TrySend(Full, Protocol.ClientMessage.Wait).Unwrap());
+  Ignored := Press(App, Base with Requests := Full; end with, Tui.TuiKeyKind.Enter, '');
+  Test.AssertFalse(Ignored.Pending);
+  Test.AssertFalse(Ignored.PendingChangesProgress);
+  Test.AssertEquals(10, Ignored.Health);
+  Test.AssertEquals(2, Ignored.Inventory.Length());
+  Test.AssertTrue(Tasks.TryReceive(Full).Unwrap().Unwrap() is Protocol.ClientMessage.Wait);
+  AssertEmpty(Full);
+  discard Tasks.CloseChannel(Full);
+  const Closed: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  discard Tasks.CloseChannel(Closed);
+  Ignored := Press(App, Base with Requests := Closed; end with, Tui.TuiKeyKind.Enter, '');
+  Test.AssertFalse(Ignored.Pending);
+  Test.AssertFalse(Ignored.PendingChangesProgress);
+  Test.AssertEquals(10, Ignored.Health);
+  Test.AssertEquals(2, Ignored.Inventory.Length());
+  // A key interrupts playback, then still routes exactly once to inventory use.
+  const Hit := Protocol.VisibleCombatEvent(
+    Kind := Protocol.VisibleCombatEventKind.HostileHit,
+    Amount := 1,
+    HostileCode := 'r'
+  );
+  var Animated := ClientUnit.UpdateClientEvent(
+    Base,
+    ClientUnit.ClientEvent.State(Visible(Pair, 9, true, [Hit])),
+    Cmd
+  );
+  Test.AssertTrue(Animated.Animation.Active);
+  Test.AssertTrue(Animation.AnimationFrameAt(Animated.Animation).Effect.Swing < 0.0);
+  Animated := Press(App, Animated, Tui.TuiKeyKind.Enter, '');
+  Test.AssertFalse(Animated.Animation.Active);
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.UseItem('first')
+  );
+  AssertEmpty(Requests);
+  const Late := ClientUnit.UpdateClient(
+    Animated,
+    Tui.TuiMsg.Tick(Animation.AnimationFrameMilliseconds),
+    Cmd
+  );
+  Test.AssertFalse(Late.Animation.Active);
+  Test.AssertEquals(9, Late.Health);
+  // Defeat/disconnect stop playback; pending ticks and input cannot revive it or use an item.
+  for Disconnected: boolean in [false, true] do
+    var Ending := ClientUnit.UpdateClientEvent(
+      Base,
+      ClientUnit.ClientEvent.State(Visible(Pair, 9, true, [Hit])),
+      Cmd
+    );
+    Ending := ClientUnit.UpdateClientEvent(
+      Ending,
+      if Disconnected then ClientUnit.ClientEvent.Disconnected
+        else ClientUnit.ClientEvent.Defeated('You have fallen.')
+        end if,
+      Cmd
+    );
+    if not Disconnected then
+      Test.AssertTrue(
+        Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.ListWorlds(_, _)
+      );
+    end if;
+
+    Test.AssertFalse(Ending.Animation.Active);
+    Ending := ClientUnit.UpdateClient(Ending, Tui.TuiMsg.Tick(1000), Cmd);
+    Test.AssertTrue(Cmd.Command() = Tui.TuiCmd.NoCommand);
+    if Disconnected then
+      // The disconnected screen renders Connect; a late gameplay key cannot use its old inventory.
+      Test.AssertTrue(Ending.Screen = ClientUnit.ClientScreen.StartScreen);
+      Test.AssertFalse(Ending.HasVisibleState);
+      Ending := App.RunIterations(Ending, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+      Ending := ClientUnit.UpdateClient(Ending, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Enter, '')), Cmd);
+    else
+      Ending := Press(App, Ending, Tui.TuiKeyKind.Enter, '');
+    end if;
+
+    Test.AssertFalse(Ending.Animation.Active);
+    AssertEmpty(Requests);
+  end for;
+
+  // A resize deferred behind use queues a viewport after its reply. A transport failure there
+  // arrives as BackgroundFailed, while server error replies arrive as ClientEvent.Failed.
+  for TransportFailure: boolean in [false, true] do
+    var Interrupted := Press(App, Base, Tui.TuiKeyKind.Enter, '');
+    Test.AssertTrue(
+      Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.UseItem('first')
+    );
+    Interrupted := ClientUnit.UpdateClient(
+      Interrupted,
+      Tui.TuiMsg.Resize(Tui.TuiSize.Create(100, 30)),
+      Cmd
+    );
+    AssertEmpty(Requests);
+    Interrupted := ClientUnit.UpdateClientEvent(
+      Interrupted,
+      ClientUnit.ClientEvent.State(Visible([Pair[1]], 15, true, [Hit])),
+      Cmd
+    );
+    Test.AssertTrue(Interrupted.Animation.Active);
+    Test.AssertTrue(Interrupted.Pending);
+    Test.AssertTrue(
+      Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.Viewport(_, _)
+    );
+    if TransportFailure then
+      Interrupted := ClientUnit.UpdateClient(
+        Interrupted,
+        Tui.TuiMsg.BackgroundFailed(
+          1,
+          Tasks.TaskFailureKind.RuntimeError,
+          'transport stopped',
+          0,
+          0,
+          0
+        ),
+        Cmd
+      );
+    else
+      Interrupted := ClientUnit.UpdateClientEvent(
+        Interrupted,
+        ClientUnit.ClientEvent.Failed('server stopped'),
+        Cmd
+      );
+    end if;
+
+    Test.AssertTrue(Interrupted.Screen = ClientUnit.ClientScreen.StartScreen);
+    Test.AssertTrue(Interrupted.ConnectionPhase = ClientUnit.ClientConnectionPhase.Failed);
+    Test.AssertFalse(Interrupted.HasVisibleState);
+    Test.AssertFalse(Interrupted.Animation.Active);
+    Test.AssertFalse(Interrupted.Pending);
+    Interrupted := ClientUnit.UpdateClient(Interrupted, Tui.TuiMsg.Tick(1000), Cmd);
+    Test.AssertFalse(Interrupted.Animation.Active);
+    Test.AssertTrue(Cmd.Command() = Tui.TuiCmd.NoCommand);
+    Test.AssertEquals(15, Interrupted.Health);
+    Test.AssertEquals('second', Interrupted.Inventory[0].Id);
+    Interrupted := App.RunIterations(
+      Interrupted,
+      ClientUnit.UpdateClient,
+      ClientUnit.ViewClient,
+      0,
+      0
+    );
+    Interrupted := ClientUnit.UpdateClient(
+      Interrupted,
+      Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Enter, '')),
+      Cmd
+    );
+    AssertEmpty(Requests);
+  end for;
+
+  // Resizing keeps the owning overlay and selection; all view sizes still render and route input.
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(60, 20),
+    Tui.TuiSize.Create(1, 1),
+    Tui.TuiSize.Create(0, 0)
+  ] do
+    var Resized := ClientUnit.UpdateClient(
+      Base with Pending := true; InventorySelection := 1; end with,
+      Tui.TuiMsg.Resize(Size),
+      Cmd
+    );
+    Test.AssertTrue(Resized.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+    Test.AssertEquals(1, Resized.InventorySelection);
+    const Small := Tui.TuiApplication.OpenForTest(Size);
+    Resized := Small.RunIterations(Resized, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+    Resized := Press(Small, Resized, Tui.TuiKeyKind.Enter, '');
+    AssertEmpty(Requests);
+    Resized := Press(Small, Resized with Pending := false; end with, Tui.TuiKeyKind.Enter, '');
+    Test.AssertTrue(
+      Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.UseItem('second')
+    );
+    Test.AssertEquals(10, Resized.Health);
+    Test.AssertEquals(2, Resized.Inventory.Length());
+    AssertEmpty(Requests);
+    Small.Close();
+  end for;
+
+  App.Close();
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

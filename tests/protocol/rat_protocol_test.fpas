@@ -1,0 +1,89 @@
+// Verifies strict protocol-15 opponent markers and typed events without leaking combat rules.
+program RatProtocolTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages, Std.Test as Test;
+
+function Hall(): Protocol.FirstPersonVisibleState;
+begin
+  return Protocol.FirstPersonVisibleState(
+    Title := 'Rat hall', Status := 'Ready', Width := 5, Height := 3,
+    Rows := ['#####', '#.r.#', '#####'], KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'],
+    PlayerX := 3, PlayerY := 1, Facing := Protocol.FirstPersonFacing.West, Inventory := [],
+    Health := 20, MaxHealth := 20, Character := [], CombatLog := [], CombatEvents := [
+      Protocol.VisibleCombatEvent(
+        Kind := Protocol.VisibleCombatEventKind.PlayerHit,
+        Amount := 2,
+        HostileCode := 'r'
+      )
+    ]
+  );
+end function;
+
+function Encoded(Value: Protocol.FirstPersonVisibleState): string;
+begin
+  return Messages.EncodeServer(
+    Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(Value))
+  );
+end function;
+
+begin
+  const Original := Encoded(Hall());
+  case Messages.DecodeServer(Original).Unwrap() of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      Test.AssertEquals('r', Value.Rows[1][2]);
+      Test.AssertEquals('r', Value.CombatEvents[0].HostileCode);
+      Test.AssertEquals(2, Value.CombatEvents[0].Amount);
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_)), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a rat state');
+  end case;
+
+  for Replacement: string in [
+    '',
+    ',"hostile_code":""',
+    ',"hostile_code":"x"',
+    ',"hostile_code":"rr"',
+    ',"hostile_code":1',
+    ',"hostile_code":null',
+    ',"hostile_code":true',
+    ',"hostile_code":[]',
+    ',"hostile_code":{}',
+    ',"hostile_code":"r","hostile_code":"h"',
+    ',"hostile_code":"r","extra":1'
+  ] do
+    Test.AssertTrue(
+      Messages.DecodeServer(Original.Replace(',"hostile_code":"r"', Replacement)) is Error(_)
+    );
+  end for;
+
+  Test.AssertTrue(
+    Messages.DecodeServer(Original.Replace('"kind":"player_hit"', '"kind":"rat_attack"')) is Error(_)
+  );
+  for Amount: string in ['-1', '0', '1000', '1.5', 'null', '"2"'] do
+    Test.AssertTrue(
+      Messages.DecodeServer(Original.Replace('"amount":2', '"amount":' + Amount)) is Error(_)
+    );
+  end for;
+
+  for Kind: Protocol.VisibleCombatEventKind in [
+    Protocol.VisibleCombatEventKind.PlayerMiss,
+    Protocol.VisibleCombatEventKind.HostileMiss,
+    Protocol.VisibleCombatEventKind.HostileDefeated
+  ] do
+    var Value := Hall();
+    Value.CombatEvents[0] := Value.CombatEvents[0] with Kind := Kind; Amount := 0; end with;
+
+    Test.AssertTrue(Messages.DecodeServer(Encoded(Value)) is Ok(_));
+    Value.CombatEvents[0] := Value.CombatEvents[0] with Amount := 1; end with;
+
+    Test.AssertTrue(Messages.DecodeServer(Encoded(Value)) is Error(_));
+  end for;
+  var Blocked := Hall() with PlayerX := 2; end with;
+
+  Test.AssertTrue(Messages.DecodeServer(Encoded(Blocked)) is Error(_));
+  Blocked := Hall() with Rows := ['#####', '#.z.#', '#####']; end with;
+
+  Test.AssertTrue(Messages.DecodeServer(Encoded(Blocked)) is Error(_));
+  // r still means river in the separate outdoor alphabet.
+  Test.AssertTrue(Protocol.IsMapCellCode('r'));
+  Test.AssertTrue(Protocol.IsInteriorCellCode('r'));
+end.

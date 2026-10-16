@@ -1,0 +1,165 @@
+// Verifies headless inventory keyboard use through the real client adapter and server TCP session.
+program ItemUseNetworkTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Server as ServerUnit, Dungeon.Server.Config as ConfigUnit, Dungeon.Test.ClientSession as ClientSession, Dungeon.Test.Levels as Levels, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
+
+function ServeOne(Listener: Net.Listener; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Connection := try Net.AcceptWithCancellation(Listener, Token);
+  const Configured := try Net.SetTimeout(Connection, 30000);
+  const Served := ServerUnit.ServeConnection(Connection, Config, Token);
+  const Closed := try Net.Close(Connection);
+  return Served;
+end function;
+
+function FirstPerson(Received: ClientUnit.ClientEvent): Protocol.FirstPersonVisibleState;
+begin
+  case Received of
+    when ClientUnit.ClientEvent.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      return Value;
+    when ClientUnit.ClientEvent.State(Protocol.VisibleState.MapState(_)), ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+      panic('expected first person event');
+  end case;
+end function;
+
+function Press(App: Tui.TuiApplication; Model: ClientUnit.ClientModel; Kind: Tui.TuiKeyKind; Text: string): ClientUnit.ClientModel;
+begin
+  App.InjectKeyForTest(
+    Tui.TuiKeyEvent(
+      kind := Kind,
+      ch := Text,
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+  return App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+end function;
+
+begin
+  const Root := '.temp-data/item-use-network-' + Conv.IntToStr(Time.TimestampMillis());
+  const World := WorldUnit.OpenWorld(Root, 'potions', 12345, 4, 32).Unwrap();
+  const Map := Levels.SpawnLevel(World);
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  const Path := World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' +
+    Conv.IntToStr(Region.Y) + '/0.json';
+  const Stored := Encoding.EncodeLevel(World.Metadata, Map);
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Stored).Unwrap());
+  var State := Levels.EnterSpawnLevel(World, GameState.NewGame(World.Metadata)).Unwrap() with Health := 18; RandomState := 42; end with;
+
+  State.Items[3] := State.Items[3] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  for Index: integer := 0 to State.Hostiles.Length() - 1 do
+    State.Hostiles[Index] := State.Hostiles[Index] with Health := 0; end with;
+  end for;
+
+  Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+  const Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := 'potions',
+    WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(8);
+  const Outcomes: channel of string := Tasks.CreateChannel(4);
+  scope
+    const ServerTask := go ServeOne(Listener, Config, Token);
+    const ClientTask := go ClientSession.RunReportedClient(
+      '127.0.0.1', Net.ListenerLocalAddress(Listener).Unwrap().Port, 78, 25,
+      Requests, Events, Outcomes, Token
+    );
+    const Connected := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+    Test.AssertTrue(Connected is ClientUnit.ClientEvent.Connected(_));
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(
+        Requests,
+        Protocol.ClientMessage.UseItem(Map.Items[3].ItemId),
+        1000
+      ).Unwrap()
+    );
+    Test.AssertTrue(
+      ClientSession.NextClientEvent(Events, Outcomes, 30000) is ClientUnit.ClientEvent.Rejected('session_not_started', _)
+    );
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.LoadGame, 1000).Unwrap()
+    );
+    const LoadedEvent := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+    const Loaded := FirstPerson(LoadedEvent);
+    Test.AssertEquals(18, Loaded.Health);
+    Test.AssertEquals(1, Loaded.Inventory.Length());
+    Test.AssertTrue(Loaded.Inventory[0].Usable);
+    Test.AssertEquals(Map.Items[3].ItemId, Loaded.Inventory[0].Id);
+    // The actual I/Enter route queues the request; the client waits for authoritative changes.
+    const Cmd := Tui.TuiCmdOutput.Create();
+    const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 30));
+    var Model := ClientUnit.NewClientModel(
+      '127.0.0.1',
+      Net.ListenerLocalAddress(Listener).Unwrap().Port,
+      '',
+      RuntimeData.DefaultClientPreferences(),
+      Requests,
+      Events
+    );
+    Model.ViewportWidth := 120;
+    Model.ViewportHeight := 30;
+    Model.RequestedWorldWidth := 78;
+    Model.RequestedWorldHeight := 25;
+    Model := ClientUnit.UpdateClientEvent(Model, Connected, Cmd);
+    Model := ClientUnit.UpdateClientEvent(Model, LoadedEvent, Cmd);
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'i');
+    Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    Test.AssertTrue(Model.Pending);
+    Test.AssertEquals(18, Model.Health);
+    Test.AssertEquals(1, Model.Inventory.Length());
+    const HealedEvent := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+    const Healed := FirstPerson(HealedEvent);
+    Test.AssertEquals(20, Healed.Health);
+    Test.AssertEquals(0, Healed.Inventory.Length());
+    Test.AssertEquals(1, Healed.CombatLog.Length());
+    Test.AssertEquals('You drink the healing potion and recover 2 health.', Healed.CombatLog[0]);
+    Test.AssertEquals(0, Healed.CombatEvents.Length());
+    Model := ClientUnit.UpdateClientEvent(Model, HealedEvent, Cmd);
+    Test.AssertFalse(Model.Pending);
+    Test.AssertTrue(Model.Dirty);
+    Test.AssertEquals(20, Model.Health);
+    Test.AssertEquals(0, Model.Inventory.Length());
+    Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.InventoryOverlay);
+    Test.AssertFalse('Picked up:' in Model.PrimaryStatus);
+    Test.AssertFalse(Model.Animation.Active);
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+    App.Close();
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(
+        Requests,
+        Protocol.ClientMessage.UseItem(Loaded.Inventory[0].Id),
+        1000
+      ).Unwrap()
+    );
+    Test.AssertTrue(
+      ClientSession.NextClientEvent(Events, Outcomes, 30000) is ClientUnit.ClientEvent.Rejected('item_use_rejected', _)
+    );
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Viewport(20, 10), 1000).Unwrap()
+    );
+    const Still := FirstPerson(ClientSession.NextClientEvent(Events, Outcomes, 30000));
+    Test.AssertEquals(20, Still.Health);
+    Test.AssertEquals(0, Still.Inventory.Length());
+    Test.AssertTrue(
+      Tasks.SendWithTimeout(Requests, Protocol.ClientMessage.Disconnect, 1000).Unwrap()
+    );
+    Test.AssertTrue(Tasks.Wait(ClientTask).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+  end scope;
+
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+  discard Tasks.CloseChannel(Outcomes);
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+  Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertEquals(Stored, Fs.ReadText(Path).Unwrap());
+end.

@@ -1,0 +1,99 @@
+// Verifies potion floor/inventory projections, strict wire rows and removal from visible and remembered fields.
+program PotionProjectionTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as SessionUnit, Dungeon.Test.Fixtures as Fixtures, Dungeon.World as WorldUnit, Std.Test as Test;
+
+function Fields(Value: Protocol.VisibleState): Protocol.FirstPersonVisibleState;
+begin
+  case Value of
+    when Protocol.VisibleState.FirstPersonState(const State):
+      return State;
+    when Protocol.VisibleState.MapState(_):
+      panic('expected a first person projection');
+  end case;
+end function;
+
+begin
+  const Metadata := Fixtures.FixtureMetadata();
+  const Map := Fixtures.WithPotion(Fixtures.FixtureDungeonMap());
+  const Position := Map.Items[3].Position;
+  var State := Fixtures.FixtureDungeonState(
+    Coordinates.InteriorPosition(X := Position.X + 1, Y := Position.Y),
+    Coordinates.FacingDirection.West
+  );
+  State.Items := Areas.MaterializeArea(GameState.NewGame(Metadata), Map).Items;
+  const View := GameState.AreaView(Metadata := Metadata, Interior := Some(Map));
+  State := Exploration.RevealCurrentArea(View, State).Unwrap();
+  const World := WorldUnit.WorldSession(
+    Directory := '.temp-data/unused-potion-projection',
+    Metadata := Metadata,
+    Cache := [],
+    Clock := 0,
+    CacheLimit := 32
+  );
+  const Size := SessionUnit.ViewportSize(Width := 20, Height := 12);
+  const Floor := Fields(
+    Projection.ProjectSession(World, View, State, Size, Projection.NoTurnReport()).Unwrap().State
+  );
+  Test.AssertEquals('p', Floor.Rows[Position.Y][Position.X]);
+  Test.AssertEquals(0, Floor.Inventory.Length());
+  Test.AssertTrue('Healing potion' in Floor.Status);
+  const Wire := Messages.EncodeServer(
+    Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(Floor))
+  );
+  case Messages.DecodeServer(Wire).Unwrap() of
+    when Protocol.ServerMessage.State(const Decoded):
+      Test.AssertEquals('p', Fields(Decoded).Rows[Position.Y][Position.X]);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a state round trip');
+  end case;
+  const Away := State with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(
+      Position := Coordinates.InteriorPosition(X := Position.X + 1, Y := Position.Y),
+      Facing := Coordinates.FacingDirection.East
+    )
+  ); end with;
+  const Hidden := Fields(
+    Projection.ProjectSession(World, View, Away, Size, Projection.NoTurnReport()).Unwrap().State
+  );
+  Test.AssertEquals('r', Hidden.KnowledgeRows[Position.Y][Position.X]);
+  Test.AssertEquals('.', Hidden.Rows[Position.Y][Position.X]);
+  const Remembered := Projection.ProjectExplorationMap(
+    Away,
+    View,
+    0,
+    0,
+    Map.Width,
+    Map.Height
+  ).Unwrap();
+  Test.AssertEquals('r', Remembered.KnowledgeRows[Position.Y][Position.X]);
+  Test.AssertEquals('.', Remembered.Rows[Position.Y][Position.X]);
+  State.Items[3] := State.Items[3] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+  const Carried := Fields(
+    Projection.ProjectSession(World, View, State, Size, Projection.NoTurnReport()).Unwrap().State
+  );
+  Test.AssertEquals('.', Carried.Rows[Position.Y][Position.X]);
+  Test.AssertEquals(1, Carried.Inventory.Length());
+  Test.AssertEquals(Map.Items[3].ItemId, Carried.Inventory[0].Id);
+  Test.AssertEquals('Healing potion', Carried.Inventory[0].Name);
+  Test.AssertTrue(Carried.Inventory[0].Slot = Protocol.VisibleItemSlot.NoSlot);
+  Test.AssertFalse(Carried.Inventory[0].Equipped);
+  State.Items[3] := State.Items[3] with Location := Items.ItemLocation.Consumed; end with;
+  const Consumed := Fields(
+    Projection.ProjectSession(World, View, State, Size, Projection.NoTurnReport()).Unwrap().State
+  );
+  Test.AssertEquals('.', Consumed.Rows[Position.Y][Position.X]);
+  Test.AssertEquals(0, Consumed.Inventory.Length());
+  Test.AssertFalse('Healing potion' in Consumed.Status);
+  Test.AssertEquals(
+    '.',
+    Projection.ProjectExplorationMap(
+      State,
+      View,
+      0,
+      0,
+      Map.Width,
+      Map.Height
+    ).Unwrap().Rows[Position.Y][Position.X]
+  );
+end.

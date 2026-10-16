@@ -1,7 +1,18 @@
-// Pure dungeon content selection with independent seeds; names never consume geometry or combat draws.
+// Pure names and bounded optional loot with independent seeds, separate from geometry and combat draws.
 unit Dungeon.Interior.Generation.Content;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.Random as Random;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Items as Items, Dungeon.Random as Random;
+
+// Normalize each input before multiplying; all intermediate sums fit signed 64-bit integers.
+function ContentSeed(Seed: integer; RegionX: integer; RegionY: integer; Domain: integer): integer;
+begin
+  return Coordinates.PositiveModulo(
+    Coordinates.PositiveModulo(Seed, Random.RandomStateModulus) * 7919 +
+    Coordinates.PositiveModulo(RegionX, Random.RandomStateModulus) * 104729 +
+    Coordinates.PositiveModulo(RegionY, Random.RandomStateModulus) * 1299709 +
+    Domain, Random.RandomStateModulus
+  );
+end function;
 
 // Returns the stable display name of one entrance region, independent of world identity and visit order.
 // Normalize before multiplying so even signed-64-bit inputs keep intermediate values in range.
@@ -13,14 +24,53 @@ begin
   const Nouns: array of string := [
     'Vault', 'Crypt', 'Halls', 'Sanctum', 'Catacombs', 'Keep', 'Depths', 'Tomb'
   ];
-  const NameSeed: integer := Coordinates.PositiveModulo(
-    Coordinates.PositiveModulo(Seed, Random.RandomStateModulus) * 7919 +
-    Coordinates.PositiveModulo(RegionX, Random.RandomStateModulus) * 104729 +
-    Coordinates.PositiveModulo(RegionY, Random.RandomStateModulus) * 1299709 +
-    1009, Random.RandomStateModulus
-  );
+  const NameSeed := ContentSeed(Seed, RegionX, RegionY, 1009);
   const Adjective := Random.DrawBelow(NameSeed, 8);
   const Noun := Random.DrawBelow(Adjective.State, 8);
   return Adjectives[Adjective.Value] + ' ' + Nouns[Noun.Value];
+end function;
+
+// Maps one 0..99 roll to fixed weights: empty/coin/potion 30 each, sword/jerkin 5 each.
+// Out-of-range rolls are errors, never normalized, clamped or rerolled.
+public function LootForRoll(Roll: integer): result of (option of Items.ItemKind, string);
+begin
+  if (Roll < 0) or (Roll > 99) then
+    return Error('loot roll must be from 0 through 99');
+  end if;
+
+  if Roll < 30 then
+    return Ok(None);
+  end if;
+
+  if Roll < 60 then
+    return Ok(Some(Items.ItemKind.AncientCoin));
+  end if;
+
+  if Roll < 90 then
+    return Ok(Some(Items.ItemKind.HealingPotion));
+  end if;
+
+  if Roll < 95 then
+    return Ok(Some(Items.ItemKind.RustyShortSword));
+  end if;
+
+  return Ok(Some(Items.ItemKind.LeatherJerkin));
+end function;
+
+// Selects optional original slot 4 or 5 using its own domain (2003 or 2011) and one draw below 100.
+// World identity, other slots, geometry, combat state and query order cannot affect this pure result.
+public function OptionalLoot(Seed: integer; RegionX: integer; RegionY: integer; Slot: integer): result of (option of Items.ItemKind, string);
+begin
+  var Domain := 0;
+  case Slot of
+    when 4:
+      Domain := 2003;
+    when 5:
+      Domain := 2011;
+    else
+      return Error('optional loot slot must be 4 or 5');
+  end case;
+  const Draw := Random.DrawBelow(ContentSeed(Seed, RegionX, RegionY, Domain), 100);
+  return LootForRoll(Draw.Value);
 end function;
 end unit;
