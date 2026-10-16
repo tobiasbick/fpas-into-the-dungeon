@@ -300,7 +300,7 @@ and equipment remain outside this phase.
 The user accepted the slice after `Space` was mapped to the terminal's
 dedicated space key kind.
 
-## 13. Character progression — PARTIAL
+## 13. Character progression — DONE
 
 Progression starts with equipment because it changes the existing fight at
 once, while experience and levels need more opponents than the initial dungeon
@@ -659,11 +659,15 @@ one turn when successful; rejected use changes nothing. Outdoor step healing
 remains available; consumables provide healing inside a dungeon. Revise the
 savegame, protocol, and generator versions where their contracts change.
 
-### 14c. Dungeon levels — LATER
+### 14c. Dungeon levels — NEXT
 
 Stairs between levels and deeper, harder levels of a generated dungeon.
+The [implementation plan](plans/14c-dungeon-levels.md) fixes the decisions and
+ordered checkpoints: every generated dungeon has exactly three levels; deeper
+levels hold more opponents of the existing kinds and fewer guaranteed finds;
+paired stairs are terrain cells; only level 0 leads outdoors.
 
-Implement after 13b. Each level is a separate area with an identity derived
+13b is complete. Each level is a separate area with an identity derived
 from the dungeon and level index. Generate and permanently store its immutable
 layout and original placements on first visit, then materialize its game state.
 Revisits load the same level file; deeper unvisited levels remain ungenerated.
