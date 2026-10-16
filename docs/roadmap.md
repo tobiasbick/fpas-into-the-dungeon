@@ -354,19 +354,43 @@ slots remain outside this slice.
 The user accepted the complete equipment, character-sheet, and combat-animation
 slice.
 
-### 13b. Experience and levels — LATER
+### 13b. Experience and levels — NEXT
 
-Experience waits until generated content (stage 14) supplies enough opponents
-to make it meaningful. The preferred direction is learning by doing, as in
-Dungeon Master: the character improves in what it actually does, which suits a
-game without class selection at the start.
+14b and the client/server review are accepted. The
+[13b implementation plan](plans/13b-experience-and-levels.md) fixes the rules
+and orders thirteen small checkpoints with positive, negative and edge-case
+tests. Planning is complete; gameplay implementation has not started.
 
-Implement this slice after 14b and before 14c, so progression can be balanced
-against several opponent kinds before deeper, harder levels are introduced.
+The character learns by doing, with independent Unarmed and Blades skills.
+Only health actually removed by a successful player attack earns experience
+for the skill used. Misses and non-combat actions grant none; overkill cannot
+inflate the award. Each skill starts at level 1, reaches levels 2/3/4/5 at
+12/36/72/120 cumulative experience, and caps at 120. Its total hit/damage
+bonuses are 0/0, 0/+1, +1/+1, +1/+2 and +2/+2 respectively. Only the active
+skill contributes, starting with the next attack after a level increase.
+Maximum health, armor, opponents and generated content remain unchanged.
 
-The user accepted 14b on 2026-10-16. Progression is the next gameplay slice;
-finish the current client/server review checkpoint and detail 13b in its own
-small implementation plan before starting its gameplay changes.
+- [x] Detail the rules, state/storage boundaries and ordered checkpoints in a
+  temporary implementation plan, with exact thresholds and test expectations.
+- [ ] Establish the permanent progression contract and canonical terminology;
+  implement and test the pure skill model.
+- [ ] Add validated progress to GameState and savegame format 9. Preserve older
+  saves without migration; compatible world and level files remain usable.
+- [ ] Derive weapon-dependent benefits, isolate existing hostile navigation,
+  and award practice once per resolved hit with bounded level-up messages.
+- [ ] Prove full server commit/rollback, save/replay, Start over and reconnect
+  behavior, including invalid data, overkill and mastery.
+- [ ] Project both skills as six entries in the existing character array on
+  protocol 15; provide a bounded, scrollable read-only character sheet on C.
+- [ ] Verify complete TCP play, deterministic pacing, formatting, all workspace
+  checks and the complete suite; synchronize permanent documentation.
+- [ ] Review the finished slice with the user and obtain explicit acceptance
+  before marking it DONE and removing its temporary plan.
+
+The slice adds no overall character level, classes, allocated skill points,
+defensive training, ranged combat or spells. World format 3, generator 7 and
+immutable level format 2 stay unchanged. Implement 13b before deeper dungeon
+levels (14c), so progression is established against the current opponent kinds.
 
 ## 14. Generated game content — PARTIAL
 
