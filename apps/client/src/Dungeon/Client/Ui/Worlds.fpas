@@ -20,6 +20,36 @@ begin
   return Available;
 end function;
 
+// Keeps the local cursor within the rendered page; only an empty list uses -1.
+// Prefer the authoritative selection on a new page, without changing it or sending a request.
+public function ReconcileWorldCursor(State: Model.ClientModel): Model.ClientModel;
+begin
+  var Count := State.Catalog.Worlds.Length();
+  if Count > PageSize(State) then
+    Count := PageSize(State);
+  end if;
+
+  if Count = 0 then
+    return State with WorldCursor := -1; end with;
+  end if;
+  var Cursor := State.WorldCursor;
+  if Cursor < 0 then
+    for Index: integer := 0 to Count - 1 do
+      if State.Catalog.Worlds[Index].Id = State.Catalog.SelectedId then
+        Cursor := Index;
+      end if;
+    end for;
+
+    if Cursor < 0 then
+      Cursor := 0;
+    end if;
+  elsif Cursor >= Count then
+    Cursor := Count - 1;
+  end if;
+
+  return State with WorldCursor := Cursor; end with;
+end function;
+
 // Installs only a validated catalog after the server has completed a selection request.
 public function InstallCatalog(State: Model.ClientModel; Catalog: Protocol.WorldCatalog; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
@@ -44,10 +74,12 @@ begin
             end;
         end case;
 
-        return State with Catalog := Valid; WorldCursor := -1; Screen := Model.ClientScreen.StartScreen; ConnectionPhase := Model.ClientConnectionPhase.AwaitingSession; Overlay := Model.ClientOverlay.NoOverlay; Pending := false; MapRequestPending := false; MapHasState := false; PendingChangesProgress := false; PendingCreatedWorld := false; Dirty := false; HasVisibleState := false; SaveAvailable := WorldsUnit.CatalogHasSave(
+        const Next := State with Catalog := Valid; WorldCursor := -1; Screen := Model.ClientScreen.StartScreen; ConnectionPhase := Model.ClientConnectionPhase.AwaitingSession; Overlay := Model.ClientOverlay.NoOverlay; Pending := false; MapRequestPending := false; MapHasState := false; PendingChangesProgress := false; PendingCreatedWorld := false; Dirty := false; HasVisibleState := false; SaveAvailable := WorldsUnit.CatalogHasSave(
           Valid
         ); FocusedControl := Focus; Status := 'Choose a world. ' +
           Valid.SelectionReason; end with;
+
+        return ReconcileWorldCursor(Next);
       end;
   end case;
 end function;
@@ -276,13 +308,10 @@ public function ViewWorldChoices(State: Model.ClientModel): array of Tui.TuiElem
 begin
   var Items: array of Tui.TuiElement := [];
   var Labels: array of string := [];
-  var Selected: integer := State.WorldCursor;
+  const Selected := ReconcileWorldCursor(State).WorldCursor;
   for Index: integer := 0 to State.Catalog.Worlds.Length() - 1 do
     if Index < PageSize(State) then
       const World: Protocol.WorldSummary := State.Catalog.Worlds[Index];
-      if (State.WorldCursor < 0) and (World.Id = State.Catalog.SelectedId) then
-        Selected := Index;
-      end if;
       var Text: string := (((World.Id + ' | ') + World.Status) + ' | ') + World.Reason;
       if World.Status = 'ready' then
         Text := (

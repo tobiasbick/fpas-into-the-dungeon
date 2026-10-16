@@ -184,7 +184,7 @@ Storage tests now cover potion transfer between dungeons, terminal items,
 explicit save/reopen/load, revisit, Start over and earlier-save rewind without
 replacing level files. TCP tests also cover the complete contents loop, combat
 art, reconnect before saving, Continue, old-data rejection and shutdown without
-autosave. All 91 test programs and 20 project checks pass. The
+autosave. All 94 test programs and 20 project checks pass. The
 [persistence smoke measurements](docs/architecture/persistence-measurements.md)
 cover 1/10/100 visited dungeons and explain the additional validation cost.
 Independent review findings are corrected and the documentation is aligned.
@@ -207,7 +207,7 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-The current complete suite contains **91 test programs**, covering game rules,
+The current complete suite contains **94 test programs**, covering game rules,
 deterministic generation, storage, protocol validation, TUI rendering and input,
 and real TCP sessions.
 

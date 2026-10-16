@@ -1,0 +1,142 @@
+// Listener failures and shutdown timeouts retain cleanup; a session failure releases admission.
+program ListenerLifetimeTest;
+
+uses Dungeon.Server as ServerUnit, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Listener as ListenerUnit, Dungeon.Server.Logging as Logging, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Server as Server, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+procedure WaitKind(Logs: channel of Logging.ServerLogEvent; Kind: string);
+begin
+  while Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap().Kind <> Kind do
+    null;
+  end while;
+end procedure;
+
+function FailSession(Client: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Sent := try Net.SendBytesWithCancellation(Client, [42], Token);
+  return Error('controlled client failure');
+end function;
+
+begin
+  const Root := '.temp-data/listener-lifetime-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := Some(Logs),
+    WorldsRoot := Root,
+    WorldId := 'absent',
+    WorldSeed := 12345,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 80,
+    MaximumViewHeight := 24
+  );
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  // Deliberately break the transferred listener to inject a real accept error.
+  const Broken := Net.Listen('127.0.0.1', 0).Unwrap();
+  const BrokenPort := Net.ListenerLocalAddress(Broken).Unwrap().Port;
+  scope
+    const Worker := go ListenerUnit.Run(Broken, Config, Token, false, ServerUnit.ServeConnection);
+    WaitKind(Logs, 'status');
+    Test.AssertTrue(Net.CloseListener(Broken).Unwrap());
+    case Tasks.Wait(Worker) of
+      when Error(const Reason):
+        Test.AssertTrue(Reason.StartsWith('Listener failed: '));
+      when Ok(_):
+        panic('accept failure must not become a successful server exit');
+    end case;
+
+    Test.AssertTrue(Net.Connect('127.0.0.1', BrokenPort, 100) is Error(_));
+    WaitKind(Logs, 'error');
+  end scope;
+  // A protocol handler's ordinary Error affects that connection, not the persistent worker.
+  const ListenerValue := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(ListenerValue).Unwrap().Port;
+  scope
+    const Worker := go ListenerUnit.Run(ListenerValue, Config, Token, false, FailSession);
+    WaitKind(Logs, 'status');
+    for Index: integer := 1 to 2 do
+      const Client := Net.Connect('127.0.0.1', Port, 5000).Unwrap();
+      Test.AssertTrue(Net.SetTimeout(Client, 5000).Unwrap());
+      Test.AssertEquals(42, Net.ReceiveBytes(Client, 1).Unwrap()[0]);
+      Test.AssertEquals(0, Net.ReceiveBytes(Client, 1).Unwrap().Length());
+      Test.AssertTrue(Net.Close(Client).Unwrap());
+      WaitKind(Logs, 'disconnected');
+    end for;
+
+    discard Tasks.Cancel(Stop);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+    Test.AssertTrue(Net.Connect('127.0.0.1', Port, 100) is Error(_));
+  end scope;
+
+  // Hold a handler beyond the grace budget, then release it only after the timeout is observable.
+  const SlowLogs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(32);
+  const SlowConfig := Config with Logs := Some(SlowLogs); end with;
+  const SlowStop := Tasks.CreateCancellationSource();
+  const SlowToken := Tasks.GetCancellationToken(SlowStop);
+  const Release: channel of boolean := Tasks.CreateChannel(1);
+  const SlowListener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const SlowPort := Net.ListenerLocalAddress(SlowListener).Unwrap().Port;
+  const SlowHandler: ListenerUnit.ConnectionHandler := function(
+    Client: Net.Connection; HandlerConfig: ConfigUnit.ServerConfig; HandlerToken: Tasks.CancellationToken
+  ): result of (boolean, string) begin
+    Logging.LogServer(HandlerConfig.Logs, 'world', 'Handler waiting for release');
+    // Deliberately ignore cancellation for this barrier, bounded to avoid a hung failed test.
+    return Tasks.ReceiveWithTimeout(Release, 10000);
+  end function;
+
+  scope
+    const Worker := go ListenerUnit.Run(SlowListener, SlowConfig, SlowToken, false, SlowHandler);
+    WaitKind(SlowLogs, 'status');
+    const Client := Net.Connect('127.0.0.1', SlowPort, 5000).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(Client, 5000).Unwrap());
+    WaitKind(SlowLogs, 'world');
+    discard Tasks.Cancel(SlowStop);
+    const Notice := Tasks.ReceiveWithTimeout(SlowLogs, 5000);
+    // Always release the barrier before asserting, including on a failed timeout observation.
+    Test.AssertTrue(Tasks.Send(Release, true).Unwrap());
+    Test.AssertEquals('error', Notice.Unwrap().Kind);
+    Test.AssertEquals('Task group close timed out', Notice.Unwrap().Text);
+    case Tasks.Wait(Worker) of
+      when Error(const Reason):
+        Test.AssertEquals('Task group close timed out', Reason);
+      when Ok(_):
+        panic('a shutdown timeout must remain an error after cleanup');
+    end case;
+
+    Test.AssertEquals(0, Net.ReceiveBytes(Client, 1).Unwrap().Length());
+    Test.AssertTrue(Net.Close(Client).Unwrap());
+    Test.AssertTrue(Net.Connect('127.0.0.1', SlowPort, 100) is Error(_));
+  end scope;
+
+  discard Tasks.CloseChannel(Release);
+  discard Tasks.CloseChannel(SlowLogs);
+  // The documented per-VM lifetime limit must not leak a listener transferred to Run.
+  var Exhausted: boolean := false;
+  for Index: integer := 1 to 256 do
+    case Server.CreateLifetime(0, false) of
+      when Error(const Reason):
+        Test.AssertEquals('At most 256 server lifetime identities may be created per VM', Reason);
+        Exhausted := true;
+        break;
+      when Ok(const Life):
+        discard Server.RequestStop(Life);
+        Test.AssertEquals(0, Tasks.CloseTaskGroup(Server.GetWorkGroup(Life)).Length());
+        Test.AssertTrue(Server.FinishShutdown(Life).Unwrap());
+    end case;
+  end for;
+
+  Test.AssertTrue(Exhausted);
+  const Unstarted := Net.Listen('127.0.0.1', 0).Unwrap();
+  const UnstartedPort := Net.ListenerLocalAddress(Unstarted).Unwrap().Port;
+  case ListenerUnit.Run(Unstarted, Config, Token, false, FailSession) of
+    when Error(const Reason):
+      Test.AssertEquals('At most 256 server lifetime identities may be created per VM', Reason);
+    when Ok(_):
+      panic('exhausted lifetime identities must reject startup');
+  end case;
+
+  Test.AssertTrue(Net.Connect('127.0.0.1', UnstartedPort, 100) is Error(_));
+  discard Tasks.CloseChannel(Logs);
+end.

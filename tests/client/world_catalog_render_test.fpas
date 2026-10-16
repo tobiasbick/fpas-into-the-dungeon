@@ -1,0 +1,107 @@
+// Actual catalog rendering keeps its local cursor valid across pages, missing choices and resize.
+program WorldCatalogRenderTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as CatalogUnit, Std.Conv as Conv, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+procedure Render(State: ClientUnit.ClientModel; Width: integer; Height: integer);
+begin
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(Width, Height));
+  discard App.RunIterations(State, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertEquals(Width, App.SurfaceSnapshot().Width);
+  Test.AssertEquals(Height, App.SurfaceSnapshot().Height);
+  App.Close();
+end procedure;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of ClientUnit.ClientEvent := Tasks.CreateChannel(8);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  ) with ViewportWidth := 100; ViewportHeight := 28; end with;
+  const Good := CatalogUnit.FixtureCatalog(false, false).Worlds[0];
+  const Bad := Good with Id := 'broken'; Status := 'incompatible'; SaveStatus := 'unknown'; Reason := 'Incompatible world'; end with;
+  var Catalog := WorldsUnit.EmptyWorldCatalog(0, 4) with Worlds := [Bad, Good]; Total := 2; end with;
+
+  // No authority is selected, but a nonempty native List must still have a local cursor.
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Connected(Catalog), Cmd);
+  Render(Model, 100, 28);
+  Test.AssertEquals(0, Model.WorldCursor);
+  Test.AssertEquals('', Model.Catalog.SelectedId);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  // A missing configured world remains missing; cursor fallback never selects a different world.
+  Catalog := Catalog with SelectedId := 'absent'; SelectionReason := 'Selected world is missing'; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(Catalog), Cmd);
+  Test.AssertEquals(0, Model.WorldCursor);
+  Test.AssertEquals('absent', Model.Catalog.SelectedId);
+  Render(Model, 100, 28);
+  Catalog := Catalog with SelectedId := Good.Id; SelectionReason := ''; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(Catalog), Cmd);
+  Test.AssertEquals(1, Model.WorldCursor);
+  Render(Model, 100, 28);
+  // Browsing an incompatible row is independent from the selected compatible world's actions.
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(40), Tui.TuiAction.Create(148), 0),
+    Cmd
+  );
+  Test.AssertEquals(0, Model.WorldCursor);
+  Test.AssertEquals(Good.Id, Model.Catalog.SelectedId);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  Render(Model, 100, 28);
+  var Rows: array of Protocol.WorldSummary := [];
+  for Index: integer := 0 to 5 do
+    Rows.PushInPlace(Bad with Id := 'broken-' + Conv.IntToStr(Index); end with);
+  end for;
+
+  Catalog := Catalog with Worlds := Rows; SelectedId := 'off-page'; Total := 8; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(Catalog), Cmd);
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(40), Tui.TuiAction.Create(148), 5),
+    Cmd
+  );
+  Test.AssertEquals(5, Model.WorldCursor);
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(100, 18)), Cmd);
+  Test.AssertEquals(2, Model.WorldCursor);
+  Test.AssertEquals('off-page', Model.Catalog.SelectedId);
+  Render(Model, 100, 18);
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(100, 28)), Cmd);
+  Model := ClientUnit.UpdateClient(
+    Model,
+    Tui.TuiMsg.Action(Tui.TuiControlId.Create(1), Tui.TuiAction.Create(147)),
+    Cmd
+  );
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap().Unwrap() = Protocol.ClientMessage.ListWorlds(6, false)
+  );
+  Catalog := Catalog with Worlds := [Bad, Good]; Offset := 6; end with;
+
+  Model := ClientUnit.UpdateClientEvent(Model, ClientUnit.ClientEvent.Worlds(Catalog), Cmd);
+  Test.AssertEquals(0, Model.WorldCursor);
+  Test.AssertEquals('off-page', Model.Catalog.SelectedId);
+  Render(Model, 100, 28);
+  // Direct public model consumers get a safe render even before a resize reconciles their cursor.
+  Render(Model with WorldCursor := 100; end with, 100, 28);
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Worlds(WorldsUnit.EmptyWorldCatalog(0, 4)),
+    Cmd
+  );
+  Test.AssertEquals(-1, Model.WorldCursor);
+  Render(Model, 100, 28);
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(20, 8)), Cmd);
+  Test.AssertEquals(-1, Model.WorldCursor);
+  Render(Model, 20, 8);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

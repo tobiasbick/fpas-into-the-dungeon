@@ -65,7 +65,16 @@ these projects.
   network updates. `Backdrop` owns its generation and reuse; `Model` retains one
   immutable cell grid so focus navigation does not regenerate it.
 - `apps/server` owns the server program entry point and server lifetime.
-  `Dungeon.Server` runs the handshake, message loop, and listener; its subunits
+  `Dungeon.Server` runs the handshake/message loop and validates listener
+  configuration. `Listener` owns the bound listener and two persistent workers:
+  accept/admission and sequential protocol sessions. Their bounded handoff
+  retains each connection until closure, and ordinary worker failures reach
+  the owner before shutdown completes. Session completion events precede the
+  next admission, preserving dashboard event order. Shutdown uses one shared
+  two-second grace budget. A timeout is logged and returned as an error after
+  the cancelled workers finish and their connections close; cancellation is
+  cooperative, so cleanup can exceed that budget without a forced process exit.
+  Other subunits
   own the policy (`Config`), per-connection session rules (`Session`),
   enumeration conversions (`Mapping`), client-safe projections (`Projection`),
   replies, turn and transition commits (`Replies`), message handling

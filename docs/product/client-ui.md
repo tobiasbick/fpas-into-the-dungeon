@@ -41,7 +41,10 @@ through the list. `Create world` opens controlled seed and region inputs with
 server-provided defaults and ranges. `Continue` loads the selected world's
 explicit save or starts at spawn if absent. `Start over` starts fresh in the
 same world and keeps its earlier save. Incompatible worlds and saves show a
-reason; they are never deleted automatically.
+reason; they are never deleted automatically. The list cursor belongs to the
+client and always lies within the displayed rows; an empty list has no cursor.
+Paging, a missing preselection and resize reconcile that cursor without
+changing the server-selected world or implicitly queuing a selection request.
 
 While a selection or start request is pending, further requests are gated.
 Cancel confirms disconnecting; it does not roll back server work that may

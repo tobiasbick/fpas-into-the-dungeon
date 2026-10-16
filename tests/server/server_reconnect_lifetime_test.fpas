@@ -1,0 +1,160 @@
+// More than a task-group's worth of real sessions preserve admission and ordered dashboard events.
+program ServerReconnectLifetimeTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Logging as Logging, Std.Conv as Conv, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type Observed = record
+  Model: ModelUnit.ConsoleModel;
+  Sessions: integer;
+  Connected: boolean;
+end record;
+
+procedure Observe(var State: Observed; Value: Logging.ServerLogEvent);
+begin
+  Test.AssertFalse(Value.Kind = 'error');
+  if Value.Kind = 'connected' then
+    Test.AssertFalse(State.Connected);
+    State.Connected := true;
+    State.Sessions := State.Sessions + 1;
+  elsif Value.Kind = 'disconnected' then
+    Test.AssertTrue(State.Connected);
+    State.Connected := false;
+  end if;
+
+  if Value.Snapshot is Some(_) then
+    Test.AssertTrue(State.Connected);
+  end if;
+
+  State.Model := ModelUnit.ApplyConsoleLog(State.Model, Value);
+  Test.AssertTrue(State.Model.Connected = State.Connected);
+end procedure;
+
+procedure Drain(Logs: channel of Logging.ServerLogEvent; var State: Observed);
+begin
+  while true do
+    case Tasks.TryReceive(Logs).Unwrap() of
+      when None:
+        return;
+      when Some(const Value):
+        Observe(var State, Value);
+    end case;
+  end while;
+end procedure;
+
+function Connect(Port: integer; Logs: channel of Logging.ServerLogEvent; var State: Observed; Token: Tasks.CancellationToken): Net.Connection;
+begin
+  const Started := Time.MonotonicMillis();
+  while Time.ElapsedMillis(Started) < 10000 do
+    const Client := Net.Connect('127.0.0.1', Port, 5000).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(Client, 5000).Unwrap());
+    const Sent := Transport.WriteLine(
+      Client,
+      ClientMessages.EncodeClient(Protocol.ClientMessage.Hello(Protocol.ProtocolVersion, 9, 5)),
+      Token
+    );
+    if Sent is Ok(_) then
+      case Transport.ReadLine(Transport.NewLineReader(Client), Token) of
+        when Ok(const Reply):
+          case ServerMessages.DecodeServer(Reply.Line).Unwrap() of
+            when Protocol.ServerMessage.Welcome(const Version, const Catalog):
+              Test.AssertEquals(Protocol.ProtocolVersion, Version);
+              Test.AssertEquals(0, Catalog.Total);
+              return Client;
+            when Protocol.ServerMessage.Rejected(const Code, _):
+              Test.AssertEquals('server_busy', Code);
+            when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+              panic('expected welcome or transient busy response');
+          end case;
+        when Error(_):
+          null;
+      end case;
+    end if;
+
+    Test.AssertTrue(Net.Close(Client).Unwrap());
+    Drain(Logs, var State);
+    Time.Sleep(1);
+  end while;
+
+  panic('server stopped admitting clients');
+end function;
+
+begin
+  const Root := '.temp-data/reconnect-lifetime-' + Conv.IntToStr(Time.TimestampMillis());
+  const Reservation := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Reservation).Unwrap().Port;
+  Test.AssertTrue(Net.CloseListener(Reservation).Unwrap());
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '',
+    Logs := Some(Logs),
+    WorldsRoot := Root,
+    WorldId := 'absent',
+    WorldSeed := 12345,
+    DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32,
+    MaximumViewWidth := 80,
+    MaximumViewHeight := 24
+  );
+  var State := Observed(
+    Model := ModelUnit.NewConsoleModel(
+      '',
+      RuntimeData.ServerWorldConfig(
+        Id := 'absent',
+        Seed := 12345,
+        DungeonRegionChunks := 4,
+        ChunkCacheLimit := 32,
+        MaximumViewWidth := 80,
+        MaximumViewHeight := 24
+      )
+    ),
+    Sessions := 0, Connected := false
+  );
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  scope
+    const Worker := go Server.RunServerWithCancellation('127.0.0.1', Port, Config, Token);
+    while true do
+      const Value := Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap();
+      Observe(var State, Value);
+      if Value.Kind = 'status' then
+        break;
+      end if;
+    end while;
+
+    // Reconnect after wire EOF, never waiting for the previous disconnected log first.
+    for Index: integer := 1 to 1050 do
+      const Client := Connect(Port, Logs, var State, Token);
+      while true do
+        const Value := Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap();
+        Observe(var State, Value);
+        // Disconnect itself can publish a final snapshot of the previous session.
+        if (Value.Snapshot is Some(_)) and (State.Sessions = Index) then
+          break;
+        end if;
+      end while;
+
+      Test.AssertTrue(State.Model.Connected);
+      Test.AssertTrue(State.Model.Dashboard is Some(_));
+      Test.AssertEquals(Index, State.Sessions);
+      Test.AssertTrue(
+        Transport.WriteLine(
+          Client,
+          ClientMessages.EncodeClient(Protocol.ClientMessage.Disconnect),
+          Token
+        ).Unwrap()
+      );
+      Test.AssertEquals(0, Net.ReceiveBytes(Client, 1).Unwrap().Length());
+      Test.AssertTrue(Net.Close(Client).Unwrap());
+    end for;
+
+    discard Tasks.Cancel(Stop);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+    Drain(Logs, var State);
+    Test.AssertEquals(1050, State.Sessions);
+    Test.AssertFalse(State.Connected);
+    Test.AssertTrue(State.Model.Dashboard is None);
+    Test.AssertTrue(Net.Connect('127.0.0.1', Port, 100) is Error(_));
+  end scope;
+
+  discard Tasks.CloseChannel(Logs);
+end.
