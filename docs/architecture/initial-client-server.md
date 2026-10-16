@@ -18,6 +18,21 @@ test seams without defining the wider game.
   not stop the server.
 - The initial server accepts one active client at a time.
 
+Each production client connection attempt owns a new intention queue. Its
+events carry a local generation in the host inbox; generations never appear
+in the wire protocol. Cancelling or quitting invalidates the attempt and closes
+its queue before the host cancels and joins the worker. Buffered old intentions
+cannot reach a new connection, and late old events cannot restore gameplay or
+replace the new attempt's status. Cancellation does not roll back work the
+server already received. Reconnecting remains an explicit user action.
+
+The network adapter owns every successfully connected socket. All ordinary
+outcomes close it, including failed setup, hello/request writes, response reads,
+event publication, cancellation and normal completion. The original session
+error wins if cleanup also fails; cleanup errors after success are returned.
+Ordinary connection errors are delivered to the UI through the tagged inbox,
+because the TUI host does not present a subscription's ordinary Result.Error.
+
 No game time passes without a player intention. The slice has no combat,
 general mutable-world simulation, authentication, TLS, multiplayer state, or
 LLM integration.
@@ -29,6 +44,16 @@ line is limited to 64 KiB. The client starts with `hello`; the server answers
 with `welcome` and the world catalog, save classifications and creation
 defaults. Invalid data is preserved. A complete initial `state` follows
 only after `new_game` or `load_game`.
+
+Catalog requests enumerate canonical world directory identities in stable order
+before choosing a page. Full metadata, save and referenced-level inspection is
+limited to that page (at most 64 entries) and an existing selected world if it
+lies outside the page. An on-page selection uses the same inspection as its row.
+Directory enumeration still grows with the total world count; unrelated
+off-page content is not read. Every request inspects its reported entries anew,
+preserves invalid data and retains the existing status classifications. Continue
+always loads and fully validates the save and its referenced levels again;
+a previous catalog status does not authorize loading changed or damaged data.
 
 ```text
 Client: hello, list_worlds, select_world, create_world, new_game, load_game,
@@ -57,6 +82,22 @@ Session selection and save intentions are also request-response operations.
 The server acknowledges a save only after the atomic replacement succeeds.
 Before session selection it rejects projection and gameplay intentions with a
 stable lifecycle error.
+
+Gameplay and viewport candidates prepare the complete projection and check its
+encoded UTF-8 size before sending. A preparation failure rejects the intention
+and preserves the entire installed session: game state, discovery, RNG, retained
+map, chunk cache and LRU clock, viewport, dirty flag and last-save timestamp.
+Move preparation keeps the original session separate from the candidate cache.
+The player can retry over the same connection after the underlying cause is
+repaired. Rejections use the intention's code (`movement_rejected`,
+`turn_rejected`, `interaction_rejected`, or the combat action's existing code);
+viewport preparation uses `viewport_rejected`. Invalid viewport dimensions
+still use `invalid_viewport`.
+
+Only a successful state write installs the candidate. Viewport success preserves
+game state and dirty/save facts. Actual response or rejection write errors end
+the connection as before. Preparation may leave valid generated chunk files for
+a retry, but never writes an explicit save or repairs a corrupt file silently.
 
 Each `state` message identifies its view family. A map state contains its world
 origin, dimensions, compact server-produced terrain rows, and the player's
@@ -105,5 +146,10 @@ A failed send yields an error for connection teardown and writes no progress.
 
 These automated programs run real sockets and production server workers.
 The listener/dashboard test also cancels the server with an active dirty game
-and checks that shutdown preserves the previous save. Final performance smoke
-checks and visual terminal acceptance remain checkpoint 12.
+and checks that shutdown preserves the previous save. Checkpoint 12 completed
+the automated checks and the [persistence measurements](persistence-measurements.md).
+The user accepted 14b on 2026-10-16.
+That acceptance supersedes the earlier manual-terminal deferral. Later
+client/server maintenance adds lifecycle-handler parity, shared interior
+knowledge projection and socket-completion checks; these retain the accepted
+14b gameplay, protocol, storage formats and generator fingerprints.

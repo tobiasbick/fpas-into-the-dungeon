@@ -1,0 +1,209 @@
+// Counts real full inspections per catalog page and verifies fresh classifications and Continue validation.
+program CatalogPageTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Protocol.Worlds as ProtocolWorlds, Dungeon.Server.Config as Config, Dungeon.Server.Handling as Handling, Dungeon.Server.Session as Session, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Worlds.Catalog as Pages, Dungeon.Test.CatalogWorlds as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.World as World, Dungeon.World.Catalog as Catalog, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+function Id(Index: integer): string;
+begin
+  return 'world-' + (if Index < 10 then '0' else '' end if) + Conv.IntToStr(Index);
+end function;
+
+function Page(Root: string; Selected: string; Offset: integer; Expected: array of string): Protocol.WorldCatalog;
+begin
+  const Calls: channel of string := Tasks.CreateChannel(128);
+  const Value := Pages.ReadPage(
+    ProtocolWorlds.EmptyWorldCatalog(24680, 1), Root, Selected, Offset,
+    function(WorldId: string): Catalog.WorldEntry begin
+      discard Tasks.Send(Calls, WorldId).Unwrap();
+      return Catalog.InspectWorld(Root, WorldId, 32);
+    end function
+  ).Unwrap();
+  var Actual: array of string := [];
+  var Done := false;
+  while not Done do
+    case Tasks.TryReceive(Calls).Unwrap() of
+      when Some(const WorldId):
+        Actual.PushInPlace(WorldId);
+      when None:
+        Done := true;
+    end case;
+  end while;
+
+  discard Tasks.CloseChannel(Calls);
+  Test.AssertEquals(Expected.Length(), Actual.Length());
+  for Index: integer := 0 to Expected.Length() - 1 do
+    Test.AssertEquals(Expected[Index], Actual[Index]);
+  end for;
+
+  return Value;
+end function;
+
+function Receive(Client: Net.Connection; Token: Tasks.CancellationToken): Protocol.ServerMessage;
+begin
+  const Read := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  return ServerMessages.DecodeServer(Read.Line).Unwrap();
+end function;
+
+begin
+  const Root := '.temp-data/catalog-page-' + Conv.IntToStr(Time.TimestampMillis());
+  const Directory := Root + '/worlds';
+  var Ids: array of string := [];
+  var WorldsOnDisk: array of World.WorldSession := [];
+  var Saves: array of string := [];
+  var Levels: array of string := [];
+  var Metadata: array of string := [];
+  for Index: integer := 0 to 66 do
+    const Value := Fixtures.CreateVisitedWorld(Directory, Id(Index), 10);
+    Ids.PushInPlace(Id(Index));
+    WorldsOnDisk.PushInPlace(Value);
+    Saves.PushInPlace(Fs.ReadText(Savegame.SaveGamePath(Value)).Unwrap());
+    Levels.PushInPlace(Fs.ReadText(Fixtures.SpawnLevelPath(Value)).Unwrap());
+    Metadata.PushInPlace(Fs.ReadText(World.WorldMetadataPath(Value)).Unwrap());
+    Test.AssertTrue(Saves[Index].Length() > 10000);
+  end for;
+
+  discard Fs.CreateDirAll(Directory + '/not canonical').Unwrap();
+  discard Fs.WriteTextAtomic(Directory + '/ordinary-file', 'keep').Unwrap();
+
+  // A full first page must not inspect the remaining three saved worlds.
+  const First := Page(Directory, '', 0, Ids.Slice(0, 64));
+  Test.AssertEquals(67, First.Total);
+  Test.AssertEquals(0, First.Offset);
+  Test.AssertEquals('', First.SelectionReason);
+  for Index: integer := 0 to 63 do
+    Test.AssertEquals(Id(Index), First.Worlds[Index].Id);
+    Test.AssertEquals('ready', First.Worlds[Index].Status);
+    Test.AssertEquals('available', First.Worlds[Index].SaveStatus);
+  end for;
+
+  for Offset: integer in [64, 1000000, 9223372036854775807] do
+    const Last := Page(Directory, '', Offset, Ids.Slice(64, 3));
+    Test.AssertEquals(64, Last.Offset);
+    Test.AssertEquals(3, Last.Worlds.Length());
+  end for;
+
+  discard Page(Directory, Id(3), 2, Ids.Slice(2, 64));
+  discard Page(Directory, Id(0), 2, Ids.Slice(2, 64).Concat([Id(0)]));
+  discard Page(Directory, Id(66), 0, Ids.Slice(0, 64).Concat([Id(66)]));
+  const Selected := Page(Directory, Id(66), -1, [Id(66)]);
+  Test.AssertEquals(66, Selected.Offset);
+  Test.AssertEquals(1, Selected.Worlds.Length());
+  discard Page(Directory, '', -2, Ids.Slice(0, 64));
+  const Missing := Page(Directory, 'absent', 64, Ids.Slice(64, 3));
+  Test.AssertTrue(Missing.SelectionReason.Length() > 0);
+  discard Page(Directory, 'absent', -1, Ids.Slice(0, 64));
+
+  // Repeated calls reread complete data: invalid metadata, saves and levels keep their classes.
+  const LastWorld := WorldsOnDisk[66];
+  discard Fs.WriteTextAtomic(World.WorldMetadataPath(LastWorld), '{').Unwrap();
+  const BadMetadata := Page(Directory, Id(66), 64, Ids.Slice(64, 3));
+  Test.AssertEquals('incompatible', BadMetadata.Worlds[2].Status);
+  Test.AssertEquals('unknown', BadMetadata.Worlds[2].SaveStatus);
+  Test.AssertTrue(BadMetadata.SelectionReason.Length() > 0);
+  Test.AssertEquals('{', Fs.ReadText(World.WorldMetadataPath(LastWorld)).Unwrap());
+  discard Fs.WriteTextAtomic(World.WorldMetadataPath(LastWorld), Metadata[66]).Unwrap();
+  discard Fs.WriteTextAtomic(Savegame.SaveGamePath(LastWorld), '{').Unwrap();
+  const BadSave := Page(Directory, '', 64, Ids.Slice(64, 3));
+  Test.AssertEquals('ready', BadSave.Worlds[2].Status);
+  Test.AssertEquals('incompatible', BadSave.Worlds[2].SaveStatus);
+  Test.AssertEquals('{', Fs.ReadText(Savegame.SaveGamePath(LastWorld)).Unwrap());
+  discard Fs.WriteTextAtomic(Savegame.SaveGamePath(LastWorld), Saves[66]).Unwrap();
+  discard Fs.WriteTextAtomic(Fixtures.SpawnLevelPath(LastWorld), '{').Unwrap();
+  const OffPage := Page(Directory, Id(66), 0, Ids.Slice(0, 64).Concat([Id(66)]));
+  Test.AssertTrue(OffPage.SelectionReason.Length() > 0);
+  const BadLevel := Page(Directory, '', 64, Ids.Slice(64, 3));
+  Test.AssertEquals('world_data_error', BadLevel.Worlds[2].SaveStatus);
+  Test.AssertEquals('{', Fs.ReadText(Fixtures.SpawnLevelPath(LastWorld)).Unwrap());
+  discard Fs.WriteTextAtomic(Fixtures.SpawnLevelPath(LastWorld), Levels[66]).Unwrap();
+  const Repaired := Page(Directory, '', 64, Ids.Slice(64, 3));
+  Test.AssertEquals('available', Repaired.Worlds[2].SaveStatus);
+
+  const Settings := Config.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Directory, WorldId := Id(0),
+    WorldSeed := 24680, DungeonRegionChunks := 1, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Production := Worlds.CatalogFor(Settings, Id(66), 64).Unwrap();
+  Test.AssertEquals('available', Production.Worlds[2].SaveStatus);
+  Test.AssertEquals(67, Production.Total);
+  for Index: integer := 0 to 66 do
+    const Value := WorldsOnDisk[Index];
+    Test.AssertEquals(Saves[Index], Fs.ReadText(Savegame.SaveGamePath(Value)).Unwrap());
+    Test.AssertEquals(Levels[Index], Fs.ReadText(Fixtures.SpawnLevelPath(Value)).Unwrap());
+    Test.AssertEquals(Metadata[Index], Fs.ReadText(World.WorldMetadataPath(Value)).Unwrap());
+    Test.AssertEquals(0, Fs.ReadDir(Value.Directory + '/chunks').Unwrap().Length());
+  end for;
+
+  // Empty/missing/non-directory roots must not invoke the content inspector or create storage.
+  const EmptyRoot := Root + '/empty';
+  discard Fs.CreateDirAll(EmptyRoot).Unwrap();
+  const Empty := Page(EmptyRoot, '', 9223372036854775807, []);
+  Test.AssertEquals(0, Empty.Total);
+  Test.AssertEquals(0, Empty.Offset);
+  for BadRoot: string in [Root + '/missing', Directory + '/ordinary-file'] do
+    Test.AssertTrue(
+      Pages.ReadPage(
+        ProtocolWorlds.EmptyWorldCatalog(24680, 1), BadRoot, '', 0,
+        function(WorldId: string): Catalog.WorldEntry begin
+          panic('bad root must fail before any content inspection');
+        end function
+      ) is Error(_)
+    );
+  end for;
+
+  Test.AssertFalse(Fs.Exists(Root + '/missing'));
+  Test.AssertEquals('keep', Fs.ReadText(Directory + '/ordinary-file').Unwrap());
+  const Storage := Fixtures.CreateVisitedWorld(Root + '/storage', 'broken', 0);
+  discard Fs.DeleteFile(Savegame.SaveGamePath(Storage)).Unwrap();
+  discard Fs.CreateDirAll(Savegame.SaveGamePath(Storage)).Unwrap();
+  Test.AssertEquals(
+    'storage_error',
+    Page(Root + '/storage', '', 0, ['broken']).Worlds[0].SaveStatus
+  );
+  discard Fs.DeleteFile(World.WorldMetadataPath(Storage)).Unwrap();
+  discard Fs.CreateDirAll(World.WorldMetadataPath(Storage)).Unwrap();
+  Test.AssertEquals('storage_error', Page(Root + '/storage', '', 0, ['broken']).Worlds[0].Status);
+
+  // A previous available catalog never authorizes Continue without rereading its referenced levels.
+  const FirstWorld := WorldsOnDisk[0];
+  const Before := Worlds.NewServerSession(
+    Settings,
+    Session.ViewportSize(Width := 1, Height := 1)
+  ).Unwrap();
+  discard Fs.WriteTextAtomic(Fixtures.SpawnLevelPath(FirstWorld), '{').Unwrap();
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Rejected := Handling.HandleSessionMessage(
+    Before,
+    Protocol.ClientMessage.LoadGame,
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  Test.AssertTrue(Receive(Client, Token) is Protocol.ServerMessage.Rejected('world_data_error', _));
+  Sessions.AssertUnchanged(Before, Rejected);
+  Test.AssertEquals('{', Fs.ReadText(Fixtures.SpawnLevelPath(FirstWorld)).Unwrap());
+  discard Fs.WriteTextAtomic(Fixtures.SpawnLevelPath(FirstWorld), Levels[0]).Unwrap();
+  const Continued := Handling.HandleSessionMessage(
+    Rejected,
+    Protocol.ClientMessage.LoadGame,
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  Test.AssertTrue(Receive(Client, Token) is Protocol.ServerMessage.State(_));
+  Test.AssertEquals(10, Continued.State.Unwrap().VisitedAreas.Length());
+  Test.AssertTrue(Continued.State.Unwrap().Items.Length() >= 40);
+  Test.AssertFalse(Continued.Dirty);
+  Test.AssertEquals(Saves[0], Fs.ReadText(Savegame.SaveGamePath(FirstWorld)).Unwrap());
+  discard Net.Close(Client).Unwrap();
+  discard Net.Close(Server).Unwrap();
+end.

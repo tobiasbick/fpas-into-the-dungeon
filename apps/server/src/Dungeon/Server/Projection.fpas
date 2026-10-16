@@ -84,32 +84,6 @@ begin
   return TurnReport(Log := [], Events := []);
 end function;
 
-function InteriorRows(State: GameState.GameState; Map: InteriorUnit.InteriorMap): result of (array of string, string);
-begin
-  var Rows: array of string := [];
-  for Y: integer := 0 to Map.Height - 1 do
-    begin
-      var Row: string := '';
-      for X: integer := 0 to Map.Width - 1 do
-        begin
-          Row := Row +
-            (
-              try GameState.InteriorVisibleCodeForState(
-                Map,
-                State,
-                Coordinates.InteriorPosition(X := X, Y := Y)
-              )
-            );
-        end;
-      end for;
-
-      Rows.PushInPlace(Row);
-    end;
-  end for;
-
-  return Ok(Rows);
-end function;
-
 function KnowledgeCode(Value: Model.FieldKnowledge): string;
 begin
   case Value of
@@ -126,6 +100,41 @@ begin
         return Protocol.KnowledgeVisibleCode;
       end;
   end case;
+end function;
+
+// One field decision shared by first-person rows and exploration windows.
+type InteriorField = record
+  Code: string;
+  Knowledge: string;
+end record;
+
+function ProjectInteriorField(State: GameState.GameState; Map: InteriorUnit.InteriorMap; VisibleFields: array of boolean; X: integer; Y: integer): result of (InteriorField, string);
+begin
+  if (X < 0) or (X >= Map.Width) or (Y < 0) or (Y >= Map.Height) then
+    return Ok(
+      InteriorField(
+        Code := Protocol.UnknownFieldCode,
+        Knowledge := Protocol.KnowledgeUndiscoveredCode
+      )
+    );
+  end if;
+  const Knowledge := Exploration.ClassifyField(
+    Exploration.InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y),
+    VisibleFields[(Y * Map.Width) + X]
+  );
+  const Position := Coordinates.InteriorPosition(X := X, Y := Y);
+  var Code := Protocol.UnknownFieldCode;
+  case Knowledge of
+    when Model.FieldKnowledge.Visible:
+      Code := try GameState.InteriorVisibleCodeForState(Map, State, Position);
+    when Model.FieldKnowledge.Remembered:
+      // Memory retains geometry, never the current position of a dynamic entity.
+      Code := try InteriorUnit.InteriorVisibleCode(Map, Position);
+    when Model.FieldKnowledge.Undiscovered:
+      null;
+  end case;
+
+  return Ok(InteriorField(Code := Code, Knowledge := KnowledgeCode(Knowledge)));
 end function;
 
 function MaskOutdoorRows(
@@ -185,7 +194,6 @@ end function;
 
 function MaskInteriorRows(State: GameState.GameState; Map: InteriorUnit.InteriorMap; Pose: Coordinates.FirstPersonPose): result of (MaskedRows, string);
 begin
-  const TerrainRows: array of string := try InteriorRows(State, Map);
   const VisibleFields: array of boolean := Sight.InteriorVisibility(Map, Pose);
   var Rows: array of string := [];
   var KnowledgeRows: array of string := [];
@@ -195,37 +203,9 @@ begin
       var KnowledgeRow: string := '';
       for X: integer := 0 to Map.Width - 1 do
         begin
-          const Knowledge: Model.FieldKnowledge := Exploration.ClassifyField(
-            Exploration.InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y),
-            VisibleFields[
-              (Y * Map.Width) +
-              X
-            ]
-          );
-          if Knowledge = Model.FieldKnowledge.Undiscovered then
-            begin
-              Row := Row + Protocol.UnknownFieldCode;
-            end;
-          else
-            begin
-              var Code: string := TerrainRows[Y][X];
-              if (Knowledge = Model.FieldKnowledge.Remembered)
-                and
-                (Protocol.IsInteriorItemCode(Code) or Protocol.IsHostileCode(Code))
-              then
-                begin
-                  Code := try InteriorUnit.InteriorVisibleCode(
-                    Map,
-                    Coordinates.InteriorPosition(X := X, Y := Y)
-                  );
-                end;
-              end if;
-
-              Row := Row + Code;
-            end;
-          end if;
-
-          KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
+          const Field := try ProjectInteriorField(State, Map, VisibleFields, X, Y);
+          Row := Row + Field.Code;
+          KnowledgeRow := KnowledgeRow + Field.Knowledge;
         end;
       end for;
 
@@ -337,47 +317,9 @@ begin
         begin
           const X: integer := OriginX + LocalX;
           const Y: integer := OriginY + LocalY;
-          var Knowledge: Model.FieldKnowledge := Model.FieldKnowledge.Undiscovered;
-          if (((X >= 0) and (X < Map.Width)) and (Y >= 0)) and (Y < Map.Height) then
-            begin
-              Knowledge := Exploration.ClassifyField(
-                Exploration.InteriorIsDiscovered(State.Exploration, State.AreaId, Map.Width, X, Y),
-                VisibleFields[
-                  (Y * Map.Width) +
-                  X
-                ]
-              );
-            end;
-          end if;
-
-          if Knowledge = Model.FieldKnowledge.Undiscovered then
-            begin
-              Row := Row + Protocol.UnknownFieldCode;
-            end;
-          else
-            begin
-              var Code: string := try GameState.InteriorVisibleCodeForState(
-                Map,
-                State,
-                Coordinates.InteriorPosition(X := X, Y := Y)
-              );
-              if (Knowledge = Model.FieldKnowledge.Remembered)
-                and
-                (Protocol.IsInteriorItemCode(Code) or Protocol.IsHostileCode(Code))
-              then
-                begin
-                  Code := try InteriorUnit.InteriorVisibleCode(
-                    Map,
-                    Coordinates.InteriorPosition(X := X, Y := Y)
-                  );
-                end;
-              end if;
-
-              Row := Row + Code;
-            end;
-          end if;
-
-          KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
+          const Field := try ProjectInteriorField(State, Map, VisibleFields, X, Y);
+          Row := Row + Field.Code;
+          KnowledgeRow := KnowledgeRow + Field.Knowledge;
         end;
       end for;
 

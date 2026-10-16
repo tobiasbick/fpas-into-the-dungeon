@@ -108,7 +108,7 @@ do not advance time. The in-game system menu also lists the controls.
 ## Screenshots
 
 These images were captured before the final 14b contents at 144 × 45 terminal
-cells; they do not constitute the still-open 14b terminal review.
+cells; they illustrate that earlier version rather than every current item.
 The gameplay images use a newly created world with seed `12345`, normal Fog of
 War, and real server responses. Font appearance can vary between terminals.
 
@@ -176,7 +176,7 @@ asking you to delete or recreate that configuration.
 ## Development and next steps
 
 Generated dungeons (14a) and world management with the server dashboard (14s)
-are complete. Dungeon contents (14b) is **IN REVIEW**: named dungeons now
+are complete. Dungeon contents (14b) was **accepted on 2026-10-16**: named dungeons now
 naturally contain a skeleton, a giant rat, equipment and healing potions.
 Optional floor finds keep stable original slot identities. Combat, storage,
 protocol, rendering and inventory `I`/`Enter` potion use are implemented.
@@ -184,18 +184,26 @@ Storage tests now cover potion transfer between dungeons, terminal items,
 explicit save/reopen/load, revisit, Start over and earlier-save rewind without
 replacing level files. TCP tests also cover the complete contents loop, combat
 art, reconnect before saving, Continue, old-data rejection and shutdown without
-autosave. All 94 test programs and 20 project checks pass. The
+autosave. The
 [persistence smoke measurements](docs/architecture/persistence-measurements.md)
 cover 1/10/100 visited dungeons and explain the additional validation cost.
 Independent review findings are corrected and the documentation is aligned.
-The manual terminal review remains deliberately open because it cannot be
-performed in this cloud environment. After acceptance, progression (13b) is the
-next gameplay slice, before multiple dungeon levels (14c). Settlements, multiplayer, and LLM
+Progression (13b) is the next gameplay slice, before multiple dungeon levels
+(14c). Client/server connection isolation and socket cleanup are verified.
+Server preparation failures preserve the current session. Large inventories
+keep selection and controls visible; quick summaries stay bounded. World-catalog
+inspection is limited to the requested page and any selected
+world outside it; Continue still fully validates the save and referenced levels.
+Save and load failures retain their detailed causes in the server log while
+client rejections stay sanitized. Viewport refreshes keep the exploration map
+open and preserve its current projection and pending map request. The completed
+client/server review also separates world-lifecycle responsibilities and
+documents connection ownership and UI state contracts.
+Settlements, multiplayer, and LLM
 integration remain later work.
 
-See the [roadmap](docs/roadmap.md) and the
-[14b implementation plan](docs/plans/14b-dungeon-contents.md) for the current
-checkpoints. The [architecture overview](docs/architecture/overview.md) explains
+See the [roadmap](docs/roadmap.md) for the current checkpoints.
+The [architecture overview](docs/architecture/overview.md) explains
 module ownership, and [world structure and views](docs/product/world-and-views.md)
 defines the game's terms.
 
@@ -207,7 +215,8 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-The current complete suite contains **94 test programs**, covering game rules,
+The complete suite passes **107/107 test programs**, and all **21 workspace
+projects** check. Coverage includes game rules,
 deterministic generation, storage, protocol validation, TUI rendering and input,
 and real TCP sessions.
 

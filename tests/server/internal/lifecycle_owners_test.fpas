@@ -1,0 +1,335 @@
+// Verifies concrete lifecycle prerequisites and facade parity without changing installed sessions on rejection.
+program LifecycleOwnersTest;
+
+uses Dungeon.GameState as GameState, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as Config, Dungeon.Server.Handling as Handling, Dungeon.Server.Session as Session, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Worlds.Creation as Creation, Dungeon.Server.Worlds.Persistence as Persistence, Dungeon.Server.Worlds.Selection as Selection, Dungeon.Test.SessionAssertions as Sessions, Dungeon.World as World, Dungeon.World.Catalog as Catalog, Dungeon.World.Savegame as SavegameUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type Exchange = record
+  After: Session.ServerSession;
+  Reply: Protocol.ServerMessage;
+end record;
+
+type Wire = record
+  Client: Net.Connection;
+  Server: Net.Connection;
+  Token: Tasks.CancellationToken;
+end record;
+
+function Owned(Before: Session.ServerSession; Message: Protocol.ClientMessage; Settings: Config.ServerConfig; Socket: Wire): result of (Session.ServerSession, string);
+begin
+  case Message of
+    when Protocol.ClientMessage.ListWorlds(const Offset, const DiscardProgress):
+      return Selection.ListCatalog(
+        Before,
+        Offset,
+        DiscardProgress,
+        Socket.Server,
+        Settings,
+        Socket.Token
+      );
+    when Protocol.ClientMessage.SelectWorld(const Id):
+      return Selection.SelectWorld(Before, Id, Socket.Server, Settings, Socket.Token);
+    when Protocol.ClientMessage.CreateWorld(const Seed, const Region):
+      return Creation.CreateGame(Before, Seed, Region, Socket.Server, Settings, Socket.Token);
+    when Protocol.ClientMessage.StartNewGame:
+      return Creation.StartGame(Before, Socket.Server, Settings, Socket.Token);
+    when Protocol.ClientMessage.LoadGame:
+      return Persistence.LoadGame(Before, Socket.Server, Settings, Socket.Token);
+    when Protocol.ClientMessage.SaveGame:
+      return Persistence.SaveGame(Before, false, Socket.Server, Settings, Socket.Token);
+    when Protocol.ClientMessage.OverwriteSaveGame:
+      return Persistence.SaveGame(Before, true, Socket.Server, Settings, Socket.Token);
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_), Protocol.ClientMessage.Disconnect:
+      panic('test accepts lifecycle messages only');
+  end case;
+end function;
+
+function Request(Before: Session.ServerSession; Message: Protocol.ClientMessage; Settings: Config.ServerConfig; Socket: Wire; Direct: boolean): Exchange;
+begin
+  var After := Before;
+  if Direct then
+    After := Owned(Before, Message, Settings, Socket).Unwrap();
+  else
+    After := Handling.HandleSessionMessage(
+      Before,
+      Message,
+      Socket.Server,
+      Settings,
+      Socket.Token
+    ).Unwrap();
+  end if;
+  const Read := Transport.ReadLine(Transport.NewLineReader(Socket.Client), Socket.Token).Unwrap();
+  return Exchange(After := After, Reply := Servers.DecodeServer(Read.Line).Unwrap());
+end function;
+
+procedure Rejected(Before: Session.ServerSession; Message: Protocol.ClientMessage; Settings: Config.ServerConfig; Socket: Wire; Direct: boolean; Code: string; Text: string);
+begin
+  const Value := Request(Before, Message, Settings, Socket, Direct);
+  Sessions.AssertUnchanged(Before, Value.After);
+  case Value.Reply of
+    when Protocol.ServerMessage.Rejected(const ActualCode, const ActualText):
+      begin
+        Test.AssertEquals(Code, ActualCode);
+        Test.AssertEquals(Text, ActualText);
+      end;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected lifecycle rejection');
+  end case;
+end procedure;
+
+begin
+  const Root := '.temp-data/lifecycle-owners-' + Conv.IntToStr(Time.TimestampMillis());
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  discard Net.SetTimeout(Server, 5000).Unwrap();
+  const Socket := Wire(
+    Client := Client,
+    Server := Server,
+    Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource())
+  );
+  for Direct: boolean in [false, true] do
+    const Directory := Root + '/' + (if Direct then 'direct' else 'facade' end if);
+    const Settings := Config.ServerConfig(
+      ConfigPath := '', Logs := None, WorldsRoot := Directory, WorldId := 'a', WorldSeed := 24680,
+      DungeonRegionChunks := 1, ChunkCacheLimit := 32, MaximumViewWidth := 80,
+      MaximumViewHeight := 24
+    );
+    const First := World.OpenWorld(Directory, 'a', 24680, 1, 32).Unwrap();
+    const Second := World.OpenWorld(Directory, 'b', 12345, 1, 32).Unwrap();
+    const FirstMetadata := Fs.ReadText(World.WorldMetadataPath(First)).Unwrap();
+    const SecondMetadata := Fs.ReadText(World.WorldMetadataPath(Second)).Unwrap();
+    const OldState := GameState.NewGame(First.Metadata) with Health := 7; end with;
+
+    discard SavegameUnit.WriteSaveGame(First, OldState).Unwrap();
+    const OldSave := Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap();
+    const Warm := World.LoadWorldCell(
+      First,
+      First.Metadata.Spawn.X,
+      First.Metadata.Spawn.Y
+    ).Unwrap().World;
+    const Idle := Worlds.NewServerSession(
+      Settings,
+      Session.ViewportSize(Width := 1, Height := 1)
+    ).Unwrap() with World := Warm; LastSavedAt := 123456; end with;
+    const Active := Idle with State := Some(OldState); Dirty := true; end with;
+    const Unselected := Idle with WorldSelected := false; end with;
+    const Broken := Settings with ConfigPath := Root + '/missing.toml'; WorldsRoot := Root +
+      '/missing-worlds'; end with;
+
+    // Owners reject prerequisites before consulting the deliberately unusable storage/config.
+    for Message: Protocol.ClientMessage in [
+      Protocol.ClientMessage.SaveGame,
+      Protocol.ClientMessage.OverwriteSaveGame
+    ] do
+      Test.AssertFalse(Session.RequiresActiveSession(Message));
+      Rejected(
+        Idle,
+        Message,
+        Broken,
+        Socket,
+        Direct,
+        'session_not_started',
+        'Start or continue a game first.'
+      );
+    end for;
+
+    for Message: Protocol.ClientMessage in [
+      Protocol.ClientMessage.StartNewGame,
+      Protocol.ClientMessage.LoadGame
+    ] do
+      Rejected(
+        Active,
+        Message,
+        Broken,
+        Socket,
+        Direct,
+        'session_already_started',
+        'A game session is already active.'
+      );
+      Rejected(
+        Unselected,
+        Message,
+        Broken,
+        Socket,
+        Direct,
+        'world_unavailable',
+        'Select a compatible world first.'
+      );
+    end for;
+
+    for Message: Protocol.ClientMessage in [
+      Protocol.ClientMessage.SelectWorld('b'),
+      Protocol.ClientMessage.CreateWorld(12345, 1)
+    ] do
+      Rejected(
+        Active,
+        Message,
+        Broken,
+        Socket,
+        Direct,
+        'session_already_started',
+        'Return to world selection first.'
+      );
+    end for;
+
+    Rejected(
+      Active, Protocol.ClientMessage.ListWorlds(0, false), Broken, Socket, Direct,
+      'discard_required', 'Confirm discarding unsaved progress or cancel.'
+    );
+    Test.AssertFalse(Fs.Exists(Broken.WorldsRoot));
+    Rejected(
+      Idle, Protocol.ClientMessage.SelectWorld('missing'), Settings, Socket, Direct,
+      'world_missing', 'World is missing. Create a world or select another.'
+    );
+    Rejected(
+      Idle, Protocol.ClientMessage.SelectWorld('../escape'), Settings, Socket, Direct,
+      'world_incompatible', 'World is incompatible. Delete or recreate it.'
+    );
+    for Parameters: Protocol.ClientMessage in [
+      Protocol.ClientMessage.CreateWorld(9223372036854775807, 1),
+      Protocol.ClientMessage.CreateWorld(24680, 0)
+    ] do
+      Rejected(
+        Idle,
+        Parameters,
+        Settings,
+        Socket,
+        Direct,
+        'create_failed',
+        'Cannot create world. Check parameters and storage access.'
+      );
+    end for;
+
+    Rejected(
+      Idle, Protocol.ClientMessage.CreateWorld(24680, 1), Broken, Socket, Direct,
+      'storage_error', 'Cannot read server defaults.'
+    );
+    Test.AssertEquals(2, Catalog.ListWorldIds(Directory).Unwrap().Length());
+    Test.AssertEquals(OldSave, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
+
+    // Start over keeps the earlier save; only explicit overwrite commits the new progress.
+    const Started := Request(Idle, Protocol.ClientMessage.StartNewGame, Settings, Socket, Direct);
+    Test.AssertTrue(Started.Reply is Protocol.ServerMessage.State(_));
+    Test.AssertEquals(20, Started.After.State.Unwrap().Health);
+    Test.AssertTrue(Started.After.Dirty);
+    Test.AssertEquals(123456, Started.After.LastSavedAt);
+    Test.AssertEquals(OldSave, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
+    Rejected(
+      Started.After, Protocol.ClientMessage.SaveGame, Settings, Socket, Direct,
+      'overwrite_required', 'Confirm overwriting the existing save or cancel.'
+    );
+    const Saved := Request(
+      Started.After,
+      Protocol.ClientMessage.OverwriteSaveGame,
+      Settings,
+      Socket,
+      Direct
+    );
+    Test.AssertTrue(Saved.Reply is Protocol.ServerMessage.SaveCompleted);
+    Test.AssertFalse(Saved.After.Dirty);
+    Test.AssertTrue(Saved.After.LastSavedAt > 123456);
+    Sessions.AssertUnchanged(
+      Started.After with Dirty := false; LastSavedAt := Saved.After.LastSavedAt; end with,
+      Saved.After
+    );
+    const SavedBytes := Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap();
+    const Menu := Request(
+      Saved.After,
+      Protocol.ClientMessage.ListWorlds(9223372036854775807, false),
+      Settings,
+      Socket,
+      Direct
+    );
+    Test.AssertTrue(Menu.Reply is Protocol.ServerMessage.Worlds(_));
+    Test.AssertTrue(Menu.After.State is None);
+    Test.AssertTrue(Menu.After.Interior is None);
+    Test.AssertFalse(Menu.After.Dirty);
+    Test.AssertEquals(Saved.After.LastSavedAt, Menu.After.LastSavedAt);
+    const Loaded := Request(Menu.After, Protocol.ClientMessage.LoadGame, Settings, Socket, Direct);
+    Test.AssertTrue(Loaded.Reply is Protocol.ServerMessage.State(_));
+    Test.AssertEquals(20, Loaded.After.State.Unwrap().Health);
+    Test.AssertFalse(Loaded.After.Dirty);
+    const Changed := Loaded.After with State := Some(
+      Loaded.After.State.Unwrap() with Health := 13; end with
+    ); Dirty := true; end with;
+
+    Rejected(
+      Changed, Protocol.ClientMessage.ListWorlds(0, false), Settings, Socket, Direct,
+      'discard_required', 'Confirm discarding unsaved progress or cancel.'
+    );
+    const Discarded := Request(
+      Changed,
+      Protocol.ClientMessage.ListWorlds(0, true),
+      Settings,
+      Socket,
+      Direct
+    );
+    const Rewound := Request(
+      Discarded.After,
+      Protocol.ClientMessage.LoadGame,
+      Settings,
+      Socket,
+      Direct
+    );
+    Test.AssertEquals(20, Rewound.After.State.Unwrap().Health);
+    Test.AssertEquals(SavedBytes, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
+    const IdleAgain := Request(
+      Rewound.After,
+      Protocol.ClientMessage.ListWorlds(0, false),
+      Settings,
+      Socket,
+      Direct
+    );
+    const Selected := Request(
+      IdleAgain.After,
+      Protocol.ClientMessage.SelectWorld('b'),
+      Settings,
+      Socket,
+      Direct
+    );
+    Test.AssertTrue(Selected.Reply is Protocol.ServerMessage.Worlds(_));
+    Test.AssertEquals('b', Selected.After.World.Metadata.Id);
+    Test.AssertEquals(0, Selected.After.LastSavedAt);
+    const MissingSave := Request(
+      Selected.After,
+      Protocol.ClientMessage.LoadGame,
+      Settings,
+      Socket,
+      Direct
+    );
+    Test.AssertTrue(MissingSave.After.Dirty);
+    Test.AssertFalse(Fs.Exists(SavegameUnit.SaveGamePath(Second)));
+    const BeforeCreate := Request(
+      MissingSave.After,
+      Protocol.ClientMessage.ListWorlds(0, true),
+      Settings,
+      Socket,
+      Direct
+    );
+    const Created := Request(
+      BeforeCreate.After,
+      Protocol.ClientMessage.CreateWorld(24680, 1),
+      Settings,
+      Socket,
+      Direct
+    );
+    Test.AssertTrue(Created.Reply is Protocol.ServerMessage.State(_));
+    Test.AssertTrue(Created.After.Dirty);
+    Test.AssertEquals('world-1', Created.After.World.Metadata.Id);
+    Test.AssertEquals(0, Created.After.LastSavedAt);
+    Test.AssertFalse(Fs.Exists(SavegameUnit.SaveGamePath(Created.After.World)));
+    Test.AssertEquals(3, Catalog.ListWorldIds(Directory).Unwrap().Length());
+    Test.AssertEquals(FirstMetadata, Fs.ReadText(World.WorldMetadataPath(First)).Unwrap());
+    Test.AssertEquals(SecondMetadata, Fs.ReadText(World.WorldMetadataPath(Second)).Unwrap());
+    Test.AssertEquals(SavedBytes, Fs.ReadText(SavegameUnit.SaveGamePath(First)).Unwrap());
+  end for;
+
+  discard Net.Close(Client).Unwrap();
+  discard Net.Close(Server).Unwrap();
+end.

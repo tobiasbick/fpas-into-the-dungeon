@@ -1,0 +1,271 @@
+// Drives real Resize -> Viewport -> State replies through the client adapter with an open exploration map.
+program ExplorationMapResizeNetworkTest;
+
+uses Dungeon.Client as Client, Dungeon.Coordinates as Coordinates, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as Config, Dungeon.Test.ClientSession as ClientSession, Dungeon.Test.Routes as Routes, Dungeon.World as World, Std.Conv as Conv, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
+
+type Observation = record
+  Description: string;
+  Holds: boolean;
+end record;
+
+function Key(Kind: Tui.TuiKeyKind; Text: string): Tui.TuiMsg;
+begin
+  return Tui.TuiMsg.Key(
+    Tui.TuiKeyEvent(
+      kind := Kind,
+      ch := Text,
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+end function;
+
+function Serve(Listener: Net.Listener; Settings: Config.ServerConfig; Outcomes: channel of string; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Connection := try Net.AcceptWithCancellation(Listener, Token);
+  const Outcome := Server.ServeConnection(Connection, Settings, Token);
+  discard Net.Close(Connection);
+  ClientSession.ReportOutcome(Outcomes, 'server', Outcome);
+  return Outcome;
+end function;
+
+begin
+  const Root := '.temp-data/map-resize-network-' + Conv.IntToStr(Time.TimestampMillis());
+  const Settings := Config.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := 'resize',
+    WorldSeed := 24680, DungeonRegionChunks := 1, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const StoredWorld := World.OpenWorld(Root, 'resize', 24680, 1, 32).Unwrap();
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Listener).Unwrap().Port;
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const Events: channel of Client.ClientEvent := Tasks.CreateChannel(8);
+  const Inbox: channel of Client.ConnectionEvent := Tasks.CreateChannel(8);
+  const Outcomes: channel of string := Tasks.CreateChannel(4);
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := Client.NewClientModel(
+    '127.0.0.1',
+    Port,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Inbox
+  );
+  Model.ViewportWidth := 60;
+  Model.ViewportHeight := 24;
+  var Before := Model;
+  var Observations: array of Observation := [];
+  scope
+    const ServerTask := go Serve(Listener, Settings, Outcomes, Token);
+    const ClientTask := go ClientSession.RunReportedClient(
+      '127.0.0.1',
+      Port,
+      1,
+      1,
+      Requests,
+      Events,
+      Outcomes,
+      Token
+    );
+    Model := Client.UpdateClientEvent(
+      Model,
+      ClientSession.NextClientEvent(Events, Outcomes, 30000),
+      Cmd
+    );
+
+    Model := Client.UpdateClient(
+      Model,
+      Tui.TuiMsg.Action(Tui.TuiControlId.Create(4), Tui.TuiAction.Create(104)),
+      Cmd
+    );
+    Model := Client.UpdateClientEvent(
+      Model,
+      ClientSession.NextClientEvent(Events, Outcomes, 30000),
+      Cmd
+    );
+    while Model.Pending do
+      Model := Client.UpdateClientEvent(
+        Model,
+        ClientSession.NextClientEvent(Events, Outcomes, 30000),
+        Cmd
+      );
+    end while;
+
+    Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, 'm'), Cmd);
+    Test.AssertTrue(Model.MapRequestPending);
+    Model := Client.UpdateClientEvent(
+      Model,
+      ClientSession.NextClientEvent(Events, Outcomes, 30000),
+      Cmd
+    );
+    Test.AssertTrue(Model.MapHasState);
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.ExplorationMapOverlay);
+    Before := Model;
+    Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(80, 30)), Cmd);
+    Test.AssertTrue(Model.Pending);
+    Model := Client.UpdateClientEvent(
+      Model,
+      ClientSession.NextClientEvent(Events, Outcomes, 30000),
+      Cmd
+    );
+    Observations.PushInPlace(
+      Observation(
+        Description := 'ready map survives a real viewport reply',
+        Holds := (Model.Overlay = Client.ClientOverlay.ExplorationMapOverlay) and not Model.Pending
+        and
+        (Before.MapWidth = Model.MapWidth) and (Before.MapHeight = Model.MapHeight)
+        and
+        (Before.MapRows[0] = Model.MapRows[0]) and (Before.Dirty = Model.Dirty)
+      )
+    );
+    for Family: integer := 0 to 1 do
+      if Family = 1 then
+        Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, 'm'), Cmd);
+        for Step: Coordinates.WorldPosition in Routes.OutdoorRoute(
+          StoredWorld.Metadata, StoredWorld.Metadata.Spawn, StoredWorld.Metadata.SpawnEntrance, 4
+        ) do
+          var Direction := 'w';
+          if Step.X > Model.WorldX then
+            Direction := 'd';
+          else
+            if Step.X < Model.WorldX then
+              Direction := 'a';
+            else
+              if Step.Y > Model.WorldY then
+                Direction := 's';
+              end if;
+            end if;
+          end if;
+
+          Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, Direction), Cmd);
+          Model := Client.UpdateClientEvent(
+            Model,
+            ClientSession.NextClientEvent(Events, Outcomes, 30000),
+            Cmd
+          );
+        end for;
+
+        Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Enter, ''), Cmd);
+        const Entered := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+        Observations.PushInPlace(
+          Observation(
+            Description := 'entering a dungeon remains an ordinary gameplay state',
+            Holds := Entered is Client.ClientEvent.State(Protocol.VisibleState.FirstPersonState(_))
+          )
+        );
+        Model := Client.UpdateClientEvent(Model, Entered, Cmd);
+        while Model.Pending do
+          Model := Client.UpdateClientEvent(
+            Model,
+            ClientSession.NextClientEvent(Events, Outcomes, 30000),
+            Cmd
+          );
+        end while;
+
+        Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, 'm'), Cmd);
+        Model := Client.UpdateClientEvent(
+          Model,
+          ClientSession.NextClientEvent(Events, Outcomes, 30000),
+          Cmd
+        );
+      end if;
+
+      // Hold a real map reply while Resize queues a viewport; apply replies in wire order.
+      Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Home, ''), Cmd);
+      const MapFirst := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+      Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(100, 36)), Cmd);
+      Model := Client.UpdateClientEvent(Model, MapFirst, Cmd);
+      Observations.PushInPlace(
+        Observation(
+          Description := 'map reply does not consume the pending viewport',
+          Holds := (Model.Overlay = Client.ClientOverlay.ExplorationMapOverlay) and Model.Pending
+          and
+          not Model.MapRequestPending and Model.MapHasState
+        )
+      );
+      const ViewportSecond := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+      Model := Client.UpdateClientEvent(Model, ViewportSecond, Cmd);
+      Observations.PushInPlace(
+        Observation(
+          Description := 'viewport after map reply retains the complete map',
+          Holds := (ViewportSecond is Client.ClientEvent.ViewportState(_))
+          and
+          (Model.Overlay = Client.ClientOverlay.ExplorationMapOverlay) and not Model.Pending
+        )
+      );
+
+      // Hold a viewport reply while Home starts a map request, then apply the viewport first.
+      Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(60, 24)), Cmd);
+      const ViewportFirst := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+      Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Home, ''), Cmd);
+      const WaitingMap := Model;
+      Model := Client.UpdateClientEvent(Model, ViewportFirst, Cmd);
+      Observations.PushInPlace(
+        Observation(
+          Description := 'viewport reply does not consume the pending map or replace its projection',
+          Holds := (ViewportFirst is Client.ClientEvent.ViewportState(_))
+          and
+          (Model.Overlay = Client.ClientOverlay.ExplorationMapOverlay) and Model.MapRequestPending
+          and
+          not Model.Pending and (WaitingMap.MapWidth = Model.MapWidth)
+          and
+          (WaitingMap.MapHeight = Model.MapHeight) and (WaitingMap.MapRows[0] = Model.MapRows[0])
+        )
+      );
+      Model := Client.UpdateClientEvent(
+        Model,
+        ClientSession.NextClientEvent(Events, Outcomes, 30000),
+        Cmd
+      );
+      Observations.PushInPlace(
+        Observation(
+          Description := 'subsequent map reply supplies its requested dimensions',
+          Holds := (Model.Overlay = Client.ClientOverlay.ExplorationMapOverlay)
+          and
+          not Model.MapRequestPending
+          and
+          (Model.MapWidth = Model.MapDesiredWidth) and (Model.MapHeight = Model.MapDesiredHeight)
+        )
+      );
+
+      Model := Client.UpdateClient(Model, Tui.TuiMsg.Resize(Tui.TuiSize.Create(96, 32)), Cmd);
+      const ClosingReply := ClientSession.NextClientEvent(Events, Outcomes, 30000);
+      Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, 'm'), Cmd);
+      Model := Client.UpdateClientEvent(Model, ClosingReply, Cmd);
+      Observations.PushInPlace(
+        Observation(
+          Description := 'viewport reply does not reopen an explicitly closed map',
+          Holds := (ClosingReply is Client.ClientEvent.ViewportState(_))
+          and
+          (Model.Overlay = Client.ClientOverlay.NoOverlay) and not Model.Pending
+        )
+      );
+      Model := Client.UpdateClient(Model, Key(Tui.TuiKeyKind.Character, 'm'), Cmd);
+      Model := Client.UpdateClientEvent(
+        Model,
+        ClientSession.NextClientEvent(Events, Outcomes, 30000),
+        Cmd
+      );
+    end for;
+
+    discard Tasks.Send(Requests, Protocol.ClientMessage.Disconnect).Unwrap();
+    Test.AssertTrue(Tasks.Wait(ClientTask).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerTask).Unwrap());
+  end scope;
+
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+  discard Tasks.CloseChannel(Inbox);
+  discard Tasks.CloseChannel(Outcomes);
+  // Verify observations after closing both workers so a failed assertion cannot keep them alive.
+  for Value: Observation in Observations do
+    if not Value.Holds then
+      Test.Fail(Value.Description);
+    end if;
+  end for;
+end.

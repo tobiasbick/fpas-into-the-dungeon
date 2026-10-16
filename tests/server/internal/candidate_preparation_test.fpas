@@ -1,0 +1,269 @@
+// Verifies recoverable candidate failures and atomic state/cache/viewport installation over TCP.
+program CandidatePreparationTest;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Session as SessionUnit, Dungeon.Terrain as Terrain, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Path as Paths, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type ExchangeResult = record
+  Session: SessionUnit.ServerSession;
+  Reply: Protocol.ServerMessage;
+end record;
+
+function Request(Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage; Client: Net.Connection; Server: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): ExchangeResult;
+begin
+  const Decoded := Clients.DecodeClient(Clients.EncodeClient(Message)).Unwrap();
+  const Next := Handling.HandleSessionMessage(Session, Decoded, Server, Config, Token).Unwrap();
+  const Read := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  return ExchangeResult(Session := Next, Reply := Servers.DecodeServer(Read.Line).Unwrap());
+end function;
+
+procedure Rejected(Value: Protocol.ServerMessage; Expected: string);
+begin
+  Test.AssertTrue(Value is Protocol.ServerMessage.Rejected(_, _));
+  case Value of
+    when Protocol.ServerMessage.Rejected(const Code, const Reason):
+      Test.AssertEquals(Expected, Code);
+      Test.AssertTrue(Reason.Length() > 0);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a recoverable rejection');
+  end case;
+end procedure;
+
+function MapState(Value: Protocol.ServerMessage): Protocol.MapVisibleState;
+begin
+  case Value of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(const Fields)):
+      return Fields;
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(_)), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected an outdoor state');
+  end case;
+end function;
+
+// Independent plain cached terrain makes the boundary step legal without depending on generation.
+function PlainChunk(X: integer): Terrain.WorldChunk;
+begin
+  var Cells: array of Terrain.WorldCell := [];
+  for Index: integer := 1 to Coordinates.WorldChunkSize * Coordinates.WorldChunkSize do
+    Cells.PushInPlace(Terrain.PlainCell());
+  end for;
+
+  return Terrain.WorldChunk(
+    Coordinate := Coordinates.ChunkCoordinate(X := X, Y := 0),
+    Cells := Cells
+  );
+end function;
+
+begin
+  const Root := '.temp-data/candidate-preparation-' + Conv.IntToStr(Time.TimestampMillis());
+  const Metadata := Fixtures.FixtureMetadata();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := Metadata.Id,
+    WorldSeed := Metadata.Seed, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  discard Net.SetTimeout(Server, 5000).Unwrap();
+
+  for StartX: integer in [127, -1] do
+    const ChunkX := Coordinates.ChunkForCoordinate(StartX);
+    const World := WorldUnit.WorldSession(
+      Directory := Root + '/' + Conv.IntToStr(StartX), Metadata := Metadata,
+      Cache := [
+        WorldUnit.CachedWorldChunk(Chunk := PlainChunk(ChunkX), LastUsed := 3),
+        WorldUnit.CachedWorldChunk(Chunk := PlainChunk(ChunkX + 1), LastUsed := 7)
+      ], Clock := 7, CacheLimit := 32
+    );
+    const State := Exploration.RevealCurrentArea(
+      GameState.AreaView(Metadata := Metadata, Interior := None),
+      GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+        Coordinates.WorldPosition(X := StartX, Y := 64)
+      ); Health := 7; RandomState := 123; end with
+    ).Unwrap();
+    const Session := SessionUnit.ServerSession(
+      World := World, WorldSelected := true, State := Some(State), Interior := None,
+      Dirty := false, LastSavedAt := 123456, Finished := false,
+      Viewport := SessionUnit.ViewportSize(Width := 1, Height := 1)
+    );
+    const BlockedCoordinate := Coordinates.ChunkCoordinate(X := ChunkX + 2, Y := 0);
+    const Blocked := WorldUnit.WorldChunkPath(World, BlockedCoordinate);
+    discard Fs.CreateDirAll(World.Directory + '/saves').Unwrap();
+    discard Fs.CreateDirAll(Paths.DirName(Blocked)).Unwrap();
+    const SaveBytes := 'previous explicit save';
+    discard Fs.WriteTextAtomic(Savegame.SaveGamePath(World), SaveBytes).Unwrap();
+
+    for Resize: boolean in [false, true] do
+      var Message := Protocol.ClientMessage.Move(1, 0);
+      var Code := 'movement_rejected';
+      if Resize then
+        Message := Protocol.ClientMessage.Viewport(3, 1);
+        Code := 'viewport_rejected';
+      end if;
+
+      discard Fs.WriteTextAtomic(Blocked, '{').Unwrap();
+      for Dirty: boolean in [false, true] do
+        const Before := Session with Dirty := Dirty; end with;
+        const Failed := Request(Before, Message, Client, Server, Config, Token);
+        Rejected(Failed.Reply, Code);
+        Sessions.AssertUnchanged(Before, Failed.Session);
+        Test.AssertEquals('{', Fs.ReadText(Blocked).Unwrap());
+        Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+      end for;
+
+      // Repair the missing prefetch data, then retry on the same live connection.
+      discard Fs.DeleteFile(Blocked).Unwrap();
+      discard WorldUnit.LoadWorldChunk(World, BlockedCoordinate).Unwrap();
+      for Dirty: boolean in [false, true] do
+        const Before := Session with Dirty := Dirty; end with;
+        const Accepted := Request(Before, Message, Client, Server, Config, Token);
+        const Visible := MapState(Accepted.Reply);
+        Test.AssertTrue(Accepted.Session.World.Clock > World.Clock);
+        Test.AssertTrue(Accepted.Session.World.Cache.Length() <= World.CacheLimit);
+        Test.AssertEquals(Session.LastSavedAt, Accepted.Session.LastSavedAt);
+        Test.AssertFalse(Accepted.Session.Finished);
+        if Resize then
+          Test.AssertEquals(3, Visible.Width);
+          Test.AssertEquals(1, Visible.Height);
+          Test.AssertEquals(3, Accepted.Session.Viewport.Width);
+          Test.AssertEquals(Dirty, Accepted.Session.Dirty);
+          Test.AssertTrue(States.SameState(State, Accepted.Session.State.Unwrap()));
+        else
+          Test.AssertEquals(StartX + 1, Visible.WorldX);
+          Test.AssertEquals(8, Visible.Health);
+          Test.AssertTrue(Accepted.Session.Dirty);
+          Test.AssertTrue(Session.Viewport = Accepted.Session.Viewport);
+          Test.AssertEquals(123, Accepted.Session.State.Unwrap().RandomState);
+          Test.AssertFalse(States.SameState(State, Accepted.Session.State.Unwrap()));
+        end if;
+
+        Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+      end for;
+    end for;
+
+    // Invalid dimensions and invalid movements reject without touching any session fact.
+    for Message: Protocol.ClientMessage in [
+      Protocol.ClientMessage.Viewport(0, 1),
+      Protocol.ClientMessage.Move(0, 0)
+    ] do
+      const Failed := Request(Session, Message, Client, Server, Config, Token);
+      Test.AssertTrue(Failed.Reply is Protocol.ServerMessage.Rejected(_, _));
+      Sessions.AssertUnchanged(Session, Failed.Session);
+    end for;
+
+    // Encoded rows plus all 64 escaped item IDs exceed the wire limit; never omit items.
+    var Packed := State;
+    for Index: integer := 0 to 63 do
+      Packed.Items.PushInPlace(
+        Items.GameItem(
+          Id := '"\'.RepeatStr(60) + Conv.IntToStr(Index), Kind := Items.ItemKind.AncientCoin,
+          Location := Items.ItemLocation.CarriedByPlayer
+        )
+      );
+    end for;
+    const Huge := Session with State := Some(Packed); Viewport := SessionUnit.ViewportSize(
+      Width := 240,
+      Height := 120
+    ); end with;
+
+    for Message: Protocol.ClientMessage in [
+      Protocol.ClientMessage.Move(1, 0),
+      Protocol.ClientMessage.Viewport(240, 120)
+    ] do
+      const Failed := Request(Huge, Message, Client, Server, Config, Token);
+      Test.AssertTrue(
+        Failed.Reply is Protocol.ServerMessage.Rejected(_, Transport.LineTooLongError)
+      );
+      Sessions.AssertUnchanged(Huge, Failed.Session);
+    end for;
+    const Small := Request(
+      Huge,
+      Protocol.ClientMessage.Viewport(1, 1),
+      Client,
+      Server,
+      Config,
+      Token
+    );
+    Test.AssertEquals(64, MapState(Small.Reply).Inventory.Length());
+    Test.AssertFalse(Small.Session.Dirty);
+    Test.AssertTrue(States.SameState(Packed, Small.Session.State.Unwrap()));
+    const Moved := Request(
+      Small.Session,
+      Protocol.ClientMessage.Move(1, 0),
+      Client,
+      Server,
+      Config,
+      Token
+    );
+    Test.AssertEquals(8, MapState(Moved.Reply).Health);
+    Test.AssertEquals(64, MapState(Moved.Reply).Inventory.Length());
+    Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  end for;
+
+  // Establish successful preparation before making writes fail on the identical candidates.
+  const FinalWorld := WorldUnit.WorldSession(
+    Directory := Root + '/127', Metadata := Metadata, Cache := [
+      WorldUnit.CachedWorldChunk(Chunk := PlainChunk(0), LastUsed := 3),
+      WorldUnit.CachedWorldChunk(Chunk := PlainChunk(1), LastUsed := 7)
+    ], Clock := 7, CacheLimit := 32
+  );
+  const Final := SessionUnit.ServerSession(
+    World := FinalWorld, WorldSelected := true, State := Some(
+      GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+        Coordinates.WorldPosition(X := 127, Y := 64)
+      ); Health := 7; end with
+    ),
+    Interior := None, Dirty := true, LastSavedAt := 789, Finished := false,
+    Viewport := SessionUnit.ViewportSize(Width := 1, Height := 1)
+  );
+  const ReadyMove := Request(
+    Final,
+    Protocol.ClientMessage.Move(1, 0),
+    Client,
+    Server,
+    Config,
+    Token
+  );
+  Test.AssertEquals(8, MapState(ReadyMove.Reply).Health);
+  const ReadyView := Request(
+    Final,
+    Protocol.ClientMessage.Viewport(1, 1),
+    Client,
+    Server,
+    Config,
+    Token
+  );
+  Test.AssertEquals(1, MapState(ReadyView.Reply).Width);
+  discard Net.Close(Server).Unwrap();
+  // Both prepared state writes and failed rejection writes must escape as Error.
+  for Message: Protocol.ClientMessage in [
+    Protocol.ClientMessage.Move(1, 0),
+    Protocol.ClientMessage.Viewport(1, 1)
+  ] do
+    Test.AssertTrue(
+      Handling.HandleSessionMessage(Final, Message, Server, Config, Token) is Error(_)
+    );
+  end for;
+  const Limited := Final with World := FinalWorld with CacheLimit := 1; end with; end with;
+
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(
+      Limited,
+      Protocol.ClientMessage.Viewport(1, 1),
+      Server,
+      Config,
+      Token
+    ) is Error(_)
+  );
+  Test.AssertEquals(
+    'previous explicit save',
+    Fs.ReadText(Savegame.SaveGamePath(FinalWorld)).Unwrap()
+  );
+  discard Net.Close(Client).Unwrap();
+end.

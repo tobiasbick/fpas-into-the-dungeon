@@ -1,0 +1,295 @@
+// Verifies map/focus continuity and independent request ownership across viewport replies and resize failures.
+program ExplorationMapResizeTest;
+
+uses Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Key(Kind: Tui.TuiKeyKind; Text: string): Tui.TuiMsg;
+begin
+  return Tui.TuiMsg.Key(
+    Tui.TuiKeyEvent(
+      kind := Kind,
+      ch := Text,
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+end function;
+
+function Visible(View: Protocol.ViewKind): Protocol.VisibleState;
+begin
+  if View = Protocol.ViewKind.FirstPerson then
+    return Protocol.VisibleState.FirstPersonState(
+      Protocol.FirstPersonVisibleState(
+        Title := 'Resize hall', Status := 'Ready', Width := 3, Height := 3,
+        Rows := ['###', '#.#', '#e#'], KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+        PlayerX := 1, PlayerY := 1, Facing := Protocol.FirstPersonFacing.North,
+        Inventory := [], Health := 20, MaxHealth := 20, Character := [], CombatLog := [],
+        CombatEvents := []
+      )
+    );
+  end if;
+
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      OriginX := 10, OriginY := 19, Width := 3, Height := 3,
+      Rows := ['ggg', 'ggg', 'ggg'], KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+      PlayerX := 1, PlayerY := 1, WorldX := 11, WorldY := 20,
+      Inventory := [], Health := 20, MaxHealth := 20, Character := []
+    )
+  );
+end function;
+
+function MapReply(State: Client.ClientModel): Client.ClientEvent;
+begin
+  var Rows: array of string := [];
+  var Knowledge: array of string := [];
+  for Y: integer := 1 to State.MapDesiredHeight do
+    Rows.PushInPlace(
+      (
+        if State.View = Protocol.ViewKind.Map then 'g' else '.' end if
+      ).RepeatStr(State.MapDesiredWidth)
+    );
+    Knowledge.PushInPlace('v'.RepeatStr(State.MapDesiredWidth));
+  end for;
+
+  return Client.ClientEvent.ExplorationMap(
+    Protocol.ExplorationMapState(
+      View := State.View, LabelText := 'Resize map', OriginX := State.MapDesiredOriginX,
+      OriginY := State.MapDesiredOriginY, Width := State.MapDesiredWidth,
+      Height := State.MapDesiredHeight,
+      Rows := Rows, KnowledgeRows := Knowledge,
+      PlayerWorldX := if State.View = Protocol.ViewKind.Map then State.WorldX
+        else State.PlayerX
+        end if,
+      PlayerWorldY := if State.View = Protocol.ViewKind.Map then State.WorldY
+        else State.PlayerY
+        end if,
+      PlayerInWindow := true
+    )
+  );
+end function;
+
+procedure AssertSameMap(Before: Client.ClientModel; After: Client.ClientModel);
+begin
+  Test.AssertEquals(Before.MapRequestPending, After.MapRequestPending);
+  Test.AssertEquals(Before.MapHasState, After.MapHasState);
+  Test.AssertTrue(Before.MapView = After.MapView);
+  Test.AssertEquals(Before.MapLabel, After.MapLabel);
+  Test.AssertEquals(Before.MapOriginX, After.MapOriginX);
+  Test.AssertEquals(Before.MapOriginY, After.MapOriginY);
+  Test.AssertEquals(Before.MapWidth, After.MapWidth);
+  Test.AssertEquals(Before.MapHeight, After.MapHeight);
+  Test.AssertEquals(Before.MapDesiredOriginX, After.MapDesiredOriginX);
+  Test.AssertEquals(Before.MapDesiredOriginY, After.MapDesiredOriginY);
+  Test.AssertEquals(Before.MapDesiredWidth, After.MapDesiredWidth);
+  Test.AssertEquals(Before.MapDesiredHeight, After.MapDesiredHeight);
+  Test.AssertEquals(Before.MapPlayerWorldX, After.MapPlayerWorldX);
+  Test.AssertEquals(Before.MapPlayerWorldY, After.MapPlayerWorldY);
+  Test.AssertEquals(Before.MapPlayerInWindow, After.MapPlayerInWindow);
+  Test.AssertEquals(Before.MapRows.Length(), After.MapRows.Length());
+  Test.AssertEquals(Before.MapKnowledgeRows.Length(), After.MapKnowledgeRows.Length());
+  for Y: integer := 0 to Before.MapRows.Length() - 1 do
+    Test.AssertEquals(Before.MapRows[Y], After.MapRows[Y]);
+    Test.AssertEquals(Before.MapKnowledgeRows[Y], After.MapKnowledgeRows[Y]);
+  end for;
+end procedure;
+
+procedure TakeViewport(Queue: channel of Protocol.ClientMessage);
+begin
+  Test.AssertTrue(
+    Tasks.ReceiveWithTimeout(Queue, 0).Unwrap() is Protocol.ClientMessage.Viewport(_, _)
+  );
+end procedure;
+
+begin
+  const Cmd := Tui.TuiCmdOutput.Create();
+  for View: Protocol.ViewKind in [Protocol.ViewKind.Map, Protocol.ViewKind.FirstPerson] do
+    for Ready: boolean in [false, true] do
+      const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+      const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(4);
+      var State := Client.NewClientModel(
+        '127.0.0.1',
+        4040,
+        '',
+        RuntimeData.DefaultClientPreferences(),
+        Requests,
+        Events
+      );
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(30, 12)), Cmd);
+      State := Client.UpdateClientEvent(State, Client.ClientEvent.State(Visible(View)), Cmd);
+      TakeViewport(Requests);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.ViewportState(Visible(View)),
+        Cmd
+      );
+      Test.AssertFalse(State.Pending);
+      State := Client.UpdateClient(State, Key(Tui.TuiKeyKind.Character, 'm'), Cmd);
+      Test.AssertTrue(
+        Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.ExplorationMap(_, _, _, _)
+      );
+      if Ready then
+        State := Client.UpdateClientEvent(State, MapReply(State), Cmd);
+      end if;
+      const Before := State;
+
+      // A second resize coalesces behind the first viewport reply, preserving the same complete map.
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(60, 22)), Cmd);
+      TakeViewport(Requests);
+      Test.AssertTrue(State.Pending);
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(80, 30)), Cmd);
+      Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.ViewportState(Visible(View)),
+        Cmd
+      );
+      AssertSameMap(Before, State);
+      Test.AssertTrue(State.Pending);
+      TakeViewport(Requests);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.ViewportState(Visible(View)),
+        Cmd
+      );
+      Test.AssertFalse(State.Pending);
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.ExplorationMapOverlay);
+      AssertSameMap(Before, State);
+      Test.AssertEquals(Before.Dirty, State.Dirty);
+      const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 30));
+      State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+      var Found := false;
+      const Text := if Ready then 'Map - Resize map' else 'Loading map...' end if;
+      for Y: integer := 0 to App.SurfaceSnapshot().Height - 1 do
+        if Text in App.SurfaceSnapshot().LineAt(Y) then
+          Found := true;
+        end if;
+      end for;
+
+      Test.AssertTrue(Found);
+      AssertSameMap(Before, State);
+      App.Close();
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(80, 30)), Cmd);
+      Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+
+      // A rejected primary viewport neither resolves a map request nor closes its overlay.
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(70, 26)), Cmd);
+      TakeViewport(Requests);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.Rejected('viewport_rejected', 'Cannot prepare view.'),
+        Cmd
+      );
+      Test.AssertFalse(State.Pending);
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.ExplorationMapOverlay);
+      AssertSameMap(Before, State);
+      if not Ready then
+        State := Client.UpdateClientEvent(State, MapReply(State), Cmd);
+      end if;
+
+      // Home requests the new map dimensions; its rejection must not consume the pending viewport.
+      State := Client.UpdateClient(State, Key(Tui.TuiKeyKind.Home, ''), Cmd);
+      Test.AssertTrue(State.MapRequestPending);
+      Test.AssertTrue(
+        Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.ExplorationMap(_, _, _, _)
+      );
+      const Updating := State;
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(72, 28)), Cmd);
+      TakeViewport(Requests);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.MapRejected('map_rejected', 'Map unavailable.'),
+        Cmd
+      );
+      Test.AssertTrue(State.Pending);
+      Test.AssertFalse(State.MapRequestPending);
+      AssertSameMap(Updating with MapRequestPending := false; end with, State);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.ViewportState(Visible(View)),
+        Cmd
+      );
+      Test.AssertFalse(State.Pending);
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.ExplorationMapOverlay);
+      Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+
+      // A blocked queue leaves viewport bookkeeping unchanged; an explicit retry succeeds.
+      discard Tasks.Send(Requests, Protocol.ClientMessage.Wait).Unwrap();
+      const Requested := State.RequestedWorldWidth;
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(74, 30)), Cmd);
+      Test.AssertFalse(State.Pending);
+      Test.AssertEquals(Requested, State.RequestedWorldWidth);
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.ExplorationMapOverlay);
+      Test.AssertTrue(
+        Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.Wait
+      );
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(74, 30)), Cmd);
+      TakeViewport(Requests);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.ViewportState(Visible(View)),
+        Cmd
+      );
+      Test.AssertFalse(State.Pending);
+
+      // A tiny terminal and replies arriving after explicit close never reopen the map.
+      State := Client.UpdateClient(State, Key(Tui.TuiKeyKind.Home, ''), Cmd);
+      Test.AssertTrue(
+        Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.ExplorationMap(_, _, _, _)
+      );
+      const LateMap := MapReply(State);
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(1, 1)), Cmd);
+      Test.AssertTrue(
+        Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.Viewport(1, 1)
+      );
+      State := Client.UpdateClient(State, Key(Tui.TuiKeyKind.Escape, ''), Cmd);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.ViewportState(Visible(View)),
+        Cmd
+      );
+      State := Client.UpdateClientEvent(State, LateMap, Cmd);
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.NoOverlay);
+      Test.AssertFalse(State.Pending);
+      Test.AssertFalse(State.MapRequestPending);
+
+      // Ordinary game states still close a map; read-only viewport states preserve modal focus.
+      State := Client.UpdateClient(State, Key(Tui.TuiKeyKind.Character, 'm'), Cmd);
+      Test.AssertTrue(
+        Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.ExplorationMap(_, _, _, _)
+      );
+      State := Client.UpdateClientEvent(State, MapReply(State), Cmd);
+      State := Client.UpdateClientEvent(State, Client.ClientEvent.State(Visible(View)), Cmd);
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.NoOverlay);
+      State := Client.UpdateClient(
+        State, Tui.TuiMsg.Key(
+          Tui.TuiKeyEvent(
+            kind := Tui.TuiKeyKind.Character, ch := 'p', shift := false, ctrl := true, alt := false,
+            meta := false
+          )
+        ), Cmd
+      );
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(30, 12)), Cmd);
+      TakeViewport(Requests);
+      const Focus := State.FocusedControl;
+      Test.AssertTrue(Focus > 0);
+      State := Client.UpdateClientEvent(
+        State,
+        Client.ClientEvent.ViewportState(Visible(View)),
+        Cmd
+      );
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.SystemMenuOverlay);
+      Test.AssertEquals(Focus, State.FocusedControl);
+
+      discard Tasks.CloseChannel(Requests);
+      State := Client.UpdateClient(State, Tui.TuiMsg.Resize(Tui.TuiSize.Create(40, 16)), Cmd);
+      Test.AssertFalse(State.Pending);
+      State := Client.UpdateClientEvent(State, Client.ClientEvent.Disconnected, Cmd);
+      Test.AssertTrue(State.Overlay = Client.ClientOverlay.NoOverlay);
+      Test.AssertTrue(State.ConnectionPhase = Client.ClientConnectionPhase.Disconnected);
+      discard Tasks.CloseChannel(Events);
+    end for;
+  end for;
+end.

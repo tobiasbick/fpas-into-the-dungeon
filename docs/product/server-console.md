@@ -23,6 +23,14 @@ history of 128 entries; older entries are evicted. Unknown kinds are info.
 Control characters are replaced by spaces and each diagnostic is limited to
 256 characters, so one event cannot inject extra terminal rows.
 
+Failed save and Continue operations emit an error naming the operation, world
+and detailed persistence cause, including invalid save contents or a missing,
+invalid or unreadable referenced level. The separate warning records the
+sanitized rejection sent to the client. Storage paths and low-level causes
+remain server-side. Successful operations and lifecycle/overwrite guards do
+not produce persistence errors. Delivery retains the existing best-effort
+queue policy; slow or closed log consumers cannot change a session outcome.
+
 UTC timestamps describe emission time. The last save time remains unknown
 after reconnecting or selecting another world until a successful explicit
 save is observed. Failed save requests leave the previous save time and dirty

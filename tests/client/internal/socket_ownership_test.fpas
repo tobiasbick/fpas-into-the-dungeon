@@ -1,0 +1,352 @@
+// Exercises production socket ownership across setup, write, read and publication failures.
+program SocketOwnershipTest;
+
+uses Dungeon.Client.Model as ModelUnit, Dungeon.Client.Network as Network, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.Test.Catalog as CatalogUnit, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+
+type Pair = record
+  Client: Net.Connection;
+  Peer: Net.Connection;
+end record;
+
+function ErrorText(Value: result of (boolean, string)): string;
+begin
+  case Value of
+    when Error(const Reason):
+      return Reason;
+    when Ok(_):
+      panic('expected a failed session');
+  end case;
+end function;
+
+function OpenPair(): Pair;
+begin
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Listener).Unwrap().Port;
+  const Client := Net.Connect('127.0.0.1', Port, 5000).Unwrap();
+  const Peer := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Peer, 5000).Unwrap();
+  return Pair(Client := Client, Peer := Peer);
+end function;
+
+function Own(
+  Client: Net.Connection; Requests: channel of Protocol.ClientMessage;
+  Events: channel of ModelUnit.ClientEvent; Token: Tasks.CancellationToken
+): result of (boolean, string);
+begin
+  return Network.RunConnection(
+    Client, 1, 1, Requests,
+    function(Value: ModelUnit.ClientEvent): result of (boolean, string) begin
+      if Value is ModelUnit.ClientEvent.Disconnected then
+        if Net.SetTimeout(Client, 1) is Ok(_) then
+          return Error('Disconnected was published before closing the owned socket');
+        end if;
+      end if;
+
+      return Tasks.SendWithCancellation(Events, Value, Token);
+    end function, Token
+  );
+end function;
+
+function Welcome(Peer: Net.Connection; Token: Tasks.CancellationToken): Transport.LineReader;
+begin
+  const Hello := Transport.ReadLine(Transport.NewLineReader(Peer), Token).Unwrap();
+  Test.AssertTrue(
+    ClientMessages.DecodeClient(Hello.Line).Unwrap() is Protocol.ClientMessage.Hello(_, _, _)
+  );
+  discard Transport.WriteLine(
+    Peer, ServerMessages.EncodeServer(
+      Protocol.ServerMessage.Welcome(
+        Protocol.ProtocolVersion, CatalogUnit.FixtureCatalog(true, false)
+      )
+    ), Token
+  ).Unwrap();
+  return Hello.Reader;
+end function;
+
+procedure AssertReleased(Sockets: Pair);
+begin
+  // The handle itself is invalidated, rather than merely detached from the worker.
+  Test.AssertTrue(Net.SetTimeout(Sockets.Client, 1) is Error(_));
+  const Remaining := Net.ReceiveBytes(Sockets.Peer, 1).Unwrap();
+  Test.AssertEquals(0, Remaining.Length());
+  discard Net.Close(Sockets.Peer).Unwrap();
+end procedure;
+
+procedure FinishChannels(Requests: channel of Protocol.ClientMessage; Events: channel of ModelUnit.ClientEvent);
+begin
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end procedure;
+
+begin
+  // Normal disconnect and an empty closed request queue both release the owned socket.
+  for ExplicitDisconnect: boolean in [true, false] do
+    const Sockets := OpenPair();
+    const Stop := Tasks.CreateCancellationSource();
+    const Token := Tasks.GetCancellationToken(Stop);
+    const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+    const Events: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(2);
+    scope
+      const Worker := go Own(Sockets.Client, Requests, Events, Token);
+      const Reader := Welcome(Sockets.Peer, Token);
+      Test.AssertTrue(
+        Tasks.ReceiveWithTimeout(Events, 5000).Unwrap() is ModelUnit.ClientEvent.Connected(_)
+      );
+      if ExplicitDisconnect then
+        discard Tasks.Send(Requests, Protocol.ClientMessage.Disconnect).Unwrap();
+        const Goodbye := Transport.ReadLine(Reader, Token).Unwrap();
+        Test.AssertTrue(
+          ClientMessages.DecodeClient(Goodbye.Line).Unwrap() is Protocol.ClientMessage.Disconnect
+        );
+      else
+        discard Tasks.CloseChannel(Requests);
+      end if;
+
+      Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+    end scope;
+
+    Test.AssertTrue(Tasks.TryReceive(Events).Unwrap() is Some(ModelUnit.ClientEvent.Disconnected));
+    Test.AssertTrue(Tasks.TryReceive(Events).Unwrap() is None);
+    AssertReleased(Sockets);
+    FinishChannels(Requests, Events);
+  end for;
+
+  // Cancellation before hello makes its write fail; ownership still releases an open handle.
+  const BeforeHello := OpenPair();
+  const Cancelled := Tasks.CreateCancellationSource();
+  discard Tasks.Cancel(Cancelled);
+  const CancelledToken := Tasks.GetCancellationToken(Cancelled);
+  const CancelRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const CancelEvents: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(1);
+  Test.AssertTrue(
+    Own(BeforeHello.Client, CancelRequests, CancelEvents, CancelledToken) is Error(_)
+  );
+  AssertReleased(BeforeHello);
+  FinishChannels(CancelRequests, CancelEvents);
+
+  // Publication failure at welcome and after a response must close, without losing its error.
+  for RejectResponse: boolean in [false, true] do
+    const Sockets := OpenPair();
+    const Stop := Tasks.CreateCancellationSource();
+    const Token := Tasks.GetCancellationToken(Stop);
+    const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+    const Events: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(2);
+    if not RejectResponse then
+      discard Tasks.CloseChannel(Events);
+    end if;
+
+    scope
+      const Worker := go Own(Sockets.Client, Requests, Events, Token);
+      const Reader := Welcome(Sockets.Peer, Token);
+      if RejectResponse then
+        discard Tasks.ReceiveWithTimeout(Events, 5000).Unwrap();
+        discard Tasks.CloseChannel(Events);
+        discard Tasks.Send(Requests, Protocol.ClientMessage.LoadGame).Unwrap();
+        const Request := Transport.ReadLine(Reader, Token).Unwrap();
+        Test.AssertTrue(
+          ClientMessages.DecodeClient(Request.Line).Unwrap() is Protocol.ClientMessage.LoadGame
+        );
+        discard Transport.WriteLine(
+          Sockets.Peer, ServerMessages.EncodeServer(
+            Protocol.ServerMessage.Rejected('load_failed', 'retry')
+          ), Token
+        ).Unwrap();
+      end if;
+      const Outcome := Tasks.Wait(Worker);
+      Test.AssertTrue(Outcome is Error(_));
+      Test.AssertEquals('Channel is closed', ErrorText(Outcome));
+    end scope;
+
+    AssertReleased(Sockets);
+    FinishChannels(Requests, Events);
+  end for;
+
+  // A malformed welcome ends reading and releases the socket.
+  const Invalid := OpenPair();
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const Events: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(1);
+  scope
+    const Worker := go Own(Invalid.Client, Requests, Events, Token);
+    discard Transport.ReadLine(Transport.NewLineReader(Invalid.Peer), Token).Unwrap();
+    discard Transport.WriteLine(Invalid.Peer, 'not json', Token).Unwrap();
+    Test.AssertTrue(Tasks.Wait(Worker) is Error(_));
+  end scope;
+
+  AssertReleased(Invalid);
+  FinishChannels(Requests, Events);
+
+  // Cancel while waiting for welcome, the next intention, or the requested reply.
+  for CancelStage: integer in [0, 1, 2] do
+    const Sockets := OpenPair();
+    const Source := Tasks.CreateCancellationSource();
+    const ActiveToken := Tasks.GetCancellationToken(Source);
+    const PendingRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+    const PendingEvents: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(2);
+    scope
+      const Worker := go Own(Sockets.Client, PendingRequests, PendingEvents, ActiveToken);
+      if CancelStage > 0 then
+        const Reader := Welcome(Sockets.Peer, ActiveToken);
+        discard Tasks.ReceiveWithTimeout(PendingEvents, 5000).Unwrap();
+        if CancelStage = 2 then
+          discard Tasks.Send(PendingRequests, Protocol.ClientMessage.LoadGame).Unwrap();
+          discard Transport.ReadLine(Reader, ActiveToken).Unwrap();
+        end if;
+      else
+        discard Transport.ReadLine(Transport.NewLineReader(Sockets.Peer), ActiveToken).Unwrap();
+      end if;
+
+      discard Tasks.Cancel(Source);
+      const Outcome := Tasks.Wait(Worker);
+      if CancelStage = 1 then
+        Test.AssertTrue(Outcome.Unwrap());
+      else
+        Test.AssertTrue(Outcome is Error(_));
+      end if;
+    end scope;
+
+    AssertReleased(Sockets);
+    Test.AssertTrue(Tasks.TryReceive(PendingEvents).Unwrap() is None);
+    FinishChannels(PendingRequests, PendingEvents);
+  end for;
+
+  // Actual peer EOF before welcome and during a request is an error, not a leaked socket.
+  for PendingReply: boolean in [false, true] do
+    const Sockets := OpenPair();
+    const EofRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+    const EofEvents: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(2);
+    scope
+      const Worker := go Own(Sockets.Client, EofRequests, EofEvents, Token);
+      if PendingReply then
+        const Reader := Welcome(Sockets.Peer, Token);
+        discard Tasks.ReceiveWithTimeout(EofEvents, 5000).Unwrap();
+        discard Tasks.Send(EofRequests, Protocol.ClientMessage.LoadGame).Unwrap();
+        discard Transport.ReadLine(Reader, Token).Unwrap();
+      else
+        discard Transport.ReadLine(Transport.NewLineReader(Sockets.Peer), Token).Unwrap();
+      end if;
+
+      discard Net.Close(Sockets.Peer).Unwrap();
+      Test.AssertTrue(Tasks.Wait(Worker) is Error(_));
+    end scope;
+
+    Test.AssertTrue(Net.SetTimeout(Sockets.Client, 1) is Error(_));
+    Test.AssertTrue(Tasks.TryReceive(EofEvents).Unwrap() is None);
+    FinishChannels(EofRequests, EofEvents);
+  end for;
+
+  // Reject an oversized request while the socket is live; the owner must still close it.
+  const Oversized := OpenPair();
+  const OversizedRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const OversizedEvents: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(1);
+  const TooLong := Protocol.ClientMessage.SelectWorld('x'.RepeatStr(Protocol.MaximumLineBytes));
+  Test.AssertTrue(ClientMessages.EncodeClient(TooLong).Length() > Protocol.MaximumLineBytes);
+  scope
+    const Worker := go Own(Oversized.Client, OversizedRequests, OversizedEvents, Token);
+    discard Welcome(Oversized.Peer, Token);
+    Test.AssertTrue(
+      Tasks.ReceiveWithTimeout(OversizedEvents, 5000).Unwrap() is ModelUnit.ClientEvent.Connected(_)
+    );
+    discard Net.SetTimeout(Oversized.Client, 5000).Unwrap();
+    discard Tasks.Send(OversizedRequests, TooLong).Unwrap();
+    Test.AssertEquals(Transport.LineTooLongError, ErrorText(Tasks.Wait(Worker)));
+  end scope;
+
+  AssertReleased(Oversized);
+  FinishChannels(OversizedRequests, OversizedEvents);
+
+  // A cleanup error must not replace a distinct original publication error.
+  const DoubleFailure := OpenPair();
+  const FailureRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  scope
+    const Worker := go Network.RunConnection(
+      DoubleFailure.Client, 1, 1, FailureRequests,
+      function(Value: ModelUnit.ClientEvent): result of (boolean, string) begin
+        discard Net.Close(DoubleFailure.Client).Unwrap();
+        return Error('original publication failure');
+      end function, Token
+    );
+    discard Welcome(DoubleFailure.Peer, Token);
+    Test.AssertEquals('original publication failure', ErrorText(Tasks.Wait(Worker)));
+  end scope;
+
+  AssertReleased(DoubleFailure);
+  discard Tasks.CloseChannel(FailureRequests);
+
+  // A published rejection/fatal reply stays terminal; normal cleanup must not replace Failed.
+  for DuringRequest: boolean in [false, true] do
+    const Sockets := OpenPair();
+    const TerminalRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+    const TerminalEvents: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(2);
+    scope
+      const Worker := go Own(Sockets.Client, TerminalRequests, TerminalEvents, Token);
+      if DuringRequest then
+        const Reader := Welcome(Sockets.Peer, Token);
+        discard Tasks.ReceiveWithTimeout(TerminalEvents, 5000).Unwrap();
+        discard Tasks.Send(TerminalRequests, Protocol.ClientMessage.LoadGame).Unwrap();
+        discard Transport.ReadLine(Reader, Token).Unwrap();
+      else
+        discard Transport.ReadLine(Transport.NewLineReader(Sockets.Peer), Token).Unwrap();
+      end if;
+      const Reply := if DuringRequest then Protocol.ServerMessage.ErrorMessage(
+        'fatal',
+        'server failure'
+      )
+        else Protocol.ServerMessage.Rejected('world_unavailable', 'server failure')
+        end if;
+      discard Transport.WriteLine(Sockets.Peer, ServerMessages.EncodeServer(Reply), Token).Unwrap();
+      Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+    end scope;
+
+    Test.AssertTrue(
+      Tasks.TryReceive(TerminalEvents).Unwrap() is Some(ModelUnit.ClientEvent.Failed('server failure'))
+    );
+    Test.AssertTrue(Tasks.TryReceive(TerminalEvents).Unwrap() is None);
+    AssertReleased(Sockets);
+    FinishChannels(TerminalRequests, TerminalEvents);
+  end for;
+
+  // The terminal event's own publication can fail, but the socket has already closed.
+  const PublishFailure := OpenPair();
+  const EndRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const EndEvents: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(1);
+  scope
+    const Worker := go Own(PublishFailure.Client, EndRequests, EndEvents, Token);
+    const Reader := Welcome(PublishFailure.Peer, Token);
+    discard Tasks.ReceiveWithTimeout(EndEvents, 5000).Unwrap();
+    discard Tasks.CloseChannel(EndEvents);
+    discard Tasks.Send(EndRequests, Protocol.ClientMessage.Disconnect).Unwrap();
+    discard Transport.ReadLine(Reader, Token).Unwrap();
+    Test.AssertEquals('Channel is closed', ErrorText(Tasks.Wait(Worker)));
+  end scope;
+
+  AssertReleased(PublishFailure);
+  FinishChannels(EndRequests, EndEvents);
+
+  // Close failure after a normal exchange is returned without publishing Disconnected.
+  const CloseFailure := OpenPair();
+  const ClosedRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const ClosedEvents: channel of ModelUnit.ClientEvent := Tasks.CreateChannel(1);
+  scope
+    const Worker := go Network.RunConnection(
+      CloseFailure.Client, 1, 1, ClosedRequests,
+      function(Value: ModelUnit.ClientEvent): result of (boolean, string) begin
+        if Value is ModelUnit.ClientEvent.Connected(_) then
+          discard Net.Close(CloseFailure.Client).Unwrap();
+          discard Tasks.CloseChannel(ClosedRequests);
+          return Ok(true);
+        end if;
+
+        return Tasks.SendWithCancellation(ClosedEvents, Value, Token);
+      end function, Token
+    );
+    discard Welcome(CloseFailure.Peer, Token);
+    Test.AssertTrue(Tasks.Wait(Worker) is Error(_));
+  end scope;
+
+  Test.AssertTrue(Tasks.TryReceive(ClosedEvents).Unwrap() is None);
+  AssertReleased(CloseFailure);
+  FinishChannels(ClosedRequests, ClosedEvents);
+end.

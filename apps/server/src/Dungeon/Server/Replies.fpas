@@ -1,38 +1,12 @@
 // Sends projections and rejections and commits accepted states and turns.
 unit Dungeon.Server.Replies;
 
-uses Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.World as WorldUnit, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
+uses Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
 
 // Encodes and sends one server message.
 public function SendMessage(ConnectionValue: Net.Connection; Message: Protocol.ServerMessage; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
   return Transport.WriteLine(ConnectionValue, ServerMessages.EncodeServer(Message), Token);
-end function;
-
-// Projects the state, sends it, and returns the world session with its possibly grown cache.
-public function SendProjection(
-  ConnectionValue: Net.Connection;
-  World: WorldUnit.WorldSession;
-  View: GameState.AreaView;
-  State: GameState.GameState;
-  Viewport: SessionUnit.ViewportSize;
-  Report: ProjectionUnit.TurnReport;
-  Token: Tasks.CancellationToken
-): result of (WorldUnit.WorldSession, string);
-begin
-  const Projection: ProjectionUnit.SessionProjection := try ProjectionUnit.ProjectSession(
-    World,
-    View,
-    State,
-    Viewport,
-    Report
-  );
-  const Sent: boolean := try SendMessage(
-    ConnectionValue,
-    Protocol.ServerMessage.State(Projection.State),
-    Token
-  );
-  return Ok(Projection.World);
 end function;
 
 // Sends a rejection with a stable code and a player-facing message.
@@ -46,59 +20,101 @@ begin
   return SendMessage(ConnectionValue, Protocol.ServerMessage.Rejected(Code, Message), Token);
 end function;
 
-// Candidate facts and bounded wire response, prepared without replacing the installed session.
-type PreparedTurn = record
-  State: GameState.GameState;
-  World: WorldUnit.WorldSession;
+// Complete candidate and bounded wire response; neither is installed before sending.
+type PreparedReply = record
+  Session: SessionUnit.ServerSession;
   Line: string;
 end record;
 
-function PrepareTurn(
-  Session: SessionUnit.ServerSession;
-  Changed: GameState.GameState;
+function PrepareProjection(
+  Candidate: SessionUnit.ServerSession;
   Report: ProjectionUnit.TurnReport
-): result of (PreparedTurn, string);
+): result of (PreparedReply, string);
 begin
-  const View: GameState.AreaView := try SessionUnit.SessionAreaView(Session, Changed);
-  const Revealed: GameState.GameState := try Exploration.RevealCurrentArea(View, Changed);
+  const State := try SessionUnit.RequireActiveState(Candidate.State);
+  const View := try SessionUnit.SessionAreaView(Candidate, State);
   const Projection := try ProjectionUnit.ProjectSession(
-    Session.World, View, Revealed, Session.Viewport, Report
+    Candidate.World, View, State, Candidate.Viewport, Report
   );
   const Line := ServerMessages.EncodeServer(Protocol.ServerMessage.State(Projection.State));
   if Utf8.Encode(Line).Length() > Protocol.MaximumLineBytes then
     return Error(Transport.LineTooLongError);
   end if;
 
-  return Ok(PreparedTurn(State := Revealed, World := Projection.World, Line := Line));
+  return Ok(
+    PreparedReply(
+      Session := Candidate with World := Projection.World; end with, Line := Line
+    )
+  );
 end function;
 
-// Sending is the last fallible operation; only then install the prepared state and mark it dirty.
-function CommitPreparedTurn(
+function PrepareTurn(
+  Candidate: SessionUnit.ServerSession;
+  Report: ProjectionUnit.TurnReport
+): result of (PreparedReply, string);
+begin
+  const State := try SessionUnit.RequireActiveState(Candidate.State);
+  const View := try SessionUnit.SessionAreaView(Candidate, State);
+  const Revealed := try Exploration.RevealCurrentArea(View, State);
+  return PrepareProjection(
+    Candidate with State := Some(Revealed); Dirty := true; end with, Report
+  );
+end function;
+
+// Preparation failure rejects with the original session; actual write failure remains fatal.
+function CommitPreparedReply(
   Session: SessionUnit.ServerSession;
-  Prepared: PreparedTurn;
+  Preparation: result of (PreparedReply, string);
+  RejectionCode: string;
   ConnectionValue: Net.Connection;
-  Token: Tasks.CancellationToken
+  Token: Tasks.CancellationToken;
+  Logs: option of channel of Logging.ServerLogEvent
 ): result of (SessionUnit.ServerSession, string);
 begin
-  const Sent := try Transport.WriteLine(ConnectionValue, Prepared.Line, Token);
-  var Next := Session;
-  Next.State := Some(Prepared.State);
-  Next.World := Prepared.World;
-  Next.Dirty := true;
-  return Ok(Next);
+  case Preparation of
+    when Ok(const Prepared):
+      const Sent := try Transport.WriteLine(ConnectionValue, Prepared.Line, Token);
+      return Ok(Prepared.Session);
+    when Error(const Reason):
+      Logging.LogServer(Logs, 'rejected', RejectionCode + ': ' + Reason);
+      const Sent := try Reject(ConnectionValue, RejectionCode, Reason, Token);
+      return Ok(Session);
+  end case;
 end function;
 
-// Reveals the accepted state, makes it current, and sends its projection without combat messages.
+// Reveals and projects a candidate without replacing Session until its response is sent.
+// Rejecting preparation restores the entire original session, including its cache and save facts.
+// Candidate is derived from Session for its current area and may carry an updated world cache.
 public function CommitState(
   Session: SessionUnit.ServerSession;
-  Changed: GameState.GameState;
+  Candidate: SessionUnit.ServerSession;
+  RejectionCode: string;
   ConnectionValue: Net.Connection;
-  Token: Tasks.CancellationToken
+  Token: Tasks.CancellationToken;
+  Logs: option of channel of Logging.ServerLogEvent
 ): result of (SessionUnit.ServerSession, string);
 begin
-  return CommitPreparedTurn(
-    Session, try PrepareTurn(Session, Changed, ProjectionUnit.NoTurnReport()), ConnectionValue,
-    Token
+  return CommitPreparedReply(
+    Session, PrepareTurn(Candidate, ProjectionUnit.NoTurnReport()), RejectionCode,
+    ConnectionValue, Token, Logs
+  );
+end function;
+
+// Sends a read-only viewport candidate; failed preparation retains even the old viewport/cache.
+// Successful resizing changes no game state or dirty/save facts; write errors remain fatal.
+// Viewport must already be bounded by Session.ResolveViewport and the server policy.
+public function ChangeViewport(
+  Session: SessionUnit.ServerSession;
+  Viewport: SessionUnit.ViewportSize;
+  ConnectionValue: Net.Connection;
+  Token: Tasks.CancellationToken;
+  Logs: option of channel of Logging.ServerLogEvent
+): result of (SessionUnit.ServerSession, string);
+begin
+  return CommitPreparedReply(
+    Session,
+    PrepareProjection(Session with Viewport := Viewport; end with, ProjectionUnit.NoTurnReport()),
+    'viewport_rejected', ConnectionValue, Token, Logs
   );
 end function;
 
@@ -215,18 +231,14 @@ begin
         case Outcome of
           when Combat.TurnOutcome.Continued(const Changed, const Log, const Events):
             begin
-              case PrepareTurn(
+              return CommitPreparedReply(
                 Session,
-                Changed,
-                ProjectionUnit.TurnReport(Log := Log, Events := Events)
-              ) of
-                when Ok(const Prepared):
-                  return CommitPreparedTurn(Session, Prepared, ConnectionValue, Token);
-                when Error(const Reason):
-                  Logging.LogServer(Logs, 'rejected', RejectionCode + ': ' + Reason);
-                  const Sent := try Reject(ConnectionValue, RejectionCode, Reason, Token);
-                  return Ok(Session);
-              end case;
+                PrepareTurn(
+                  Session with State := Some(Changed); end with,
+                  ProjectionUnit.TurnReport(Log := Log, Events := Events)
+                ),
+                RejectionCode, ConnectionValue, Token, Logs
+              );
             end;
           when Combat.TurnOutcome.Defeated(const Log):
             begin

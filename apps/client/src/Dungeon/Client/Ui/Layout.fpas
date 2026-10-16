@@ -1,7 +1,7 @@
 // Terminal layout rules: panel sizes, docking, requested world and map viewports, and text wrapping.
 unit Dungeon.Client.Ui.Layout;
 
-uses Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol;
+uses Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Std.Console as Console;
 
 // Smallest terminal width and height that dock the context sidebar and message panel.
 public const MinimumDockedContextWidth: integer := 72;
@@ -14,6 +14,16 @@ public const MessagePanelHeight: integer := 6;
 public const StatusPanelHeight: integer := 3;
 // Five content rows plus the frame; independent of current interaction text.
 public const EnvironmentPanelHeight: integer := 7;
+// Context frame, nine fixed content labels, at most two worn slots, and one quick summary row.
+public const MinimumContextPanelHeight: integer := 14;
+// Fixed labels in the docked context; the overlay omits one spacer for its Close button.
+public const ContextFixedSummaryLines: integer := 9;
+// Quick summaries show at most this many rows, including their omitted-item count.
+public const MaximumQuickInventoryLines: integer := 4;
+// Inventory-specific action threshold and maximum visible item rows; not a whole-game minimum.
+public const MinimumInventoryWidth: integer := 32;
+public const MinimumInventoryHeight: integer := 8;
+public const MaximumInventoryRows: integer := 12;
 // Terminals at least this large show the exploration map at MapScaleNumerator / MapScaleDenominator.
 public const MinimumScaledMapWidth: integer := 60;
 public const MinimumScaledMapHeight: integer := 20;
@@ -36,10 +46,82 @@ begin
     end;
   end if;
 
-  // Preserve room for the existing character and inventory summary below the hint.
+  // Reserve fixed context labels, the two server-owned equipment slots, and a bounded summary.
   return (State.ViewportWidth >= MinimumDockedContextWidth)
     and
-    (AvailableHeight >= EnvironmentPanelHeight + 14);
+    (AvailableHeight >= EnvironmentPanelHeight + MinimumContextPanelHeight);
+end function;
+
+// Returns content rows available inside the docked context frame or the context overlay.
+public function ContextContentRows(State: Model.ClientModel): integer;
+begin
+  // Outer overlay frame, its Close button and the inner Context frame consume five rows.
+  var Height := State.ViewportHeight - EnvironmentPanelHeight - 5;
+  if ContextCanDock(State) then
+    Height := State.ViewportHeight - StatusPanelHeight - EnvironmentPanelHeight - 2;
+    if State.MessagePanelVisible and (State.ViewportHeight >= MinimumDockedMessagesHeight) then
+      Height := Height - MessagePanelHeight;
+    end if;
+  end if;
+
+  if Height < 0 then
+    Height := 0;
+  end if;
+
+  return Height;
+end function;
+
+// Requires enough space to display a selected inventory row and all action/close hints.
+public function InventoryCanFit(State: Model.ClientModel): boolean;
+begin
+  return (State.ViewportWidth >= MinimumInventoryWidth)
+    and
+    (State.ViewportHeight >= MinimumInventoryHeight);
+end function;
+
+// Reserves four footer rows, the frame and outer breathing room, retaining at least one item row.
+public function InventoryPageRows(State: Model.ClientModel): integer;
+begin
+  var Rows := State.ViewportHeight - 8;
+  if Rows > MaximumInventoryRows then
+    Rows := MaximumInventoryRows;
+  end if;
+
+  if Rows < 1 then
+    Rows := 1;
+  end if;
+
+  return Rows;
+end function;
+
+// Clips presentation text to terminal cells, preserving grapheme clusters and marking omitted text.
+// Non-positive width returns empty text; a narrow overflow uses only the dots that fit.
+public function FitLine(Text: string; Width: integer): string;
+begin
+  if Width <= 0 then
+    return '';
+  end if;
+
+  if Console.DisplayWidth(Text) <= Width then
+    return Text;
+  end if;
+
+  if Width < 3 then
+    return '.'.RepeatStr(Width);
+  end if;
+  var Prefix := '';
+  var Used := 0;
+  for Glyph: string in Console.SplitGraphemes(Text) do
+    const Cells := Console.GraphemeWidth(Glyph);
+    if Used + Cells > Width - 3 then
+      break;
+    end if;
+
+    Prefix := Prefix + Glyph;
+    Used := Used + Cells;
+  end for;
+
+  return Prefix + '...';
 end function;
 
 // Returns whether the terminal fits the message panel below the primary view.

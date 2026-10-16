@@ -1,0 +1,55 @@
+// Real catalog fixtures with resumable state spanning multiple stored generated dungeon levels.
+unit Dungeon.Test.CatalogWorlds;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as World, Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Std.Conv as Conv;
+
+// Creates a real world, visits Count generated levels and saves outside; panics on fixture failure.
+// No chunks are generated. Each level retains its complete items, opponents and discovery.
+public function CreateVisitedWorld(Root: string; Id: string; Count: integer): World.WorldSession;
+begin
+  const Value := World.OpenWorld(Root, Id, 24680, 1, 32).Unwrap();
+  const Metadata := Value.Metadata;
+  const Spawn := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  var State := GameState.NewGame(Metadata);
+  for Offset: integer := 0 to 255 do
+    if State.VisitedAreas.Length() < Count then
+      const Region := Entrances.RegionCoordinate(X := Spawn.X + Offset, Y := Spawn.Y);
+      case Entrances.EntranceSite(Metadata, Region) of
+        when Some(const Site):
+          const Outside := State with Player := Coordinates.PlayerPosition.Outdoor(Site); end with;
+          const Map := Interiors.OpenLevelForEntry(
+            Value,
+            Outside,
+            Identities.DungeonAreaId(Metadata, Region)
+          ).Unwrap();
+          const Entered := Movement.ActivateAreaTransition(
+            GameState.AreaView(Metadata := Metadata, Interior := None), Outside, Some(Map)
+          ).Unwrap();
+          const Inside := Exploration.RevealCurrentArea(Entered.View, Entered.State).Unwrap();
+          const AtExit := Inside with Player := Coordinates.PlayerPosition.FirstPerson(
+            Coordinates.FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing)
+          ); end with;
+
+          State := Movement.ActivateAreaTransition(Entered.View, AtExit, None).Unwrap().State;
+        when None:
+          null;
+      end case;
+    end if;
+  end for;
+
+  if State.VisitedAreas.Length() <> Count then
+    panic('fixture could not visit the requested number of levels');
+  end if;
+
+  discard Savegame.WriteSaveGame(Value, State).Unwrap();
+  return Value;
+end function;
+
+// Path of the fixture's visited spawn-region level, used to test preserved corruption and repair.
+public function SpawnLevelPath(Value: World.WorldSession): string;
+begin
+  const Region := Entrances.RegionOf(Value.Metadata, Value.Metadata.Spawn);
+  return Value.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y) +
+    '/0.json';
+end function;
+end unit;

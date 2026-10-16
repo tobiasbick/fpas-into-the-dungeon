@@ -37,7 +37,10 @@ Before a session, the client shows a framed menu centered in the terminal:
 The frame remains centered as the terminal changes size. Initially the menu
 contains connect, information, and quit. A successful connection shows the server's world catalog with original seed,
 entrance-region size, compatibility and save status. Previous/next controls page
-through the list. `Create world` opens controlled seed and region inputs with
+through the list. The server fully checks only the requested page and, when
+outside that page, the selected world. Refresh checks those entries again;
+Continue independently validates the selected save and all its referenced
+dungeon levels. `Create world` opens controlled seed and region inputs with
 server-provided defaults and ranges. `Continue` loads the selected world's
 explicit save or starts at spawn if absent. `Start over` starts fresh in the
 same world and keeps its earlier save. Incompatible worlds and saves show a
@@ -104,11 +107,23 @@ Docking also requires enough height for both frames and the existing character
 summary; short terminals use the same overlay and hint fallback as narrow ones.
 
 Context contains summaries rather than another full game screen. Its equipment
-section lists one line per worn item, such as `Weapon: Rusty short sword`, or
-`Nothing worn`. Its quick inventory lists the carried items that are not worn
-and displays `Empty` when there are none. Worn and carried lines together never
-exceed the item count plus one, which the docking height already reserves. Item identity, ownership, and rules never move into
-the client.
+section lists the two server-owned worn slots, such as `Weapon: Rusty short sword`,
+or `Nothing worn`. Quick inventory shows carried items in projection order and
+`Empty` when there are none. It uses at most four rows, reduced to the height
+remaining after the fixed context labels and equipment. When names are omitted,
+its final row shows `+N more (I)`; if only one row fits, it shows `N items (I)`.
+If no item row fits, the heading itself states the carried count.
+Open `I` to reach every item. Long inventory/equipment names are clipped by
+terminal-cell width without splitting graphemes.
+
+Docking reserves the seven-row Environment panel and at least fourteen rows
+for Context, including its frame, nine fixed labels, up to two worn slots and
+one quick-summary row. This requires width 72 and height 24 with Messages
+hidden, or height 30 with Messages docked. Inventory count does not enlarge
+the sidebar or change these thresholds. Item identity, ownership and rules
+remain server-owned.
+The F2 overlay additionally reserves its outer frame and Close button and omits
+one optional context spacer, keeping the button and bottom frame inside the surface.
 
 The context and message panels can be shown or hidden. The framed status view
 remains visible with one content line in the form `ctrl-p | <current message>`.
@@ -145,6 +160,25 @@ is pending. Further movement is ignored until the server returns either a new
 visible state or a rejection. This preserves the request-response protocol and
 avoids speculative local movement or partially painted resizes.
 
+The primary pending request and the exploration-map request are independent.
+The client marks progress unsaved after an accepted state reply to a changing
+intention; queuing an intention alone does not mark it successful. A rejected
+intention preserves the unsaved-progress hint, except that `discard_required`
+corrects it from the authoritative server. Successful saving, installing a
+world catalog and defeat clear the hint. Starting a fresh session creates
+unsaved progress, while continuing an existing save starts clean.
+
+Internally, `PendingChangesProgress` describes an outstanding intention that
+expects a primary state; `PendingCreatedWorld` additionally invalidates the
+previous catalog/save hint when its creation reply arrives. State, rejection
+and catalog installation clear those flags. Returning to start and applying a
+failure/disconnection clear `Pending` and can retain inactive flag values and the
+old dirty hint; they are not session facts
+outside their request or active visible game. A newly accepted catalog resets
+them before another session starts. Generation checks ignore all late events
+from a cancelled or replaced connection. Quitting invalidates the attempt and
+ends the application without resetting its final model snapshot.
+
 ### Rejected
 
 The last visible state remains unchanged and the server-provided explanation is
@@ -152,8 +186,9 @@ shown in the status area. The client may accept the next intention afterward.
 
 ### Connection failed
 
-The failure is visible in the status area and movement is disabled. Recovery or
-reconnection behavior is not yet defined.
+The failure is visible in the status area and movement is disabled. Connect
+starts a new connection attempt with its own request queue. Late events from
+previous attempts cannot replace the current screen, status or visible state.
 
 ### Disconnected
 
@@ -218,6 +253,16 @@ origin and is coalesced into the next request. The overlay shows
 previous valid projection and shows `Updating map...` in the status view without
 adding an overlay row or changing its size; a recoverable rejection
 also retains it and reports the error in the status view.
+
+Resizing refreshes the primary view without closing the exploration map or
+changing its received projection, desired window or pending map request. The
+client adapter retains the viewport response's intent internally, so this
+read-only state refresh preserves the current overlay and focus. Map and
+viewport replies resolve their own pending requests independently, regardless
+of which arrives first. Home requests map dimensions for the current terminal;
+the received dimensions remain in use until a complete map reply replaces
+them. Closing the map while a refresh is pending keeps it closed when the
+reply arrives. Ordinary gameplay/session states retain their existing behavior.
 
 The overlay derives entirely from server-owned discovered-area state; the
 client does not reconstruct unknown world cells. Requesting or panning a map
@@ -290,6 +335,14 @@ once and is then handled normally. While an animation runs, the client requests
 a host tick every 40 ms; walls and floor are rendered once at its start, so
 each frame only composes sprites and texts.
 
+Combat effects currently identify opponent kinds, not individual figures.
+Generated levels contain one restless skeleton and one giant rat, so each
+kind identifies at most one figure there. With several visible opponents of
+the same kind, an effect would be applied to every matching sprite. Supporting
+such groups first requires a distinct figure or position in the combat-event
+and animation contract, including standing/fallen targeting. This is an
+extension boundary; the current generated content and protocol stay unchanged.
+
 Defeat returns to the session start screen with a `You have fallen` overlay
 containing the server's summary. `Continue` closes it with `New game` focused,
 or `Cancel` while the world-catalog refresh is still pending. The player can
@@ -299,9 +352,13 @@ it. This includes a viewport request deferred behind an inventory action.
 
 ## Equipment
 
-`I` opens the inventory overlay. It lists every carried and worn item with its
-slot, worn state or use capability, plus projected health and the selected
-Enter action. W/S or Up/Down select; `Enter` asks the server to use a usable
+`I` opens the inventory overlay. Every carried and worn item is reachable in
+a selection-following window of at most twelve rows, reduced to terminal height.
+The title shows the visible range and total. Projected health, selected Enter
+action, drop/navigation/close hints and the turn cost stay below the window.
+Long entry text is clipped by terminal-cell width without splitting graphemes;
+the selected action remains visible separately. W/S or Up/Down select;
+`Enter` asks the server to use a usable
 item, otherwise wear or remove gear. `D` asks the server to drop the selected
 item on the occupied dungeon floor field, and `Escape` or `I` closes the overlay.
 Items without a projected action do not send an Enter request. Full-health use
@@ -316,6 +373,11 @@ input ownership. Explicit navigation wraps; a refresh retains the selected ID
 when present, otherwise clamps the previous index, including an empty list.
 Using, changing or dropping an item takes a turn, so an adjacent opponent may
 strike in between. Hostile animation events still play, with no player swing.
+
+Inventory actions require at least 32 by 8 terminal cells. Below that threshold
+the overlay shows `Resize to 32x8`; Enter and D send no item intention, while
+Escape/I still close it. This is an inventory-specific threshold. Resize and
+authoritative refresh recalculate the visible window without extra scroll state.
 
 `C` opens the character sheet: health, then each server-formatted derived value
 with its source, such as `Damage d6+1 · Rusty short sword`, then the worn
@@ -387,8 +449,9 @@ and hides the optional message panel when vertical space is insufficient. The
 primary view and one-line status remain. At still smaller sizes, hidden panels
 open as overlays and the TUI may clip the previous complete primary view while
 the replacement is pending, but it must not fail or access rows outside the
-visible-state bounds. Scrolling, scaling, and a minimum supported terminal size
-remain open.
+visible-state bounds. The inventory has its own bounded window and action-size
+threshold described above; a minimum supported size for the whole game remains
+open.
 
 ## Completion criteria
 
@@ -406,8 +469,6 @@ The client UI foundation is complete when:
 - client projects do not import server-owned game rules; and
 - the implementation and this document describe the same behavior.
 
-Inventory use, gear controls, kind-specific combat art and death animation now
-have headless and TCP coverage. The final 14b visual/keyboard review in a real
-terminal remains deliberately open: it cannot be performed in this cloud
-environment. Accessibility conventions and further first-person styling remain
-later work.
+Inventory use, gear controls, kind-specific combat art and death animation have
+headless and TCP coverage. The user accepted 14b on 2026-10-16. Accessibility
+conventions and further first-person styling remain later work.

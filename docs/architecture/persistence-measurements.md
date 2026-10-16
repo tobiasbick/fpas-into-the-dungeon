@@ -1,7 +1,7 @@
 # Persistence measurements: 14b
 
-Measured on 2026-10-16. This is an automated persistence smoke check, not user
-acceptance of the terminal UI. That review remains deliberately open.
+Measured on 2026-10-16. This is an automated persistence smoke check, separate
+from the user's explicit acceptance of 14b on 2026-10-16.
 
 ## Scenario and timing boundaries
 
@@ -105,7 +105,7 @@ and never regenerates it, as separately traced in checkpoint 10.
 No cache, optimization, validation shortcut or changed performance expectation
 was introduced. The measurements locate and document the additional strict
 content-validation work; they do not claim linear scaling to arbitrary visit
-counts or a terminal latency guarantee. The user terminal review remains open.
+counts or a terminal latency guarantee.
 
 Initial diagnostic runs included a 100-dungeon run overlapping the suite and
 controls on a RAM filesystem while current data used the workspace filesystem.

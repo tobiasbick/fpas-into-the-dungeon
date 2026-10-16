@@ -64,6 +64,32 @@ these projects.
   The client facade prepares size-dependent start artwork after framework and
   network updates. `Backdrop` owns its generation and reuse; `Model` retains one
   immutable cell grid so focus navigation does not regenerate it.
+  Each connection attempt owns a fresh request queue. The host retains one
+  event inbox, but `ConnectionEvent` tags each event with its local generation;
+  the facade rejects events from cancelled or replaced attempts. The network
+  adapter owns its socket from successful connect through every ordinary
+  session outcome, including publication errors. Cancel/quit invalidate the
+  attempt and close its request queue before host cancellation. Raw-event
+  adapters remain available for explicitly caller-orchestrated sessions.
+  Normal non-cancelled completion publishes `ClientEvent.Disconnected` only
+  after successful socket closure. A previously published failure stays terminal;
+  transport, cleanup and publication errors retain their failure outcome.
+  Cancellation is normalized by the outer adapter after cleanup and emits no
+  terminal disconnect event. The server's `ServeConnection` borrows its socket;
+  its listener or test caller closes it after either result. EOF, cancellation
+  and ordinary read failures end that server session normally; failed writes
+  remain errors. Connection teardown never autosaves.
+  The adapter retains the response intent when decoding the shared wire `state`:
+  viewport replies publish `ClientEvent.ViewportState`, while gameplay/session
+  replies publish `State`. `Events` preserves the current overlay/focus for the
+  read-only viewport refresh. Exploration-map projections and pending requests
+  remain independent from primary state; an explicitly closed map stays closed.
+  Inventory rendering derives a bounded item window from selection and terminal
+  dimensions, with reserved controls; it retains no additional scroll state.
+  Item intentions require renderable inventory dimensions. The context summary
+  has a fixed maximum row count and reduces to the remaining panel height, with
+  an explicit count of omitted carried names. Neither view mutates inventory
+  to fit the terminal; identity and item rules remain authoritative.
 - `apps/server` owns the server program entry point and server lifetime.
   `Dungeon.Server` runs the handshake/message loop and validates listener
   configuration. `Listener` owns the bound listener and two persistent workers:
@@ -82,6 +108,24 @@ these projects.
   codes (`Failures`), world lifecycle (`Worlds`), bounded diagnostics (`Logging`)
   and optional dashboard/settings (`Console`). `Diagnostics` projects committed
   session facts into typed snapshots, separately from timestamped log text.
+  Persistence rejection paths in `Worlds` log the detailed cause separately
+  from the sanitized client reply, with operation and world identity. Typed
+  failures use `Failures.PersistenceFailureReason`; incompatible save contents
+  retain the loader's reason. Both use the existing non-blocking log delivery.
+  `Worlds.Catalog` resolves page bounds and selection from canonical directory
+  identities before invoking full world inspection. A request inspects at most
+  64 page entries and one existing off-page selection, with no duplicate
+  inspection for an on-page selection. It also binds that inspector to the world
+  layer and reads creation defaults. `Worlds` is the existing lifecycle facade;
+  `Worlds.Selection` owns catalog requests and world selection,
+  `Worlds.Creation` owns create/start, and `Worlds.Persistence` owns load/save.
+  Each concrete handler owns its active/selected/dirty prerequisites, including
+  guard precedence; the gameplay dispatcher does not duplicate save guards.
+  `Worlds.Replies` owns sanitized lifecycle rejections and installation after a
+  successful state reply. A successful disk save precedes its acknowledgement;
+  a failed acknowledgement is fatal and does not undo the committed save.
+  Continue still validates and loads the complete save independently of catalog
+  inspection. These internal subunits do not widen the server library exports.
   The console submodules own presentation/settings state (`Model`), bounded log
   filtering and scroll anchors (`Log`), responsive dimensions (`Layout`), native
   panels and settings overlays (`View`), and validated keyboard events (`Input`).
@@ -90,9 +134,16 @@ these projects.
   the current interior map and builds area views from it. Entry opens the target
   level through the world layer; loading
   installs the already validated view returned by the world layer.
-  Turn replies prepare discovery, projection and a bounded UTF-8 response
-  before installing a replacement state. Preparation failures reject the turn
-  and retain the installed session; successful sends mark progress unsaved.
+  Turn and ordinary state replies prepare discovery, projection and a bounded
+  UTF-8 response before installing a replacement session. Preparation failures
+  reject the intention and retain every installed fact, including the original
+  world cache and its LRU clock; successful gameplay sends mark progress unsaved.
+  Viewport candidates share preparation/rejection policy but change no game
+  state or dirty/save facts. A response or rejection write failure remains fatal.
+  First-person rows and exploration-map windows share one interior-field
+  decision for visible, remembered and unknown knowledge. Remembered fields
+  contain only static geometry; current items and opponents appear only while
+  visible. Each projection retains its own window traversal and padding.
 - `libs/game` owns the authoritative world model, rules, and simulation,
   including the deterministic outdoor terrain generator. It has one unit per
   concern, layered without cycles:
@@ -133,6 +184,9 @@ these projects.
   with `.Encoding` (level format) and `.Errors` (`LevelFailure`).
   `Dungeon.World.Catalog` opens existing worlds without creating them, lists
   non-destructively, and allocates exclusive new identities using `Std.Fs.ReadDir`.
+  `ListWorldIds` enumerates canonical directories without opening metadata,
+  saves or levels; `InspectWorld` validates one complete entry. `ListWorlds`
+  explicitly inspects every identity for callers that need a complete list.
   `Dungeon.World.Names` holds the persisted kind and facing names shared by saves
   and levels. `Dungeon.World.Savegame` owns the savegame file, its format version,
   and three-phase loading; its subunits `Player`, `Entities`, `Discovery`, and
@@ -169,6 +223,8 @@ these projects.
   `tests/server/internal` compiles production server units directly in a
   separate test project to test session and projection internals without
   expanding the server library's public exports.
+  `tests/client/internal` uses the same pattern for direct socket-ownership
+  failure tests without exporting private client units from the library.
 
 ## Client-server seam
 

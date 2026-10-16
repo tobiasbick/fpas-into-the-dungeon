@@ -1,0 +1,253 @@
+// Cross-checks first-person and map knowledge for every dynamic kind, memory state and clipped window.
+program InteriorKnowledgeTest;
+
+uses Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Memory, Dungeon.GameState as GameState, Dungeon.Hostiles as Hostiles, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as Session, Dungeon.Test.Fixtures as Fixtures, Dungeon.World as World, Std.Test as Test;
+
+function Fields(Value: Protocol.VisibleState): Protocol.FirstPersonVisibleState;
+begin
+  case Value of
+    when Protocol.VisibleState.FirstPersonState(const State):
+      return State;
+    when Protocol.VisibleState.MapState(_):
+      panic('expected interior rows');
+  end case;
+end function;
+
+function Opposite(Value: Coordinates.FacingDirection): Coordinates.FacingDirection;
+begin
+  case Value of
+    when Coordinates.FacingDirection.North:
+      return Coordinates.FacingDirection.South;
+    when Coordinates.FacingDirection.East:
+      return Coordinates.FacingDirection.West;
+    when Coordinates.FacingDirection.South:
+      return Coordinates.FacingDirection.North;
+    when Coordinates.FacingDirection.West:
+      return Coordinates.FacingDirection.East;
+  end case;
+end function;
+
+function Watching(Map: InteriorUnit.InteriorMap; Target: Coordinates.InteriorPosition): Coordinates.FirstPersonPose;
+begin
+  const Deltas := [-1, 0, 1, 0, 0, -1, 0, 1];
+  const Facings := [
+    Coordinates.FacingDirection.East, Coordinates.FacingDirection.West,
+    Coordinates.FacingDirection.South, Coordinates.FacingDirection.North
+  ];
+  for Index: integer := 0 to 3 do
+    const Position := Coordinates.InteriorPosition(
+      X := Target.X + Deltas[Index * 2],
+      Y := Target.Y + Deltas[Index * 2 + 1]
+    );
+    if InteriorUnit.InteriorCellAt(Map, Position).Unwrap() = InteriorUnit.InteriorCellKind.Floor then
+      var Free := true;
+      for Hostile: Hostiles.HostilePlacement in Map.Hostiles do
+        Free := Free and not Coordinates.SamePosition(Position, Hostile.Position);
+      end for;
+
+      if Free then
+        return Coordinates.FirstPersonPose(Position := Position, Facing := Facings[Index]);
+      end if;
+    end if;
+  end for;
+
+  panic('fixture target needs a free neighboring floor');
+end function;
+
+procedure CompareViews(State: GameState.GameState; View: GameState.AreaView; SessionWorld: World.WorldSession);
+begin
+  const Map := View.Interior.Unwrap();
+  const Full := Fields(
+    Projection.ProjectSession(
+      SessionWorld, View, State,
+      Session.ViewportSize(Width := 20, Height := 12), Projection.NoTurnReport()
+    ).Unwrap().State
+  );
+  const Overlay := Projection.ProjectExplorationMap(
+    State,
+    View,
+    0,
+    0,
+    Map.Width,
+    Map.Height
+  ).Unwrap();
+  const Border := Projection.ProjectExplorationMap(
+    State,
+    View,
+    -1,
+    -1,
+    Map.Width + 2,
+    Map.Height + 2
+  ).Unwrap();
+  const Crop := Projection.ProjectExplorationMap(State, View, 1, 1, 3, 2).Unwrap();
+  for Y: integer := 0 to Map.Height - 1 do
+    Test.AssertEquals(Full.Rows[Y], Overlay.Rows[Y]);
+    Test.AssertEquals(Full.KnowledgeRows[Y], Overlay.KnowledgeRows[Y]);
+    for X: integer := 0 to Map.Width - 1 do
+      Test.AssertEquals(Full.Rows[Y][X], Border.Rows[Y + 1][X + 1]);
+      Test.AssertEquals(Full.KnowledgeRows[Y][X], Border.KnowledgeRows[Y + 1][X + 1]);
+      if Full.KnowledgeRows[Y][X] = Protocol.KnowledgeRememberedCode then
+        Test.AssertEquals(
+          InteriorUnit.InteriorVisibleCode(
+            Map,
+            Coordinates.InteriorPosition(X := X, Y := Y)
+          ).Unwrap(),
+          Full.Rows[Y][X]
+        );
+      end if;
+
+      if Full.KnowledgeRows[Y][X] = Protocol.KnowledgeUndiscoveredCode then
+        Test.AssertEquals(Protocol.UnknownFieldCode, Full.Rows[Y][X]);
+      end if;
+    end for;
+
+    Test.AssertEquals(Protocol.UnknownFieldCode, Border.Rows[Y + 1][0]);
+    Test.AssertEquals(
+      Protocol.KnowledgeUndiscoveredCode,
+      Border.KnowledgeRows[Y + 1][Map.Width + 1]
+    );
+  end for;
+
+  Test.AssertEquals(Protocol.UnknownFieldCode.RepeatStr(Map.Width + 2), Border.Rows[0]);
+  Test.AssertEquals(
+    Protocol.KnowledgeUndiscoveredCode.RepeatStr(Map.Width + 2),
+    Border.KnowledgeRows[Map.Height + 1]
+  );
+  for Y: integer := 0 to 1 do
+    for X: integer := 0 to 2 do
+      Test.AssertEquals(Full.Rows[Y + 1][X + 1], Crop.Rows[Y][X]);
+      Test.AssertEquals(Full.KnowledgeRows[Y + 1][X + 1], Crop.KnowledgeRows[Y][X]);
+    end for;
+  end for;
+
+  Test.AssertFalse(
+    Projection.ProjectExplorationMap(
+      State,
+      View,
+      Map.Width,
+      Map.Height,
+      1,
+      1
+    ).Unwrap().PlayerInWindow
+  );
+end procedure;
+
+begin
+  const Metadata := Fixtures.FixtureMetadata();
+  var Map := Fixtures.WithPotion(Fixtures.FixtureDungeonMap());
+  Map.Hostiles.PushInPlace(
+    Hostiles.HostilePlacement(
+      Id := Map.AreaId + ':hostile:1',
+      Kind := Hostiles.HostileKind.GiantRat,
+      Position := Coordinates.InteriorPosition(X := 4, Y := 3)
+    )
+  );
+  Map := InteriorUnit.ValidateInteriorMap(Map).Unwrap();
+  const Materialized := Areas.MaterializeArea(GameState.NewGame(Metadata), Map);
+  var Base := Fixtures.FixtureDungeonState(Map.Start, Map.StartFacing);
+  Base.Items := Materialized.Items;
+  Base.Hostiles := Materialized.Hostiles;
+  const View := GameState.AreaView(Metadata := Metadata, Interior := Some(Map));
+  const SessionWorld := World.WorldSession(
+    Directory := '.temp-data/unused-interior-knowledge',
+    Metadata := Metadata,
+    Cache := [],
+    Clock := 0,
+    CacheLimit := 32
+  );
+  var Targets: array of Coordinates.InteriorPosition := [];
+  var Codes: array of string := [];
+  for Placement: Items.ItemPlacement in Map.Items do
+    Targets.PushInPlace(Placement.Position);
+    Codes.PushInPlace(
+      GameState.InteriorVisibleCodeForState(Map, Base, Placement.Position).Unwrap()
+    );
+  end for;
+
+  for Placement: Hostiles.HostilePlacement in Map.Hostiles do
+    Targets.PushInPlace(Placement.Position);
+    Codes.PushInPlace(
+      GameState.InteriorVisibleCodeForState(Map, Base, Placement.Position).Unwrap()
+    );
+  end for;
+
+  Test.AssertEquals(6, Targets.Length());
+  for Index: integer := 0 to Targets.Length() - 1 do
+    const Target := Targets[Index];
+    const Pose := Watching(Map, Target);
+    for Remember: boolean in [false, true] do
+      var State := Base with Player := Coordinates.PlayerPosition.FirstPerson(Pose); end with;
+
+      if Remember then
+        State.Exploration := Memory.ExplorationState(
+          OutdoorChunks := [], InteriorAreas := [
+            Memory.InteriorDiscoveryArea(
+              AreaId := Map.AreaId, Width := Map.Width, Height := Map.Height,
+              Fields := array.Fill(true, Map.Width * Map.Height)
+            )
+          ]
+        );
+      end if;
+      const Visible := Projection.ProjectExplorationMap(
+        State,
+        View,
+        Target.X,
+        Target.Y,
+        1,
+        1
+      ).Unwrap();
+      Test.AssertEquals(Codes[Index], Visible.Rows[0]);
+      Test.AssertEquals(Protocol.KnowledgeVisibleCode, Visible.KnowledgeRows[0]);
+      CompareViews(State, View, SessionWorld);
+      State.Player := Coordinates.PlayerPosition.FirstPerson(
+        Pose with Facing := Opposite(Pose.Facing); end with
+      );
+      const Hidden := Projection.ProjectExplorationMap(
+        State,
+        View,
+        Target.X,
+        Target.Y,
+        1,
+        1
+      ).Unwrap();
+      Test.AssertEquals(
+        if Remember then Protocol.InteriorFloorCode else Protocol.UnknownFieldCode end if,
+        Hidden.Rows[0]
+      );
+      Test.AssertEquals(
+        if Remember then Protocol.KnowledgeRememberedCode
+          else Protocol.KnowledgeUndiscoveredCode
+          end if,
+        Hidden.KnowledgeRows[0]
+      );
+      CompareViews(State, View, SessionWorld);
+    end for;
+  end for;
+  const Missing := View with Interior := None; end with;
+  const WrongArea := View with Interior := Some(Map with AreaId := 'other-area'; end with); end with;
+  const Invalid := Base with Health := -1; end with;
+
+  for BadView: GameState.AreaView in [Missing, WrongArea] do
+    Test.AssertTrue(
+      Projection.ProjectSession(
+        SessionWorld,
+        BadView,
+        Base,
+        Session.ViewportSize(Width := 20, Height := 12),
+        Projection.NoTurnReport()
+      ) is Error(_)
+    );
+    Test.AssertTrue(Projection.ProjectExplorationMap(Base, BadView, 0, 0, 1, 1) is Error(_));
+  end for;
+
+  Test.AssertTrue(
+    Projection.ProjectSession(
+      SessionWorld,
+      View,
+      Invalid,
+      Session.ViewportSize(Width := 20, Height := 12),
+      Projection.NoTurnReport()
+    ) is Error(_)
+  );
+  Test.AssertTrue(Projection.ProjectExplorationMap(Invalid, View, 0, 0, 1, 1) is Error(_));
+end.

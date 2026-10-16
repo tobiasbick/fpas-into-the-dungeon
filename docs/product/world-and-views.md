@@ -133,7 +133,10 @@ define quests, experience, or levels.
 - **Combat log** is the ordered list of messages describing one resolved turn.
 - **Combat event** is one structured fact of a resolved turn, such as a hit and
   its damage and involved opponent kind. Combat events drive the client's
-  animation and never change state.
+  animation and never change state. They currently identify a kind, not an
+  individual figure; generated levels contain at most one opponent of each
+  kind. Same-kind groups require figure or position identity before animation
+  can target them independently.
 - **Defeat** ends the current game session when the player's health reaches
   zero. The connection remains, and the player may load or start a game.
 - **Visible state** is the server-produced, client-safe projection of the

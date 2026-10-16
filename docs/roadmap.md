@@ -364,7 +364,11 @@ game without class selection at the start.
 Implement this slice after 14b and before 14c, so progression can be balanced
 against several opponent kinds before deeper, harder levels are introduced.
 
-## 14. Generated game content — NEXT
+The user accepted 14b on 2026-10-16. Progression is the next gameplay slice;
+finish the current client/server review checkpoint and detail 13b in its own
+small implementation plan before starting its gameplay changes.
+
+## 14. Generated game content — PARTIAL
 
 Expand beyond the fixed initial dungeon with generated interiors, dungeons,
 locations, and their contents. Generation remains deterministic and
@@ -486,10 +490,11 @@ closing the final terminal review for 14s. See the
 [server console documentation](product/server-console.md) for operation and
 controls.
 
-### 14b. Dungeon contents — IN REVIEW
+### 14b. Dungeon contents — DONE
 
-The [14b implementation plan](plans/14b-dungeon-contents.md) fixes twelve small,
-ordered checkpoints with positive, negative and edge-case tests. It adds stored,
+The twelve implementation checkpoints have positive, negative and edge-case
+tests. The user accepted 14b on 2026-10-16, and its completed plan is removed.
+It adds stored,
 deterministic dungeon names, a Giant rat alongside the Restless skeleton,
 generated floor finds and a Healing potion. Opponent death drops remain deferred.
 
@@ -575,7 +580,7 @@ generated floor finds and a Healing potion. Opponent death drops remain deferred
   programs) on 2026-10-16. Independent review found a missing explicit enemy-phase
   assertion; fixed literal health/damage/RNG anchors close it, and follow-up
   review confirms no open findings. Checkpoint 12 closes automated verification
-  below; terminal review remains deliberately open.
+  below. The later user acceptance closes the terminal-review gate.
 - [x] Use protocol 15, generator 7, level format 2 and save format 8; keep world
   format 3 and runtime settings unchanged. Preserve incompatible files and report
   why their worlds/saves cannot continue; do not migrate or delete them.
@@ -588,10 +593,36 @@ generated floor finds and a Healing potion. Opponent death drops remain deferred
   stale placement/coin claims and clarified the phase timings to include
   self-contained validation. Follow-up review confirms no open relevant findings
   or benchmark-code defect.
-- [ ] User terminal review and explicit acceptance remain deliberately open.
-  The user cannot perform this review in the cloud and explicitly deferred it.
-  Automated coverage does not replace acceptance; keep the plan and IN REVIEW
-  status, and do not mark DONE. 13b follows acceptance, before 14c.
+- [x] The user explicitly accepted 14b on 2026-10-16. The prior deferred terminal
+  review no longer blocks completion, and the accepted implementation plan is
+  removed. 13b is the next gameplay slice, before 14c. The client/server review
+  is complete: R03/R04
+  connection isolation/socket cleanup, R05 recoverable preparation errors,
+  R06 bounded inventories, R07 bounded catalog inspection, R09 detailed
+  persistence diagnostics and R10 exploration-map continuity are complete on
+  2026-10-16, with 107/107 tests and all
+  21 projects checked using the fixed compiler. Failed Move/Viewport preparation
+  preserves the session; actual send
+  failures remain fatal. Inventory windows
+  follow selection and retain controls; quick summaries fit the panel and count
+  omitted items. Catalogs fully inspect at most 64 page entries plus an existing
+  off-page selection; Continue still validates the complete save and its levels.
+  Save/load failures retain their original cause in server logs and preserve
+  sanitized client replies. Viewport replies retain the open exploration map
+  and its independent projection/request; explicit close stays respected.
+  R11-R15 are complete: focused lifecycle owners, shared interior knowledge
+  projection, normal disconnect publication after socket cleanup, verified
+  dead-code cleanup and explicit lifecycle/animation contracts. All **15/15**
+  review items are closed. The user authorized two FPAS compiler repairs with
+  tests: imported constants as native-call receivers and native enum aliases
+  used by record fields. Both minimal reproductions pass, and the complete Rust
+  workspace suite is green. Independent compiler and game Standards/Spec reviews
+  have no remaining findings. Final game verification is **107/107 programs**,
+  all **21 projects** checked, with unchanged generator fingerprints and formats.
+  The user accepted the review on 2026-10-16, and its temporary plan is removed.
+  Lasting contracts remain in the [architecture overview](architecture/overview.md)
+  and product documentation. Progression (13b) is the next gameplay slice before
+  14c.
 
 Generated loot has stable identities derived from its source and is created
 only once. Persist consumed items as consumed rather than deleting their

@@ -1,0 +1,171 @@
+// Existing-world selection and catalog transitions with their own lifecycle prerequisites.
+unit Dungeon.Server.Worlds.Selection;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Worlds.Catalog as CatalogPages, Dungeon.Server.Logging as Logging, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Terrain.Placement as PlacementRules, Dungeon.World as WorldUnit, Dungeon.World.Catalog as CatalogUnit, Std.Net as Net, Std.Tasks as Tasks, Dungeon.Server.Worlds.Replies as Lifecycle;
+
+// Creates an idle transport session. Missing/incompatible preselection does not create a world.
+public function NewServerSession(Config: ConfigUnit.ServerConfig; Viewport: SessionUnit.ViewportSize): result of (SessionUnit.ServerSession, string);
+begin
+  var Session: SessionUnit.ServerSession := SessionUnit.ServerSession(
+    World := WorldUnit.WorldSession(
+      Directory := '',
+      Metadata := try PlacementRules.NewWorldMetadata('unselected', 12345, 4),
+      Cache := [],
+      Clock := 0,
+      CacheLimit := Config.ChunkCacheLimit
+    ),
+    WorldSelected := false,
+    Dirty := false,
+    State := None,
+    Interior := None,
+    Viewport := Viewport,
+    Finished := false
+  );
+  case CatalogUnit.OpenExistingWorld(Config.WorldsRoot, Config.WorldId, Config.ChunkCacheLimit) of
+    when Ok(const World):
+      begin
+        Session.World := World;
+        Session.WorldSelected := true;
+      end;
+    when Error(const Failure):
+      begin
+        null;
+      end;
+  end case;
+
+  return Ok(Session);
+end function;
+
+// Lists a catalog before leaving an active game; dirty progress requires explicit discard. Errors retain the session.
+public function ListCatalog(Session: SessionUnit.ServerSession; Offset: integer; DiscardProgress: boolean; ConnectionValue: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (SessionUnit.ServerSession, string);
+begin
+  const Active: boolean := Session.State is Some(_);
+  var Next := Session;
+  if Active and Session.Dirty and not DiscardProgress then
+    return Ok(
+      try Lifecycle.RejectWorld(
+        Session,
+        Config,
+        ConnectionValue,
+        'discard_required',
+        'Confirm discarding unsaved progress or cancel.',
+        Token
+      )
+    );
+  end if;
+  var Id: string := Config.WorldId;
+  if Session.WorldSelected then
+    Id := Session.World.Metadata.Id;
+  end if;
+
+  case CatalogPages.CatalogFor(Config, Id, Offset) of
+    when Error(const Reason):
+      begin
+        return Ok(
+          try Lifecycle.RejectWorld(
+            Session,
+            Config,
+            ConnectionValue,
+            'storage_error',
+            'Cannot list worlds. Check storage and server settings.',
+            Token
+          )
+        );
+      end;
+    when Ok(const Catalog):
+      begin
+        const Sent: boolean := try Replies.SendMessage(
+          ConnectionValue,
+          Protocol.ServerMessage.Worlds(Catalog),
+          Token
+        );
+        Next.State := None;
+        Next.Interior := None;
+        Next.Dirty := false;
+        return Ok(Next);
+      end;
+  end case;
+end function;
+
+// Selects an existing compatible world only while idle; failures retain selection and save diagnostics.
+public function SelectWorld(Session: SessionUnit.ServerSession; Id: string; ConnectionValue: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (SessionUnit.ServerSession, string);
+begin
+  const Active: boolean := Session.State is Some(_);
+  if Active then
+    return Ok(
+      try Lifecycle.RejectWorld(
+        Session,
+        Config,
+        ConnectionValue,
+        'session_already_started',
+        'Return to world selection first.',
+        Token
+      )
+    );
+  end if;
+
+  case CatalogUnit.OpenExistingWorld(Config.WorldsRoot, Id, Config.ChunkCacheLimit) of
+    when Error(const Failure):
+      begin
+        var Code: string := 'world_incompatible';
+        var Reason: string := 'World is incompatible. Delete or recreate it.';
+        case Failure of
+          when CatalogUnit.WorldAccessFailure.Missing:
+            begin
+              Code := 'world_missing';
+              Reason := 'World is missing. Create a world or select another.';
+            end;
+          when CatalogUnit.WorldAccessFailure.Io(const Detail):
+            begin
+              Code := 'storage_error';
+              Reason := 'World storage access failed.';
+            end;
+          when CatalogUnit.WorldAccessFailure.Incompatible(_):
+            begin
+              null;
+            end;
+        end case;
+
+        return Ok(try Lifecycle.RejectWorld(Session, Config, ConnectionValue, Code, Reason, Token));
+      end;
+    when Ok(const World):
+      begin
+        case CatalogPages.CatalogFor(Config, Id, -1) of
+          when Error(const Reason):
+            begin
+              return Ok(
+                try Lifecycle.RejectWorld(
+                  Session,
+                  Config,
+                  ConnectionValue,
+                  'storage_error',
+                  'Cannot prepare world selection.',
+                  Token
+                )
+              );
+            end;
+          when Ok(const Catalog):
+            begin
+              const Sent: boolean := try Replies.SendMessage(
+                ConnectionValue,
+                Protocol.ServerMessage.Worlds(Catalog),
+                Token
+              );
+              Logging.LogServer(Config.Logs, 'world', 'Selected world ' + Id);
+              var LastSavedAt: integer := Session.LastSavedAt;
+              if not Session.WorldSelected
+                or
+                (Session.World.Metadata.Id <> World.Metadata.Id)
+              then
+                LastSavedAt := 0;
+              end if;
+
+              return Ok(
+                Session with World := World; WorldSelected := true; LastSavedAt := LastSavedAt; end with
+              );
+            end;
+        end case;
+      end;
+  end case;
+end function;
+end unit;

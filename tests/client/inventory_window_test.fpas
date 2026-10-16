@@ -1,0 +1,367 @@
+// Actual inventory rendering and keys keep large selections, actions and bounded summaries visible.
+program InventoryWindowTest;
+
+uses Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as Catalog, Std.Conv as Conv, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Contains(Screen: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Row) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function ItemName(Index: integer): string;
+begin
+  return 'Item ' + (if Index < 10 then '0' else '' end if) + Conv.IntToStr(Index);
+end function;
+
+procedure AssertSidebarFooter(Screen: Tui.TuiSurfaceSnapshot);
+begin
+  var CloseRow := -1;
+  for Row: integer := 0 to Screen.Height - 1 do
+    if 'Close' in Screen.LineAt(Row) then
+      CloseRow := Row;
+    end if;
+  end for;
+
+  Test.AssertTrue(CloseRow >= 0);
+  Test.AssertTrue(CloseRow + 1 < Screen.Height);
+  Test.AssertTrue('╰' in Screen.LineAt(CloseRow + 1));
+  Test.AssertTrue('╯' in Screen.LineAt(CloseRow + 1));
+  Test.AssertFalse('Close' in Screen.LineAt(CloseRow + 1));
+end procedure;
+
+function Items(): array of Protocol.VisibleInventoryItem;
+begin
+  var Entries: array of Protocol.VisibleInventoryItem := [];
+  for Index: integer := 0 to 63 do
+    Entries.PushInPlace(
+      Protocol.VisibleInventoryItem(
+        Id := 'item-' + Conv.IntToStr(Index), Name := ItemName(Index),
+        Slot := Protocol.VisibleItemSlot.NoSlot, Equipped := false, Usable := true
+      )
+    );
+  end for;
+
+  return Entries;
+end function;
+
+function State(Inventory: array of Protocol.VisibleInventoryItem): Client.ClientEvent;
+begin
+  return Client.ClientEvent.State(
+    Protocol.VisibleState.MapState(
+      Protocol.MapVisibleState(
+        OriginX := 0, OriginY := 0, Width := 3, Height := 3,
+        Rows := ['ggg', 'ggg', 'ggg'], KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+        PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := Inventory,
+        Health := 20, MaxHealth := 20, Character := []
+      )
+    )
+  );
+end function;
+
+// Authoritative state may request a resized projection; acknowledge only that expected intention.
+function Refresh(Model: Client.ClientModel; Inventory: array of Protocol.VisibleInventoryItem; Requests: channel of Protocol.ClientMessage): Client.ClientModel;
+begin
+  const Cmd := Tui.TuiCmdOutput.Create();
+  const Next := Client.UpdateClientEvent(Model, State(Inventory), Cmd);
+  case Tasks.TryReceive(Requests) of
+    when Ok(Some(Protocol.ClientMessage.Viewport(_, _))):
+      return Client.UpdateClientEvent(Next, State(Inventory), Cmd);
+    when Ok(None), Error(_):
+      return Next;
+    when Ok(Some(_)):
+      panic('unexpected gameplay intention while refreshing inventory');
+  end case;
+end function;
+
+function NewModel(Requests: channel of Protocol.ClientMessage; Events: channel of Client.ConnectionEvent): Client.ClientModel;
+begin
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := Client.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  ) with ViewportWidth := 120; ViewportHeight := 30; ContextPanelVisible := true; MessagePanelVisible := false; end with;
+
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Connected(Catalog.FixtureCatalog(false, false)),
+    Cmd
+  );
+  return Refresh(Model, Items(), Requests);
+end function;
+
+function Press(App: Tui.TuiApplication; Model: Client.ClientModel; Kind: Tui.TuiKeyKind; Ch: string): Client.ClientModel;
+begin
+  App.InjectKeyForTest(
+    Tui.TuiKeyEvent(
+      kind := Kind,
+      ch := Ch,
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+  return App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 1, 0);
+end function;
+
+procedure AssertSelection(App: Tui.TuiApplication; Model: Client.ClientModel; Expected: string);
+begin
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), '> ' + Expected));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Health 20/20'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Enter: Use'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'D drop'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Esc/I close'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Item actions: one turn'));
+  Test.AssertEquals(64, Model.Inventory.Length());
+end procedure;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(1);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := NewModel(Requests, Events);
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 30));
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'i');
+  Model := Press(App, Model, Tui.TuiKeyKind.Up, '');
+  Test.AssertEquals(63, Model.InventorySelection);
+  AssertSelection(App, Model, 'Item 63');
+  // Wrap and then traverse every item with real keys; no navigation becomes a game intention.
+  Model := Press(App, Model, Tui.TuiKeyKind.Down, '');
+  AssertSelection(App, Model, 'Item 00');
+  for Index: integer := 1 to 63 do
+    Model := Press(App, Model, Tui.TuiKeyKind.Down, '');
+    Test.AssertEquals(Index, Model.InventorySelection);
+    AssertSelection(App, Model, ItemName(Index));
+  end for;
+
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap().Unwrap() = Protocol.ClientMessage.UseItem('item-63')
+  );
+  Test.AssertTrue(Model.Pending);
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'd');
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  Test.AssertEquals(64, Model.Inventory.Length());
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Rejected('item_use_rejected', 'retry'),
+    Cmd
+  );
+
+  // A true resize keeps the overlay/selection and processes the ordinary viewport reply.
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(40, 12),
+    Tui.TuiSize.Create(32, 8),
+    Tui.TuiSize.Create(120, 30)
+  ] do
+    App.InjectResizeForTest(Size);
+    Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 1, 0);
+    Test.AssertTrue(
+      Tasks.TryReceive(Requests).Unwrap().Unwrap() is Protocol.ClientMessage.Viewport(_, _)
+    );
+    Model := Refresh(Model, Items(), Requests);
+    Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.InventoryOverlay);
+    Test.AssertEquals(63, Model.InventorySelection);
+    AssertSelection(App, Model, 'Item 63');
+  end for;
+
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'd');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap().Unwrap() = Protocol.ClientMessage.DropItem('item-63')
+  );
+  Model := Client.UpdateClientEvent(
+    Model,
+    Client.ClientEvent.Rejected('drop_rejected', 'retry'),
+    Cmd
+  );
+
+  // Projected gear actions remain usable on the scrolled final identity as well.
+  var Gear := Items();
+  Gear[63] := Gear[63] with Slot := Protocol.VisibleItemSlot.Weapon; Usable := false; end with;
+
+  Model := Refresh(Model, Gear, Requests);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), '> Item 63'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Enter: Wear'));
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap().Unwrap() = Protocol.ClientMessage.Equip('item-63')
+  );
+  Gear[63] := Gear[63] with Equipped := true; end with;
+
+  Model := Refresh(Model, Gear, Requests);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Enter: Remove'));
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap().Unwrap() = Protocol.ClientMessage.Unequip('item-63')
+  );
+  Model := Refresh(Model, Items(), Requests);
+
+  // Reordering keeps the selected ID even when its index moves to the other end of the window.
+  const Inventory := Items();
+  var Reordered: array of Protocol.VisibleInventoryItem := [Inventory[63]];
+  Reordered := Reordered.Concat(Inventory.Slice(0, 63));
+  Model := Refresh(Model, Reordered, Requests);
+  Test.AssertEquals(0, Model.InventorySelection);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  AssertSelection(App, Model, 'Item 63');
+  Model := Refresh(Model, Inventory.Slice(0, 63), Requests);
+  Test.AssertEquals('item-0', Model.Inventory[Model.InventorySelection].Id);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), '> Item 00'));
+  Model := Refresh(Model, [], Requests);
+  Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'You carry nothing.'));
+  Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+  Model := Press(App, Model, Tui.TuiKeyKind.Character, 'd');
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+
+  // Untrusted local indices neither crash rendering nor address an unintended identity.
+  for Selection: integer in [-1, 999] do
+    Model := NewModel(Requests, Events) with Overlay := Client.ClientOverlay.InventoryOverlay; InventorySelection := Selection; end with;
+
+    Model := App.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Enter: No action'));
+    Model := Press(App, Model, Tui.TuiKeyKind.Enter, '');
+    Model := Press(App, Model, Tui.TuiKeyKind.Character, 'd');
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  end for;
+
+  App.Close();
+
+  // Long ASCII, wide graphemes and combining marks cannot push controls outside the terminal.
+  for LongName: string in [
+    'x'.RepeatStr(128),
+    'Elixir ' + '界'.RepeatStr(50),
+    'Potion ' + ('e' + '́').RepeatStr(40)
+  ] do
+    Model := NewModel(Requests, Events) with ViewportWidth := 32; ViewportHeight := 8; Overlay := Client.ClientOverlay.InventoryOverlay; end with;
+
+    Model.Inventory[0] := Model.Inventory[0] with Name := LongName; end with;
+    const Small := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(32, 8));
+    Model := Small.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Test.AssertTrue(Contains(Small.SurfaceSnapshot(), 'Enter: Use'));
+    Test.AssertTrue(Contains(Small.SurfaceSnapshot(), 'Esc/I close'));
+    Test.AssertTrue(Contains(Small.SurfaceSnapshot(), '...'));
+    Test.AssertFalse(Contains(Small.SurfaceSnapshot(), '�'));
+    Small.Close();
+  end for;
+
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(31, 8),
+    Tui.TuiSize.Create(32, 7),
+    Tui.TuiSize.Create(1, 1)
+  ] do
+    Model := NewModel(Requests, Events) with ViewportWidth := Size.Width; ViewportHeight := Size.Height; Overlay := Client.ClientOverlay.InventoryOverlay; end with;
+    const Tiny := Tui.TuiApplication.OpenForTest(Size);
+    Model := Tiny.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+    if Size.Width >= 20 then
+      Test.AssertTrue(Contains(Tiny.SurfaceSnapshot(), 'Resize'));
+    end if;
+
+    Model := Press(Tiny, Model, Tui.TuiKeyKind.Enter, '');
+    Model := Press(Tiny, Model, Tui.TuiKeyKind.Character, 'd');
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+    Model := Press(Tiny, Model, Tui.TuiKeyKind.Escape, '');
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.NoOverlay);
+    Tiny.Close();
+  end for;
+
+  // Two equipped slots plus 62 carried entries fit even at the docking height boundary.
+  var Worn := Items();
+  Worn[0] := Worn[0] with Slot := Protocol.VisibleItemSlot.Weapon; Equipped := true; Usable := false; end with;
+
+  Worn[1] := Worn[1] with Slot := Protocol.VisibleItemSlot.Body; Equipped := true; Usable := false; end with;
+
+  for Mode: integer in [0, 1, 2] do
+    const Height := if Mode = 1 then 24 else 30 end if;
+    Model := NewModel(Requests, Events) with ViewportWidth := 72; ViewportHeight := Height; MessagePanelVisible := Mode =
+      2; end with;
+
+    Model := Refresh(Model, Worn, Requests);
+    const Dock := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(72, Height));
+    Model := Dock.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Test.AssertTrue(Contains(Dock.SurfaceSnapshot(), 'Environment'));
+    Test.AssertTrue(Contains(Dock.SurfaceSnapshot(), 'Weapon: Item 00'));
+    Test.AssertTrue(Contains(Dock.SurfaceSnapshot(), 'Body: Item 01'));
+    Test.AssertTrue(Contains(Dock.SurfaceSnapshot(), 'Quick inventory'));
+    Test.AssertTrue(
+      Contains(
+        Dock.SurfaceSnapshot(),
+        if Mode = 0 then '+59 more (I)' else '62 items (I)' end if
+      )
+    );
+    Test.AssertFalse(Contains(Dock.SurfaceSnapshot(), 'Item 63'));
+    Test.AssertEquals(64, Model.Inventory.Length());
+    Dock.Close();
+  end for;
+
+  for MessagesVisible: boolean in [false, true] do
+    const Height := if MessagesVisible then 29 else 23 end if;
+    Model := NewModel(Requests, Events) with ViewportWidth := 72; ViewportHeight := Height; MessagePanelVisible := MessagesVisible; end with;
+
+    Model := Refresh(Model, Worn, Requests);
+    const Short := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(72, Height));
+    Model := Short.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Test.AssertFalse(Contains(Short.SurfaceSnapshot(), 'Quick inventory'));
+    Model := Press(Short, Model, Tui.TuiKeyKind.F2, '');
+    Test.AssertTrue(Model.Overlay = Client.ClientOverlay.ContextOverlay);
+    Test.AssertTrue(
+      Contains(
+        Short.SurfaceSnapshot(),
+        if MessagesVisible then '+59 more (I)' else '62 items (I)' end if
+      )
+    );
+    AssertSidebarFooter(Short.SurfaceSnapshot());
+    Short.Close();
+  end for;
+
+  Model := NewModel(Requests, Events) with ViewportWidth := 71; ViewportHeight := 24; end with;
+
+  Model := Refresh(Model, Worn, Requests);
+  const Narrow := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(71, 24));
+  Model := Narrow.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertFalse(Contains(Narrow.SurfaceSnapshot(), 'Quick inventory'));
+  Model := Press(Narrow, Model, Tui.TuiKeyKind.F2, '');
+  Test.AssertTrue(Model.Overlay = Client.ClientOverlay.ContextOverlay);
+  Test.AssertTrue(Contains(Narrow.SurfaceSnapshot(), 'Quick inventory'));
+  Test.AssertTrue(Contains(Narrow.SurfaceSnapshot(), '+61 more (I)'));
+  AssertSidebarFooter(Narrow.SurfaceSnapshot());
+  Narrow.Close();
+  // With no room for item rows, the summary heading itself retains the carried count.
+  Model := NewModel(Requests, Events) with ViewportWidth := 72; ViewportHeight := 22; end with;
+
+  Model := Refresh(Model, Worn, Requests);
+  const Cramped := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(72, 22));
+  Model := Cramped.RunIterations(Model, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Model := Press(Cramped, Model, Tui.TuiKeyKind.F2, '');
+  Test.AssertTrue(Contains(Cramped.SurfaceSnapshot(), 'Quick inventory (62)'));
+  AssertSidebarFooter(Cramped.SurfaceSnapshot());
+  Cramped.Close();
+  const Closed: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  discard Tasks.CloseChannel(Closed);
+  Model := NewModel(Closed, Events) with Overlay := Client.ClientOverlay.InventoryOverlay; end with;
+  const Last := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 30));
+  Model := Press(Last, Model, Tui.TuiKeyKind.Enter, '');
+  Model := Press(Last, Model, Tui.TuiKeyKind.Character, 'd');
+  Test.AssertFalse(Model.Pending);
+  Test.AssertEquals(64, Model.Inventory.Length());
+  Last.Close();
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

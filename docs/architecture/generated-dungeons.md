@@ -293,10 +293,9 @@ contents loop, actual kind-carrying combat animation, named exploration maps,
 authoritative dashboard facts and failure paths. Checkpoint 12 completes
 automated verification, documentation and the
 [persistence smoke measurements](persistence-measurements.md). All 91 test
-programs and 20 project checks pass; 14b is IN REVIEW. Manual terminal review
-and explicit user acceptance remain deliberately open because the review is
-unavailable in this cloud environment.
-After acceptance, stage 13b follows 14b with progression;
+programs and 20 project checks passed at that checkpoint. The user explicitly
+accepted 14b on 2026-10-16; the completed implementation plan has been removed.
+Stage 13b follows 14b with progression;
 14c then adds separate level areas and paired stairs without changing the
 first-person view family. Settlements with NPCs and
 dialogue belong to stage 15; LLM-generated content to stage 17.

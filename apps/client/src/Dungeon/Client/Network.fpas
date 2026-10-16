@@ -8,6 +8,12 @@ type ServerRead = record
   Reader: Transport.LineReader;
 end record;
 
+// A published failure must remain the last event of its connection attempt.
+type SessionEnd = enum
+  Disconnected;
+  FailurePublished;
+end enum;
+
 // Publishes one session event; an ordinary publication error ends that session.
 public type EventPublisher = function(Value: Model.ClientEvent): result of (boolean, string);
 
@@ -150,6 +156,10 @@ begin
       begin
         if AcceptsState(Request) then
           begin
+            if Request is Protocol.ClientMessage.Viewport(_, _) then
+              return Some(Model.ClientEvent.ViewportState(Value));
+            end if;
+
             return Some(Model.ClientEvent.State(Value));
           end;
         end if;
@@ -221,7 +231,7 @@ function Exchange(
   Requests: channel of Protocol.ClientMessage;
   PublishEvent: EventPublisher;
   Token: Tasks.CancellationToken
-): result of (boolean, string);
+): result of (SessionEnd, string);
 begin
   var Reader: Transport.LineReader := Transport.NewLineReader(ConnectionValue);
   var Catalog: Protocol.WorldCatalog := WorldsUnit.EmptyWorldCatalog(12345, 4);
@@ -258,7 +268,7 @@ begin
             begin
               const Published: boolean := try PublishEvent(Model.ClientEvent.Failed(Message));
 
-              return Ok(true);
+              return Ok(SessionEnd.FailurePublished);
             end;
           when Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
             begin
@@ -273,7 +283,7 @@ begin
       case Tasks.ReceiveWithCancellation(Requests, Token) of
         when Error(const Message):
           begin
-            return Ok(true);
+            return Ok(SessionEnd.Disconnected);
           end;
         when Ok(const Request):
           begin
@@ -290,7 +300,7 @@ begin
                     Token
                   );
 
-                  return Ok(true);
+                  return Ok(SessionEnd.Disconnected);
                 end;
               when Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_):
                 begin
@@ -315,7 +325,7 @@ begin
                     when Protocol.ServerMessage.ErrorMessage(const Code, const Message):
                       const Sent: boolean := try PublishEvent(Model.ClientEvent.Failed(Message));
 
-                      return Ok(true);
+                      return Ok(SessionEnd.FailurePublished);
                     when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _):
                       case ResponseEvent(Request, ReadValue.Message) of
                         when Some(const ResponseValue):
@@ -335,11 +345,13 @@ begin
     end;
   end while;
 
-  return Ok(true);
+  return Ok(SessionEnd.Disconnected);
 end function;
 
 // Takes ownership of an already connected socket and closes it after every ordinary outcome.
 // A session error takes precedence if closing also fails; unexpected diagnostics still propagate.
+// Only non-cancelled normal completion publishes Disconnected, after successful closure.
+// A prior Failed event remains terminal. The caller relinquishes the handle until return.
 public function RunConnection(
   ConnectionValue: Net.Connection;
   ViewWidth: integer;
@@ -354,9 +366,13 @@ begin
   case Outcome of
     when Error(const Reason):
       return Error(Reason);
-    when Ok(const Completed):
+    when Ok(const EndReason):
       const Released := try Closed;
-      return Ok(Completed);
+      if (EndReason = SessionEnd.Disconnected) and not Tasks.IsCancellationRequested(Token) then
+        const Published := try PublishEvent(Model.ClientEvent.Disconnected);
+      end if;
+
+      return Ok(true);
   end case;
 end function;
 

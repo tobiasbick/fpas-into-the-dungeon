@@ -1,0 +1,126 @@
+// Constructs bounded catalog replies from directory identities and complete world inspections.
+unit Dungeon.Server.Worlds.Catalog;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Config as ConfigUnit, Dungeon.World.Catalog as CatalogUnit;
+
+// Inspects exactly the requested world identity; implementations retain full save/level checks.
+public type WorldInspector = function(Id: string): CatalogUnit.WorldEntry;
+
+// Builds a catalog page in canonical directory order; -1 starts at an existing selection.
+// Inspects at most one page plus its selection if off-page, never the same identity twice.
+// Inspector owns content access; root/validation errors propagate without modifying storage.
+public function ReadPage(
+  Defaults: Protocol.WorldCatalog; Root: string; SelectedId: string;
+  RequestedOffset: integer; Inspect: WorldInspector
+): result of (Protocol.WorldCatalog, string);
+begin
+  var Catalog := Defaults;
+  const Ids := try CatalogUnit.ListWorldIds(Root);
+  Catalog.Total := Ids.Length();
+  Catalog.SelectedId := SelectedId;
+  Catalog.SelectionReason := 'Selected world is missing. Create a world or select another.';
+  var Offset: integer := RequestedOffset;
+  var SelectedIndex: integer := -1;
+  for Index: integer := 0 to Catalog.Total - 1 do
+    if Ids[Index] = SelectedId then
+      SelectedIndex := Index;
+      if Offset = -1 then
+        Offset := Index;
+      end if;
+    end if;
+  end for;
+
+  if SelectedId = '' then
+    Catalog.SelectionReason := '';
+  end if;
+
+  if Offset < 0 then
+    Offset := 0;
+  end if;
+
+  if (Offset >= Catalog.Total) and (Catalog.Total > 0) then
+    Offset := ((Catalog.Total - 1) div Protocol.MaximumWorldsPerPage) *
+      Protocol.MaximumWorldsPerPage;
+  end if;
+
+  if Catalog.Total = 0 then
+    Offset := 0;
+  end if;
+
+  Catalog.Offset := Offset;
+  var Count := Catalog.Total - Offset;
+  if Count > Protocol.MaximumWorldsPerPage then
+    Count := Protocol.MaximumWorldsPerPage;
+  end if;
+
+  var Summaries: array of Protocol.WorldSummary := [];
+  for Step: integer := 0 to Count - 1 do
+    const Index := Offset + Step;
+    const Entry := Inspect(Ids[Index]);
+    if Index = SelectedIndex then
+      Catalog.SelectionReason := Entry.Reason;
+    end if;
+
+    var Summary: Protocol.WorldSummary := Protocol.WorldSummary(
+      Id := Entry.Id,
+      Seed := 0,
+      RegionChunks := 0,
+      Status := Entry.Status,
+      SaveStatus := Entry.SaveStatus,
+      Reason := Entry.Reason
+    );
+    case Entry.Metadata of
+      when Some(const Metadata):
+        begin
+          Summary.Seed := Metadata.Seed;
+          Summary.RegionChunks := Metadata.DungeonRegionChunks;
+        end;
+      when None:
+        begin
+          null;
+        end;
+    end case;
+
+    if Summary.Reason.Length() > 96 then
+      Summary.Reason := Summary.Reason.Slice(0, 96);
+    end if;
+
+    Summaries.PushInPlace(Summary);
+  end for;
+
+  if (SelectedIndex >= 0) and ((SelectedIndex < Offset) or (SelectedIndex >= Offset + Count)) then
+    Catalog.SelectionReason := Inspect(Ids[SelectedIndex]).Reason;
+  end if;
+
+  Catalog.Worlds := Summaries;
+  return WorldsUnit.ValidateWorldCatalog(Catalog);
+end function;
+
+// Reads current creation defaults; selected world parameters remain independent of TOML changes.
+public function CreationDefaults(Config: ConfigUnit.ServerConfig): result of (Protocol.WorldCatalog, string);
+begin
+  const ValidIdentity: string := try WorldsUnit.ValidateWorldIdentity(Config.WorldId);
+  if Config.ConfigPath <> '' then
+    const Settings: RuntimeData.ServerWorldConfig := try RuntimeData.ReadServerDefaults(
+      Config.ConfigPath
+    );
+    return Ok(WorldsUnit.EmptyWorldCatalog(Settings.Seed, Settings.DungeonRegionChunks));
+  end if;
+  const Valid: boolean := try RuntimeData.ValidateServerDefaults(
+    Config.WorldSeed,
+    Config.DungeonRegionChunks
+  );
+  return Ok(WorldsUnit.EmptyWorldCatalog(Config.WorldSeed, Config.DungeonRegionChunks));
+end function;
+
+// Builds one fully inspected page and resolves selection facts without changing world files.
+public function CatalogFor(Config: ConfigUnit.ServerConfig; SelectedId: string; RequestedOffset: integer): result of (Protocol.WorldCatalog, string);
+begin
+  return ReadPage(
+    try CreationDefaults(Config), Config.WorldsRoot, SelectedId, RequestedOffset,
+    function(Id: string): CatalogUnit.WorldEntry begin
+      return CatalogUnit.InspectWorld(Config.WorldsRoot, Id, Config.ChunkCacheLimit);
+    end function
+  );
+end function;
+end unit;

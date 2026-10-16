@@ -1,0 +1,149 @@
+// Verifies attempt-owned queues and stale-event isolation across cancel, reconnect and quit.
+program ConnectionAttemptUiTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as CatalogUnit, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Action(Control: integer; Value: integer): Tui.TuiMsg;
+begin
+  return Tui.TuiMsg.Action(Tui.TuiControlId.Create(Control), Tui.TuiAction.Create(Value));
+end function;
+
+function Visible(): ClientUnit.ClientEvent;
+begin
+  return ClientUnit.ClientEvent.State(
+    Protocol.VisibleState.MapState(
+      Protocol.MapVisibleState(
+        OriginX := 99, OriginY := -20, Width := 1, Height := 1, Rows := ['g'],
+        KnowledgeRows := ['v'], PlayerX := 0, PlayerY := 0, WorldX := 99, WorldY := -20,
+        Inventory := [], Health := 3, MaxHealth := 20, Character := []
+      )
+    )
+  );
+end function;
+
+procedure AssertIgnored(State: ClientUnit.ClientModel; Generation: integer; Value: ClientUnit.ClientEvent);
+begin
+  const Cmd := Tui.TuiCmdOutput.Create();
+  const Next := ClientUnit.UpdateConnectionEvent(
+    State, ClientUnit.ConnectionEvent(Generation := Generation, Value := Value), Cmd
+  );
+  Test.AssertEquals(State.ConnectionGeneration, Next.ConnectionGeneration);
+  Test.AssertTrue(State.Screen = Next.Screen);
+  Test.AssertTrue(State.ConnectionPhase = Next.ConnectionPhase);
+  Test.AssertTrue(State.Overlay = Next.Overlay);
+  Test.AssertTrue(State.Pending = Next.Pending);
+  Test.AssertTrue(State.PendingChangesProgress = Next.PendingChangesProgress);
+  Test.AssertTrue(State.PendingCreatedWorld = Next.PendingCreatedWorld);
+  Test.AssertTrue(State.HasVisibleState = Next.HasVisibleState);
+  Test.AssertTrue(State.Dirty = Next.Dirty);
+  Test.AssertTrue(State.SaveAvailable = Next.SaveAvailable);
+  Test.AssertEquals(State.Health, Next.Health);
+  Test.AssertEquals(State.WorldX, Next.WorldX);
+  Test.AssertEquals(State.WorldY, Next.WorldY);
+  Test.AssertEquals(State.Status, Next.Status);
+  Test.AssertEquals(State.Inventory.Length(), Next.Inventory.Length());
+  Test.AssertEquals(State.Messages.Length(), Next.Messages.Length());
+  Test.AssertTrue(State.MapHasState = Next.MapHasState);
+  Test.AssertTrue(State.MapRequestPending = Next.MapRequestPending);
+  Test.AssertEquals(State.MapLabel, Next.MapLabel);
+  Test.AssertEquals(State.DescriptionTitle, Next.DescriptionTitle);
+  Test.AssertTrue(Cmd.Command() = Tui.TuiCmd.NoCommand);
+end procedure;
+
+begin
+  const InitialRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const Inbox: channel of ClientUnit.ConnectionEvent := Tasks.CreateChannel(8);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := ClientUnit.NewClientModel(
+    '127.0.0.1', 4040, '', RuntimeData.DefaultClientPreferences(), InitialRequests, Inbox
+  );
+  AssertIgnored(Model, 0, Visible());
+  AssertIgnored(Model, 1, Visible());
+  const StaleEvents: array of ClientUnit.ClientEvent := [
+    ClientUnit.ClientEvent.Connected(CatalogUnit.FixtureCatalog(true, false)),
+    ClientUnit.ClientEvent.Worlds(CatalogUnit.FixtureCatalog(false, false)),
+    ClientUnit.ClientEvent.ExplorationMap(
+      Protocol.ExplorationMapState(
+        View := Protocol.ViewKind.Map, LabelText := 'old map', OriginX := 0, OriginY := 0,
+        Width := 1, Height := 1, Rows := ['g'], KnowledgeRows := ['v'],
+        PlayerWorldX := 0, PlayerWorldY := 0, PlayerInWindow := true
+      )
+    ),
+    Visible(), ClientUnit.ClientEvent.Interaction('old', 'old description'),
+    ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected('old', 'old'),
+    ClientUnit.ClientEvent.MapRejected('old', 'old'), ClientUnit.ClientEvent.Defeated('old'),
+    ClientUnit.ClientEvent.Failed('old failure'), ClientUnit.ClientEvent.Disconnected
+  ];
+  for Attempt: integer := 0 to 7 do
+    const Before := Model.ConnectionGeneration;
+    Model := ClientUnit.UpdateClient(Model, Action(1, 101), Cmd);
+    Test.AssertEquals(Before + 1, Model.ConnectionGeneration);
+    Test.AssertTrue(Model.ConnectionPhase = ClientUnit.ClientConnectionPhase.Connecting);
+    Test.AssertTrue(Tasks.TrySend(InitialRequests, Protocol.ClientMessage.Disconnect) is Error(_));
+    const Current := Model.ConnectionGeneration;
+    const Requests := Model.Requests;
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+    Model := ClientUnit.UpdateConnectionEvent(
+      Model, ClientUnit.ConnectionEvent(
+        Generation := Current,
+        Value := ClientUnit.ClientEvent.Connected(CatalogUnit.FixtureCatalog(true, false))
+      ), Cmd
+    );
+    Test.AssertTrue(Model.ConnectionPhase = ClientUnit.ClientConnectionPhase.AwaitingSession);
+    Test.AssertFalse(Model.Pending);
+    Test.AssertFalse(Model.PendingChangesProgress);
+    Test.AssertFalse(Model.PendingCreatedWorld);
+    Test.AssertFalse(Model.Dirty);
+    // Leave a genuine pending intention buffered when cancelling; a new attempt must not see it.
+    Model := ClientUnit.UpdateClient(Model, Action(5, 105), Cmd);
+    Test.AssertTrue(Model.Pending);
+    Model := ClientUnit.UpdateClient(Model, Action(7, 132), Cmd);
+    Model := ClientUnit.UpdateClient(Model, Action(32, 133), Cmd);
+    Test.AssertEquals(Current + 1, Model.ConnectionGeneration);
+    Test.AssertTrue(Model.ConnectionPhase = ClientUnit.ClientConnectionPhase.Offline);
+    Test.AssertTrue(Tasks.TrySend(Requests, Protocol.ClientMessage.Disconnect) is Error(_));
+    for Value: ClientUnit.ClientEvent in StaleEvents do
+      AssertIgnored(Model, Current, Value);
+    end for;
+
+    // A closed queue can still contain its old load; it stays isolated and is never drained into reuse.
+    Model := ClientUnit.UpdateClient(Model, Action(1, 101), Cmd);
+    Test.AssertTrue(Tasks.TryReceive(Model.Requests).Unwrap() is None);
+    Test.AssertTrue(Tasks.TrySend(Requests, Protocol.ClientMessage.StartNewGame) is Error(_));
+    for Value: ClientUnit.ClientEvent in StaleEvents do
+      AssertIgnored(Model, Current, Value);
+      AssertIgnored(Model, Model.ConnectionGeneration + 1, Value);
+    end for;
+
+    Model := ClientUnit.UpdateConnectionEvent(
+      Model, ClientUnit.ConnectionEvent(
+        Generation := Model.ConnectionGeneration,
+        Value := ClientUnit.ClientEvent.Connected(CatalogUnit.FixtureCatalog(false, false))
+      ), Cmd
+    );
+    Model := ClientUnit.UpdateClient(Model, Action(4, 104), Cmd);
+    Test.AssertTrue(
+      Tasks.ReceiveWithTimeout(Model.Requests, 0).Unwrap() is Protocol.ClientMessage.StartNewGame
+    );
+    Model := ClientUnit.UpdateConnectionEvent(
+      Model, ClientUnit.ConnectionEvent(
+        Generation := Model.ConnectionGeneration, Value := Visible()
+      ), Cmd
+    );
+    Test.AssertTrue(Model.ConnectionPhase = ClientUnit.ClientConnectionPhase.Active);
+    Test.AssertTrue(Model.HasVisibleState);
+    Test.AssertEquals(3, Model.Health);
+    Test.AssertEquals(99, Model.WorldX);
+    // Cancel an active attempt through the visible system-menu action, then start the next cycle.
+    Model := ClientUnit.UpdateClient(Model, Action(12, 111), Cmd);
+  end for;
+
+  Model := ClientUnit.UpdateClient(Model, Action(1, 101), Cmd);
+  const LastGeneration := Model.ConnectionGeneration;
+  const LastRequests := Model.Requests;
+  Model := ClientUnit.UpdateClient(Model, Action(3, 103), Cmd);
+  Test.AssertTrue(Cmd.Command() = Tui.TuiCmd.Quit);
+  Test.AssertTrue(Tasks.TrySend(LastRequests, Protocol.ClientMessage.StartNewGame) is Error(_));
+  AssertIgnored(Model, LastGeneration, Visible());
+  discard Tasks.CloseChannel(Inbox);
+end.

@@ -1,7 +1,7 @@
 // Inventory overlay, character sheet, and equipment summaries built from server projections.
 unit Dungeon.Client.Character;
 
-uses Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Std.Conv as Conv, Std.Tui as Tui;
+uses Dungeon.Client.Model as Model, Dungeon.Client.Ui.Layout as Layout, Dungeon.Protocol as Protocol, Std.Conv as Conv, Std.Tui as Tui;
 
 function SlotLabel(Slot: Protocol.VisibleItemSlot): string;
 begin
@@ -61,6 +61,34 @@ begin
   return Names;
 end function;
 
+// Summarizes carried names in projection order; any omitted names have an explicit count.
+// AvailableRows includes the count row and is capped by the quick-summary limit; zero yields no rows.
+public function QuickInventoryLines(Inventory: array of Protocol.VisibleInventoryItem; AvailableRows: integer): array of string;
+begin
+  if AvailableRows <= 0 then
+    return [];
+  end if;
+  var Rows := AvailableRows;
+  if Rows > Layout.MaximumQuickInventoryLines then
+    Rows := Layout.MaximumQuickInventoryLines;
+  end if;
+  const Names := CarriedItemNames(Inventory);
+  if Names.Length() = 0 then
+    return ['Empty'];
+  end if;
+
+  if Names.Length() <= Rows then
+    return Names;
+  end if;
+
+  if Rows = 1 then
+    return [Conv.IntToStr(Names.Length()) + ' items (I)'];
+  end if;
+  var Lines := Names.Slice(0, Rows - 1);
+  Lines.PushInPlace('+' + Conv.IntToStr(Names.Length() - Lines.Length()) + ' more (I)');
+  return Lines;
+end function;
+
 // Moves the inventory selection by Delta, wrapping at both ends; an empty inventory selects 0.
 public function MoveInventorySelection(State: Model.ClientModel; Delta: integer): Model.ClientModel;
 begin
@@ -115,9 +143,13 @@ end function;
 
 // Returns Enter's server intention from projected capability: use, then remove or wear.
 // No name or health rule is inferred here; the server validates every request.
+// Unrenderable inventory dimensions and invalid selections never address an item.
 public function SelectedItemRequest(State: Model.ClientModel): option of Protocol.ClientMessage;
 begin
-  if (State.InventorySelection < 0) or (State.InventorySelection >= State.Inventory.Length()) then
+  if not Layout.InventoryCanFit(State) or (State.InventorySelection < 0)
+    or
+    (State.InventorySelection >= State.Inventory.Length())
+  then
     begin
       return None;
     end;
@@ -143,9 +175,13 @@ begin
 end function;
 
 // Returns the intention for D on the selected item; the server decides whether it may be dropped.
+// Unrenderable inventory dimensions and invalid selections never address an item.
 public function SelectedDropRequest(State: Model.ClientModel): option of Protocol.ClientMessage;
 begin
-  if (State.InventorySelection < 0) or (State.InventorySelection >= State.Inventory.Length()) then
+  if not Layout.InventoryCanFit(State) or (State.InventorySelection < 0)
+    or
+    (State.InventorySelection >= State.Inventory.Length())
+  then
     begin
       return None;
     end;
@@ -203,9 +239,34 @@ begin
   return 'Enter: No action';
 end function;
 
-// Renders the inventory overlay with the current selection and its controls.
+// Renders a selection-following window with reserved controls and a visible range.
+// Tiny terminals show a resize hint; they never hide an enabled item action below the surface.
 public function ViewInventory(State: Model.ClientModel): Tui.TuiElement;
 begin
+  if not Layout.InventoryCanFit(State) then
+    return Tui.TuiElementBuilders.MakeOverlay(
+      'Inventory', [
+        Tui.TuiElementBuilders.MakeColumn([
+          Tui.TuiElementBuilders.MakeLabel('Resize to 32x8'),
+          Tui.TuiElementBuilders.MakeLabel('Esc/I close')
+        ])
+      ]
+    );
+  end if;
+  var Width := State.ViewportWidth - 4;
+  if Width > 64 then
+    Width := 64;
+  end if;
+  const Rows := Layout.InventoryPageRows(State);
+  var First := 0;
+  if (State.InventorySelection >= Rows) and (State.InventorySelection < State.Inventory.Length()) then
+    First := State.InventorySelection - Rows + 1;
+  end if;
+  var Last := First + Rows;
+  if Last > State.Inventory.Length() then
+    Last := State.Inventory.Length();
+  end if;
+  var Title := 'Inventory';
   var Content: array of Tui.TuiElement := [];
   if State.Inventory.Length() = 0 then
     begin
@@ -213,13 +274,17 @@ begin
     end;
   else
     begin
-      for Index: integer := 0 to State.Inventory.Length() - 1 do
+      Title := Title + ' ' + Conv.IntToStr(First + 1) + '-' + Conv.IntToStr(Last) + '/' +
+        Conv.IntToStr(State.Inventory.Length());
+      for Index: integer := First to Last - 1 do
         begin
           Content.PushInPlace(
             Tui.TuiElementBuilders.MakeLabel(
-              InventoryEntry(
-                State.Inventory[Index], Index =
-                State.InventorySelection
+              Layout.FitLine(
+                InventoryEntry(
+                  State.Inventory[Index], Index =
+                  State.InventorySelection
+                ), Width
               )
             )
           );
@@ -228,21 +293,20 @@ begin
     end;
   end if;
 
-  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(''));
   Content.PushInPlace(
     Tui.TuiElementBuilders.MakeLabel(
       'Health ' + Conv.IntToStr(State.Health) + '/' + Conv.IntToStr(State.MaxHealth)
     )
   );
-  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(SelectedActionLabel(State)));
+  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(SelectedActionLabel(State) + '  D drop'));
   Content.PushInPlace(
-    Tui.TuiElementBuilders.MakeLabel('W/S or arrows select  D drop  Esc close')
+    Tui.TuiElementBuilders.MakeLabel('W/S/arrows; Esc/I close')
   );
   Content.PushInPlace(
-    Tui.TuiElementBuilders.MakeLabel('Using, changing or dropping an item takes one turn.')
+    Tui.TuiElementBuilders.MakeLabel('Item actions: one turn')
   );
   return Tui.TuiElementBuilders.MakeOverlay(
-    'Inventory',
+    Title,
     [Tui.TuiElementBuilders.MakeColumn(Content)]
   );
 end function;

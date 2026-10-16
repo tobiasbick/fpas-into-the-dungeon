@@ -1,0 +1,410 @@
+// Verifies detailed server-only persistence causes, preserved sessions and non-blocking log delivery.
+program PersistenceDiagnosticsTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.GameState as GameState, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as Config, Dungeon.Server.Failures as Failures, Dungeon.Server.Handling as Handling, Dungeon.Server.Logging as Logging, Dungeon.Server.Session as Session, Dungeon.Server.Worlds as Worlds, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.CatalogWorlds as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.World as World, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Errors as LevelErrors, Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as SaveErrors, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type SocketPair = record
+  Client: Net.Connection;
+  Server: Net.Connection;
+  Token: Tasks.CancellationToken;
+end record;
+
+type ExchangeResult = record
+  Next: Session.ServerSession;
+  Wire: string;
+end record;
+
+function Request(Before: Session.ServerSession; Message: Protocol.ClientMessage; Settings: Config.ServerConfig; Pair: SocketPair): ExchangeResult;
+begin
+  const Next := Handling.HandleSessionMessage(
+    Before, Message, Pair.Server, Settings, Pair.Token
+  ).Unwrap();
+  const Read := Transport.ReadLine(Transport.NewLineReader(Pair.Client), Pair.Token).Unwrap();
+  return ExchangeResult(Next := Next, Wire := Read.Line);
+end function;
+
+function Drain(Queue: channel of Logging.ServerLogEvent): array of Logging.ServerLogEvent;
+begin
+  var Values: array of Logging.ServerLogEvent := [];
+  var Done := false;
+  while not Done do
+    case Tasks.TryReceive(Queue).Unwrap() of
+      when Some(const Value):
+        Values.PushInPlace(Value);
+      when None:
+        Done := true;
+    end case;
+  end while;
+
+  return Values;
+end function;
+
+procedure AssertRejected(Before: Session.ServerSession; Outcome: ExchangeResult; Code: string; SafeText: string);
+begin
+  Sessions.AssertUnchanged(Before, Outcome.Next);
+  Test.AssertEquals(
+    Servers.EncodeServer(Protocol.ServerMessage.Rejected(Code, SafeText)),
+    Outcome.Wire
+  );
+end procedure;
+
+procedure AssertNoErrors(Queue: channel of Logging.ServerLogEvent);
+begin
+  for Value: Logging.ServerLogEvent in Drain(Queue) do
+    Test.AssertFalse(Value.Kind = 'error');
+  end for;
+end procedure;
+
+function StoredState(Value: World.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(Value).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('fixture needs a valid saved state');
+  end case;
+end function;
+
+procedure AssertFailure(
+  Before: Session.ServerSession; Message: Protocol.ClientMessage; Settings: Config.ServerConfig;
+  Pair: SocketPair; Code: string; SafeText: string; Detail: string
+);
+begin
+  const Outcome := Request(Before, Message, Settings, Pair);
+  AssertRejected(Before, Outcome, Code, SafeText);
+  Test.AssertFalse(Settings.WorldsRoot in Outcome.Wire);
+  const Values := Drain(Settings.Logs.Unwrap());
+  Test.AssertEquals(2, Values.Length());
+  Test.AssertEquals('error', Values[0].Kind);
+  Test.AssertEquals(Detail, Values[0].Text);
+  Test.AssertEquals('rejected', Values[1].Kind);
+  Test.AssertEquals(Code + ': ' + SafeText, Values[1].Text);
+  for Value: Logging.ServerLogEvent in Values do
+    Test.AssertTrue(Value.Timestamp > 0);
+    Test.AssertTrue(Value.Snapshot is None);
+  end for;
+end procedure;
+
+begin
+  const Root := '.temp-data/persistence-diagnostics-' + Conv.IntToStr(Time.TimestampMillis());
+  const Queue: channel of Logging.ServerLogEvent := Tasks.CreateChannel(32);
+  const Settings := Config.ServerConfig(
+    ConfigPath := '', Logs := Some(Queue), WorldsRoot := Root, WorldId := 'write-io',
+    WorldSeed := 24680, DungeonRegionChunks := 1, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  discard Net.SetTimeout(Server, 5000).Unwrap();
+  const Pair := SocketPair(
+    Client := Client, Server := Server,
+    Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource())
+  );
+
+  const Value := World.OpenWorld(Root, Settings.WorldId, 24680, 1, 32).Unwrap();
+  const Idle := Worlds.NewServerSession(
+    Settings,
+    Session.ViewportSize(Width := 1, Height := 1)
+  ).Unwrap();
+  const Active := Idle with State := Some(GameState.NewGame(Value.Metadata)); Dirty := true; LastSavedAt := 123456; end with;
+  const Blocker := Value.Directory + '/saves';
+  discard Fs.WriteTextAtomic(Blocker, 'preserve this blocker').Unwrap();
+  var Cause := '';
+  case Fs.CreateDirAll(Blocker) of
+    when Error(const Reason):
+      Cause := 'cannot create savegame directory: ' + Reason;
+    when Ok(_):
+      panic('fixture must prevent directory creation');
+  end case;
+
+  AssertFailure(
+    Active, Protocol.ClientMessage.SaveGame, Settings, Pair, 'storage_error',
+    'Saved game storage of world write-io failed.',
+    'save failed for world write-io: savegame storage failed: ' + Cause
+  );
+  Test.AssertEquals('preserve this blocker', Fs.ReadText(Blocker).Unwrap());
+  AssertFailure(
+    Idle, Protocol.ClientMessage.LoadGame, Settings, Pair, 'storage_error',
+    'Saved game storage of world write-io failed.',
+    'load failed for world write-io: savegame storage failed: savegame directory exists but is not a directory'
+  );
+
+  // Full delivery evicts older diagnostics; one-slot, closed and absent queues remain optional.
+  const Full: channel of Logging.ServerLogEvent := Tasks.CreateChannel(2);
+  for Index: integer := 1 to 2 do
+    discard Tasks.Send(Full, Logging.ServerLogEvent(Kind := 'world', Text := 'older')).Unwrap();
+  end for;
+
+  AssertFailure(
+    Active, Protocol.ClientMessage.SaveGame, Settings with Logs := Some(Full); end with,
+    Pair, 'storage_error', 'Saved game storage of world write-io failed.',
+    'save failed for world write-io: savegame storage failed: ' + Cause
+  );
+  discard Tasks.CloseChannel(Full);
+  const Tiny: channel of Logging.ServerLogEvent := Tasks.CreateChannel(1);
+  discard Tasks.Send(Tiny, Logging.ServerLogEvent(Kind := 'world', Text := 'older')).Unwrap();
+  const TinyReply := Request(
+    Active,
+    Protocol.ClientMessage.SaveGame,
+    Settings with Logs := Some(Tiny); end with,
+    Pair
+  );
+  AssertRejected(
+    Active,
+    TinyReply,
+    'storage_error',
+    'Saved game storage of world write-io failed.'
+  );
+  const Retained := Drain(Tiny);
+  Test.AssertEquals(1, Retained.Length());
+  Test.AssertEquals('rejected', Retained[0].Kind);
+  discard Tasks.CloseChannel(Tiny);
+  const Closed: channel of Logging.ServerLogEvent := Tasks.CreateChannel(1);
+  discard Tasks.CloseChannel(Closed);
+  const ClosedReply := Request(
+    Active,
+    Protocol.ClientMessage.SaveGame,
+    Settings with Logs := Some(Closed); end with,
+    Pair
+  );
+  AssertRejected(
+    Active,
+    ClosedReply,
+    'storage_error',
+    'Saved game storage of world write-io failed.'
+  );
+  const HeadlessReply := Request(
+    Idle,
+    Protocol.ClientMessage.LoadGame,
+    Settings with Logs := None; end with,
+    Pair
+  );
+  AssertRejected(
+    Idle,
+    HeadlessReply,
+    'storage_error',
+    'Saved game storage of world write-io failed.'
+  );
+  Test.AssertEquals('preserve this blocker', Fs.ReadText(Blocker).Unwrap());
+
+  // Repair and retry on this connection, including Continue when no explicit save exists.
+  discard Fs.DeleteFile(Blocker).Unwrap();
+  const Missing := Request(Idle, Protocol.ClientMessage.LoadGame, Settings, Pair);
+  Test.AssertTrue(Servers.DecodeServer(Missing.Wire).Unwrap() is Protocol.ServerMessage.State(_));
+  Test.AssertTrue(Missing.Next.Dirty);
+  Test.AssertFalse(Fs.Exists(Savegame.SaveGamePath(Value)));
+  AssertNoErrors(Queue);
+  const Saved := Request(Active, Protocol.ClientMessage.SaveGame, Settings, Pair);
+  Test.AssertTrue(
+    Servers.DecodeServer(Saved.Wire).Unwrap() is Protocol.ServerMessage.SaveCompleted
+  );
+  Test.AssertFalse(Saved.Next.Dirty);
+  Test.AssertTrue(Saved.Next.LastSavedAt > 123456);
+  Sessions.AssertUnchanged(
+    Active with Dirty := false; LastSavedAt := Saved.Next.LastSavedAt; end with,
+    Saved.Next
+  );
+  AssertNoErrors(Queue);
+  const SavedText := Fs.ReadText(Savegame.SaveGamePath(Value)).Unwrap();
+
+  // Guard rejections must never be logged as persistence failures.
+  const Overwrite := Request(Saved.Next, Protocol.ClientMessage.SaveGame, Settings, Pair);
+  AssertRejected(
+    Saved.Next,
+    Overwrite,
+    'overwrite_required',
+    'Confirm overwriting the existing save or cancel.'
+  );
+  AssertNoErrors(Queue);
+  const NotStarted := Request(Idle, Protocol.ClientMessage.SaveGame, Settings, Pair);
+  AssertRejected(Idle, NotStarted, 'session_not_started', 'Start or continue a game first.');
+  AssertNoErrors(Queue);
+  const AlreadyStarted := Request(Saved.Next, Protocol.ClientMessage.LoadGame, Settings, Pair);
+  AssertRejected(
+    Saved.Next,
+    AlreadyStarted,
+    'session_already_started',
+    'A game session is already active.'
+  );
+  AssertNoErrors(Queue);
+  Test.AssertEquals(SavedText, Fs.ReadText(Savegame.SaveGamePath(Value)).Unwrap());
+
+  // An actual atomic publication failure retains its complete OS cause only in logs.
+  discard Fs.DeleteFile(Savegame.SaveGamePath(Value)).Unwrap();
+  discard Fs.CreateDirAll(Savegame.SaveGamePath(Value)).Unwrap();
+  const Sentinel := Savegame.SaveGamePath(Value) + '/keep';
+  discard Fs.WriteTextAtomic(Sentinel, 'preserve directory contents').Unwrap();
+  var WriteCause := '';
+  case Savegame.WriteSaveGame(Value, Active.State.Unwrap()) of
+    when Error(SaveErrors.PersistenceFailure.Io(const Reason)):
+      WriteCause := Reason;
+    when Error(_), Ok(_):
+      panic('fixture must prevent atomic publication');
+  end case;
+
+  Test.AssertTrue('cannot write savegame:' in WriteCause);
+  Test.AssertTrue(WriteCause.Length() > 'cannot write savegame: '.Length());
+  AssertFailure(
+    Active, Protocol.ClientMessage.OverwriteSaveGame, Settings, Pair, 'storage_error',
+    'Saved game storage of world write-io failed.',
+    'save failed for world write-io: savegame storage failed: ' + WriteCause
+  );
+  AssertFailure(
+    Idle, Protocol.ClientMessage.LoadGame, Settings, Pair, 'storage_error',
+    'Saved game storage of world write-io failed.',
+    'load failed for world write-io: savegame storage failed: savegame path exists but is not a file'
+  );
+  Test.AssertEquals('preserve directory contents', Fs.ReadText(Sentinel).Unwrap());
+
+  // Real saved entities and discovery across two visited levels survive each rejection.
+  const Visited := Fixtures.CreateVisitedWorld(Root, 'visited', 2);
+  const VisitedSettings := Settings with WorldId := 'visited'; end with;
+  const State := StoredState(Visited);
+  const Position := GameState.OutdoorPlayerPosition(State).Unwrap();
+  const Warm := World.LoadWorldCell(Visited, Position.X, Position.Y).Unwrap().World;
+  const BeforeLoad := Worlds.NewServerSession(VisitedSettings, Idle.Viewport).Unwrap() with World := Warm; LastSavedAt := 123456; end with;
+  const BeforeSave := BeforeLoad with State := Some(State); Dirty := true; end with;
+  const SaveText := Fs.ReadText(Savegame.SaveGamePath(Visited)).Unwrap();
+  const MetadataText := Fs.ReadText(World.WorldMetadataPath(Visited)).Unwrap();
+  const Path := Fixtures.SpawnLevelPath(Visited);
+  const LevelText := Fs.ReadText(Path).Unwrap();
+  const Region := Entrances.RegionOf(Visited.Metadata, Visited.Metadata.Spawn);
+  const AreaId := Identities.DungeonAreaId(Visited.Metadata, Region);
+  for InvalidContent: boolean in [true, false] do
+    var Detail := 'level missing: ' + AreaId;
+    var SafeText := 'The dungeon level ' + AreaId + ' of world visited is missing.';
+    if InvalidContent then
+      discard Fs.WriteTextAtomic(Path, '{').Unwrap();
+      case Interiors.ReadLevel(Visited, AreaId) of
+        when Error(LevelErrors.LevelFailure.Invalid(_, const Reason)):
+          Detail := 'level invalid: ' + AreaId + ': ' + Reason;
+        when Error(_), Ok(_):
+          panic('fixture needs an invalid level');
+      end case;
+
+      SafeText := 'The dungeon level ' + AreaId + ' of world visited is invalid.';
+    else
+      discard Fs.DeleteFile(Path).Unwrap();
+    end if;
+
+    AssertFailure(
+      BeforeSave, Protocol.ClientMessage.OverwriteSaveGame, VisitedSettings, Pair,
+      'world_data_error', SafeText, 'save failed for world visited: ' + Detail
+    );
+    AssertFailure(
+      BeforeLoad, Protocol.ClientMessage.LoadGame, VisitedSettings, Pair,
+      'world_data_error', SafeText, 'load failed for world visited: ' + Detail
+    );
+    if InvalidContent then
+      Test.AssertEquals('{', Fs.ReadText(Path).Unwrap());
+    else
+      Test.AssertFalse(Fs.Exists(Path));
+    end if;
+
+    Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(Visited)).Unwrap());
+    discard Fs.WriteTextAtomic(Path, LevelText).Unwrap();
+    const Retried := Request(BeforeLoad, Protocol.ClientMessage.LoadGame, VisitedSettings, Pair);
+    Test.AssertTrue(Servers.DecodeServer(Retried.Wire).Unwrap() is Protocol.ServerMessage.State(_));
+    Test.AssertFalse(Retried.Next.Dirty);
+    Test.AssertEquals(123456, Retried.Next.LastSavedAt);
+    Test.AssertEquals(2, Retried.Next.State.Unwrap().VisitedAreas.Length());
+    Test.AssertEquals(State.Items.Length(), Retried.Next.State.Unwrap().Items.Length());
+    AssertNoErrors(Queue);
+  end for;
+
+  const InvalidState := BeforeSave with State := Some(State with Health := 0; end with); end with;
+
+  AssertFailure(
+    InvalidState, Protocol.ClientMessage.OverwriteSaveGame, VisitedSettings, Pair, 'save_failed',
+    'player health is outside its range',
+    'save failed for world visited: invalid state: player health is outside its range'
+  );
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(Visited)).Unwrap());
+  discard Fs.WriteTextAtomic(Savegame.SaveGamePath(Visited), '{').Unwrap();
+  var InvalidReason := '';
+  case Savegame.LoadSaveGame(Visited).Unwrap() of
+    when Savegame.SaveGameLoad.Invalid(const Reason):
+      InvalidReason := Reason;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Loaded(_, _):
+      panic('fixture needs invalid save content');
+  end case;
+
+  Test.AssertTrue('invalid savegame:' in InvalidReason);
+  AssertFailure(
+    BeforeLoad, Protocol.ClientMessage.LoadGame, VisitedSettings, Pair, 'save_incompatible',
+    'Saved game is incompatible and was kept. Start over or recreate it.',
+    'load failed for world visited: ' + InvalidReason
+  );
+  Test.AssertEquals('{', Fs.ReadText(Savegame.SaveGamePath(Visited)).Unwrap());
+  discard Fs.WriteTextAtomic(Savegame.SaveGamePath(Visited), SaveText).Unwrap();
+  const Reloaded := Request(BeforeLoad, Protocol.ClientMessage.LoadGame, VisitedSettings, Pair);
+  Test.AssertTrue(Servers.DecodeServer(Reloaded.Wire).Unwrap() is Protocol.ServerMessage.State(_));
+  AssertNoErrors(Queue);
+  const Rewritten := Request(
+    BeforeSave,
+    Protocol.ClientMessage.OverwriteSaveGame,
+    VisitedSettings,
+    Pair
+  );
+  Test.AssertTrue(
+    Servers.DecodeServer(Rewritten.Wire).Unwrap() is Protocol.ServerMessage.SaveCompleted
+  );
+  Test.AssertFalse(Rewritten.Next.Dirty);
+  Sessions.AssertUnchanged(
+    BeforeSave with Dirty := false; LastSavedAt := Rewritten.Next.LastSavedAt; end with,
+    Rewritten.Next
+  );
+  AssertNoErrors(Queue);
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(Visited)).Unwrap());
+  Test.AssertEquals(LevelText, Fs.ReadText(Path).Unwrap());
+
+  // Leave this final test-owned obstruction in place and prove it is never replaced or repaired.
+  discard Fs.DeleteFile(Path).Unwrap();
+  discard Fs.CreateDirAll(Path).Unwrap();
+  const LevelSentinel := Path + '/keep';
+  discard Fs.WriteTextAtomic(LevelSentinel, 'preserve level directory').Unwrap();
+  const LevelCause := 'level storage failed: level path exists but is not a file for area ' +
+    AreaId;
+  for Loading: boolean in [false, true] do
+    AssertFailure(
+      if Loading then BeforeLoad else BeforeSave end if,
+      if Loading then Protocol.ClientMessage.LoadGame
+        else Protocol.ClientMessage.OverwriteSaveGame
+        end if,
+      VisitedSettings, Pair, 'storage_error', 'Dungeon level storage of world visited failed.',
+      (if Loading then 'load' else 'save' end if) + ' failed for world visited: ' + LevelCause
+    );
+  end for;
+
+  Test.AssertEquals('preserve level directory', Fs.ReadText(LevelSentinel).Unwrap());
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(Visited)).Unwrap());
+  Test.AssertEquals(MetadataText, Fs.ReadText(World.WorldMetadataPath(Visited)).Unwrap());
+
+  // Deterministic path-bearing infrastructure causes also remain server-only, independent of OS wording.
+  const PrivatePath := '/private-storage/path-marker';
+  for Failure: SaveErrors.PersistenceFailure in [
+    SaveErrors.PersistenceFailure.Io(PrivatePath),
+    SaveErrors.PersistenceFailure.Level(LevelErrors.LevelFailure.Io(PrivatePath)),
+    SaveErrors.PersistenceFailure.Level(LevelErrors.LevelFailure.Invalid(AreaId, PrivatePath)),
+    SaveErrors.PersistenceFailure.Level(LevelErrors.LevelFailure.Generation(AreaId, PrivatePath))
+  ] do
+    const Rejection := Failures.PersistenceRejection('visited', 'load_failed', Failure);
+    Test.AssertTrue(PrivatePath in Failures.PersistenceFailureReason(Failure));
+    Test.AssertFalse(PrivatePath in Rejection.Message);
+    Test.AssertFalse(
+      PrivatePath in
+      Servers.EncodeServer(Protocol.ServerMessage.Rejected(Rejection.Code, Rejection.Message))
+    );
+  end for;
+
+  discard Net.Close(Client).Unwrap();
+  discard Net.Close(Server).Unwrap();
+  discard Tasks.CloseChannel(Queue);
+end.

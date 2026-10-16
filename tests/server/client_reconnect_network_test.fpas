@@ -1,0 +1,211 @@
+// Runs the production TUI subscription through cancellation, reconnect, stale events and failures.
+program ClientReconnectNetworkTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as CatalogUnit, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time, Std.Tui as Tui;
+
+function Visible(): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      OriginX := 0, OriginY := 0, Width := 1, Height := 1, Rows := ['g'],
+      KnowledgeRows := ['v'], PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0,
+      Inventory := [], Health := 20, MaxHealth := 20, Character := []
+    )
+  );
+end function;
+
+function Action(Control: integer; Value: integer): Tui.TuiMsg;
+begin
+  return Tui.TuiMsg.Action(Tui.TuiControlId.Create(Control), Tui.TuiAction.Create(Value));
+end function;
+
+procedure Pump(App: Tui.TuiApplication; Inbox: channel of ClientUnit.ConnectionEvent; var Model: ClientUnit.ClientModel);
+begin
+  Model := App.RunBackgroundIterations(
+    Model, Inbox, ClientUnit.UpdateClient, ClientUnit.UpdateConnectionEvent, ClientUnit.ViewClient,
+    1, 0
+  );
+end procedure;
+
+procedure UntilPhase(
+  App: Tui.TuiApplication; Inbox: channel of ClientUnit.ConnectionEvent;
+  var Model: ClientUnit.ClientModel; Phase: ClientUnit.ClientConnectionPhase
+);
+begin
+  const Started := Time.MonotonicMillis();
+  while Model.ConnectionPhase <> Phase do
+    Pump(App, Inbox, var Model);
+    if Time.ElapsedMillis(Started) > 10000 then
+      panic('client did not reach expected phase: ' + Model.Status);
+    end if;
+
+    Time.Sleep(1);
+  end while;
+end procedure;
+
+procedure UntilNotice(
+  App: Tui.TuiApplication; Inbox: channel of ClientUnit.ConnectionEvent;
+  var Model: ClientUnit.ClientModel; Notices: channel of string; Expected: string
+);
+begin
+  const Started := Time.MonotonicMillis();
+  while true do
+    case Tasks.TryReceive(Notices).Unwrap() of
+      when Some(const Value):
+        Test.AssertEquals(Expected, Value);
+        return;
+      when None:
+        null;
+    end case;
+
+    Pump(App, Inbox, var Model);
+    if Time.ElapsedMillis(Started) > 10000 then
+      panic('peer did not observe ' + Expected);
+    end if;
+
+    Time.Sleep(1);
+  end while;
+end procedure;
+
+function Serve(Listener: Net.Listener; Notices: channel of string; Token: Tasks.CancellationToken): boolean;
+begin
+  for Attempt: integer := 1 to 4 do
+    const Peer := Net.AcceptWithCancellation(Listener, Token).Unwrap();
+    discard Net.SetTimeout(Peer, 10000).Unwrap();
+    var Reader := Transport.ReadLine(Transport.NewLineReader(Peer), Token).Unwrap().Reader;
+    // The fourth connection fails before welcome; the ordinary Result must reach the UI.
+    if Attempt = 4 then
+      discard Transport.WriteLine(Peer, 'not json', Token).Unwrap();
+    else
+      discard Transport.WriteLine(
+        Peer, ServerMessages.EncodeServer(
+          Protocol.ServerMessage.Welcome(
+            Protocol.ProtocolVersion, CatalogUnit.FixtureCatalog(true, false)
+          )
+        ), Token
+      ).Unwrap();
+      const Requested := Transport.ReadLine(Reader, Token).Unwrap();
+      Reader := Requested.Reader;
+      const Request := ClientMessages.DecodeClient(Requested.Line).Unwrap();
+      if Attempt < 3 then
+        Test.AssertTrue(Request is Protocol.ClientMessage.LoadGame);
+      else
+        Test.AssertTrue(Request is Protocol.ClientMessage.StartNewGame);
+      end if;
+
+      if Attempt = 1 then
+        discard Tasks.Send(Notices, 'pending').Unwrap();
+      else
+        discard Transport.WriteLine(
+          Peer,
+          ServerMessages.EncodeServer(Protocol.ServerMessage.State(Visible())),
+          Token
+        ).Unwrap();
+      end if;
+    end if;
+
+    // The cancelled subscription closes the socket; no queued Disconnect can reach the next peer.
+    Test.AssertEquals(0, Net.ReceiveBytes(Peer, 1).Unwrap().Length());
+    discard Net.Close(Peer).Unwrap();
+    discard Tasks.Send(Notices, 'closed').Unwrap();
+  end for;
+
+  discard Net.CloseListener(Listener).Unwrap();
+  return true;
+end function;
+
+begin
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Listener).Unwrap().Port;
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  const Notices: channel of string := Tasks.CreateChannel(8);
+  const InitialRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const Inbox: channel of ClientUnit.ConnectionEvent := Tasks.CreateChannel(8);
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 24));
+  var Model := ClientUnit.NewClientModel(
+    '127.0.0.1', Port, '', RuntimeData.DefaultClientPreferences(), InitialRequests, Inbox
+  );
+  scope
+    const Worker := go Serve(Listener, Notices, Token);
+    App.Inject(Action(1, 101));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.AwaitingSession);
+    const FirstGeneration := Model.ConnectionGeneration;
+    const FirstRequests := Model.Requests;
+    App.Inject(Action(5, 105));
+    UntilNotice(App, Inbox, var Model, Notices, 'pending');
+    Test.AssertTrue(Model.Pending);
+    App.Inject(Action(7, 132));
+    for Retry: integer := 0 to 9 do
+      if Model.Overlay = ClientUnit.ClientOverlay.SessionCancelConfirmationOverlay then
+        break;
+      end if;
+
+      Pump(App, Inbox, var Model);
+    end for;
+
+    Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.SessionCancelConfirmationOverlay);
+
+    App.Inject(Action(32, 133));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.Offline);
+    Test.AssertTrue(Tasks.TrySend(FirstRequests, Protocol.ClientMessage.Disconnect) is Error(_));
+    // Reconnect before waiting for the previous peer to announce closure.
+    App.Inject(Action(1, 101));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.AwaitingSession);
+    UntilNotice(App, Inbox, var Model, Notices, 'closed');
+    Test.AssertTrue(Model.ConnectionGeneration > FirstGeneration);
+    for Old: ClientUnit.ClientEvent in [
+      ClientUnit.ClientEvent.State(Visible()), ClientUnit.ClientEvent.Failed('old failure'),
+      ClientUnit.ClientEvent.Disconnected
+    ] do
+      discard App.InjectBackgroundForTest(
+        Inbox,
+        ClientUnit.ConnectionEvent(Generation := FirstGeneration, Value := Old)
+      ).Unwrap();
+      Pump(App, Inbox, var Model);
+      Test.AssertTrue(Model.ConnectionPhase = ClientUnit.ClientConnectionPhase.AwaitingSession);
+      Test.AssertFalse(Model.HasVisibleState);
+    end for;
+
+    App.Inject(Action(5, 105));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.Active);
+    Test.AssertTrue(Model.HasVisibleState);
+    Test.AssertEquals(20, Model.Health);
+    App.Inject(Action(12, 111));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.Offline);
+    UntilNotice(App, Inbox, var Model, Notices, 'closed');
+    App.Inject(Action(1, 101));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.AwaitingSession);
+    App.Inject(Action(4, 104));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.Active);
+    App.Inject(Action(12, 111));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.Offline);
+    UntilNotice(App, Inbox, var Model, Notices, 'closed');
+    App.Inject(Action(1, 101));
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.Failed);
+    Test.AssertTrue('Connection failed:' in Model.Status);
+    Test.AssertFalse(Model.HasVisibleState);
+    UntilNotice(App, Inbox, var Model, Notices, 'closed');
+    Test.AssertTrue(Tasks.Wait(Worker));
+    // A connection refusal also becomes a tagged failure instead of being silently reaped.
+    const FailedGeneration := Model.ConnectionGeneration;
+    App.Inject(Action(1, 101));
+    Pump(App, Inbox, var Model);
+    Test.AssertTrue(Model.ConnectionPhase = ClientUnit.ClientConnectionPhase.Connecting);
+    UntilPhase(App, Inbox, var Model, ClientUnit.ClientConnectionPhase.Failed);
+    Test.AssertTrue(Model.ConnectionGeneration > FailedGeneration);
+    Test.AssertTrue('Connection failed:' in Model.Status);
+  end scope;
+  const LastRequests := Model.Requests;
+  App.Inject(Action(3, 103));
+  Pump(App, Inbox, var Model);
+  Test.AssertTrue(Tasks.TrySend(LastRequests, Protocol.ClientMessage.StartNewGame) is Error(_));
+  Test.AssertTrue(
+    Tasks.TrySend(
+      Inbox, ClientUnit.ConnectionEvent(
+        Generation := Model.ConnectionGeneration, Value := ClientUnit.ClientEvent.Disconnected
+      )
+    ) is Error(_)
+  );
+  discard Tasks.CloseChannel(Notices);
+end.
