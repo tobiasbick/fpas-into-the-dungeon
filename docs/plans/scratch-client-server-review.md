@@ -1,8 +1,10 @@
 # Scratch: client/server maintainability review
 
-Status: pass 01 is complete. R01, R02 and R08 are closed (3/15 items).
-The remaining 12 items are open; R03/R04 are next. Independent review and the
-complete 94-program suite passed after the review corrections.
+Status: pass 02 is BLOCKED by a reproduced FPAS compiler defect; R03/R04
+remain open. R01, R02 and R08 remain closed (3/15 items). Pass 01 was committed
+as `2c17456` and passed 94/94 programs. The pass 02 draft is not verified or
+ready for acceptance. The user requested a co-authored checkpoint commit and
+push on 2026-10-16; this does not close R03/R04 or authorize compiler changes.
 Created on 2026-10-16 from the five-agent review of commit `3faf77e`.
 This is a temporary tracking plan. Delete it after the agreed work is complete,
 verified and accepted by the user. Retain lasting contracts in architecture or
@@ -12,6 +14,10 @@ product documentation rather than keeping this scratch file indefinitely.
 
 - Client/server correctness, ownership, extensibility, dead code and documentation.
 - Review baseline: 43 client/server production FPAS files, about 10,200 lines.
+- Publication required GitHub noreply email metadata for the three previously
+  unpublished commits. The historical review baseline `3faf77e` corresponds to
+  `bca346d`; pass 01 changed from `2d64d52` to `2c17456`. Their complete source
+  trees are identical. Last-verified-pass references below use `2c17456`.
 - The existing complete suite passed 91/91 programs before this review; it was
   not rerun for the static review. This does not close the findings below.
 - R01 was additionally reproduced with the unchanged game-local compiler and
@@ -299,3 +305,71 @@ git diff --check
 Next pass: R03 and R04 together, because request/event isolation and socket
 closure share client connection ownership. The remaining R05-R07 and R09-R15
 stay open. Manual 14b terminal review and user acceptance stay explicitly open.
+
+
+## Pass 02 — R03 and R04 (blocked)
+
+Status: BLOCKED on 2026-10-16, before the targeted regressions and final suite.
+Implementation paused under AGENTS.md's compiler-defect rule. No item closed
+and no compiler repository changes made. The user requested a co-authored
+checkpoint commit and push on 2026-10-16. This draft and reproduction are
+recorded in the commit containing this entry, titled
+`wip(client): checkpoint blocked connection lifecycle cleanup`.
+
+### Draft scope
+
+- **R03:** each StartConnection creates a fresh request queue. Cancel/quit close
+  the old queue and invalidate its generation before host cancellation. A
+  ConnectionEvent envelope tags network events; the production host discards
+  old generations. Ordinary network errors are explicitly published as tagged
+  Failed events because the TUI silently reaps ordinary task Result values.
+- **R04:** Exchange borrows a socket; RunConnection owns it and closes it after
+  every ordinary Result outcome. A session error retains priority over an
+  additional close error. The raw-event RunNetwork adapter remains available
+  to callers that orchestrate their own network session.
+- UI tests were mechanically adapted to the new host-inbox type; existing TCP
+  tests retain raw network channels and use a separate UI inbox. Assertions
+  that expect cancellation to enqueue Disconnect still need updating, together
+  with new cancellation/reconnect and socket-failure regressions. Production
+  API comments and lasting architecture/product contracts need final alignment.
+- These are unfinished draft changes, retained for review and continuation.
+  The last verified implementation is commit `2c17456`, not this working tree.
+
+### Compiler blocker and independent review
+
+- The unchanged game-local compiler reports `FP9001: The compiler could not
+  lower field access on non-record` for a field access on an inferred generic
+  function result. The first workspace check failed; a fresh client-core check
+  reproduced it. Its game diagnostic names unchanged ClientMessages code;
+  isolation locates the trigger at `Final.Requests` after Tui.RunWithBackground.
+- Minimal game-independent reproduction:
+  [pass02-inferred-generic-record.fpas](repros/pass02-inferred-generic-record.fpas).
+  It defines Identity<T>(Value: T): T, infers a local record result, and reads
+  its Generation field. No TUI, networking, game units or dependencies are
+  required. Expected behavior: successful compilation; actual: FP9001 at the
+  field access, exit code 1.
+- A diagnostic control that changes only `const Final :=` to
+  `const Final: State :=` checks successfully. The language reference explicitly
+  permits inference for completely determined local initializers and generic
+  calls. This annotation was tried only in isolated temporary copies, not
+  installed as a game workaround.
+- Independent subagent review reproduced the minimal failure and the green
+  annotated control. R04 alone checks in a baseline copy; the entire clientcore
+  draft checks in an isolated copy when only Final is annotated. Static review
+  found no additional concrete correctness issue in the draft ownership or
+  generation policy, but cannot replace its missing behavioral regressions.
+- Toolchain is unchanged from pass 01: revision `33814ef3`, SHA-256
+  `71d2ddc8912509f302832cff3e4db26c9f33fa4741fb16b091075461dfc97d4f`,
+  with its matching standard library. The compiler repository remains untouched.
+
+Reproduce from the game repository root:
+
+```sh
+.temp-data/rat-toolchain/fpas check --std-lib .temp-data/rat-toolchain/lib docs/plans/repros/pass02-inferred-generic-record.fpas
+```
+
+Resume after the user agrees to a compiler fix with regression coverage or
+chooses another explicit disposition of the compiler defect. Then finish the
+R03/R04 regressions and API/docs, run all project checks and the complete suite,
+obtain a final independent review, and update this pass's evidence before
+checking R03/R04. The manual 14b review and acceptance remain explicitly open.

@@ -96,24 +96,13 @@ begin
   return Next;
 end function;
 
-// Disconnects cleanly when connected and quits the client.
+// Invalidates the current attempt, closes its request queue and cancels it before quitting.
 public function RequestQuit(State: Model.ClientModel; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
-  if (
-    (State.ConnectionPhase = Model.ClientConnectionPhase.Active)
-    or
-    (State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession)
-  )
-    or
-    (State.ConnectionPhase = Model.ClientConnectionPhase.Connecting)
-  then
-    begin
-      discard Tasks.TrySend(State.Requests, Protocol.ClientMessage.Disconnect);
-    end;
-  end if;
-
+  discard Tasks.CloseChannel(State.Requests);
+  Cmd.CancelSubscription(Controls.NetworkSubscriptionId);
   Cmd.Set(Tui.TuiCmd.Quit);
-  return State;
+  return State with ConnectionGeneration := State.ConnectionGeneration + 1; end with;
 end function;
 
 // Starts the network subscription and shows the connecting start screen.
@@ -121,24 +110,40 @@ public function StartConnection(State: Model.ClientModel; Cmd: Tui.TuiCmdOutput)
 begin
   const Host: string := State.Host;
   const Port: integer := State.Port;
-  const Requests: channel of Protocol.ClientMessage := State.Requests;
-  const Events: channel of Model.ClientEvent := State.Events;
+  discard Tasks.CloseChannel(State.Requests);
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const Events := State.Events;
+  const Generation := State.ConnectionGeneration + 1;
   const Viewport: Layout.WorldViewport := Layout.DesiredWorldViewport(State);
   Cmd.ReplaceSubscription(
     Controls.NetworkSubscriptionId,
     function(Token: Tasks.CancellationToken): result of (boolean, string) begin
-      return Network.RunNetwork(
+      const PublishEvent: Network.EventPublisher := function(Value: Model.ClientEvent): result of (boolean, string) begin
+        return Tasks.SendWithCancellation(
+          Events, Model.ConnectionEvent(Generation := Generation, Value := Value), Token
+        );
+      end function;
+
+      case Network.RunNetworkPublishing(
         Host,
         Port,
         Viewport.Width,
         Viewport.Height,
         Requests,
-        Events,
+        PublishEvent,
         Token
-      );
+      ) of
+        when Ok(const Completed):
+          return Ok(Completed);
+        when Error(const Reason):
+          // The host silently reaps ordinary task results; deliver failures through its typed inbox.
+          return PublishEvent(Model.ClientEvent.Failed(Reason));
+      end case;
     end function
   );
   var Next: Model.ClientModel := State;
+  Next.Requests := Requests;
+  Next.ConnectionGeneration := Generation;
   Next.Screen := Model.ClientScreen.StartScreen;
   Next.Overlay := Model.ClientOverlay.NoOverlay;
   Next.ConnectionPhase := Model.ClientConnectionPhase.Connecting;
@@ -151,23 +156,13 @@ begin
   return AppendMessage(Next, Next.Status);
 end function;
 
-// Disconnects from the session and returns to the offline start screen.
+// Invalidates the attempt before the host cancels it; queued old events cannot restore gameplay.
 public function ReturnToStart(State: Model.ClientModel; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
 begin
-  if (
-    (State.ConnectionPhase = Model.ClientConnectionPhase.Active)
-    or
-    (State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession)
-  )
-    or
-    (State.ConnectionPhase = Model.ClientConnectionPhase.Connecting)
-  then
-    begin
-      discard Tasks.TrySend(State.Requests, Protocol.ClientMessage.Disconnect);
-      Cmd.CancelSubscription(Controls.NetworkSubscriptionId);
-    end;
-  end if;
+  discard Tasks.CloseChannel(State.Requests);
+  Cmd.CancelSubscription(Controls.NetworkSubscriptionId);
   var Next: Model.ClientModel := State;
+  Next.ConnectionGeneration := State.ConnectionGeneration + 1;
   Next.Screen := Model.ClientScreen.StartScreen;
   Next.Overlay := Model.ClientOverlay.NoOverlay;
   Next.ConnectionPhase := Model.ClientConnectionPhase.Offline;
