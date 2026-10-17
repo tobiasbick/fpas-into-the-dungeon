@@ -1,0 +1,192 @@
+// Verifies prior retrieval, atomic quest rewards at capacity and strict persistence of returned/used/dropped items.
+program QuestRewardTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.Equipment as Equipment, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Quests as Quests, Dungeon.Quests.Items as QuestItems, Dungeon.Quests.Model as Model, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Quests as Preflight, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+
+function Stand(State: GameState.GameState; Position: Coordinates.InteriorPosition): GameState.GameState;
+begin
+  return State with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Position, Facing := Coordinates.FacingDirection.East)
+  ); end with;
+end function;
+
+function PickedUp(View: GameState.AreaView; State: GameState.GameState): GameState.GameState;
+begin
+  case Interaction.Interact(View, State).Unwrap() of
+    when Interaction.InteractionOutcome.StateChanged(const Changed):
+      return Changed;
+    when Interaction.InteractionOutcome.TransitionRequested(_), Interaction.InteractionOutcome.Described(_, _):
+      panic('expected pickup');
+  end case;
+end function;
+
+procedure InvalidPreserved(World: WorldUnit.WorldSession; Text: string);
+begin
+  const Path := Savegame.SaveGamePath(World);
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Text).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+  Test.AssertEquals(Text, Fs.ReadText(Path).Unwrap());
+end procedure;
+
+begin
+  const Root := '.temp-data/quest-reward-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'reward', 12345, 4, 8).Unwrap();
+  const Metadata := World.Metadata;
+  const Objective := Preflight.ProveCompass(World, GameState.NewGame(Metadata)).Unwrap();
+  const Gate := GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SettlementGate
+  ); end with;
+  const Home := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := Metadata, Interior := None),
+    Gate,
+    None
+  ).Unwrap();
+  var Met := Home.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); end with;
+
+  Test.AssertTrue(Quests.Accept(Home.View, Met, Objective) is Error(_));
+  case Dialogue.Start(Home.View, Met).Unwrap() of
+    when Dialogue.Outcome.Continued(const State, _, _):
+      Met := State;
+    when Dialogue.Outcome.Ended(_):
+      panic('expected greeting');
+  end case;
+  const AcceptedEarly := Quests.Accept(Home.View, Met, Objective).Unwrap();
+  Test.AssertFalse(Quests.ReadyToReturn(AcceptedEarly));
+  Test.AssertTrue(Quests.Report(Home.View, AcceptedEarly) is Error(_));
+  Test.AssertTrue(Quests.Accept(Home.View, AcceptedEarly, Objective) is Error(_));
+
+  // Retrieve before accepting. Real transitions create every original entity and immutable file.
+  const HomeGate := Met with Player := Coordinates.PlayerPosition.Settlement(
+    Home.View.Interior.Unwrap().Arrival
+  ); end with;
+  var Trip := Movement.ActivateAreaTransition(Home.View, HomeGate, None).Unwrap();
+  Trip.State.Player := Coordinates.PlayerPosition.Outdoor(Metadata.SpawnEntrance);
+  const Region := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  for Level: integer := 0 to 2 do
+    const Id := Identities.DungeonAreaId(Metadata, Region, Level);
+    const Map := Interiors.OpenLevelForEntry(World, Trip.View, Trip.State, Id).Unwrap();
+    Trip := Movement.ActivateAreaTransition(Trip.View, Trip.State, Some(Map)).Unwrap();
+    if Level < 2 then
+      Trip.State := Stand(Trip.State, InteriorUnit.StairsDownPosition(Map).Unwrap());
+    end if;
+  end for;
+  const Deep := Trip.View.Interior.Unwrap();
+  const Compass := Deep.Items[Deep.Items.Length() - 1];
+  Trip.State := PickedUp(Trip.View, Stand(Trip.State, Compass.Position));
+  Test.AssertFalse(Quests.ReadyToReturn(Trip.State));
+  // Earlier acceptance is an independent valid input for readiness while dropping and recovering.
+  const ActiveTrip := Trip.State with Quest := AcceptedEarly.Quest; end with;
+
+  Test.AssertTrue(Quests.ReadyToReturn(ActiveTrip));
+  const DroppedCompass := Equipment.DropItem(Trip.View, ActiveTrip, Compass.ItemId).Unwrap().State;
+  Test.AssertFalse(Quests.ReadyToReturn(DroppedCompass));
+  Test.AssertTrue(Quests.ReadyToReturn(PickedUp(Trip.View, DroppedCompass)));
+  Test.AssertTrue(Equipment.EquipItem(Trip.State, Compass.ItemId) is Error(_));
+  Test.AssertTrue(
+    Combat.ResolveTurn(Trip.View, Trip.State, Combat.TurnAction.UseItem(Compass.ItemId)) is Error(_)
+  );
+  for Level: integer := 2 downto 0 do
+    const Current := Trip.View.Interior.Unwrap();
+    Trip.State := Stand(Trip.State, Current.Arrival);
+    var Target: option of InteriorUnit.InteriorMap := None;
+    if Level > 0 then
+      Target := Some(
+        Interiors.ReadLevel(World, Identities.DungeonAreaId(Metadata, Region, Level - 1)).Unwrap()
+      );
+    end if;
+
+    Trip := Movement.ActivateAreaTransition(Trip.View, Trip.State, Target).Unwrap();
+  end for;
+
+  Trip.State.Player := Coordinates.PlayerPosition.Outdoor(Metadata.SettlementGate);
+  const ReturnHome := Movement.ActivateAreaTransition(Trip.View, Trip.State, None).Unwrap();
+  const Back := ReturnHome.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); end with;
+  const Ready := Quests.Accept(ReturnHome.View, Back, Objective).Unwrap();
+  Test.AssertTrue(Quests.ReadyToReturn(Ready));
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Ready).Unwrap());
+
+  // At 64 carried items the whole claim defers; at 63 it succeeds with 64 after hand-in.
+  var Full := Ready;
+  for Index: integer := 1 to 62 do
+    Full.Items.PushInPlace(
+      Items.GameItem(
+        Id := 'capacity:' + Conv.IntToStr(Index),
+        Kind := Items.ItemKind.AncientCoin, Location := Items.ItemLocation.CarriedByPlayer
+      )
+    );
+  end for;
+  const Boundary := Quests.Report(ReturnHome.View, Full).Unwrap();
+  Test.AssertEquals(64, GameState.InventoryItems(Boundary).Length());
+  Full.Items.PushInPlace(
+    Items.GameItem(
+      Id := 'capacity:63',
+      Kind := Items.ItemKind.AncientCoin,
+      Location := Items.ItemLocation.CarriedByPlayer
+    )
+  );
+  Test.AssertTrue(Quests.Report(ReturnHome.View, Full) is Error(_));
+  Test.AssertTrue(Quests.ReadyToReturn(Full));
+
+  const Rewarded := Quests.Report(ReturnHome.View, Ready).Unwrap();
+  Test.AssertTrue(Rewarded.Quest is Model.QuestState.Rewarded(_));
+  Test.AssertFalse(Quests.ReadyToReturn(Rewarded));
+  Test.AssertEquals(2, GameState.InventoryItems(Rewarded).Length());
+  Test.AssertEquals(Ready.RandomState, Rewarded.RandomState);
+  Test.AssertTrue(Ready.Progression = Rewarded.Progression);
+  Test.AssertTrue(Quests.Report(ReturnHome.View, Rewarded) is Error(_));
+  Test.AssertTrue(Quests.Accept(ReturnHome.View, Rewarded, Objective) is Error(_));
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Rewarded).Unwrap());
+  const Valid := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  Test.AssertTrue('"kind":"returned_to_mara"' in Valid);
+  Test.AssertTrue(Savegame.LoadSaveGame(World).Unwrap() is Savegame.SaveGameLoad.Loaded(_, _));
+  var Missing := Rewarded with Items := Rewarded.Items.Slice(0, Rewarded.Items.Length() - 1); end with;
+
+  InvalidPreserved(World, Savegame.EncodeSaveGame(Metadata.Id, Missing));
+  var Duplicate := Rewarded;
+  Duplicate.Items.PushInPlace(Rewarded.Items[Rewarded.Items.Length() - 1]);
+  InvalidPreserved(World, Savegame.EncodeSaveGame(Metadata.Id, Duplicate));
+  InvalidPreserved(World, Valid.Replace('"phase":"rewarded"', '"phase":"active"'));
+  InvalidPreserved(World, Valid.Replace(':reward:0', ':reward:2'));
+  InvalidPreserved(World, Valid.Replace('"kind":"returned_to_mara"', '"kind":"consumed"'));
+
+  // A used reward and a dropped reward remain complete, distinct origins on reload.
+  var Used := Rewarded with Health := 1; end with;
+
+  case Combat.ResolveTurn(
+    ReturnHome.View,
+    Used,
+    Combat.TurnAction.UseItem(QuestItems.RewardId(Metadata, 0))
+  ).Unwrap() of
+    when Combat.TurnOutcome.Continued(const State, _, _):
+      Used := State;
+    when Combat.TurnOutcome.Defeated(_):
+      panic('using a potion in Hearthmoor cannot defeat the player');
+  end case;
+  const HomeExit := Used with Player := Coordinates.PlayerPosition.Settlement(
+    ReturnHome.View.Interior.Unwrap().Arrival
+  ); end with;
+  var DropTrip := Movement.ActivateAreaTransition(ReturnHome.View, HomeExit, None).Unwrap();
+  DropTrip.State.Player := Coordinates.PlayerPosition.Outdoor(Metadata.SpawnEntrance);
+  const FirstMap := Interiors.ReadLevel(
+    World,
+    Identities.DungeonAreaId(Metadata, Region, 0)
+  ).Unwrap();
+  DropTrip := Movement.ActivateAreaTransition(
+    DropTrip.View,
+    DropTrip.State,
+    Some(FirstMap)
+  ).Unwrap();
+  const Dropped := Equipment.DropItem(
+    DropTrip.View,
+    DropTrip.State,
+    QuestItems.RewardId(Metadata, 1)
+  ).Unwrap().State;
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Dropped).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World).Unwrap() is Savegame.SaveGameLoad.Loaded(_, _));
+  Test.AssertTrue(GameState.NewGame(Metadata).Quest is Model.QuestState.NotAccepted);
+end.

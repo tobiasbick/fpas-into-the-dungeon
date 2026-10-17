@@ -27,6 +27,7 @@ current map. Full placement checks belong to
 The save layer reads the stored level of every visited dungeon, resolves the
 authored settlement from code, and supplies those maps. Both loading and writing use this full check: an unvisited game has no dungeon entities; a visited dungeon has
 exactly its original entity identities and kinds, with their mutable state.
+A rewarded quest additionally retains its two unique reward items.
 Missing or unknown entities remain invalid even while the player is outdoors.
 The pure validator accepts the supplied visited maps in any order, with exactly
 one map per visit. `Dungeon.Areas.Validation` checks
@@ -37,7 +38,7 @@ opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
 the supplied current map.
 
-The protocol-15 welcome supplies a bounded catalog with world identities,
+The protocol-18 welcome supplies a bounded catalog with world identities,
 original parameters, compatibility, save classifications and creation defaults.
 Continue loads a valid explicit save or starts at spawn when no save exists.
 An incompatible or unreadable save rejects Continue and remains on disk. Start
@@ -50,10 +51,11 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `11` is an exact JSON object containing the selected world ID,
+Savegame format `12` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
-server-owned item state, NPC meeting records, the player's health, every opponent, the
+server-owned item state, NPC meeting records, the accepted quest/objective and
+rewarded outcome, the player's health, every opponent, the
 dice generator state, and the `progression` object with the two cumulative
 skill experience counters (see [progression](progression.md)). Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
@@ -72,10 +74,12 @@ or defeated opponents. Interior discovery and dungeon entities may reference
 only visited areas. Saves without a required field are rejected. Format 8
 added the giant rat; format 9 (13b) added `progression`; format 10 (14c) uses
 level identities for every area and entity. Format 11 adds settlement-local
-positions and exact NPC meeting records. The authored settlement map is resolved
+positions and exact NPC meeting records. Format 12 adds the exact quest object,
+returned compass location and quest reward item origins (see [quests](quests.md)).
+The authored settlement map is resolved
 from code, never read or generated as a level file. Active dialogue is absent.
 The version is checked before the
-payload, so an obsolete save reports its version. Format 10 and older saves
+payload, so an obsolete save reports its version. Format 11 and older saves
 remain intact and cannot be continued; recreate progress explicitly
 through Start over.
 
@@ -89,18 +93,18 @@ means discovered but not currently visible.
 
 Every item record contains its stable ID, kind, and location. The current item
 location is a validated field in a visited dungeon, carried inventory, a worn
-slot or the terminal consumed state. Only `healing_potion` may be consumed:
+slot, the terminal consumed state or the returned compass state. Only `healing_potion` may be consumed:
 its location must be exactly `{"kind":"consumed"}`, with no payload fields.
 The ID and kind stay in the item array, even after consumption in another area.
 Consumed records do not count toward the 64 carried/worn limit and are not
-projected. Every item placement of every visited dungeon must occur exactly
-once, so malformed, missing, duplicate, unknown, or misplaced item state
+projected. The returned compass similarly retains its original ID/kind and its
+quest identity without occupying a field or capacity. Every item placement of every visited dungeon must occur exactly
+once; a rewarded quest also requires exactly its two reward potion records.
+Malformed, missing, duplicate, unknown, or misplaced item state
 rejects the complete savegame. There is no separate client inventory file.
-Save format stays 8 for checkpoint 04; no schema reader, migration, implicit
-repair or automatic deletion is added. Revisit and save/load retain consumed
-records and never create replacements. Checkpoint 05 adds a pure healing rule
-that marks the selected carried potion consumed before the hostile phase;
-checkpoint 06 exposes it through the active session. Accepted use marks progress
+Revisit and save/load retain terminal records and never create replacements.
+The pure healing rule marks the selected carried potion consumed before the
+hostile phase. Accepted use marks progress
 unsaved and retains the last successful save timestamp. Rejections, including
 failed response preparation, preserve the installed session. The rule never
 saves or deletes files, including when the resulting turn ends in defeat.

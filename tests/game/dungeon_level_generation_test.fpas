@@ -1,4 +1,4 @@
-// Covers generator 8 levels: per-level content formulas, stairs placement, depths 1 through 5,
+// Covers generator 10 levels and the unique compass: per-level content formulas, stairs placement, depths 1 through 5,
 // acceptance below level 0 over a region block, level-0 geometry stability, and pinned deep levels.
 program DungeonLevelGenerationTest;
 
@@ -18,7 +18,7 @@ begin
     RegionY,
     Level,
     Depth,
-    AreaId(RegionX, RegionY, Level)
+    AreaId(RegionX, RegionY, Level), false
   ).Unwrap();
 end function;
 
@@ -137,10 +137,18 @@ end procedure;
 
 procedure ArgumentBounds();
 begin
-  Test.AssertTrue(Generation.GenerateDungeon(12345, 0, 0, 3, 3, AreaId(0, 0, 3)) is Error(_));
-  Test.AssertTrue(Generation.GenerateDungeon(12345, 0, 0, -1, 3, AreaId(0, 0, 0)) is Error(_));
-  Test.AssertTrue(Generation.GenerateDungeon(12345, 0, 0, 0, 0, AreaId(0, 0, 0)) is Error(_));
-  Test.AssertTrue(Generation.GenerateDungeon(12345, 0, 0, 0, 17, AreaId(0, 0, 0)) is Error(_));
+  Test.AssertTrue(
+    Generation.GenerateDungeon(12345, 0, 0, 3, 3, AreaId(0, 0, 3), false) is Error(_)
+  );
+  Test.AssertTrue(
+    Generation.GenerateDungeon(12345, 0, 0, -1, 3, AreaId(0, 0, 0), false) is Error(_)
+  );
+  Test.AssertTrue(
+    Generation.GenerateDungeon(12345, 0, 0, 0, 0, AreaId(0, 0, 0), false) is Error(_)
+  );
+  Test.AssertTrue(
+    Generation.GenerateDungeon(12345, 0, 0, 0, 17, AreaId(0, 0, 0), false) is Error(_)
+  );
 end procedure;
 
 // Level 0 keeps the single-level geometry; a deeper dungeon only adds its stairs down.
@@ -167,7 +175,7 @@ end procedure;
 // Checks endpoints, stairs, landing and per-level content of one accepted level.
 procedure AssertLevel(Map: InteriorUnit.InteriorMap; Level: integer; Depth: integer);
 begin
-  Test.AssertTrue(Validation.ValidateGeneratedDungeon(Map) is Ok(_));
+  Test.AssertTrue(Validation.ValidateGeneratedDungeon(Map, false) is Ok(_));
   Test.AssertEquals(Level, Map.Level);
   Test.AssertEquals(Depth, Map.Depth);
   Test.AssertTrue(
@@ -236,13 +244,42 @@ begin
   end for;
 end procedure;
 
+// Generator 10 reserves slot 6 without moving old finds, including depth-one worlds.
+procedure CompassContent();
 begin
+  for Seed: integer := 0 to 31 do
+    for Depth: integer in [1, 3, 5] do
+      const Map := Generation.GenerateDungeon(
+        Seed, 0, 0, Depth - 1, Depth,
+        AreaId(0, 0, Depth - 1), true
+      ).Unwrap();
+      Test.AssertTrue(Validation.ValidateGeneratedDungeon(Map, true) is Ok(_));
+      Test.AssertTrue(Validation.ValidateGeneratedDungeon(Map, false) is Error(_));
+      const Compass := Map.Items[Map.Items.Length() - 1];
+      Test.AssertTrue(Compass.Kind = ItemRules.ItemKind.MarasCompass);
+      Test.AssertEquals(Map.AreaId + ':item:6', Compass.ItemId);
+      Test.AssertTrue(
+        InteriorUnit.InteriorCellAt(Map, Compass.Position).Unwrap() =
+        InteriorUnit.InteriorCellKind.Floor
+      );
+    end for;
+  end for;
+
+  Test.AssertTrue(Generation.GenerateDungeon(12345, 0, 0, 1, 3, AreaId(0, 0, 1), true) is Error(_));
+  // Reviewed generator-10 fingerprint: unchanged level geometry/old finds plus this last corner.
+  const Pinned := Generation.GenerateDungeon(12345, 0, 0, 2, 3, AreaId(0, 0, 2), true).Unwrap();
+  Test.AssertEquals(23, Pinned.Items[Pinned.Items.Length() - 1].Position.X);
+  Test.AssertEquals(15, Pinned.Items[Pinned.Items.Length() - 1].Position.Y);
+end procedure;
+
+begin
+  CompassContent();
   ContentFormulas();
   ArgumentBounds();
   LevelZeroStability();
   DepthsOneThroughFive();
   DeepLevelsAccepted();
-  // Generator 8 output of deeper levels, pinned deliberately with the version bump.
+  // Existing deeper-level geometry remains pinned; generator 10 adds the separately pinned compass.
   Test.AssertEquals(
     'Sunken Vault ###############################/#################....##########/###<.....########....##########/###..........................##/###......#######.....#######.##/################.###########.##/################.###########.##/################.##########...#/#####>.....#####.##########...#/#####......#####.##########...#/#####......#####.##########...#/#####......#####.##############/########.#######.##############/########.#######.##############/########.######...#############/########.######...#############/####..............######.....##/####.........................##/####.......####...######.....##/####.......####################/###############################/start=4,2 gen:dungeon:0:0:1:hostile:0=Restless skeleton@8,10 gen:dungeon:0:0:1:hostile:1=Giant rat@26,17 gen:dungeon:0:0:1:hostile:2=Giant rat@7,18 gen:dungeon:0:0:1:item:0=Healing potion@27,7 gen:dungeon:0:0:1:item:1=Healing potion@29,7',
     MapText(Generated(12345, 0, 0, 1, 3))

@@ -1,0 +1,134 @@
+// Paged world administration and confirmed deletion under the listener's admission permit.
+unit Dungeon.Server.Console.Worlds.Model;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Server.Worlds.Catalog as CatalogPages, Dungeon.World.Catalog as CatalogUnit, Std.Math as Math, Std.Tasks as Tasks;
+
+// A local management view; confirmation binds an identity, never a mutable row number.
+public type WorldManager = record
+  public Config: option of ConfigUnit.ServerConfig;
+  public Open: boolean;
+  public Catalog: Protocol.WorldCatalog;
+  public Row: integer;
+  public Focus: integer;
+  public Confirmation: option of string;
+  public Message: string;
+end record;
+
+// Starts closed and unavailable until the console supplies its root and shared admission permit.
+public function NewWorldManager(): WorldManager;
+begin
+  return WorldManager(
+    Config := None, Open := false, Catalog := WorldsUnit.EmptyWorldCatalog(0, 1),
+    Row := 0, Focus := 40, Confirmation := None, Message := ''
+  );
+end function;
+
+// Bounds native list height while reserving details, messages and management controls.
+public function PageSize(Height: integer): integer;
+begin
+  return Math.Clamp(Height - 13, 1, 12);
+end function;
+
+// Only the visible part of the bounded catalog page participates in native list selection.
+public function VisibleCount(State: WorldManager; Height: integer): integer;
+begin
+  return Math.Min(State.Catalog.Worlds.Length(), PageSize(Height));
+end function;
+
+// Resolves a selection without trusting stale or out-of-range native events.
+public function Selected(State: WorldManager): option of Protocol.WorldSummary;
+begin
+  if (State.Row < 0) or (State.Row >= State.Catalog.Worlds.Length()) then
+    return None;
+  end if;
+
+  return Some(State.Catalog.Worlds[State.Row]);
+end function;
+
+// Refreshes through the existing bounded catalog owner, including incompatible worlds.
+// A read failure preserves the previous list and never authorizes a deletion.
+public function Refresh(State: WorldManager; Offset: integer): WorldManager;
+begin
+  case State.Config of
+    when None:
+      return State with Message := 'World administration is unavailable.'; end with;
+    when Some(const Config):
+      case CatalogPages.CatalogFor(Config, '', Offset) of
+        when Error(const Reason):
+          return State with Confirmation := None; Message := 'Cannot list worlds: ' + Reason; end with;
+        when Ok(const Catalog):
+          return State with Catalog := Catalog; Row := 0; Focus := 40; Confirmation := None; Message := ''; end with;
+      end case;
+  end case;
+end function;
+
+// Captures the exact selected identity; opening or cancelling this prompt changes no files.
+public function RequestDeletion(State: WorldManager): WorldManager;
+begin
+  case Selected(State) of
+    when None:
+      return State with Message := 'No world is selected.'; end with;
+    when Some(const World):
+      return State with Confirmation := Some(World.Id); Focus := 47; Message := ''; end with;
+  end case;
+end function;
+
+function DeleteWithPermit(Config: ConfigUnit.ServerConfig; Id: string): result of (boolean, string);
+begin
+  case Config.AdmissionPermit of
+    when None:
+      return Error('World administration is unavailable.');
+    when Some(const Permit):
+      case try Tasks.TryReceive(Permit) of
+        when None:
+          return Error('Disconnect the player before deleting a world.');
+        when Some(_):
+          const Outcome := CatalogUnit.DeleteWorld(Config.WorldsRoot, Id);
+          const Released := try Tasks.TrySend(Permit, true);
+          if not Released then
+            return Error(
+              'Cannot restore listener access. Restart the server and refresh the list.'
+            );
+          end if;
+
+          return Outcome;
+      end case;
+  end case;
+end function;
+
+// Rechecks exclusive admission at the destructive boundary, independent of dashboard snapshots.
+// Filesystem failures may be partial; retain the prompt and reason for explicit operator action.
+public function ConfirmDeletion(State: WorldManager): WorldManager;
+begin
+  case State.Confirmation of
+    when None:
+      return State;
+    when Some(const Id):
+      case State.Config of
+        when None:
+          return State with Message := 'World administration is unavailable.'; end with;
+        when Some(const Config):
+          case DeleteWithPermit(Config, Id) of
+            when Error(const Reason):
+              Logging.LogServer(Config.Logs, 'error', 'World deletion ' + Id + ': ' + Reason);
+              return State with Message := Reason; end with;
+            when Ok(const Deleted):
+              if Deleted then
+                Logging.LogServer(Config.Logs, 'world', 'Deleted world ' + Id);
+              end if;
+              var Next := Refresh(State, State.Catalog.Offset);
+              var Notice := 'World ' + Id + ' was already absent.';
+              if Deleted then
+                Notice := 'Deleted world ' + Id + ' and all its contents.';
+              end if;
+
+              if Next.Message <> '' then
+                Notice := Notice + ' ' + Next.Message;
+              end if;
+
+              return Next with Confirmation := None; Message := Notice; end with;
+          end case;
+      end case;
+  end case;
+end function;
+end unit;

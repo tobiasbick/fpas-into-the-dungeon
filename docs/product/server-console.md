@@ -55,8 +55,32 @@ safely rather than allocating negative layout dimensions.
 - F3 cycles All, Info, Warnings and Errors; the buttons select a filter directly.
 - F2 opens Settings. Seed and entrance-region defaults are validated and saved
   atomically to the current `server.toml`; existing world parameters remain fixed.
+- F4 or Worlds opens the world list, including incompatible worlds and their save status.
 - Escape closes Settings. Settings capture focus and block log/filter commands.
 - Alt+X, Ctrl+C and Stop server close the console and its owned server tasks.
 
-The dashboard is a server administration view. It does not expose controls for
-moving the player, changing an existing world, or bypassing save/discard guards.
+The dashboard is a server administration view. It has no controls for moving the
+player, editing world parameters or bypassing gameplay save/discard guards.
+
+## Deleting worlds
+
+Open **Worlds (F4)**, select a row with Up/Down and choose **Delete world** or D.
+The confirmation names the selected world and starts with Cancel focused.
+**Delete permanently** or Y removes the entire world directory: metadata,
+chunks, dungeon levels and its save. N or Escape cancels without changing files.
+Escape/F4 closes the list. Refresh/R reads the catalog again; Previous/Next
+page through lists that exceed the terminal's visible rows.
+
+Deletion is available for incompatible or incomplete worlds too. It validates
+the directory identity and refuses linked world directories. It is permanent
+and does not use the operating system's recycle bin. Filesystem failures are
+shown and logged; removal can be partial, so inspect the reason before retrying.
+
+Disconnect the player before confirming deletion. The operation reserves the
+same single permit as the listener's connection admission, preventing both
+deletion during an admitted connection and a new admission during deletion.
+The dashboard's best-effort connection snapshot never authorizes this operation.
+The list refreshes after successful deletion. Reconnect or refresh the client
+catalog to remove deleted entries there too.
+
+The console does not load games or change the client world-selection flow.

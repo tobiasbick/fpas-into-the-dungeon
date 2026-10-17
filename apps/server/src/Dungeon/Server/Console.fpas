@@ -1,4 +1,4 @@
-// Dashboard facade owning the cancellable server subscription and typed event inbox.
+// Dashboard facade owning the server subscription, typed events and shared admission permit.
 unit Dungeon.Server.Console;
 
 uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Input as InputUnit, Dungeon.Server.Console.View as ViewUnit, Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Tasks as Tasks, Std.Tui as Tui;
@@ -77,9 +77,14 @@ public function RunServerConsole(Host: string; Port: integer; Config: ConfigUnit
 begin
   const Settings := RuntimeData.ReadServerDefaults(Config.ConfigPath).Unwrap();
   const Events: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const Permit: channel of boolean := Tasks.CreateChannel(1);
+  discard Tasks.Send(Permit, true);
+  const ManagedConfig := Config with Logs := Some(Events); AdmissionPermit := Some(Permit); end with;
+  var Model := ModelUnit.NewConsoleModel(Config.ConfigPath, Settings) with Port := Port; Width := Console.ScreenWidth(); Height := Console.ScreenHeight(); end with;
+
+  Model.Worlds.Config := Some(ManagedConfig);
   const State := ConsoleState(
-    Model := ModelUnit.NewConsoleModel(Config.ConfigPath, Settings) with Port := Port; Width := Console.ScreenWidth(); Height := Console.ScreenHeight(); end with,
-    Host := Host, Port := Port, Config := Config with Logs := Some(Events); end with
+    Model := Model, Host := Host, Port := Port, Config := ManagedConfig
   );
   discard Tui.TuiApplication.RunWithBackgroundAndPalette(
     State,
@@ -89,6 +94,7 @@ begin
     ViewConsole,
     ViewUnit.DashboardPalette()
   );
+  discard Tasks.CloseChannel(Permit);
   return 0;
 end function;
 end unit;

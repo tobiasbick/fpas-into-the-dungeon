@@ -7,17 +7,21 @@ potions; item ownership and use remain authoritative server rules.
 ## Authoritative model
 
 `libs/game` owns every item. An item has a stable ID, a kind, and exactly one
-location. Every generated dungeon places an Ancient coin, a Rusty short sword,
+location. Level 0 of every generated dungeon places an Ancient coin, a Rusty short sword,
 a Leather jerkin and a Healing potion on room corners, named `<area>:item:0`
 to `:3`. The potion has kind `healing_potion` and no equipment slot. Optional
 original slots 4/5 use those same four kinds and keep their suffixes when
 another slot is empty. Stored generated levels accept four through six finds
-without rerolling their contents.
+without rerolling their contents. Deeper levels require a potion at slot 0 and
+accept optional 1/2. The deepest spawn level additionally requires Mara's compass
+at reserved slot 6. It uses the generic visible item marker and its own name and
+description; it can be picked up or dropped but cannot be worn or consumed.
 Full validation permits an item's current location on an ordinary floor field
 of any visited dungeon or in the player's inventory, while requiring its
 original placement identity and kind. The interaction loop supports pickup; the
 drop intention lays a carried item back on the floor (see below). Validation
-requires exactly one item per placement of every visited dungeon and rejects
+requires exactly one item per placement of every visited dungeon, plus the
+two retained quest reward records after hand-in, and rejects
 missing, duplicate, unknown, or invalid floor-item state. A floor item must lie on an
 ordinary floor field, never on a wall or the exit.
 
@@ -25,9 +29,17 @@ ordinary floor field, never on a wall or the exit.
 the original ID and kind, with no area, position, owner or equipment slot.
 It occupies no inventory capacity or field, cannot be inspected, picked up,
 dropped or worn, and is absent from all visible projections. Full validation
-still requires it to match exactly one original placement in a visited level;
+still requires it to match exactly one original placement in a visited level
+or one validated quest reward origin;
 missing, duplicate or foreign consumed records reject the save. Revisit/load
-never rematerializes it. Checkpoint 05 adds the authoritative use rule below.
+never rematerializes it.
+
+`ReturnedToMara(quest_id)` is a separate terminal location for the unique
+compass after its rewarded hand-in. It retains its ID and kind and occupies no
+field or inventory capacity. The reward consists of two carried Healing
+potions with stable quest-owned IDs; used and dropped rewards retain those
+records. There are no reward floor items in Hearthmoor. See
+[quests](quests.md) for exact origin, capacity and atomicity rules.
 
 Starting a new game creates no dungeon items. First entry materializes a
 dungeon's items at their placements. Further transitions and movement preserve

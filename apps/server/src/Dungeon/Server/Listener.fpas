@@ -27,10 +27,11 @@ begin
       when Ok(const Client):
         case try Tasks.TryReceive(Inbox.Admission) of
           when None:
-            Logging.LogServer(Config.Logs, 'rejected', 'Another player is connected.');
+            Logging.LogServer(Config.Logs, 'rejected', 'Server admission is busy.');
             discard Replies.SendMessage(
               Client,
-              Protocol.ServerMessage.Rejected('server_busy', 'Another player is connected.'), Token
+              Protocol.ServerMessage.Rejected('server_busy', 'Server is busy. Try again shortly.'),
+              Token
             );
             const Closed := try Net.Close(Client);
           when Some(_):
@@ -139,6 +140,7 @@ begin
 end function;
 
 // Takes ownership of a bound listener and uses exactly two group children for its whole lifetime.
+// A caller-supplied admission permit is borrowed, never seeded or closed by the listener.
 // Cancellation gives both workers one shared grace budget, then closes queued/active connections.
 // A timeout is reported while ownership is retained until cooperative work finishes; no forced exit.
 // Ordinary worker errors are returned after cleanup; unexpected task diagnostics propagate.
@@ -153,12 +155,19 @@ begin
   const Address := try Net.ListenerLocalAddress(ListenerValue);
   const Life := try BeginLifetime(ListenerValue, ProcessSignals);
   const Workers := Server.GetWorkGroup(Life);
+  var Admission: channel of boolean := Tasks.CreateChannel(1);
+  case Config.AdmissionPermit of
+    when Some(const Shared):
+      discard Tasks.CloseChannel(Admission);
+      Admission := Shared;
+    when None:
+      discard Tasks.Send(Admission, true);
+  end case;
   const Inbox := ConnectionInbox(
-    Admission := Tasks.CreateChannel(1), Pending := Tasks.CreateChannel(1),
+    Admission := Admission, Pending := Tasks.CreateChannel(1),
     Lease := Tasks.CreateChannel(1)
   );
   const Outcomes: channel of result of (boolean, string) := Tasks.CreateChannel(2);
-  discard Tasks.Send(Inbox.Admission, true);
   const Acceptor := Tasks.StartTaskInGroup(
     Workers, procedure(Token: Tasks.CancellationToken) begin
       const Outcome := AcceptConnections(ListenerValue, Inbox, Config, Token);
@@ -208,7 +217,10 @@ begin
       Failures := Tasks.CloseTaskGroup(Workers);
   end case;
   const LeaseClosed := CloseLease(Inbox);
-  discard Tasks.CloseChannel(Inbox.Admission);
+  if Config.AdmissionPermit is None then
+    discard Tasks.CloseChannel(Inbox.Admission);
+  end if;
+
   discard Tasks.CloseChannel(Inbox.Pending);
   discard Tasks.CloseChannel(Inbox.Lease);
   discard Tasks.CloseChannel(Outcomes);

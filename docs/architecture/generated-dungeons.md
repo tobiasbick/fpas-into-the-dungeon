@@ -8,11 +8,13 @@ outdoor world gains rare, deterministic dungeon entrances, and each entrance
 leads to a dungeon whose geometry is generated from the world seed and the
 entrance region when it is needed. Stage 14c turns each dungeon into a stack of
 levels connected by paired stairs; every level is its own area, generated and
-stored on its first visit only.
+stored on its first visit only. Quest preflight may validate missing unvisited
+levels through transient generation without storing or materializing them;
+see [quests](quests.md).
 
 The hand-authored initial dungeon is removed together with its stone tablet,
 Mara, and the complete dialogue feature (rules, protocol messages, client
-overlay, and tests). NPCs and dialogue return with settlements in stage 15.
+overlay, and tests). NPCs and dialogue returned with Hearthmoor in stage 15a.
 Mara was the only way to heal; every accepted outdoor step restores one health
 point. This remains available in 14b; consumables add healing inside dungeons.
 
@@ -212,8 +214,9 @@ room/corridor random draws and the 16-attempt seed schedule are unchanged.
 The first entry creates a versioned, immutable **level file** as world data,
 containing geometry, start and exit, and original item and opponent placements.
 Each level is stored separately; stair links are computed from identities and
-maps, never stored. Unvisited levels are not generated ahead of time; only the
-current transition target may be created.
+maps, never stored. Only the current transition target may be persistently
+created. Stage 15b may preview missing unvisited levels in memory to prove a
+quest route; existing data and missing visited files are never regenerated.
 After the file is stored successfully, entry **materializes** the dungeon:
 the area identity is added to the game state's **visited areas**, and its item
 and opponent placements become game items and opponents. Defeated opponents
@@ -221,7 +224,7 @@ and carried items stay recorded, so re-entering never restores them.
 
 - Store level files below `worlds/<world-id>/dungeons/<rx>_<ry>/<level>.json`.
   Derive paths from validated numeric region coordinates and level, never raw
-  area IDs. Each file records its own format version (currently 3), world
+  area IDs. Each file records its own format version (currently 4), world
   identity, generator version, area identity, immutable display name, level
   index, depth, dimensions, geometry with its endpoints, start pose, and
   original placements. Reject incompatible versions; no migration.
@@ -242,7 +245,8 @@ and carried items stay recorded, so re-entering never restores them.
 - Item and opponent identities are `<area>:item:<n>` and `<area>:hostile:<n>`.
 - In 14a, savegame format 7 removed the NPC and added visited areas. Format 8
   added rat state and terminal potion locations, format 9 progression, and the
-  format 10 level identities. Current format 11 adds settlement/NPC records;
+  format 10 level identities. Format 11 adds settlement/NPC records; current
+  format 12 adds quest state, returned compass ownership and reward origins;
   obsolete saves are rejected and preserved.
   A visited level deeper than 0 requires its upper level to be visited, and visited
   levels of one dungeon must agree on depth and name.
@@ -250,7 +254,7 @@ and carried items stay recorded, so re-entering never restores them.
   dungeon's level file is read and validated once, the home settlement resolves
   from code, and every item and opponent
   must match exactly one origin placement of a visited area by identity and
-  kind. An item's current
+  kind, or one of the two validated reward origins of a rewarded quest. An item's current
   location may differ from its origin, including another visited dungeon.
   Validate its location against that destination map, not its original field.
   Opponents remain in their original area. Per-intention validation checks only

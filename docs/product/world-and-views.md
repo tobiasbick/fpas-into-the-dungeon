@@ -1,7 +1,7 @@
 # World structure and views
 
 This document defines the canonical terms for the spatial world model and its
-presentation, including the first combat, equipment and progression terms. It does not yet define quests.
+presentation, including combat, equipment, progression and deterministic quest terms.
 
 ## Terminology
 
@@ -109,8 +109,9 @@ presentation, including the first combat, equipment and progression terms. It do
 - **Floor find** is an item initially placed on ordinary dungeon floor. It keeps
   its identity through pickup, dropping and consumption.
 - **Original item slot** is the stable number used in a generated item's ID.
-  Slots 0..3 are required; 4/5 are optional. Empty slots are omitted without
-  renumbering later finds.
+  Level 0 requires slots 0..3 and accepts optional 4/5; deeper levels require
+  slot 0 and accept optional 1/2. Reserved slot 6 holds the unique compass on
+  the deepest spawn-dungeon level. Empty slots never renumber later finds.
 - **Inventory** is the set of items whose authoritative location is the player.
   The visible inventory is only a client-safe projection of that set.
 - **Usable** is the server-projected capability of a carried consumable. It is
@@ -128,6 +129,24 @@ presentation, including the first combat, equipment and progression terms. It do
 - **Consumed** is a terminal potion location with no field, owner or slot.
   The item retains its original identity for save validation while appearing
   in neither inventory nor floor projections. It uses no inventory capacity.
+- **Quest** is an explicitly accepted task with a validated objective and a
+  reward granted once on completion. Start over resets it with the rest of
+  the game.
+- **Quest objective** is the condition the player must satisfy before reporting
+  success. Mara's first objective is to recover her compass from the deepest
+  level of the spawn dungeon and carry it back to her.
+- **Mara's compass** is the unique recoverable quest item. It cannot be worn or
+  consumed; dropping it in a dungeon leaves it recoverable.
+- **Ready to return** means an accepted quest's compass is currently carried.
+  Dropping it removes readiness until it is picked up again.
+- **Completed quest** means Mara has received the compass and granted both
+  Healing potions. Merely carrying the compass does not complete the quest.
+- **Returned to Mara** is the compass's terminal location after hand-in. The
+  item retains its identity while occupying no floor field or inventory space.
+- **Quest reward** is the pair of Healing potions Mara grants together on
+  hand-in. These items keep their identities through use and dropping.
+- **Quest journal** is the read-only server-provided account of accepted
+  objectives, current progress and completed outcomes, opened with `J`.
 - **Slot** is the body location for one worn item: **weapon** or **body**. An
   item kind fits at most one slot, and each slot holds at most one item.
 - **Rusty short sword** is the first weapon and **Leather jerkin** the first

@@ -316,9 +316,23 @@ begin
   return Next.Concat(Routes.VisibleHostiles(View));
 end function;
 
+// Identifies the route planner's observable input, including remembered blockers and facing.
+function NavigationKey(View: Protocol.FirstPersonVisibleState; Known: array of Coordinates.InteriorPosition): string;
+begin
+  const Ahead := Routes.FieldAhead(View);
+  var Key := Conv.IntToStr(View.PlayerX) + ',' + Conv.IntToStr(View.PlayerY) + '>' +
+    Conv.IntToStr(Ahead.X) + ',' + Conv.IntToStr(Ahead.Y);
+  for Field: Coordinates.InteriorPosition in Known do
+    Key := Key + ':' + Conv.IntToStr(Field.X) + ',' + Conv.IntToStr(Field.Y);
+  end for;
+
+  return Key;
+end function;
+
 // Walks to Target like WalkTo, but remembers opponents that leave sight while turning in place,
 // so the route does not oscillate; any step or fight forgets them because opponents may move. When remembered opponents block every way, it walks straight toward
-// the target and fights whatever stands ahead. Fails when the player falls.
+// the target and fights whatever stands ahead. Repeated planner input from a moving chaser
+// also triggers a fight instead of another avoidance cycle. Fails when the player falls.
 public function WalkPastOpponents(
   Client: WireClient;
   Map: InteriorUnit.InteriorMap;
@@ -329,14 +343,24 @@ begin
   var Current: WireClient := Client;
   var View: Protocol.FirstPersonVisibleState := FirstPersonOf(Current);
   var Known: array of Coordinates.InteriorPosition := RememberHostiles([], View);
+  var Seen: array of string := [];
   for Attempt: integer := 1 to 400 do
     const Pose: Coordinates.FirstPersonPose := Routes.VisiblePose(View);
     if Coordinates.SamePosition(Pose.Position, Target) then
       return Ok(Current);
     end if;
 
-    if Routes.HostileAhead(View) and (Fixtures.TryRouteTo(Map, Pose, Target, Known) is Error(_)) then
+    const Key := NavigationKey(View, Known);
+    const Repeated := Key in Seen;
+    Seen.PushInPlace(Key);
+    // A chaser can repeatedly invalidate a legal detour. On repeated planner input,
+    // fight the real opponent ahead instead of walking the same avoidance cycle.
+    if Routes.HostileAhead(View)
+      and
+      (Repeated or (Fixtures.TryRouteTo(Map, Pose, Target, Known) is Error(_)))
+    then
       Current := try FightAhead(Current, Token);
+      Seen := [];
     else
       case Fixtures.TryRouteTo(Map, Pose, Target, Known) of
         when Ok(const Moves):

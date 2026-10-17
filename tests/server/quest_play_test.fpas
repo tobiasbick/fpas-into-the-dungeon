@@ -1,0 +1,377 @@
+// Plays the complete compass quest with normal TCP intentions and full listener restarts in active, ready and rewarded phases.
+program QuestPlayTest;
+
+uses Dungeon.Terrain.Entrances as Entrances, Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+function FrameOf(Client: Wire.WireClient): Protocol.DialogueFrame;
+begin
+  case Client.Last of
+    when Protocol.ServerMessage.Dialogue(_, const Frame, _):
+      return Frame;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected Mara dialogue');
+  end case;
+end function;
+
+procedure RequireJournal(Client: Wire.WireClient; Line: string);
+begin
+  var Lines: array of string := [];
+  case Client.Last of
+    when Protocol.ServerMessage.State(const State), Protocol.ServerMessage.Dialogue(const State, _, _), Protocol.ServerMessage.DialogueEnded(const State, _):
+      case State of
+        when Protocol.VisibleState.MapState(const Fields):
+          Lines := Fields.Journal;
+        when Protocol.VisibleState.FirstPersonState(const Fields):
+          Lines := Fields.Journal;
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('journal requires an authoritative visible state');
+  end case;
+
+  Test.AssertTrue(Line in Lines);
+end procedure;
+
+function HasChoice(Client: Wire.WireClient; Id: string): boolean;
+begin
+  for Choice: Protocol.DialogueChoice in FrameOf(Client).Choices do
+    if Choice.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function Choose(Client: Wire.WireClient; Id: string; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  return Wire.Exchange(
+    Client,
+    Protocol.ClientMessage.DialogueChoice(FrameOf(Client).NpcId, Id),
+    Token
+  );
+end function;
+
+function Walk(Client: Wire.WireClient; Map: InteriorUnit.InteriorMap; Target: Coordinates.InteriorPosition; Token: Tasks.CancellationToken): result of (Wire.WireClient, string);
+begin
+  var Current := Client;
+  if Wire.FirstPersonOf(Current).Health <= 14 then
+    for Item: Protocol.VisibleInventoryItem in Wire.FirstPersonOf(Current).Inventory do
+      if Item.Usable then
+        Current := Wire.Exchange(Current, Protocol.ClientMessage.UseItem(Item.Id), Token);
+        break;
+      end if;
+    end for;
+  end if;
+
+  case Wire.WalkPastOpponents(Current, Map, Target, Token) of
+    when Ok(const Arrived):
+      return Ok(Arrived);
+    when Error(const Reason):
+      return Error(
+        'level ' + Conv.IntToStr(Map.Level) + ' target ' + Conv.IntToStr(Target.X) + ',' +
+        Conv.IntToStr(Target.Y) + ': ' + Reason
+      );
+  end case;
+end function;
+
+function ReachMara(Client: Wire.WireClient; World: WorldUnit.WorldSession; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  const Position := Wire.MapOf(Client);
+  var Current := Wire.WalkOutdoorRoute(
+    Client, Routes.OutdoorRoute(
+      World.Metadata,
+      Coordinates.WorldPosition(X := Position.WorldX, Y := Position.WorldY),
+      World.Metadata.SettlementGate, 2
+    ), Token
+  );
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  for Step: integer := 1 to 4 do
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Move(0, -1), Token);
+  end for;
+
+  return Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+end function;
+
+function LeaveMara(Client: Wire.WireClient; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  var Current := Wire.Exchange(Client, Protocol.ClientMessage.EndDialogue, Token);
+  for Step: integer := 1 to 5 do
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Move(0, 1), Token);
+  end for;
+
+  return Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+end function;
+
+function AcceptQuest(Client: Wire.WireClient; World: WorldUnit.WorldSession; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  var Current := Wire.Exchange(Client, Protocol.ClientMessage.StartNewGame, Token);
+  RequireJournal(Current, 'No accepted quests.');
+  Current := ReachMara(Current, World, Token);
+  Test.AssertFalse(HasChoice(Current, 'quest_accept'));
+  Current := Choose(Current, 'quest', Token);
+  Test.AssertTrue(HasChoice(Current, 'quest_accept'));
+  Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'dungeons'])));
+  RequireJournal(Current, 'No accepted quests.');
+  Current := Choose(Current, 'quest_accept', Token);
+  RequireJournal(Current, 'Status: Active');
+  Test.AssertFalse(HasChoice(Current, 'quest_accept'));
+  Test.AssertFalse(HasChoice(Current, 'quest_report'));
+  Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'dungeons'])));
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.EndDialogue, Token);
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.SaveGame, Token);
+  Wire.RequireSaved(Current);
+  return Ok(true);
+end function;
+
+function Retrieve(Client: Wire.WireClient; World: WorldUnit.WorldSession; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  var Current := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+  RequireJournal(Current, 'Status: Active');
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  Current := Choose(Current, 'quest', Token);
+  Test.AssertFalse(HasChoice(Current, 'quest_accept'));
+  Test.AssertFalse(HasChoice(Current, 'quest_report'));
+  Current := LeaveMara(Current, Token);
+  const Position := Wire.MapOf(Current);
+  Current := Wire.WalkOutdoorRoute(
+    Current, Routes.OutdoorRoute(
+      World.Metadata,
+      Coordinates.WorldPosition(X := Position.WorldX, Y := Position.WorldY),
+      World.Metadata.SpawnEntrance, 2
+    ), Token
+  );
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  const First := Routes.SpawnDungeonMap(World.Metadata);
+  for Slot: integer in [1, 2] do
+    Current := try Walk(Current, First, First.Items[Slot].Position, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    Current := Wire.Exchange(
+      Current,
+      Protocol.ClientMessage.Equip(First.Items[Slot].ItemId),
+      Token
+    );
+  end for;
+
+  for Level: integer := 0 to 2 do
+    const Map := Routes.SpawnDungeonLevel(World.Metadata, Level);
+    var PotionSlot := 0;
+    if Level = 0 then
+      PotionSlot := 3;
+    end if;
+
+    Current := try Walk(Current, Map, Map.Items[PotionSlot].Position, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    if Level < 2 then
+      Current := try Walk(Current, Map, InteriorUnit.StairsDownPosition(Map).Unwrap(), Token);
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    else
+      const Compass := Map.Items[Map.Items.Length() - 1];
+      Test.AssertTrue(Compass.ItemId.EndsWith(':item:6'));
+      Current := try Walk(Current, Map, Compass.Position, Token);
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+      var Found := false;
+      for Item: Protocol.VisibleInventoryItem in Wire.FirstPersonOf(Current).Inventory do
+        if Item.Id = Compass.ItemId then
+          Found := true;
+          Test.AssertEquals('Mara''s compass', Item.Name);
+          Test.AssertFalse(Item.Usable);
+          Test.AssertTrue(Item.Slot = Protocol.VisibleItemSlot.NoSlot);
+        end if;
+      end for;
+
+      Test.AssertTrue(Found);
+      RequireJournal(Current, 'Status: Ready to return');
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.DropItem(Compass.ItemId), Token);
+      RequireJournal(Current, 'Status: Active');
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+      RequireJournal(Current, 'Status: Ready to return');
+    end if;
+  end for;
+
+  RequireJournal(Current, 'Status: Ready to return');
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.OverwriteSaveGame, Token);
+  Wire.RequireSaved(Current);
+  return Ok(true);
+end function;
+
+function Report(Client: Wire.WireClient; World: WorldUnit.WorldSession; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  var Current := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+  RequireJournal(Current, 'Status: Ready to return');
+  Test.AssertEquals(2, Wire.FirstPersonOf(Current).Level);
+  for Level: integer := 2 downto 0 do
+    const Map := Routes.SpawnDungeonLevel(World.Metadata, Level);
+    Current := try Walk(Current, Map, Map.Arrival, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  end for;
+
+  Current := ReachMara(Current, World, Token);
+  Current := Choose(Current, 'quest', Token);
+  Test.AssertTrue(HasChoice(Current, 'quest_report'));
+  const NpcId := FrameOf(Current).NpcId;
+  Current := Choose(Current, 'quest_report', Token);
+  RequireJournal(Current, 'Status: Completed');
+  Test.AssertFalse(HasChoice(Current, 'quest_report'));
+  Test.AssertFalse(HasChoice(Current, 'quest_accept'));
+  case Current.Last of
+    when Protocol.ServerMessage.Dialogue(Protocol.VisibleState.MapState(const Map), _, const Dirty):
+      Test.AssertTrue(Dirty);
+      var Rewards := 0;
+      for Item: Protocol.VisibleInventoryItem in Map.Inventory do
+        Test.AssertTrue(Item.Name <> 'Mara''s compass');
+        if Item.Id.StartsWith(World.Metadata.Id + ':quest:mara-compass:reward:') then
+          Test.AssertEquals('Healing potion', Item.Name);
+          Rewards := Rewards + 1;
+        end if;
+      end for;
+
+      Test.AssertEquals(2, Rewards);
+    when Protocol.ServerMessage.Dialogue(Protocol.VisibleState.FirstPersonState(_), _, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      return Error('expected rewarded settlement projection');
+  end case;
+
+  Current := Wire.Exchange(
+    Current,
+    Protocol.ClientMessage.DialogueChoice(NpcId, 'quest_report'),
+    Token
+  );
+  Test.AssertTrue(Current.Last is Protocol.ServerMessage.Rejected('dialogue_rejected', _));
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.EndDialogue, Token);
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.OverwriteSaveGame, Token);
+  Wire.RequireSaved(Current);
+  return Ok(true);
+end function;
+
+function Remember(Client: Wire.WireClient; World: WorldUnit.WorldSession; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  var Current := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
+  RequireJournal(Current, 'Status: Completed');
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  Test.AssertTrue('returning her compass' in FrameOf(Current).Text);
+  Current := Choose(Current, 'quest', Token);
+  Test.AssertFalse(HasChoice(Current, 'quest_accept'));
+  Test.AssertFalse(HasChoice(Current, 'quest_report'));
+  const NpcId := FrameOf(Current).NpcId;
+  for Id: string in ['quest_report', 'quest_accept'] do
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.DialogueChoice(NpcId, Id), Token);
+    Test.AssertTrue(Current.Last is Protocol.ServerMessage.Rejected('dialogue_rejected', _));
+  end for;
+
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.EndDialogue, Token);
+  RequireJournal(Current, 'Status: Completed');
+  case Current.Last of
+    when Protocol.ServerMessage.DialogueEnded(Protocol.VisibleState.MapState(const Map), const Dirty):
+      Test.AssertFalse(Dirty);
+      var Rewards := 0;
+      for Item: Protocol.VisibleInventoryItem in Map.Inventory do
+        if Item.Id.StartsWith(World.Metadata.Id + ':quest:mara-compass:reward:') then
+          Rewards := Rewards + 1;
+        end if;
+      end for;
+
+      Test.AssertEquals(2, Rewards);
+    when Protocol.ServerMessage.DialogueEnded(Protocol.VisibleState.FirstPersonState(_), _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      return Error('expected clean completed state after Continue');
+  end case;
+
+  return Ok(true);
+end function;
+
+function Play(Client: Wire.WireClient; World: WorldUnit.WorldSession; Stage: integer; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  case Stage of
+    when 0:
+      return AcceptQuest(Client, World, Token);
+    when 1:
+      return Retrieve(Client, World, Token);
+    when 2:
+      return Report(Client, World, Token);
+    when 3:
+      return Remember(Client, World, Token);
+    else
+      return Error('unknown play stage');
+  end case;
+end function;
+
+function LevelText(World: WorldUnit.WorldSession; Level: integer): string;
+begin
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  return Fs.ReadText(
+    PathOps.Join([
+      World.Directory, 'dungeons',
+      Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y), Conv.IntToStr(Level) + '.json'
+    ])
+  ).Unwrap();
+end function;
+
+begin
+  const Root := '.temp-data/quest-play-' + Conv.IntToStr(Time.TimestampMillis());
+  discard Fs.CreateDirAll(Root).Unwrap();
+  const World := WorldUnit.OpenWorld(Root, 'compass', 12345, 4, 32).Unwrap();
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(512);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := Some(Logs), WorldsRoot := Root,
+    WorldId := 'compass', WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  var RewardedSave := '';
+  var OriginalLevels: array of string := [];
+  for Stage: integer := 0 to 3 do
+    const Reservation := Net.Listen('127.0.0.1', 0).Unwrap();
+    const Port := Net.ListenerLocalAddress(Reservation).Unwrap().Port;
+    discard Net.CloseListener(Reservation).Unwrap();
+    const Stop := Tasks.CreateCancellationSource();
+    scope
+      const Worker := go Server.RunServerWithCancellation(
+        '127.0.0.1',
+        Port,
+        Config,
+        Tasks.GetCancellationToken(Stop)
+      );
+      while Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap().Kind <> 'status' do
+        null;
+      end while;
+      const Client := Wire.ConnectClient(Port, Token);
+      const Outcome := Play(Client, World, Stage, Token);
+      discard Net.Close(Client.Connection).Unwrap();
+      discard Tasks.Cancel(Stop);
+      Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+      Test.AssertTrue(Outcome.Unwrap());
+    end scope;
+    const Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+    if Stage = 0 then
+      Test.AssertTrue('"phase":"active"' in Saved);
+      Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'dungeons'])));
+    end if;
+
+    if Stage = 1 then
+      for Level: integer := 0 to 2 do
+        OriginalLevels.PushInPlace(LevelText(World, Level));
+      end for;
+
+      Test.AssertTrue('"phase":"active"' in Saved);
+    end if;
+
+    if Stage = 2 then
+      Test.AssertTrue('"phase":"rewarded"' in Saved);
+      RewardedSave := Saved;
+    end if;
+
+    if Stage = 3 then
+      Test.AssertEquals(RewardedSave, Saved);
+    end if;
+
+    if Stage >= 2 then
+      for Level: integer := 0 to 2 do
+        Test.AssertEquals(OriginalLevels[Level], LevelText(World, Level));
+      end for;
+    end if;
+
+    while Tasks.TryReceive(Logs).Unwrap() is Some(_) do
+      null;
+    end while;
+  end for;
+
+  discard Tasks.CloseChannel(Logs);
+end.

@@ -1,0 +1,72 @@
+// Verifies quest save identities, explicit acceptance persistence, strict schema and preserved invalid saves.
+program QuestStorageTest;
+
+uses Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Quests.Model as Model, Dungeon.Test.StateComparison as Comparison, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as Fields, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
+
+begin
+  const Root := '.temp-data/quest-storage-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'compass', 12345, 4, 8).Unwrap();
+  const Initial := GameState.NewGame(World.Metadata);
+  Test.AssertTrue(Initial.Quest is Model.QuestState.NotAccepted);
+  const Outside := Initial with Player := Coordinates.PlayerPosition.Outdoor(
+    World.Metadata.SettlementGate
+  ); end with;
+  const Entry := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := World.Metadata, Interior := None),
+    Outside,
+    None
+  ).Unwrap();
+  const Adjacent := Entry.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); end with;
+  var Met := Adjacent;
+  case Dialogue.Start(Entry.View, Adjacent).Unwrap() of
+    when Dialogue.Outcome.Continued(const State, _, _):
+      Met := State;
+    when Dialogue.Outcome.Ended(_):
+      panic('Mara must greet the player');
+  end case;
+  const Objective := Model.CompassTarget(World.Metadata, 3);
+  const Active := Met with Quest := Model.QuestState.Active(Objective); end with;
+
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Active).Unwrap());
+  const Path := Savegame.SaveGamePath(World);
+  const Saved := Fs.ReadText(Path).Unwrap();
+  Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'dungeons'])));
+  const Restarted := WorldUnit.OpenWorld(Root, 'compass', 0, 1, 8).Unwrap();
+  case Savegame.LoadSaveGame(Restarted).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      Test.AssertTrue(Comparison.SameState(Active, State));
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('accepted quest must survive restart');
+  end case;
+
+  Test.AssertTrue(GameState.NewGame(World.Metadata).Quest is Model.QuestState.NotAccepted);
+  const QuestText := Json.Stringify(
+    Json.JsonValue.Object(Fields.ObjectField(Fields.ParseObject(Saved).Unwrap(), 'quest').Unwrap())
+  );
+  for BadQuest: string in [
+    '{}', '{"phase":"not_accepted","objective":{}}', '{"phase":"active"}',
+    QuestText.Replace('"phase":"active"', '"phase":"unknown"'),
+    QuestText.Replace('"phase":"active"', '"phase":"active","ready":true'),
+    QuestText.Replace('"phase":"active"', '"phase":"active","phase":"rewarded"'),
+    QuestText.Replace('compass:quest:mara-compass', 'foreign:quest:mara-compass'),
+    QuestText.Replace(Objective.AreaId, 'foreign:dungeon:0:0:2'),
+    QuestText.Replace(':item:6', ':item:06'),
+    QuestText.Replace(Objective.AreaId, Model.CompassTarget(World.Metadata, 16).AreaId),
+    QuestText.Replace('"item_id":', '"unknown":')
+  ] do
+    const Broken := Saved.Replace(QuestText, BadQuest);
+    Test.AssertTrue(Broken <> Saved);
+    Test.AssertTrue(Fs.WriteTextAtomic(Path, Broken).Unwrap());
+    Test.AssertTrue(Savegame.LoadSaveGame(Restarted).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+    Test.AssertEquals(Broken, Fs.ReadText(Path).Unwrap());
+    Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'dungeons'])));
+  end for;
+  const Obsolete := Saved.Replace('"format_version":12', '"format_version":11');
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Obsolete).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(Restarted).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+  Test.AssertEquals(Obsolete, Fs.ReadText(Path).Unwrap());
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Initial).Unwrap());
+end.

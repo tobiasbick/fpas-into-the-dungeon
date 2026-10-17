@@ -417,6 +417,17 @@ intention is sent to the server. `Escape` or another `Ctrl+P` closes it.
 The overlay pauses client input only. It does not pause the authoritative
 server or other players that may exist later.
 
+## Quest journal
+
+`J` opens the server-projected journal during an active game. It shows accepted
+objectives, active or ready-to-return progress, and completed outcomes. The
+client displays these lines without inferring completion from inventory.
+Long lines wrap to the available width. W/S or arrows scroll one row;
+Page Up/Down scroll a page. Escape/J closes it. Other gameplay keys are consumed
+locally, with no intention, turn or dirty-state change. Resize and authoritative
+refresh retain the overlay and clamp its wrapped-row offset. Active dialogue
+keeps keyboard ownership, so J cannot open another overlay while talking.
+
 ## Controls
 
 - `W`, `A`, `S`, and `D` request cardinal one-field movement in the map view.
@@ -437,6 +448,8 @@ server or other players that may exist later.
   request pending. `Enter` never attacks.
 - `I` opens or closes the inventory overlay and `C` the character sheet; both
   need an active game and no other overlay.
+- `J` opens or closes the read-only quest journal; W/S, arrows and Page Up/Down
+  scroll its wrapped text.
 - `Ctrl+P` opens or closes the system menu.
 - `M` opens or closes the exploration map. While it is open, WASD and the arrow
   keys pan, and `Home` recenters on the player.

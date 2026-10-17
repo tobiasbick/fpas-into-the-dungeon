@@ -61,7 +61,8 @@ these projects.
   `.Character` and `.CharacterSheet` render the first-person view, combat
   animation, inventory, and the scrollable character sheet. The raycaster's subunits own ray casting (`Rays`), pixels and
   lighting (`Pixels`), wall and floor textures (`Textures`), pixel art (`Art`),
-  and sprites with animation effects (`Sprites`).
+  and sprites with animation effects (`Sprites`). `Dungeon.Client.Journal`
+  renders server-formatted quest text with wrapping and local scrolling.
   The client facade prepares size-dependent start artwork after framework and
   network updates. `Backdrop` owns its generation and reuse; `Model` retains one
   immutable cell grid so focus navigation does not regenerate it.
@@ -130,7 +131,13 @@ these projects.
   The console submodules own presentation/settings state (`Model`), bounded log
   filtering and scroll anchors (`Log`), responsive dimensions (`Layout`), native
   panels and settings overlays (`View`), and validated keyboard events (`Input`).
-  The facade owns only the cancellable listener subscription and event inbox.
+  `Console.Worlds.Model`, `.Input` and `.View` own the paged world list,
+  identity-bound deletion confirmation and native controls. Deletion and client
+  admission exclusively acquire the same caller-owned channel permit. The
+  console seeds it before starting the listener and closes it after joining
+  the listener; headless listeners retain their internally owned permit.
+  The facade owns the cancellable listener subscription, event inbox and the
+  shared admission permit.
   `Session` retains
   the current finite map and builds area views from it. Dungeon entry opens the target
   level through the world layer; settlement entry resolves authored geometry
@@ -165,6 +172,13 @@ these projects.
     the generator places its selected original slots without consuming geometry
     draws. The immutable map retains its display name for storage, projections
     and diagnostics.
+  - `Dungeon.Quests.Model` and `.Items`: independent quest/objective identities,
+    retained phases, terminal compass ownership and reward-origin validation.
+    `Dungeon.Quests` applies acceptance and hand-in rules; `.Reachability`
+    proves a route over supplied maps and `.Journal` formats the projection.
+    `Dungeon.Npcs.Interaction` shares reach without a dialogue/rules cycle.
+    `Dungeon.Dialogue.Model` retains private nodes and display fields, while
+    `.Quests` owns quest-specific frames.
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
     read-only queries; the `AreaView` type pairs world metadata with a supplied
     current interior map.
@@ -184,13 +198,18 @@ these projects.
   composition, prefetching, and bounded caching. `Dungeon.World` owns world
   sessions, the chunk cache, and visible windows; `Dungeon.World.Encoding` owns
   the exact JSON formats of world metadata and chunks. `Dungeon.World.Interiors`
-  owns immutable level files (read, first-visit creation, visited-level reads)
+  owns immutable level files (read, transient preview, first-visit creation, visited-level reads)
   with `.Encoding` (level format) and `.Errors` (`LevelFailure`).
+  `Dungeon.World.Quests` coordinates read-only preflight and retained objective
+  validation. `Dungeon.World.Savegame.Quests` owns the exact quest codec.
   `Dungeon.World.Catalog` opens existing worlds without creating them, lists
   non-destructively, and allocates exclusive new identities using `Std.Fs.ReadDir`.
   `ListWorldIds` enumerates canonical directories without opening metadata,
   saves or levels; `InspectWorld` validates one complete entry. `ListWorlds`
   explicitly inspects every identity for callers that need a complete list.
+  `DeleteWorld` validates a direct child identity, refuses linked targets and
+  uses `Std.Fs.DeleteDirAll` without decoding obsolete metadata. Callers own
+  exclusion of active sessions; filesystem failures may leave partial contents.
   `Dungeon.World.Names` holds the persisted kind and facing names shared by saves
   and levels. `Dungeon.World.Savegame` owns the savegame file, its format version,
   and three-phase loading; its subunits `Player`, `Entities`, `Discovery`, and
@@ -287,4 +306,5 @@ The world save layer owns the exact NPC codec; it resolves settlement maps
 from code. The protocol shares its visible-state codec between ordinary and
 atomic dialogue replies. The server retains the active authoritative frame;
 the client retains its projection and local selection. See
-[NPCs and dialogue](npcs-and-dialogue.md) for the complete contract.
+[NPCs and dialogue](npcs-and-dialogue.md) and [quests](quests.md) for the
+complete contracts.

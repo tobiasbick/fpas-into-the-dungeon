@@ -693,8 +693,8 @@ Settlements, NPCs, deterministic quests, an economy, time, and weather follow
 the vertical slice in `DUNGEON_RPG_IDEAS.md`: enter a settlement, talk to an
 NPC, take a solvable quest into a dungeon, and return to a character that
 remembers the outcome. Every substage is deterministic and server-owned and does
-not depend on LLM integration (stage 16). Only 15a is detailed; later substages
-give an ordering direction and are planned when they become next.
+not depend on LLM integration (stage 16). Stages 15a and 15b are accepted.
+Later substages give an ordering direction and are planned when they become next.
 
 ### 15a. Home settlement and Mara — DONE
 
@@ -714,8 +714,8 @@ intentions during dialogue and commits replies atomically; the client owns only
 the projected modal, selection and scroll position. Settlement projection uses
 no outdoor chunk I/O. Houses remain closed until building interiors are added.
 
-World format 4, generator 9, savegame format 11 and protocol 17 are current;
-level-file format stays 3. Obsolete data is rejected and preserved. Formatting,
+At 15a acceptance, versions were world format 4, generator 9, savegame 11 and
+protocol 17; level-file format stayed 3. Obsolete data is rejected and preserved. Formatting,
 all 21 project checks and the complete suite pass: **146/146 test programs**.
 A natural TCP play test takes dungeon damage, reaches Mara still hurt, heals,
 saves, restarts the complete listener and verifies Continue and her repeat
@@ -726,12 +726,32 @@ All eleven checkpoints are complete. The implementation plan was removed
 after acceptance; the permanent contract is documented in
 [NPCs and dialogue](architecture/npcs-and-dialogue.md).
 
-### 15b. First deterministic quest — LATER
+### 15b. First deterministic quest — DONE
 
-Mara offers one quest whose target exists by construction, for example
-retrieving an item from the deepest level of the spawn dungeon or defeating its
-guardian. Quest state, its validated objective, a reward, and Mara's remembered
-outcome persist; the server proves the objective is reachable before offering it.
+Mara offers one quest to recover her lost compass from the deepest level of
+the spawn dungeon. Read-only preflight proves the route and target before the
+offer. Earlier retrieval counts on explicit acceptance; hand-in returns the
+compass and grants two Healing potions atomically, once per game. A full
+inventory defers the whole exchange. The journal on `J` follows carried
+ownership and remembers the completed outcome.
+
+The user accepted 15b, including server world administration, on 2026-10-17
+after testing the running feature. All nine gameplay checkpoints are complete.
+A natural TCP test covers active, ready and rewarded saves over four listener lifetimes.
+Final verification, including world administration, passes on 2026-10-17:
+formatting, all 21 project checks and the complete suite (**154/154 test programs**).
+Current versions are world metadata 4, generator 10, level file 4, savegame 12
+and protocol 18; obsolete
+data is rejected and preserved. The lasting contract is documented in
+[quests](architecture/quests.md). The accepted implementation plans are removed.
+
+The server-administration follow-up adds **Worlds (F4)** to the console, with
+paged compatibility/save status and confirmed deletion of a complete world,
+including obsolete data. It excludes admitted connections through the listener's
+shared admission permit. Current workspace verification, including both new
+programs, passes **154/154 tests** and all 21 project checks. Stored formats and
+the client world-selection flow are unchanged. See the
+[console guide](product/server-console.md#deleting-worlds).
 
 ### 15c. Generated settlements — LATER
 

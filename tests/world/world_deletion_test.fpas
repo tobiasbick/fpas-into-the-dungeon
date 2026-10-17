@@ -1,0 +1,54 @@
+// Complete deletion accepts obsolete world data and preserves sibling worlds and outside files.
+program WorldDeletionTest;
+
+uses Dungeon.World as WorldUnit, Dungeon.World.Catalog as CatalogUnit, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test;
+
+begin
+  const Scratch := Test.ScratchDir();
+  const Root := PathOps.Join([Scratch, 'worlds']);
+  Test.AssertTrue(Fs.CreateDir(Root).Unwrap());
+  const Sibling := CatalogUnit.CreateWorld(Root, 12345, 4, 32).Unwrap();
+  const SiblingText := Fs.ReadText(WorldUnit.WorldMetadataPath(Sibling)).Unwrap();
+  const Outside := PathOps.Join([Scratch, 'outside.txt']);
+  Test.AssertTrue(Fs.WriteText(Outside, 'outside must survive').Unwrap());
+  const Obsolete := PathOps.Join([Root, 'obsolete']);
+  Test.AssertTrue(Fs.CreateDirAll(PathOps.Join([Obsolete, 'saves'])).Unwrap());
+  Test.AssertTrue(Fs.CreateDirAll(PathOps.Join([Obsolete, 'chunks'])).Unwrap());
+  Test.AssertTrue(Fs.CreateDirAll(PathOps.Join([Obsolete, 'dungeons', '0_0'])).Unwrap());
+  for Relative: string in [
+    'world.json',
+    'saves/default.json',
+    'chunks/0_0.json',
+    'dungeons/0_0/0.json'
+  ] do
+    Test.AssertTrue(Fs.WriteText(PathOps.Join([Obsolete, Relative]), 'obsolete content').Unwrap());
+  end for;
+
+  Test.AssertEquals('incompatible', CatalogUnit.InspectWorld(Root, 'obsolete', 32).Status);
+  for Id: string in ['', '..', '../outside.txt', 'a/b', 'a\b', '/worlds', 'x'.RepeatStr(65)] do
+    Test.AssertTrue(CatalogUnit.DeleteWorld(Root, Id) is Error(_));
+    Test.AssertEquals(
+      'obsolete content',
+      Fs.ReadText(PathOps.Join([Obsolete, 'saves/default.json'])).Unwrap()
+    );
+  end for;
+
+  Test.AssertTrue(CatalogUnit.DeleteWorld('', 'obsolete') is Error(_));
+  Test.AssertTrue(CatalogUnit.DeleteWorld(Outside, 'obsolete') is Error(_));
+  const FileWorld := PathOps.Join([Root, 'file-world']);
+  Test.AssertTrue(Fs.WriteText(FileWorld, 'not a world directory').Unwrap());
+  Test.AssertTrue(CatalogUnit.DeleteWorld(Root, 'file-world') is Error(_));
+  Test.AssertEquals('not a world directory', Fs.ReadText(FileWorld).Unwrap());
+  Test.AssertFalse(CatalogUnit.DeleteWorld(Root, 'absent').Unwrap());
+  Test.AssertTrue(CatalogUnit.DeleteWorld(Root, 'obsolete').Unwrap());
+  Test.AssertFalse(Fs.Exists(Obsolete));
+  Test.AssertFalse(CatalogUnit.DeleteWorld(Root, 'obsolete').Unwrap());
+  Test.AssertEquals(1, CatalogUnit.ListWorldIds(Root).Unwrap().Length());
+  Test.AssertEquals(SiblingText, Fs.ReadText(WorldUnit.WorldMetadataPath(Sibling)).Unwrap());
+  Test.AssertEquals('outside must survive', Fs.ReadText(Outside).Unwrap());
+  // Missing or unreadable metadata does not obstruct explicit removal of an abandoned directory.
+  const Partial := PathOps.Join([Root, 'partial']);
+  Test.AssertTrue(Fs.CreateDir(Partial).Unwrap());
+  Test.AssertTrue(CatalogUnit.DeleteWorld(Root, 'partial').Unwrap());
+  Test.AssertTrue(Fs.IsDir(Root));
+end.

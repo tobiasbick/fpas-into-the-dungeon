@@ -1,4 +1,4 @@
-// Non-destructive inspection, existing-only opening, and exclusive creation of worlds.
+// World catalog inspection, exclusive creation and explicit complete-world deletion.
 unit Dungeon.World.Catalog;
 
 uses Dungeon.Terrain as Terrain, Dungeon.Terrain.Placement as PlacementRules, Dungeon.World as WorldUnit, Dungeon.World.Encoding as Encoding, Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as SavegameErrors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps;
@@ -24,6 +24,55 @@ public type WorldEntry = record
   public SaveStatus: string;
   public Reason: string;
 end record;
+
+// Deletes one canonical child directory without requiring compatible metadata or a valid save.
+// Callers must exclude active sessions. Linked targets are refused; filesystem errors can leave
+// partially deleted contents and must be reported. Missing targets return Ok(false).
+public function DeleteWorld(Root: string; Id: string): result of (boolean, string);
+begin
+  const ValidId := try Encoding.ValidateWorldId(Id);
+  if Root.Trim() = '' then
+    return Error('worlds root must not be empty');
+  end if;
+  const AbsoluteRoot := PathOps.Normalize(PathOps.Join([try Fs.CurrentDir(), Root]));
+  const Absolute := AbsoluteRoot.StartsWith('/') or AbsoluteRoot.StartsWith('\\')
+    or
+    (
+      (AbsoluteRoot.Length() > 2) and (AbsoluteRoot[1] = ':')
+      and
+      ((AbsoluteRoot[2] = '/') or (AbsoluteRoot[2] = '\'))
+    );
+  if not Absolute then
+    return Error('worlds root must resolve to an absolute path');
+  end if;
+
+  if not Fs.IsDir(AbsoluteRoot) then
+    return Error('worlds root is not a directory');
+  end if;
+  const Directory := PathOps.Normalize(PathOps.Join([AbsoluteRoot, ValidId]));
+  if (Directory = AbsoluteRoot) or (PathOps.DirName(Directory) <> AbsoluteRoot) then
+    return Error('world directory must be a direct child of the worlds root');
+  end if;
+
+  if Fs.IsSymLink(Directory) then
+    return Error('linked world directories cannot be deleted');
+  end if;
+
+  if not Fs.Exists(Directory) then
+    return Ok(false);
+  end if;
+
+  if not Fs.IsDir(Directory) then
+    return Error('world path is not a directory');
+  end if;
+
+  case Fs.DeleteDirAll(Directory) of
+    when Ok(const Deleted):
+      return Ok(Deleted);
+    when Error(const Reason):
+      return Error('Deletion failed; some contents may already have been removed. ' + Reason);
+  end case;
+end function;
 
 // Opens only current valid metadata. It never creates directories, chunks, levels, or saves.
 public function OpenExistingWorld(Root: string; Id: string; CacheLimit: integer): result of (WorldUnit.WorldSession, WorldAccessFailure);

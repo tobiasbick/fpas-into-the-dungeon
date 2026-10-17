@@ -1,0 +1,88 @@
+// Authoritative acceptance, carried-compass readiness and atomic hand-in with two potion rewards.
+unit Dungeon.Quests;
+
+uses Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Npcs.Interaction as NpcInteraction, Dungeon.Quests.Items as QuestItems, Dungeon.Quests.Model as Model;
+
+function RequireMara(View: GameState.AreaView; State: GameState.GameState): result of (GameState.GameState, string);
+begin
+  const Valid := try GameState.ValidateGameState(View, State);
+  if not NpcInteraction.MaraInReach(View, Valid) or not Valid.Npcs[0].HasMetPlayer then
+    return Error('quest interaction requires a conversation with Mara in reach');
+  end if;
+
+  return Ok(Valid);
+end function;
+
+// Accepts a server-preflighted objective once; the caller binds it to the current offer frame.
+// Earlier retrieval counts automatically because no item or progress facts are reset.
+public function Accept(View: GameState.AreaView; State: GameState.GameState; Objective: Model.CompassObjective): result of (GameState.GameState, string);
+begin
+  const Valid := try RequireMara(View, State);
+  if not (Valid.Quest is Model.QuestState.NotAccepted) then
+    return Error('Mara''s compass quest has already been accepted');
+  end if;
+  const Target := try Model.ValidateObjective(View.Metadata, Objective);
+  return GameState.ValidateGameState(
+    View,
+    Valid with Quest := Model.QuestState.Active(Target); end with
+  );
+end function;
+
+// Read-only derived progress; a dropped compass must be recovered before it can be handed in.
+public function ReadyToReturn(State: GameState.GameState): boolean;
+begin
+  case State.Quest of
+    when Model.QuestState.NotAccepted, Model.QuestState.Rewarded(_):
+      return false;
+    when Model.QuestState.Active(const Objective):
+      for Item: Items.GameItem in State.Items do
+        if (Item.Id = Objective.ItemId) and (Item.Kind = Items.ItemKind.MarasCompass)
+          and
+          (Item.Location is Items.ItemLocation.CarriedByPlayer)
+        then
+          return true;
+        end if;
+      end for;
+  end case;
+
+  return false;
+end function;
+
+// Atomically returns the carried compass and grants both potions once. Capacity is checked
+// after hand-in; rejection leaves every fact intact, including ready status, dice and skills.
+public function Report(View: GameState.AreaView; State: GameState.GameState): result of (GameState.GameState, string);
+begin
+  const Valid := try RequireMara(View, State);
+  if not ReadyToReturn(Valid) then
+    return Error('the accepted compass must be carried before reporting success');
+  end if;
+
+  if GameState.InventoryItems(Valid).Length() + 1 > GameState.MaximumInventoryItems then
+    return Error('make room for both Healing potions before returning the compass');
+  end if;
+  var Changed := Valid;
+  case Valid.Quest of
+    when Model.QuestState.NotAccepted, Model.QuestState.Rewarded(_):
+      return Error('quest is not active');
+    when Model.QuestState.Active(const Objective):
+      for Index: integer := 0 to Changed.Items.Length() - 1 do
+        if Changed.Items[Index].Id = Objective.ItemId then
+          Changed.Items[Index].Location := Items.ItemLocation.ReturnedToMara(Objective.QuestId);
+        end if;
+      end for;
+
+      Changed.Quest := Model.QuestState.Rewarded(Objective);
+  end case;
+
+  for Index: integer := 0 to 1 do
+    Changed.Items.PushInPlace(
+      Items.GameItem(
+        Id := QuestItems.RewardId(View.Metadata, Index),
+        Kind := Items.ItemKind.HealingPotion, Location := Items.ItemLocation.CarriedByPlayer
+      )
+    );
+  end for;
+
+  return GameState.ValidateGameState(View, Changed);
+end function;
+end unit;

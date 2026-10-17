@@ -63,13 +63,14 @@ begin
   return true;
 end function;
 
-function PlacementsAccepted(Map: InteriorUnit.InteriorMap): result of (boolean, string);
+function PlacementsAccepted(Map: InteriorUnit.InteriorMap; WithCompass: boolean): result of (boolean, string);
 begin
   const Required: array of ItemRules.ItemKind := Levels.RequiredItemKinds(Map.Level);
   const Optional: array of integer := Levels.OptionalItemSlots(Map.Level);
-  if (Map.Items.Length() < Required.Length())
+  const CompassCount := if WithCompass then 1 else 0 end if;
+  if (Map.Items.Length() < Required.Length() + CompassCount)
     or
-    (Map.Items.Length() > Required.Length() + Optional.Length())
+    (Map.Items.Length() > Required.Length() + Optional.Length() + CompassCount)
   then
     begin
       return Error(
@@ -90,14 +91,26 @@ begin
 
         Slot := Index;
       else
-        for Candidate: integer in Optional do
-          if Item.ItemId = ItemRules.ItemPlacementId(Map.AreaId, Candidate) then
-            Slot := Candidate;
+        if WithCompass and (Index = Map.Items.Length() - 1) then
+          if Item.Kind <> ItemRules.ItemKind.MarasCompass then
+            return Error('deepest spawn level must contain Mara''s compass');
           end if;
-        end for;
 
-        if Slot < 0 then
-          return Error('generated dungeon optional finds must use an original optional slot');
+          Slot := Levels.CompassSlot;
+        else
+          if Item.Kind = ItemRules.ItemKind.MarasCompass then
+            return Error('compass cannot occupy an optional loot slot');
+          end if;
+
+          for Candidate: integer in Optional do
+            if Item.ItemId = ItemRules.ItemPlacementId(Map.AreaId, Candidate) then
+              Slot := Candidate;
+            end if;
+          end for;
+
+          if Slot < 0 then
+            return Error('generated dungeon optional finds must use an original optional slot');
+          end if;
         end if;
       end if;
 
@@ -154,7 +167,7 @@ end function;
 // east, map validity including level endpoints, per-level ordered placements, floor share, and
 // no opponent that could see the start.
 // Room count is a generation-time rule only and is not checked here.
-public function ValidateGeneratedDungeon(Map: InteriorUnit.InteriorMap): result of (InteriorUnit.InteriorMap, string);
+public function ValidateGeneratedDungeon(Map: InteriorUnit.InteriorMap; WithCompass: boolean): result of (InteriorUnit.InteriorMap, string);
 begin
   if (Map.Width <> GeneratedDungeonWidth) or (Map.Height <> GeneratedDungeonHeight) then
     begin
@@ -180,7 +193,11 @@ begin
       return Error('generated dungeon start must face east one field east of the arrival endpoint');
     end;
   end if;
-  const Placements: boolean := try PlacementsAccepted(Valid);
+
+  if WithCompass and (Map.Level <> Map.Depth - 1) then
+    return Error('compass must be on the deepest level');
+  end if;
+  const Placements: boolean := try PlacementsAccepted(Valid, WithCompass);
   if not FloorShareAccepted(Valid.Cells) then
     begin
       return Error('generated dungeon floor share is outside 25 to 60 percent');

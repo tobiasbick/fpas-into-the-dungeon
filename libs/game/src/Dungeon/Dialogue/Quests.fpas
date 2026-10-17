@@ -1,0 +1,103 @@
+// Mara's offer, progress and hand-in frames; availability follows server-owned quest and item facts.
+unit Dungeon.Dialogue.Quests;
+
+uses Dungeon.Dialogue.Model as Dialogue, Dungeon.GameState as GameState, Dungeon.Quests as Quests, Dungeon.Quests.Model as Model;
+
+// Creates the frame of a connection-local quest node, including state-dependent report availability.
+public function QuestFrame(State: GameState.GameState; Node: Dialogue.Node): Dialogue.Frame;
+begin
+  var Choices: array of Dialogue.Choice := [];
+  var Text := '';
+  case Node of
+    when Dialogue.Node.Root:
+      panic('quest frame requires a quest node');
+    when Dialogue.Node.CompassOffer(_):
+      Text := 'I lost my brass compass on the deepest level of the dungeon near the spawn. Bring it back to me and I will give you two Healing potions. Will you help?';
+      if State.Quest is Model.QuestState.NotAccepted then
+        Choices.PushInPlace(
+          Dialogue.Choice(Id := 'quest_accept', Text := 'I will find your compass.')
+        );
+      end if;
+    when Dialogue.Node.CompassStatus:
+      case State.Quest of
+        when Model.QuestState.NotAccepted:
+          Text := 'Ask me about work when you are ready.';
+        when Model.QuestState.Active(_):
+          if Quests.ReadyToReturn(State) then
+            Text := 'That is my compass! Return it to me and take these two Healing potions for your next journey.';
+            Choices.PushInPlace(
+              Dialogue.Choice(Id := 'quest_report', Text := 'Return the compass.')
+            );
+          else
+            Text := 'My compass is on the deepest level of the dungeon near the spawn. Carry it back to me when you find it.';
+          end if;
+        when Model.QuestState.Rewarded(_):
+          Text := 'The compass you recovered is safe with me. Thank you again. I hope the two Healing potions serve you well.';
+      end case;
+  end case;
+
+  Choices.PushInPlace(Dialogue.Choice(Id := 'quest_back', Text := 'Back to other questions.'));
+  return Dialogue.Frame(
+    Node := Node,
+    NpcId := State.Npcs[0].Id,
+    Speaker := 'Mara',
+    Text := Text,
+    Choices := Choices
+  );
+end function;
+
+// Requires eligibility in both the retained and freshly derived node. Back is handled by the root facade.
+public function Choose(View: GameState.AreaView; State: GameState.GameState; Current: Dialogue.Frame; Id: string): result of (Dialogue.Outcome, string);
+begin
+  if Current.Node is Dialogue.Node.Root then
+    return Error('quest choice requires a quest node');
+  end if;
+
+  if not Dialogue.Contains(Current.Choices, Id)
+    or
+    not Dialogue.Contains(QuestFrame(State, Current.Node).Choices, Id)
+  then
+    return Error('quest choice is not currently available');
+  end if;
+
+  case Current.Node of
+    when Dialogue.Node.Root:
+      return Error('quest choice requires a quest node');
+    when Dialogue.Node.CompassOffer(const Objective):
+      if Id <> 'quest_accept' then
+        return Error('offer requires acceptance or back');
+      end if;
+      const Accepted := try Quests.Accept(View, State, Objective);
+      return Ok(
+        Dialogue.Outcome.Continued(
+          Accepted,
+          QuestFrame(Accepted, Dialogue.Node.CompassStatus),
+          true
+        )
+      );
+    when Dialogue.Node.CompassStatus:
+      if Id <> 'quest_report' then
+        return Error('quest status requires reporting or back');
+      end if;
+
+      case Quests.Report(View, State) of
+        when Ok(const Rewarded):
+          return Ok(
+            Dialogue.Outcome.Continued(
+              Rewarded,
+              QuestFrame(Rewarded, Dialogue.Node.CompassStatus),
+              true
+            )
+          );
+        when Error(const Reason):
+          // A full inventory defers the whole hand-in and leaves the ready frame usable.
+          return Ok(
+            Dialogue.Outcome.Continued(
+              State,
+              QuestFrame(State, Dialogue.Node.CompassStatus) with Text := Reason; end with, false
+            )
+          );
+      end case;
+  end case;
+end function;
+end unit;

@@ -2,7 +2,7 @@
 unit Dungeon.Server.Dialogue;
 
 uses
-  Dungeon.Dialogue as Rules, Dungeon.Protocol as Protocol, Dungeon.Server.Logging as Logging,
+  Dungeon.GameState as GameState, Dungeon.Quests.Model as QuestModel, Dungeon.World.Quests as Quests, Dungeon.Server.Failures as Failures, Dungeon.Dialogue as Rules, Dungeon.Protocol as Protocol, Dungeon.Server.Logging as Logging,
   Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Std.Net as Net, Std.Tasks as Tasks;
 
 // Gates all lifecycle and gameplay dispatch while a conversation is active; resize and disconnect remain valid.
@@ -66,6 +66,34 @@ begin
   end case;
 end function;
 
+function CheckedChoice(Value: result of (Rules.Outcome, string)): result of (Rules.Outcome, Failures.FailureRejection);
+begin
+  case Value of
+    when Ok(const Outcome):
+      return Ok(Outcome);
+    when Error(const Reason):
+      return Error(Failures.FailureRejection(Code := 'dialogue_rejected', Message := Reason));
+  end case;
+end function;
+
+function Choose(Session: SessionUnit.ServerSession; View: GameState.AreaView; State: GameState.GameState; Frame: Rules.Frame; Id: string; Logs: option of channel of Logging.ServerLogEvent): result of (Rules.Outcome, Failures.FailureRejection);
+begin
+  if (Id = 'quest') and (Frame.Node is Rules.Node.Root)
+    and
+    (State.Quest is QuestModel.QuestState.NotAccepted)
+  then
+    case Quests.ProveCompass(Session.World, State) of
+      when Ok(const Objective):
+        return CheckedChoice(Rules.OfferCompass(View, State, Frame, Objective));
+      when Error(const Failure):
+        Logging.LogServer(Logs, 'quest_preflight', Failures.LevelFailureReason(Failure));
+        return Error(Failures.LevelRejection(Session.World.Metadata.Id, Failure));
+    end case;
+  end if;
+
+  return CheckedChoice(Rules.Choose(View, State, Frame, Id));
+end function;
+
 // Handles dialogue intentions after the active-game prerequisite; returns None for other dispatch owners.
 public function HandleMessage(
   Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage; Connection: Net.Connection;
@@ -104,17 +132,19 @@ begin
             );
           end if;
           const State := try SessionUnit.RequireActiveState(Session.State);
-          case Rules.Choose(
+          case Choose(
+            Session,
             try SessionUnit.SessionAreaView(Session, State),
             State,
             Frame,
-            ChoiceId
+            ChoiceId,
+            Logs
           ) of
             when Ok(const Outcome):
               return Ok(Some(try Commit(Session, Outcome, Connection, Token, Logs)));
-            when Error(const Reason):
+            when Error(const Failure):
               return Ok(
-                Some(try Rejected(Session, 'dialogue_rejected', Reason, Connection, Token, Logs))
+                Some(try Rejected(Session, Failure.Code, Failure.Message, Connection, Token, Logs))
               );
           end case;
       end case;

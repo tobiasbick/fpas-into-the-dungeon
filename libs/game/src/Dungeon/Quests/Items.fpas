@@ -1,0 +1,84 @@
+// Quest reward origins and terminal compass ownership, independent of GameState to avoid rule cycles.
+unit Dungeon.Quests.Items;
+
+uses Dungeon.Items as Items, Dungeon.Quests.Model as Model, Dungeon.Terrain as Terrain, Std.Conv as Conv;
+
+// Two stable reward identities; callers use only indices 0 and 1.
+public function RewardId(Metadata: Terrain.WorldMetadata; Index: integer): string;
+begin
+  return Model.CompassQuestId(Metadata) + ':reward:' + Conv.IntToStr(Index);
+end function;
+
+// Recognizes only the two quest-owned origins, never arbitrary dungeon placements.
+public function IsRewardId(Metadata: Terrain.WorldMetadata; Id: string): boolean;
+begin
+  return (Id = RewardId(Metadata, 0)) or (Id = RewardId(Metadata, 1));
+end function;
+
+// Requires the handed-in compass and exactly two retained potion records after reward.
+// Before reward, neither terminal ownership nor reward items may exist. Used/dropped rewards retain IDs.
+public function ValidateQuestItems(Metadata: Terrain.WorldMetadata; Quest: Model.QuestState; Values: array of Items.GameItem; TargetVisited: boolean): result of (boolean, string);
+begin
+  const Rewarded := Quest is Model.QuestState.Rewarded(_);
+  var Compasses := 0;
+  var Returned := 0;
+  var Rewards := [0, 0];
+  for Item: Items.GameItem in Values do
+    if Item.Kind = Items.ItemKind.MarasCompass then
+      Compasses := Compasses + 1;
+      case Model.ObjectiveOf(Quest) of
+        when Some(const Objective):
+          if Item.Id <> Objective.ItemId then
+            return Error('compass identity must match the accepted objective');
+          end if;
+        when None:
+          null;
+      end case;
+    end if;
+
+    case Item.Location of
+      when Items.ItemLocation.ReturnedToMara(const QuestId):
+        if not Rewarded or (Item.Kind <> Items.ItemKind.MarasCompass)
+          or
+          (QuestId <> Model.CompassQuestId(Metadata))
+        then
+          return Error('only the rewarded quest compass can be returned to Mara');
+        end if;
+
+        Returned := Returned + 1;
+      when Items.ItemLocation.InInterior(_, _), Items.ItemLocation.CarriedByPlayer, Items.ItemLocation.EquippedByPlayer(_), Items.ItemLocation.Consumed:
+        null;
+    end case;
+
+    for Index: integer := 0 to 1 do
+      if Item.Id = RewardId(Metadata, Index) then
+        if not Rewarded or (Item.Kind <> Items.ItemKind.HealingPotion) then
+          return Error('quest reward potions require the rewarded quest');
+        end if;
+
+        Rewards[Index] := Rewards[Index] + 1;
+      end if;
+    end for;
+  end for;
+
+  if Compasses > 1 then
+    return Error('the game can contain only one Mara compass');
+  end if;
+
+  if Model.ObjectiveOf(Quest) is Some(_) then
+    if TargetVisited and (Compasses <> 1) then
+      return Error('visited quest target requires its retained compass record');
+    end if;
+
+    if (Compasses > 0) and not TargetVisited then
+      return Error('quest compass requires its origin level to have been visited');
+    end if;
+  end if;
+
+  if Rewarded and (not TargetVisited or (Returned <> 1) or (Rewards[0] <> 1) or (Rewards[1] <> 1)) then
+    return Error('rewarded quest requires its returned compass and both unique reward records');
+  end if;
+
+  return Ok(true);
+end function;
+end unit;

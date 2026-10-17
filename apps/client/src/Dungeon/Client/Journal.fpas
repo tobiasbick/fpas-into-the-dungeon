@@ -1,0 +1,68 @@
+// Read-only wrapped quest journal; scrolling and closing never send gameplay intentions.
+unit Dungeon.Client.Journal;
+
+uses Dungeon.Client.Model as Model, Dungeon.Client.Ui.Layout as Layout, Std.Math as Math, Std.Tui as Tui;
+
+function Width(State: Model.ClientModel): integer;
+begin
+  return Math.Clamp(State.ViewportWidth - 8, 1, 64);
+end function;
+
+// Visible body rows; two fixed hint rows remain outside the scrolling text.
+public function PageHeight(State: Model.ClientModel): integer;
+begin
+  return Math.Clamp(State.ViewportHeight - 7, 1, 20);
+end function;
+
+// Wraps every server line without interpreting quest state or clipping long objectives.
+public function BodyLines(State: Model.ClientModel): array of string;
+begin
+  var Lines: array of string := [];
+  for Line: string in State.Journal do
+    Lines := Lines.Concat(Layout.WrappedLines(Line, Width(State)));
+  end for;
+
+  if Lines.Length() = 0 then
+    Lines.PushInPlace('No journal entries.');
+  end if;
+
+  return Lines;
+end function;
+
+// Retains local position on resize/refresh while keeping the complete body reachable.
+public function ClampOffset(State: Model.ClientModel): Model.ClientModel;
+begin
+  return State with JournalOffset := Math.Clamp(
+    State.JournalOffset, 0,
+    Math.Max(0, BodyLines(State).Length() - PageHeight(State))
+  ); end with;
+end function;
+
+// Scrolls rows or pages locally; this changes neither dirty status nor any pending request.
+public function Scroll(State: Model.ClientModel; Delta: integer): Model.ClientModel;
+begin
+  return ClampOffset(State with JournalOffset := State.JournalOffset + Delta; end with);
+end function;
+
+// Displays the current wrapped page and fixed controls in the native overlay shell.
+public function View(State: Model.ClientModel): Tui.TuiElement;
+begin
+  const Lines := BodyLines(State);
+  const First := ClampOffset(State).JournalOffset;
+  var Content: array of Tui.TuiElement := [];
+  for Index: integer := First to Math.Min(Lines.Length(), First + PageHeight(State)) - 1 do
+    Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Lines[Index]));
+  end for;
+
+  Content.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(Layout.FitLine('W/S/arrows/PgUp/PgDn: scroll', Width(State)))
+  );
+  Content.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(Layout.FitLine('Esc/J: close', Width(State)))
+  );
+  return Tui.TuiElementBuilders.MakeOverlay(
+    'Journal',
+    [Tui.TuiElementBuilders.MakeColumn(Content)]
+  );
+end function;
+end unit;

@@ -1,7 +1,7 @@
-// Dashboard control validation, log navigation and modal settings input.
+// Dashboard control validation, log navigation and modal settings/world-management routing.
 unit Dungeon.Server.Console.Input;
 
-uses Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Conv as Conv, Std.Time as Time, Std.Tui as Tui;
+uses Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Dungeon.Server.Console.Worlds.Model as WorldModel, Dungeon.Server.Console.Worlds.Input as WorldInput, Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Conv as Conv, Std.Math as Math, Std.Time as Time, Std.Tui as Tui;
 
 function OpenSettings(State: ModelUnit.ConsoleModel): ModelUnit.ConsoleModel;
 begin
@@ -10,10 +10,34 @@ begin
   return State with SettingsOpen := true; FocusedControl := 10; SettingsError := ''; SeedText := Seed; SeedCaret := Seed.Length(); RegionText := Region; RegionCaret := Region.Length(); end with;
 end function;
 
+function OpenWorlds(State: ModelUnit.ConsoleModel): ModelUnit.ConsoleModel;
+begin
+  const Worlds := WorldModel.Refresh(State.Worlds with Open := true; end with, 0);
+  return State with Worlds := Worlds; FocusedControl := Worlds.Focus; end with;
+end function;
+
 // Ignores stale/invalid control events and keeps dashboard commands outside the settings modal.
 public function UpdateDashboard(State: ModelUnit.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
 begin
   Cmd.Set(Tui.TuiCmd.NoCommand);
+  if State.Worlds.Open
+    and
+    (
+      (Msg is Tui.TuiMsg.Key(_)) or (Msg is Tui.TuiMsg.Action(_, _))
+      or
+      (Msg is Tui.TuiMsg.SelectionChanged(_, _, _)) or (Msg is Tui.TuiMsg.FocusChanged(_, _))
+      or
+      (Msg is Tui.TuiMsg.QuitRequested)
+    )
+  then
+    const Worlds := WorldInput.Update(State.Worlds, Msg, State.Height, Cmd);
+    var Focus := Worlds.Focus;
+    if not Worlds.Open then
+      Focus := 20;
+    end if;
+
+    return State with Worlds := Worlds; FocusedControl := Focus; end with;
+  end if;
   const Rows := LayoutUnit.ResolveLayout(State.Width, State.Height).LogRows;
   case Msg of
     when Tui.TuiMsg.Started:
@@ -25,7 +49,14 @@ begin
       end if;
     when Tui.TuiMsg.Resize(const Size):
       const Layout := LayoutUnit.ResolveLayout(Size.Width, Size.Height);
-      return State with Width := Layout.Width; Height := Layout.Height; History := LogUnit.ResolveOffset(
+      var Worlds := State.Worlds;
+      Worlds.Row := Math.Clamp(
+        Worlds.Row,
+        0,
+        Math.Max(0, WorldModel.VisibleCount(Worlds, Layout.Height) - 1)
+      );
+
+      return State with Worlds := Worlds; Width := Layout.Width; Height := Layout.Height; History := LogUnit.ResolveOffset(
         State.History,
         Layout.LogRows
       ); end with;
@@ -39,7 +70,7 @@ begin
           else
             if (Id.Value = 20) or ((Id.Value >= 30) and (Id.Value <= 33)) or (Id.Value = 1)
               or
-              (Id.Value = 4)
+              (Id.Value = 4) or (Id.Value = 5)
             then
               return State with FocusedControl := Id.Value; end with;
             end if;
@@ -63,6 +94,10 @@ begin
       else
         if Action.Value = 1 then
           return OpenSettings(State);
+        end if;
+
+        if Action.Value = 5 then
+          return OpenWorlds(State);
         end if;
 
         if Action.Value = 4 then
@@ -131,6 +166,10 @@ begin
       else
         if KeyEvent.kind = Tui.TuiKeyKind.F2 then
           return OpenSettings(State);
+        end if;
+
+        if KeyEvent.kind = Tui.TuiKeyKind.F4 then
+          return OpenWorlds(State);
         end if;
 
         if KeyEvent.kind = Tui.TuiKeyKind.F3 then

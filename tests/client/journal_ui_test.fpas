@@ -1,0 +1,167 @@
+// Exercises native journal wrapping, scrolling, refreshed projections and read-only modal keyboard behavior.
+program JournalUiTest;
+
+uses Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Dungeon.Test.Catalog as Catalog, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Contains(Screen: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Row) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function Key(Kind: Tui.TuiKeyKind; Ch: string): Tui.TuiKeyEvent;
+begin
+  return Tui.TuiKeyEvent(
+    kind := Kind,
+    ch := Ch,
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+end function;
+
+function Event(Lines: array of string): Client.ClientEvent;
+begin
+  return Client.ClientEvent.State(
+    Protocol.VisibleState.MapState(
+      Protocol.MapVisibleState(
+        OriginX := 0, OriginY := 0, Width := 1, Height := 1, Rows := ['g'], KnowledgeRows := ['v'],
+        PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := [], Health := 20,
+        MaxHealth := 20, Character := [], Journal := Lines
+      )
+    )
+  );
+end function;
+
+function HallEvent(Lines: array of string): Client.ClientEvent;
+begin
+  return Client.ClientEvent.State(
+    Protocol.VisibleState.FirstPersonState(
+      Protocol.FirstPersonVisibleState(
+        Title := 'Dungeon', Status := 'Nothing in reach', Level := 0, Depth := 3, Width := 3,
+        Height := 3,
+        Rows := ['###', '#.#', '###'], KnowledgeRows := ['vvv', 'vvv', 'vvv'], PlayerX := 1,
+        PlayerY := 1,
+        Facing := Protocol.FirstPersonFacing.East, Inventory := [], Health := 20, MaxHealth := 20,
+        Character := [], CombatLog := [], CombatEvents := [], Journal := Lines
+      )
+    )
+  );
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(32);
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(1);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var State := Client.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  ) with ViewportWidth := 28; ViewportHeight := 9; ContextPanelVisible := false; MessagePanelVisible := false; end with;
+
+  State := Client.UpdateClientEvent(
+    State,
+    Client.ClientEvent.Connected(Catalog.FixtureCatalog(false, false)),
+    Cmd
+  );
+  State := Client.UpdateClientEvent(
+    State, Event([
+      'Mara''s lost compass', 'Status: Active',
+      'Recover the compass from the deepest level and return it to Mara in Hearthmoor.',
+      'Reward: Two Healing potions.'
+    ]), Cmd
+  );
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(28, 9));
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  while Tasks.TryReceive(Requests).Unwrap() is Some(_) do
+    null;
+  end while;
+
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Character, 'j'));
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 1, 0);
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.JournalOverlay);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Journal'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Mara''s lost compass'));
+  var SawGoal := false;
+  var SawReturn := false;
+  var SawReward := false;
+  for Step: integer := 0 to 20 do
+    const Screen := App.SurfaceSnapshot();
+    SawGoal := SawGoal or Contains(Screen, 'Recover the compass');
+    SawReturn := SawReturn or Contains(Screen, 'Hearthmoor.');
+    SawReward := SawReward or Contains(Screen, 'potions.');
+    App.InjectKeyForTest(Key(Tui.TuiKeyKind.Down, ''));
+    State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 1, 0);
+  end for;
+
+  Test.AssertTrue(SawGoal and SawReturn and SawReward);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  Test.AssertFalse(State.Dirty);
+  const AtEnd := State.JournalOffset;
+  State := Client.UpdateClient(State, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.PageUp, '')), Cmd);
+  Test.AssertTrue(State.JournalOffset < AtEnd);
+  State := Client.UpdateClient(State, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Character, 'a')), Cmd);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  State.Pending := true;
+  State := Client.UpdateClient(State, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Character, 's')), Cmd);
+  Test.AssertTrue(State.Pending);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  State.Pending := false;
+  State := Client.UpdateClientEvent(
+    State,
+    Event(['Status: Completed', 'Mara remembers.']),
+    Cmd
+  );
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.JournalOverlay);
+  Test.AssertEquals(0, State.JournalOffset);
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Status: Completed'));
+  State := Client.UpdateClientEvent(State, HallEvent(['Status: Active', 'Seek the compass.']), Cmd);
+  Test.AssertTrue(State.View = Protocol.ViewKind.FirstPerson);
+  Test.AssertEquals('Seek the compass.', State.Journal[1]);
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.JournalOverlay);
+  App.InjectResizeForTest(Tui.TuiSize.Create(80, 24));
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 1, 0);
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.JournalOverlay);
+  Test.AssertEquals(0, State.JournalOffset);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Seek the compass.'));
+  while true do
+    case Tasks.TryReceive(Requests).Unwrap() of
+      when Some(Protocol.ClientMessage.Viewport(_, _)):
+        null;
+      when None:
+        break;
+      when Some(_):
+        panic('journal resize must not send gameplay intentions');
+    end case;
+  end while;
+
+  State := Client.UpdateClient(State, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Escape, '')), Cmd);
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertFalse(State.Dirty);
+  State := Client.UpdateClient(State, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Character, 'J')), Cmd);
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.JournalOverlay);
+  State := Client.UpdateClient(State, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Character, 'j')), Cmd);
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  State.ActiveDialogue := Some(
+    Protocol.DialogueFrame(
+      NpcId := 'home:settlement:home:npc:mara',
+      Speaker := 'Mara', Text := 'Welcome.',
+      Choices := [Protocol.DialogueChoice(Id := 'goodbye', Text := 'Goodbye.')]
+    )
+  );
+  State := Client.UpdateClient(State, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.Character, 'j')), Cmd);
+  Test.AssertTrue(State.Overlay = Client.ClientOverlay.NoOverlay);
+  Test.AssertTrue(State.ActiveDialogue is Some(_));
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+end.

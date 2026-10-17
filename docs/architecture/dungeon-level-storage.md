@@ -7,8 +7,8 @@ dungeon names and by 14c with one file per dungeon level, supplementing
 three-phase savegame loading in `Dungeon.World.Savegame`, and the transition
 handling in `Dungeon.Server.Handling` and `Dungeon.Server.Replies`. The
 structural rules shared by the generator and stored levels live in
-`Dungeon.Interior.Generation.Validation`. Level format 3 (14c) stores every
-level of a dungeon separately.
+`Dungeon.Interior.Generation.Validation`. Level format 4 retains one file per
+level and adds the unique compass placement contract from 15b.
 
 ## Immutable level file
 
@@ -26,9 +26,9 @@ fields must be integral and within their stated bounds.
 
 | Key | Format and requirement |
 | --- | --- |
-| `format_version` | Integer `3`. |
+| `format_version` | Integer `4`. |
 | `world_id` | String exactly equal to selected world metadata ID. |
-| `generator_version` | Integer equal to metadata generator version, currently `9`. |
+| `generator_version` | Integer equal to metadata generator version, currently `10`. |
 | `area_id` | Canonical `<world>:dungeon:<rx>:<ry>:<level>`, equal to the requested area. |
 | `name` | Stored display name, 1..64 printable ASCII characters, no leading/trailing spaces. |
 | `level` | Integer equal to the identity's level and below `depth`. |
@@ -52,10 +52,10 @@ The name is generated once from world seed and numeric entrance region using
 an independent random stream. Readers validate its shape but never regenerate
 or compare it with a newly generated name. Projections and diagnostics use the
 name of the retained map. Duplicate display names are allowed; area identities
-remain unique; all levels of one dungeon store the same name. Level formats 1/2
-and generator-6/7 worlds are incompatible, remain untouched and cannot be
+remain unique; all levels of one dungeon store the same name. Level formats 1/2/3
+and generator-9 or older worlds are incompatible, remain untouched and cannot be
 continued with this server; create a new world for the current version. The
-current save format is 11 and protocol is 17.
+current save format is 12 and protocol is 18.
 
 Each placement is exactly `{ "id": string, "kind": string, "x": integer,
 "y": integer }`. Items occur in ascending original slot order, with IDs `<area>:item:<slot>`.
@@ -64,8 +64,13 @@ Required slots 0..3 have kinds `ancient_coin`, `rusty_short_sword`,
 have any of those four kinds; missing slot 4 never renumbers slot 5. Four through
 six placements are accepted, including `[0,1,2,3,5]`. Missing or reordered
 required slots, duplicates, unknown slots and noncanonical IDs reject.
-Levels below 0 require one `healing_potion` at slot 0 and accept optional slots
-1/2. Hostiles follow `LevelHostileKinds(level)` in order, with IDs
+Levels deeper than level 0 require one `healing_potion` at slot 0 and accept optional slots
+1/2. Only the deepest level of the spawn's owning region additionally requires
+`maras_compass` at original slot 6, including when that deepest level is 0.
+Slots omitted between other finds and slot 6 remain absent; existing IDs never
+shift. A compass in another region/level or in an optional slot rejects. World
+metadata and the file's stored depth decide whether it is required.
+Hostiles follow `LevelHostileKinds(level)` in order, with IDs
 `<area>:hostile:<slot>`; level 0 is `restless_skeleton`, `giant_rat`. Selection, names, room corners
 and distance ordering are not regenerated on read; stored validation checks
 kinds, identities, ordinary floor placement, overlap and initial sight.
@@ -74,7 +79,9 @@ no current health, alert status, ownership, equipment slot, or discovery data.
 Identity strings must also fit the existing 128-character inventory-ID bound.
 Consumed potions are savegame records, never immutable level placements:
 the original potion placement remains intact and is matched by ID and kind
-even when its mutable item has no location payload.
+even when its mutable item has no location payload. A returned compass also
+keeps its immutable placement. Quest reward potions belong only to mutable
+game state and never appear in a level file; see [quests](quests.md).
 
 Move the existing item-kind, hostile-kind, and facing JSON string conversions
 into a small shared world-layer encoding unit used by saves and levels. Keep
@@ -91,7 +98,7 @@ only: rooms are not persisted or inferred again from finished corridors.
 Neither decoding nor validation reruns the generator. Structural validity is
 the storage contract; fingerprint tests verify generator output separately.
 
-Only a missing first-visit file is generated and atomically written, using the
+Only a missing first-visit file is generated for publication and atomically written, using the
 existing filesystem primitives and the same single-server ownership assumption
 as world chunks. One server owns a runtime world directory; concurrent servers
 and external modifications during an operation are outside 14a. Existing files

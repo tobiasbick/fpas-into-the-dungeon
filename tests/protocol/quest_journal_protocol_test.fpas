@@ -1,0 +1,82 @@
+// Verifies required journal fields in both view families, preserved server text and strict payload limits.
+program QuestJournalProtocolTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages, Std.Test as Test;
+
+function Map(Lines: array of string): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      OriginX := 0, OriginY := 0, Width := 1, Height := 1, Rows := ['g'], KnowledgeRows := ['v'],
+      PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := [], Health := 20,
+      MaxHealth := 20, Character := [], Journal := Lines
+    )
+  );
+end function;
+
+function Hall(Lines: array of string): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.FirstPersonState(
+    Protocol.FirstPersonVisibleState(
+      Title := 'Dungeon', Status := 'Nothing in reach', Level := 0, Depth := 3, Width := 3,
+      Height := 3,
+      Rows := ['###', '#.#', '###'], KnowledgeRows := ['vvv', 'vvv', 'vvv'], PlayerX := 1,
+      PlayerY := 1,
+      Facing := Protocol.FirstPersonFacing.East, Inventory := [], Health := 20, MaxHealth := 20,
+      Character := [], CombatLog := [], CombatEvents := [], Journal := Lines
+    )
+  );
+end function;
+
+function Encode(State: Protocol.VisibleState): string;
+begin
+  return Messages.EncodeServer(Protocol.ServerMessage.State(State));
+end function;
+
+function Journal(Text: string): array of string;
+begin
+  case Messages.DecodeServer(Text).Unwrap() of
+    when Protocol.ServerMessage.State(const State):
+      case State of
+        when Protocol.VisibleState.MapState(const Fields):
+          return Fields.Journal;
+        when Protocol.VisibleState.FirstPersonState(const Fields):
+          return Fields.Journal;
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected visible state');
+  end case;
+end function;
+
+begin
+  for State: Protocol.VisibleState in [
+    Map(['Goal', 'Return to Mara.']),
+    Hall(['Goal', 'Return to Mara.'])
+  ] do
+    const Text := Encode(State);
+    Test.AssertEquals('Goal', Journal(Text)[0]);
+    Test.AssertEquals('Return to Mara.', Journal(Text)[1]);
+    for Bad: string in [
+      Text.Replace(',"journal":["Goal","Return to Mara."]', ''),
+      Text.Replace('"journal":["Goal","Return to Mara."]', '"journal":null'),
+      Text.Replace('"journal":["Goal","Return to Mara."]', '"journal":[1]'),
+      Text.Replace('"journal":["Goal","Return to Mara."]', '"journal":[],"journal":[]')
+    ] do
+      Test.AssertTrue(Bad <> Text);
+      Test.AssertTrue(Messages.DecodeServer(Bad) is Error(_));
+    end for;
+  end for;
+  const Maximum := array.Fill('x'.RepeatStr(160), 8);
+  Test.AssertEquals(8, Journal(Encode(Map(Maximum))).Length());
+  Test.AssertEquals(8, Journal(Encode(Hall(Maximum))).Length());
+  Test.AssertTrue(Messages.DecodeServer(Encode(Hall(array.Fill('Goal', 9)))) is Error(_));
+  for Lines: array of string in [
+    array.Fill('Goal', 9),
+    ['x'.RepeatStr(161)],
+    [''],
+    ['line'#10],
+    ['Ü']
+  ] do
+    Test.AssertTrue(Messages.DecodeServer(Encode(Map(Lines))) is Error(_));
+  end for;
+end.

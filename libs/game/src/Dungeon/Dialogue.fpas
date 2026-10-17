@@ -2,61 +2,26 @@
 unit Dungeon.Dialogue;
 
 uses
-  Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior.Generation.Content as Content,
+  Dungeon.Dialogue.Model as Model, Dungeon.Dialogue.Quests as QuestDialogue, Dungeon.Quests.Model as QuestModel, Dungeon.Npcs.Interaction as NpcInteraction, Dungeon.GameState as GameState, Dungeon.Interior.Generation.Content as Content,
   Dungeon.Interior.Generation.Levels as Levels, Dungeon.Items as Items, Dungeon.Npcs as Npcs,
-  Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv, Std.Math as Math;
+  Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv;
 
-// Stable topic identity and player-facing label; the server alone selects available choices.
-public type Choice = record
-  public Id: string;
-  public Text: string;
-end record;
+// Shared stable choice projection; availability belongs to the current authoritative node.
+public type Choice = Model.Choice;
 
-// Connection-local conversation projection; this frame is never part of a savegame.
-public type Frame = record
-  public NpcId: string;
-  public Speaker: string;
-  public Text: string;
-  public Choices: array of Choice;
-end record;
+// Server-only conversation node, including a preflighted offer objective.
+public type Node = Model.Node;
 
-// One atomic dialogue result. Continuing supplies refreshed choices and whether progress changed;
-// ending retains only game state. Text-only answers and repeated greetings do not dirty a saved game.
-public type Outcome = enum
-  Continued(State: GameState.GameState; Dialogue: Frame; ChangesGame: boolean);
-  Ended(State: GameState.GameState);
-end enum;
+// Connection-local frame, never persisted; only its display fields enter the protocol.
+public type Frame = Model.Frame;
 
-// Returns whether Mara is in cardinal interaction reach in the current settlement map.
-// A gate interaction has precedence, even if an authored NPC were adjacent to the gate.
+// Atomic replacement state/frame and actual unsaved-progress effect.
+public type Outcome = Model.Outcome;
+
+// Returns the shared authoritative NPC reach rule used by dialogue and hand-in.
 public function MaraInReach(View: GameState.AreaView; State: GameState.GameState): boolean;
 begin
-  if State.Area <> Coordinates.AreaKind.Settlement then
-    return false;
-  end if;
-
-  case GameState.SettlementPlayerPosition(State) of
-    when Error(_):
-      return false;
-    when Ok(const Position):
-      case View.Interior of
-        when None:
-          return false;
-        when Some(const Map):
-          if Position = Map.Arrival then
-            return false;
-          end if;
-      end case;
-
-      if State.Npcs.Length() <> 1 then
-        return false;
-      end if;
-      const Npc := State.Npcs[0];
-      const Field := Npcs.Position(Npc.Kind);
-      return (Npc.AreaId = State.AreaId)
-        and
-        (Math.Abs(Field.X - Position.X) + Math.Abs(Field.Y - Position.Y) = 1);
-  end case;
+  return NpcInteraction.MaraInReach(View, State);
 end function;
 
 function ChoicesFor(State: GameState.GameState): array of Choice;
@@ -83,6 +48,7 @@ begin
     Choices.PushInPlace(Choice(Id := 'wounds', Text := 'Could you tend my wounds?'));
   end if;
 
+  Choices.PushInPlace(Choice(Id := 'quest', Text := 'About your lost compass...'));
   Choices.PushInPlace(Choice(Id := 'goodbye', Text := 'Goodbye.'));
   return Choices;
 end function;
@@ -90,31 +56,25 @@ end function;
 function CurrentFrame(State: GameState.GameState; Text: string): Frame;
 begin
   return Frame(
-    NpcId := State.Npcs[0].Id, Speaker := Npcs.DisplayName(State.Npcs[0].Kind),
+    Node := Node.Root, NpcId := State.Npcs[0].Id, Speaker := Npcs.DisplayName(State.Npcs[0].Kind),
     Text := Text, Choices := ChoicesFor(State)
   );
 end function;
 
-function Contains(Choices: array of Choice; Id: string): boolean;
-begin
-  for Entry: Choice in Choices do
-    if Entry.Id = Id then
-      return true;
-    end if;
-  end for;
-
-  return false;
-end function;
-
-// Starts only next to Mara. The opening uses the previous meeting flag, then changes it to true once.
+// Starts only next to Mara. The opening remembers quest progress and the previous meeting flag.
+// Meeting Mara changes that flag to true once; opening an existing conversation changes no progress.
 public function Start(View: GameState.AreaView; State: GameState.GameState): result of (Outcome, string);
 begin
   const Valid := try GameState.ValidateGameState(View, State);
   if not MaraInReach(View, Valid) then
     return Error('Mara is not in interaction reach');
   end if;
-  const Text := if Valid.Npcs[0].HasMetPlayer then 'Mara recognizes you and rests both hands on her worn walking staff.'
-    else 'A weathered adventurer lowers her lantern. She introduces herself as Mara and invites your questions.'
+  const Text := if Valid.Quest is QuestModel.QuestState.Rewarded(_) then 'Mara recognizes you and thanks you again for returning her compass.'
+    else if Valid.Quest is QuestModel.QuestState.Active(_) then 'Mara recognizes you and remembers that you promised to find her compass.'
+      else if Valid.Npcs[0].HasMetPlayer then 'Mara recognizes you and rests both hands on her worn walking staff.'
+        else 'A weathered adventurer lowers her lantern. She introduces herself as Mara and invites your questions.'
+        end if
+      end if
     end if;
   var Changed := Valid;
   Changed.Npcs[0].HasMetPlayer := true;
@@ -142,12 +102,45 @@ begin
   return Ok(Outcome.Ended(try ValidateConversation(View, State, Current)));
 end function;
 
-// Applies only a topic present in both the active authoritative frame and current game-state choices.
+// Opens an offer only from the matching root frame, retaining the exact server-preflighted target.
+public function OfferCompass(View: GameState.AreaView; State: GameState.GameState; Current: Frame; Objective: QuestModel.CompassObjective): result of (Outcome, string);
+begin
+  const Valid := try ValidateConversation(View, State, Current);
+  if not (Current.Node is Node.Root) or not (Valid.Quest is QuestModel.QuestState.NotAccepted)
+    or
+    not Model.Contains(Current.Choices, 'quest')
+  then
+    return Error('quest offer requires the current root topic');
+  end if;
+  const Target := try QuestModel.ValidateObjective(View.Metadata, Objective);
+  return Ok(
+    Outcome.Continued(Valid, QuestDialogue.QuestFrame(Valid, Node.CompassOffer(Target)), false)
+  );
+end function;
+
+// Applies choices eligible in both the retained authoritative node and the current game state.
 // Every answer keeps the conversation open; healing changes only health and never consumes dice or a turn.
 public function Choose(View: GameState.AreaView; State: GameState.GameState; Current: Frame; ChoiceId: string): result of (Outcome, string);
 begin
   const Valid := try ValidateConversation(View, State, Current);
-  if not Contains(Current.Choices, ChoiceId) or not Contains(ChoicesFor(Valid), ChoiceId) then
+  if not (Current.Node is Node.Root) then
+    if ChoiceId = 'quest_back' then
+      if not Model.Contains(Current.Choices, ChoiceId) then
+        return Error('back is not available in this frame');
+      end if;
+
+      return Ok(
+        Outcome.Continued(Valid, CurrentFrame(Valid, 'Mara waits for your next question.'), false)
+      );
+    end if;
+
+    return QuestDialogue.Choose(View, Valid, Current, ChoiceId);
+  end if;
+
+  if not Model.Contains(Current.Choices, ChoiceId)
+    or
+    not Model.Contains(ChoicesFor(Valid), ChoiceId)
+  then
     return Error('dialogue choice is not currently available');
   end if;
 
@@ -157,6 +150,14 @@ begin
   var Changed := Valid;
   var Text := '';
   case ChoiceId of
+    when 'quest':
+      if Valid.Quest is QuestModel.QuestState.NotAccepted then
+        return Error('quest offer requires server reachability preflight');
+      end if;
+
+      return Ok(
+        Outcome.Continued(Valid, QuestDialogue.QuestFrame(Valid, Node.CompassStatus), false)
+      );
     when 'identity':
       Text := 'Mara once mapped the nearby halls. She now lives in Hearthmoor and warns travelers who follow the same path.';
     when 'dungeon':

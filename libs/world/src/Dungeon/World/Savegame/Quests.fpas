@@ -1,0 +1,76 @@
+// Exact current-version save representation of the single compass quest and its accepted target.
+unit Dungeon.World.Savegame.Quests;
+
+uses Dungeon.Quests.Model as Model, Std.Json as Json, Std.Json.Fields as Fields;
+
+function EncodeObjective(Objective: Model.CompassObjective): Json.JsonValue;
+begin
+  return Json.JsonValue.Object([
+    'quest_id': Json.JsonValue.String(Objective.QuestId),
+    'area_id': Json.JsonValue.String(Objective.AreaId),
+    'item_id': Json.JsonValue.String(Objective.ItemId)
+  ]);
+end function;
+
+// Stores only the accepted phase and target; no dialogue, readiness, geometry or proof cache.
+public function EncodeQuest(State: Model.QuestState): Json.JsonValue;
+begin
+  case State of
+    when Model.QuestState.NotAccepted:
+      return Json.JsonValue.Object(['phase': Json.JsonValue.String('not_accepted')]);
+    when Model.QuestState.Active(const Objective):
+      return Json.JsonValue.Object([
+        'phase': Json.JsonValue.String('active'),
+        'objective': EncodeObjective(Objective)
+      ]);
+    when Model.QuestState.Rewarded(const Objective):
+      return Json.JsonValue.Object([
+        'phase': Json.JsonValue.String('rewarded'),
+        'objective': EncodeObjective(Objective)
+      ]);
+  end case;
+end function;
+
+function DecodeObjective(Values: dict of string to Json.JsonValue): result of (Model.CompassObjective, string);
+begin
+  const Known := try Fields.RequireOnlyFields(Values, ['quest_id', 'area_id', 'item_id']);
+  if Values.Length() <> 3 then
+    return Error('quest objective requires exactly quest_id, area_id and item_id');
+  end if;
+
+  return Ok(
+    Model.CompassObjective(
+      QuestId := try Fields.StringField(Values, 'quest_id'),
+      AreaId := try Fields.StringField(Values, 'area_id'),
+      ItemId := try Fields.StringField(Values, 'item_id')
+    )
+  );
+end function;
+
+// Rejects unknown/missing fields, types and phases; world identity is checked by the game model.
+public function DecodeQuest(Values: dict of string to Json.JsonValue): result of (Model.QuestState, string);
+begin
+  const Phase := try Fields.StringField(Values, 'phase');
+  if Phase = 'not_accepted' then
+    const Known := try Fields.RequireOnlyFields(Values, ['phase']);
+    if Values.Length() <> 1 then
+      return Error('unaccepted quest must contain only its phase');
+    end if;
+
+    return Ok(Model.QuestState.NotAccepted);
+  end if;
+  const Known := try Fields.RequireOnlyFields(Values, ['phase', 'objective']);
+  if Values.Length() <> 2 then
+    return Error('accepted quest requires exactly phase and objective');
+  end if;
+  const Objective := try DecodeObjective(try Fields.ObjectField(Values, 'objective'));
+  case Phase of
+    when 'active':
+      return Ok(Model.QuestState.Active(Objective));
+    when 'rewarded':
+      return Ok(Model.QuestState.Rewarded(Objective));
+    else
+      return Error('unknown quest phase');
+  end case;
+end function;
+end unit;

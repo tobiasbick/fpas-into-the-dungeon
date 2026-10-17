@@ -1,0 +1,117 @@
+// Persistent identity and validated objective of Mara's one authored compass quest.
+unit Dungeon.Quests.Model;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Levels as Levels, Dungeon.Items as Items, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
+
+// Accepted target identities; the target level is the deepest level of the spawn dungeon.
+public type CompassObjective = record
+  public QuestId: string;
+  public AreaId: string;
+  public ItemId: string;
+end record;
+
+// Readiness is derived from item ownership; rewarded retains its original validated objective.
+public type QuestState = enum
+  NotAccepted;
+  Active(Objective: CompassObjective);
+  Rewarded(Objective: CompassObjective);
+end enum;
+
+// Stable quest identity in the selected world, independent of player visits and random state.
+public function CompassQuestId(Metadata: Terrain.WorldMetadata): string;
+begin
+  return Metadata.Id + ':quest:mara-compass';
+end function;
+
+// Builds the target from a proved dungeon depth; callers validate before accepting it.
+public function CompassTarget(Metadata: Terrain.WorldMetadata; Depth: integer): CompassObjective;
+begin
+  const AreaId := Identities.DungeonAreaId(
+    Metadata,
+    Entrances.RegionOf(Metadata, Metadata.Spawn),
+    Depth - 1
+  );
+  return CompassObjective(
+    QuestId := CompassQuestId(Metadata), AreaId := AreaId,
+    ItemId := Items.ItemPlacementId(AreaId, Levels.CompassSlot)
+  );
+end function;
+
+// Returns an accepted objective in either retained phase, without inventing an unaccepted target.
+public function ObjectiveOf(State: QuestState): option of CompassObjective;
+begin
+  case State of
+    when QuestState.NotAccepted:
+      return None;
+    when QuestState.Active(const Objective), QuestState.Rewarded(const Objective):
+      return Some(Objective);
+  end case;
+end function;
+
+// Checks world/quest identity, canonical spawn ownership and reserved original item identity.
+// This shape check performs no I/O or generation; supplied maps prove actual depth and existence.
+public function ValidateObjective(Metadata: Terrain.WorldMetadata; Objective: CompassObjective): result of (CompassObjective, string);
+begin
+  const Parsed := try Identities.ParseDungeonLevelId(Metadata, Objective.AreaId);
+  const Expected := CompassTarget(Metadata, Parsed.Level + 1);
+  if Objective <> Expected then
+    return Error('compass quest must name the reserved target in the spawn dungeon');
+  end if;
+
+  return Ok(Objective);
+end function;
+
+// Checks the persistent state without trusting a serialized readiness or proof flag.
+public function ValidateQuest(Metadata: Terrain.WorldMetadata; State: QuestState): result of (QuestState, string);
+begin
+  case ObjectiveOf(State) of
+    when Some(const Objective):
+      const Valid := try ValidateObjective(Metadata, Objective);
+    when None:
+      null;
+  end case;
+
+  return Ok(State);
+end function;
+
+// Requires every supplied spawn-dungeon level to agree with the accepted target depth.
+// On the target level, the immutable compass placement must exist exactly once.
+public function ValidateQuestMap(Metadata: Terrain.WorldMetadata; State: QuestState; Map: InteriorUnit.InteriorMap): result of (boolean, string);
+begin
+  case ObjectiveOf(State) of
+    when None:
+      return Ok(true);
+    when Some(const Objective):
+      if not Map.AreaId.StartsWith(Metadata.Id + ':dungeon:') then
+        return Ok(true);
+      end if;
+      const Target := try Identities.ParseDungeonLevelId(Metadata, Objective.AreaId);
+      const Current := try Identities.ParseDungeonLevelId(Metadata, Map.AreaId);
+      if Current.Region <> Target.Region then
+        return Ok(true);
+      end if;
+
+      if Map.Depth <> Target.Level + 1 then
+        return Error('quest objective must name the stored deepest spawn-dungeon level');
+      end if;
+
+      if Map.AreaId = Objective.AreaId then
+        var Count := 0;
+        for Placement: Items.ItemPlacement in Map.Items do
+          if (Placement.ItemId = Objective.ItemId)
+            and
+            (Placement.Kind = Items.ItemKind.MarasCompass)
+          then
+            Count := Count + 1;
+          end if;
+        end for;
+
+        if Count <> 1 then
+          return Error('quest target must match exactly one original compass placement');
+        end if;
+      end if;
+  end case;
+
+  return Ok(true);
+end function;
+end unit;

@@ -1,0 +1,99 @@
+// Proves quest preflight uses immutable stored depth, creates no files and never repairs invalid or visited data.
+program QuestPreflightTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Quests.Reachability as Reachability, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Dungeon.World.Quests as Quests, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
+
+begin
+  const Root := '.temp-data/quest-preflight-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'proof', 12345, 4, 8).Unwrap();
+  const Initial := GameState.NewGame(World.Metadata);
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  const Id0 := Identities.DungeonAreaId(World.Metadata, Region, 0);
+  const Id1 := Identities.DungeonAreaId(World.Metadata, Region, 1);
+  const Id2 := Identities.DungeonAreaId(World.Metadata, Region, 2);
+  const Directory := PathOps.Join([World.Directory, 'dungeons']);
+  const LevelDirectory := PathOps.Join([
+    Directory,
+    Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y)
+  ]);
+  const Path0 := PathOps.Join([LevelDirectory, '0.json']);
+  const Path1 := PathOps.Join([LevelDirectory, '1.json']);
+  const Objective := Quests.ProveCompass(World, Initial).Unwrap();
+  Test.AssertEquals(Id2, Objective.AreaId);
+  Test.AssertEquals(Id2 + ':item:6', Objective.ItemId);
+  Test.AssertFalse(Fs.Exists(Directory));
+
+  // Valid stored depth wins over the generator's default of three.
+  const First := Interiors.PreviewLevel(World, Id0, 4).Unwrap();
+  const FirstText := Encoding.EncodeLevel(World.Metadata, First);
+  Test.AssertTrue(Fs.CreateDirAll(LevelDirectory).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(Path0, FirstText).Unwrap());
+  Test.AssertEquals(
+    Identities.DungeonAreaId(World.Metadata, Region, 3),
+    Quests.ProveCompass(World, Initial).Unwrap().AreaId
+  );
+  Test.AssertEquals(FirstText, Fs.ReadText(Path0).Unwrap());
+  Test.AssertFalse(Fs.Exists(Path1));
+  Test.AssertFalse(Fs.Exists(PathOps.Join([LevelDirectory, '2.json'])));
+  Test.AssertFalse(Fs.Exists(PathOps.Join([LevelDirectory, '3.json'])));
+
+  const Broken := FirstText.Replace('"depth":4', '"depth":0');
+  Test.AssertTrue(Fs.WriteTextAtomic(Path0, Broken).Unwrap());
+  case Quests.ProveCompass(World, Initial) of
+    when Error(const Failure):
+      Test.AssertTrue(Failure is Errors.LevelFailure.Invalid(_, _));
+    when Ok(_):
+      panic('invalid authoritative level must reject quest preflight');
+  end case;
+
+  Test.AssertEquals(Broken, Fs.ReadText(Path0).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(Path0, FirstText).Unwrap());
+
+  // Enter through real transitions, then remove a visited deeper file. Preflight cannot recreate it.
+  const Outside := Initial with Player := Coordinates.PlayerPosition.Outdoor(
+    World.Metadata.SpawnEntrance
+  ); end with;
+  const Entry := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := World.Metadata, Interior := None),
+    Outside,
+    Some(First)
+  ).Unwrap();
+  const AtStairs := Entry.State with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(
+      Position := InteriorUnit.StairsDownPosition(First).Unwrap(),
+      Facing := Coordinates.FacingDirection.East
+    )
+  ); end with;
+  const Second := Interiors.OpenLevelForEntry(World, Entry.View, AtStairs, Id1).Unwrap();
+  const Descended := Movement.ActivateAreaTransition(Entry.View, AtStairs, Some(Second)).Unwrap();
+  Test.AssertTrue(Fs.DeleteFile(Path1).Unwrap());
+  case Quests.ProveCompass(World, Descended.State) of
+    when Error(const Failure):
+      Test.AssertTrue(Failure is Errors.LevelFailure.Missing(_));
+    when Ok(_):
+      panic('missing visited level must not be previewed');
+  end case;
+
+  Test.AssertFalse(Fs.Exists(Path1));
+
+  // A complete route must prove connectivity, rather than merely containing the right item ID.
+  const Map0 := Interiors.PreviewLevel(World, Id0, 3).Unwrap();
+  const Map1 := Interiors.PreviewLevel(World, Id1, 3).Unwrap();
+  const Map2 := Interiors.PreviewLevel(World, Id2, 3).Unwrap();
+  var Isolated := Map2;
+  const Compass := Map2.Items[Map2.Items.Length() - 1].Position;
+  for Offset: Coordinates.InteriorPosition in [
+    Coordinates.InteriorPosition(X := 1, Y := 0), Coordinates.InteriorPosition(X := -1, Y := 0),
+    Coordinates.InteriorPosition(X := 0, Y := 1), Coordinates.InteriorPosition(X := 0, Y := -1)
+  ] do
+    Isolated.Cells[((Compass.Y + Offset.Y) * Map2.Width) + Compass.X + Offset.X] := InteriorUnit.InteriorCellKind.Wall;
+  end for;
+
+  case Reachability.ProveCompassRoute(World.Metadata, [Map0, Map1, Isolated]) of
+    when Error(const Reason):
+      Test.AssertTrue('connected' in Reason);
+    when Ok(_):
+      panic('an unreachable compass cannot be offered');
+  end case;
+end.

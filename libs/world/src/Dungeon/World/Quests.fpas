@@ -1,0 +1,97 @@
+// Read-only quest preflight: authoritative stored levels first, transient generation for unvisited gaps.
+unit Dungeon.World.Quests;
+
+uses Dungeon.World.Savegame.Errors as SaveErrors, Dungeon.Areas.Identities as Identities, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Levels as Levels, Dungeon.Quests.Model as Model, Dungeon.Quests.Reachability as Reachability, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Errors as Errors;
+
+function ReadOrPreview(World: WorldUnit.WorldSession; State: GameState.GameState; AreaId: string; Depth: integer): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
+begin
+  case Interiors.ReadLevel(World, AreaId) of
+    when Ok(const Map):
+      return Ok(Map);
+    when Error(const Failure):
+      if Failure is Errors.LevelFailure.Missing(_) then
+        if GameState.HasVisitedArea(State, AreaId) then
+          return Error(Failure);
+        end if;
+
+        return Interiors.PreviewLevel(World, AreaId, Depth);
+      end if;
+
+      return Error(Failure);
+  end case;
+end function;
+
+// Proves the full outward/return route and target without publishing files or materializing entities.
+// Existing level 0 supplies depth; invalid existing files and missing visited files always fail.
+public function ProveCompass(World: WorldUnit.WorldSession; State: GameState.GameState): result of (Model.CompassObjective, Errors.LevelFailure);
+begin
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  const FirstId := Identities.DungeonAreaId(World.Metadata, Region, 0);
+  const First := try ReadOrPreview(
+    World, State, FirstId,
+    Levels.DungeonDepth(World.Metadata.Seed, Region.X, Region.Y)
+  );
+  var Maps: array of InteriorUnit.InteriorMap := [First];
+  for Level: integer := 1 to First.Depth - 1 do
+    Maps.PushInPlace(
+      try ReadOrPreview(
+        World, State,
+        Identities.DungeonAreaId(World.Metadata, Region, Level), First.Depth
+      )
+    );
+  end for;
+
+  case Reachability.ProveCompassRoute(World.Metadata, Maps) of
+    when Ok(const Objective):
+      return Ok(Objective);
+    when Error(const Reason):
+      return Error(Errors.LevelFailure.Invalid(FirstId, Reason));
+  end case;
+end function;
+
+// Validates a retained objective without generating maps on save/load. Visited maps are
+// reused; an existing unvisited level 0 supplies authoritative depth, otherwise the current
+// content contract supplies it. Invalid world data and invalid save targets remain distinct.
+public function ValidateSavedObjective(World: WorldUnit.WorldSession; State: GameState.GameState; Maps: array of InteriorUnit.InteriorMap): result of (boolean, SaveErrors.PersistenceFailure);
+begin
+  case Model.ObjectiveOf(State.Quest) of
+    when None:
+      return Ok(true);
+    when Some(const Objective):
+      const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+      const FirstId := Identities.DungeonAreaId(World.Metadata, Region, 0);
+      var Depth := Levels.DungeonDepth(World.Metadata.Seed, Region.X, Region.Y);
+      var Found := false;
+      for Map: InteriorUnit.InteriorMap in Maps do
+        if Map.AreaId = FirstId then
+          Depth := Map.Depth;
+          Found := true;
+        end if;
+      end for;
+
+      if not Found then
+        case Interiors.ReadLevel(World, FirstId) of
+          when Ok(const Map):
+            Depth := Map.Depth;
+          when Error(const Failure):
+            if not (Failure is Errors.LevelFailure.Missing(_))
+              or
+              GameState.HasVisitedArea(State, FirstId)
+            then
+              return Error(SaveErrors.PersistenceFailure.Level(Failure));
+            end if;
+        end case;
+      end if;
+
+      if Objective <> Model.CompassTarget(World.Metadata, Depth) then
+        return Error(
+          SaveErrors.PersistenceFailure.InvalidState(
+            'quest objective must match the actual deepest spawn-dungeon level'
+          )
+        );
+      end if;
+  end case;
+
+  return Ok(true);
+end function;
+end unit;

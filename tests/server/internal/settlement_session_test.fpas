@@ -2,7 +2,7 @@
 program SettlementSessionTest;
 
 uses
-  Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.Exploration as Exploration,
+  Dungeon.Areas as Areas, Dungeon.Quests.Model as QuestModel, Dungeon.Items as Items, Dungeon.World.Interiors as Interiors, Dungeon.Areas.Identities as Identities, Dungeon.Terrain.Entrances as Entrances, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.Exploration as Exploration,
   Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol,
   Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport,
   Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection,
@@ -130,6 +130,81 @@ begin
   Test.AssertEquals(20, Healed.State.Unwrap().Health);
   Test.AssertEquals(42, Healed.LastSavedAt);
   Test.AssertEquals(Frame.Choices.Length() - 1, Healed.ActiveDialogue.Unwrap().Choices.Length());
+  // The offered objective is retained across failed acceptance preparation.
+  const Offered := Handling.HandleSessionMessage(
+    Healed with Dirty := false; end with,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(Offered.ActiveDialogue.Unwrap().Node is Dialogue.Node.CompassOffer(_));
+  Test.AssertFalse(Offered.Dirty);
+  const BrokenOffer := Offered with Viewport := SessionUnit.ViewportSize(Width := 0, Height := 1); end with;
+  const FailedAccept := Handling.HandleSessionMessage(
+    BrokenOffer,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_accept'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Sessions.AssertUnchanged(BrokenOffer, FailedAccept);
+  const Accepted := Handling.HandleSessionMessage(
+    Offered,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_accept'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(Accepted.State.Unwrap().Quest is QuestModel.QuestState.Active(_));
+  Test.AssertTrue(Accepted.Dirty);
+  // Complete in-memory rule input for report preparation, without claiming a persisted visit.
+  var ReadyState := Accepted.State.Unwrap();
+  const Region := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  for Level: integer := 0 to 2 do
+    const Map := Interiors.PreviewLevel(
+      World,
+      Identities.DungeonAreaId(Metadata, Region, Level),
+      3
+    ).Unwrap();
+    ReadyState := Areas.MaterializeArea(ReadyState, Map);
+  end for;
+
+  for Index: integer := 0 to ReadyState.Items.Length() - 1 do
+    if ReadyState.Items[Index].Kind = Items.ItemKind.MarasCompass then
+      ReadyState.Items[Index].Location := Items.ItemLocation.CarriedByPlayer;
+    end if;
+  end for;
+  var ReadySession := Accepted with State := Some(ReadyState); end with;
+
+  ReadySession := Handling.HandleSessionMessage(
+    ReadySession,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_back'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  ReadySession := Handling.HandleSessionMessage(
+    ReadySession,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  ReadySession.Dirty := false;
+  const BrokenReport := ReadySession with Viewport := SessionUnit.ViewportSize(
+    Width := 0,
+    Height := 1
+  ); end with;
+  const FailedReport := Handling.HandleSessionMessage(
+    BrokenReport,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_report'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Sessions.AssertUnchanged(BrokenReport, FailedReport);
+  const Rewarded := Handling.HandleSessionMessage(
+    ReadySession,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_report'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(Rewarded.State.Unwrap().Quest is QuestModel.QuestState.Rewarded(_));
+  Test.AssertTrue(Rewarded.Dirty);
+  const DuplicateReport := Handling.HandleSessionMessage(
+    Rewarded,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_report'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Sessions.AssertUnchanged(Rewarded, DuplicateReport);
   discard Net.Close(Server).Unwrap();
   Test.AssertTrue(
     Handling.HandleSessionMessage(

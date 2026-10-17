@@ -3,7 +3,7 @@
 Every world has one home settlement, Hearthmoor. Its outdoor gate is exactly
 six traversable cardinal steps from spawn, excluding dungeon entrances and
 the spawn entrance's neighbors. World format 4 stores `settlement_gate` as
-`{x,y}`; generator 9 overlays it with feature code `s`. Invalid or obsolete
+`{x,y}`; generator 10 overlays it with feature code `s`. Invalid or obsolete
 world data is rejected and preserved.
 
 ## Geometry and state
@@ -42,7 +42,9 @@ conversation from any cardinally adjacent field; no facing is required.
 The occupied exit has precedence. The first greeting changes `HasMetPlayer`
 to true; later greetings use that flag without changing progress.
 
-Each frame contains the NPC ID, speaker, text and ordered choices:
+Each frame contains the NPC ID, speaker, text and ordered choices. The server
+also retains a private node; a quest offer binds its preflighted objective. Root
+topics are:
 
 | ID | Available | Result |
 | --- | --- | --- |
@@ -50,13 +52,17 @@ Each frame contains the NPC ID, speaker, text and ordered choices:
 | `dungeon` | Always | Spawn dungeon name and depth, derived without level access. |
 | `coin` | Ancient coin carried | Information about its crescent mark. |
 | `wounds` | Health below maximum | Free healing to maximum health. |
+| `quest` | Always | Proved offer, current progress or remembered quest outcome. |
 | `goodbye` | Always | End the conversation. |
 
 Every answer refreshes the same frame. Healing removes `wounds`; only goodbye,
 explicit end or disconnect closes the dialogue. Rules check both the active
 frame and currently available choices. Talking consumes no turn and changes
-no items, opponent state or dice. Only a first meeting or healing marks new
-progress unsaved.
+no opponent state or dice. Information and healing do not change items; quest
+hand-in returns the compass and grants its potions atomically. A first meeting,
+healing, quest acceptance or successful hand-in marks progress unsaved. Quest
+frames use `quest_accept`, `quest_report` and `quest_back`, with eligibility
+checked for the active node. See [quests](quests.md).
 
 ## Connection and protocol
 
@@ -67,7 +73,7 @@ including world selection and saves, receive `dialogue_active`. A foreign NPC
 or unavailable topic receives `dialogue_rejected`; an inactive conversation
 receives `dialogue_not_active`.
 
-Protocol 17 has exact message fields. `dialogue_choice` contains `type`,
+Protocol 18 has exact message fields. `dialogue_choice` contains `type`,
 `npc_id` and `choice_id`; `end_dialogue` contains only `type`. A `dialogue`
 reply contains `type`, `dirty`, `state` and `dialogue`; `dialogue_ended`
 contains `type`, `dirty` and `state`. The embedded state is the complete
@@ -93,12 +99,12 @@ a viewport reply preserves it.
 
 ## Persistence and verification
 
-Savegame 11 stores settlement positions as `{kind:"settlement",x,y}` and exact
+Savegame 12 stores settlement positions as `{kind:"settlement",x,y}` and exact
 NPC records as `{id,kind,area_id,has_met_player}`. It resolves settlement
 visits and discovery against the authored map. A met NPC requires a visited
 home settlement. Active frames, choices, scroll positions and speaker text
 never enter a save. Explicit saving after ending the dialogue persists the
-flag; disconnect and server shutdown never autosave. Start over resets it and
+flag and the separate quest state; disconnect and server shutdown never autosave. Start over resets it and
 keeps the prior save. Obsolete save versions are rejected without migration.
 
 Game tests own topic availability, reach and effects. World tests own exact

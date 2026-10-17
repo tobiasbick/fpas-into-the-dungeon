@@ -1,0 +1,133 @@
+// Responsive native world list and identity-bound permanent-deletion confirmation.
+unit Dungeon.Server.Console.Worlds.View;
+
+uses Dungeon.Server.Console.Worlds.Model as Model, Dungeon.Server.Console.Log as LogUnit, Std.Conv as Conv, Std.Math as Math, Std.Tui as Tui;
+
+function Fit(Text: string; Width: integer): string;
+begin
+  if Text.Length() <= Width then
+    return Text;
+  end if;
+
+  return Text.Slice(0, Width);
+end function;
+
+function Labels(Text: string; Width: integer; Limit: integer): array of Tui.TuiElement;
+begin
+  const Clean := LogUnit.SingleLine(Text);
+  var Lines: array of Tui.TuiElement := [];
+  var Offset := 0;
+  while (Offset < Clean.Length()) and (Lines.Length() < Limit) do
+    Lines.PushInPlace(
+      Tui.TuiElementBuilders.MakeLabel(
+        Clean.Slice(Offset, Math.Min(Width, Clean.Length() - Offset))
+      )
+    );
+    Offset := Offset + Width;
+  end while;
+
+  return Lines;
+end function;
+
+function Button(Id: integer; Text: string): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeButton(
+    Tui.TuiControlId.Create(Id),
+    Text,
+    Tui.TuiAction.Create(Id)
+  );
+end function;
+
+// Shows incompatible worlds without opening them; Cancel receives initial confirmation focus.
+public function View(State: Model.WorldManager; Width: integer; Height: integer): Tui.TuiElement;
+begin
+  const BodyWidth := Math.Clamp(Width - 8, 16, 88);
+  var Items: array of Tui.TuiElement := [];
+  case State.Confirmation of
+    when Some(const Id):
+      Items := Labels('Delete world ' + Id + '?', BodyWidth, 4);
+      Items := Items.Concat(
+        Labels('Permanently removes its save, chunks and dungeon levels.', BodyWidth, 4)
+      );
+      Items := Items.Concat(Labels(State.Message, BodyWidth, 4));
+      Items.PushInPlace(
+        Tui.TuiElementBuilders.MakeRowSpaced(
+          [
+            Button(46, 'Delete permanently'), Button(47, 'Cancel')
+          ], 2
+        )
+      );
+      Items.PushInPlace(
+        Tui.TuiElementBuilders.MakeLabel(Fit('Y: delete  N/Esc: cancel', BodyWidth))
+      );
+      return Tui.TuiElementBuilders.MakeOverlay(
+        'Confirm world deletion',
+        [Tui.TuiElementBuilders.MakeColumn(Items)]
+      );
+    when None:
+      null;
+  end case;
+
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(Fit('  World              Status        Save', BodyWidth))
+  );
+  var Rows: array of string := [];
+  const Count := Model.VisibleCount(State, Height);
+  for Index: integer := 0 to Count - 1 do
+    const World := State.Catalog.Worlds[Index];
+    Rows.PushInPlace(
+      Fit(
+        Fit(World.Id, 18).PadRight(19, ' ') +
+        World.Status.PadRight(14, ' ') + World.SaveStatus, BodyWidth
+      )
+    );
+  end for;
+
+  var SelectedRow := -1;
+  if Count > 0 then
+    SelectedRow := Math.Clamp(State.Row, 0, Count - 1);
+  end if;
+
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeList(
+      Tui.TuiControlId.Create(40), Rows,
+      SelectedRow, Tui.TuiAction.Create(40)
+    )
+  );
+  var Range := 'No worlds.';
+  if Count > 0 then
+    Range := Conv.IntToStr(State.Catalog.Offset + 1) + '-' +
+      Conv.IntToStr(State.Catalog.Offset + Count) + ' of ' + Conv.IntToStr(State.Catalog.Total);
+  end if;
+
+  Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Range));
+  case Model.Selected(State) of
+    when Some(const World):
+      Items := Items.Concat(
+        Labels(World.Id + ': ' + World.SaveStatus + ' ' + World.Reason, BodyWidth, 2)
+      );
+    when None:
+      null;
+  end case;
+
+  Items := Items.Concat(Labels(State.Message, BodyWidth, 2));
+  var Pages: array of Tui.TuiElement := [];
+  if State.Catalog.Offset > 0 then
+    Pages.PushInPlace(Button(44, 'Previous'));
+  end if;
+
+  if State.Catalog.Offset + Count < State.Catalog.Total then
+    Pages.PushInPlace(Button(45, 'Next'));
+  end if;
+
+  Pages.PushInPlace(Button(41, 'Refresh'));
+  Items.PushInPlace(Tui.TuiElementBuilders.MakeRowSpaced(Pages, 2));
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeRowSpaced([Button(42, 'Delete world'), Button(43, 'Close')], 2)
+  );
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(Fit('D: delete  R: refresh  Esc: close', BodyWidth))
+  );
+  return Tui.TuiElementBuilders.MakeOverlay('Worlds', [Tui.TuiElementBuilders.MakeColumn(Items)]);
+end function;
+end unit;

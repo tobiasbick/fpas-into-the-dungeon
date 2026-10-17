@@ -23,7 +23,8 @@ run headless or with a full-terminal dashboard.
 - Enter generated dungeons with rooms, corridors, and stored names. A dungeon's
   layout is fixed on first entry and retained when you revisit it.
 - Visit Hearthmoor, talk to Mara, and receive free healing. Her meeting state
-  persists through explicit saves.
+  persists through explicit saves. Recover her lost compass from the deepest
+  spawn-dungeon level for two Healing potions, and follow progress in the `J` journal.
 - Discover the world through Fog of War and open a pannable exploration map.
 - Inspect and collect ancient coins, equip a rusty short sword and leather
   jerkin, find and use healing potions, and drop carried items.
@@ -97,6 +98,7 @@ fpas run apps/server/server.fpasprj
 | Space / Z | Attack ahead / wait one turn inside a dungeon |
 | I | Inventory; Enter uses a consumable or wears/removes gear, D drops the selected item |
 | C | Character sheet with health, equipment, and derived values |
+| J | Quest journal; W/S, arrows and Page Up/Down scroll, Escape/J closes |
 | M | Exploration map; WASD or arrows pan, Home centers, M or Esc closes |
 | F2 / F3 | Toggle the client's context / message panels |
 | Ctrl+P | System menu, including Save and Choose world |
@@ -152,8 +154,11 @@ The panels show listener status, connected players, the active world and dungeon
 and explicit-save status. Below them, the live log records real events from the
 same session, including world creation, dungeon entry, and saving.
 
-In the dashboard, **F2** opens settings, **F3** cycles log filters, and **End**
-resumes following the latest entries. **Tab** selects controls; the focused log
+In the dashboard, **F2** opens settings, **F3** cycles log filters, **F4** opens
+world administration, and **End** resumes following the latest entries. The
+world list can permanently delete a confirmed complete world, including
+incompatible data and its save, while no player is connected. **Tab** selects
+controls; the focused log
 supports arrows, PageUp/PageDown, and Home. See the
 [server console guide](docs/product/server-console.md) for all controls.
 
@@ -174,9 +179,9 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 gets its own identity, even when another world uses the same seed.
 
 Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 4**,
-**generator 9**, **level format 3**, **protocol 17** and **save format 11**.
-Format-8 and older saves remain intact but cannot be continued with this server.
-Generator-6 worlds remain on disk but
+**generator 10**, **level format 4**, **protocol 18** and **save format 12**.
+Format-11 and older saves remain intact but cannot be continued with this server.
+Generator-9 and older worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds
 can still be continued. Incompatible data is rejected without migration or
 automatic deletion. Obsolete runtime configuration also produces an error
@@ -201,7 +206,7 @@ Progression (13b) is complete and accepted: the character
 trains Unarmed and Blades by the health its hits remove, up to level 5 each, and
 the scrollable `C` sheet shows both skills; see
 [progression](docs/architecture/progression.md). Multiple dungeon levels (14c)
-follow. Client/server connection isolation and socket cleanup are verified.
+are implemented, with paired stairs between three distinct areas. Client/server connection isolation and socket cleanup are verified.
 Server preparation failures preserve the current session. Large inventories
 keep selection and controls visible; quick summaries stay bounded. World-catalog
 inspection is limited to the requested page and any selected
@@ -211,8 +216,11 @@ client rejections stay sanitized. Viewport refreshes keep the exploration map
 open and preserve its current projection and pending map request. The completed
 client/server review also separates world-lifecycle responsibilities and
 documents connection ownership and UI state contracts.
-Settlements, multiplayer, and LLM
-integration remain later work.
+Hearthmoor and Mara are implemented in 15a. The first deterministic compass
+quest (15b), accepted with server world administration on 2026-10-17, includes
+explicit acceptance, remembered hand-in, two potion rewards
+and a read-only journal; see [quests](docs/architecture/quests.md). Generated
+settlements, economy, multiplayer and LLM integration remain later work.
 
 See the [roadmap](docs/roadmap.md) for the current checkpoints.
 The [architecture overview](docs/architecture/overview.md) explains
@@ -227,10 +235,9 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-The complete suite passes **107/107 test programs**, and all **21 workspace
-projects** check. Coverage includes game rules,
-deterministic generation, storage, protocol validation, TUI rendering and input,
-and real TCP sessions.
+Current workspace verification passes: **154/154 test programs**, formatting and all
+21 project checks. Coverage includes game rules, deterministic generation,
+storage, protocol validation, TUI rendering and input, and real TCP sessions.
 
 To inspect generated terrain without starting a game server:
 

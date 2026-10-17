@@ -1,0 +1,221 @@
+// Native console deletion, cancellation, paging and real listener admission share one ownership gate.
+program WorldAdministrationTest;
+
+uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server as ServerUnit, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Model as ConsoleModel, Dungeon.Server.Listener as ListenerUnit, Dungeon.Server.Logging as Logging, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Console as Console, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Key(Kind: Tui.TuiKeyKind; Text: string): Console.KeyEvent;
+begin
+  return Console.KeyEvent(
+    kind := Kind,
+    ch := Text,
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+end function;
+
+function Press(App: Tui.TuiApplication; State: ConsoleModel.ConsoleModel; Kind: Tui.TuiKeyKind; Text: string): ConsoleModel.ConsoleModel;
+begin
+  App.InjectKeyForTest(Key(Kind, Text));
+  return App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+end function;
+
+function Contains(Screen: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Y: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Y) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+procedure WaitKind(Logs: channel of Logging.ServerLogEvent; Kind: string);
+begin
+  while Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap().Kind <> Kind do
+    null;
+  end while;
+end procedure;
+
+begin
+  const Root := PathOps.Join([Test.ScratchDir(), 'worlds']);
+  Test.AssertTrue(Fs.CreateDir(Root).Unwrap());
+  for Index: integer := 0 to 15 do
+    const Directory := PathOps.Join([Root, 'obsolete-' + Conv.IntToStr(Index).PadLeft(2, '0')]);
+    Test.AssertTrue(Fs.CreateDirAll(PathOps.Join([Directory, 'saves'])).Unwrap());
+    Test.AssertTrue(Fs.WriteText(PathOps.Join([Directory, 'world.json']), '{}').Unwrap());
+    Test.AssertTrue(
+      Fs.WriteText(PathOps.Join([Directory, 'saves', 'default.json']), 'old save').Unwrap()
+    );
+  end for;
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const Permit: channel of boolean := Tasks.CreateChannel(1);
+  discard Tasks.Send(Permit, true);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := Some(Logs), WorldsRoot := Root,
+    WorldId := 'main', WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 28, AdmissionPermit := Some(Permit)
+  );
+  const Settings := RuntimeData.ServerWorldConfig(
+    Id := 'main', Seed := 12345, DungeonRegionChunks := 4,
+    ChunkCacheLimit := 32, MaximumViewWidth := 80, MaximumViewHeight := 28
+  );
+  var State := ConsoleModel.NewConsoleModel('', Settings) with Width := 80; Height := 28; end with;
+
+  State.Worlds.Config := Some(Config);
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 28));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Worlds (F4)'));
+  State := Press(App, State, Tui.TuiKeyKind.F4, '');
+  Test.AssertTrue(State.Worlds.Open);
+  Test.AssertEquals(16, State.Worlds.Catalog.Total);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'incompatible'));
+  State := Press(App, State, Tui.TuiKeyKind.Down, '');
+  Test.AssertEquals(1, State.Worlds.Row);
+  State := Press(App, State, Tui.TuiKeyKind.Character, 'd');
+  Test.AssertEquals('obsolete-01', State.Worlds.Confirmation.Unwrap());
+  State := Press(App, State, Tui.TuiKeyKind.Escape, '');
+  Test.AssertTrue(State.Worlds.Confirmation is None);
+  Test.AssertTrue(Fs.Exists(PathOps.Join([Root, 'obsolete-01', 'saves', 'default.json'])));
+  State := Press(App, State, Tui.TuiKeyKind.Character, 'd');
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(State.Worlds.Confirmation is None);
+  Test.AssertTrue(Fs.IsDir(PathOps.Join([Root, 'obsolete-01'])));
+  State := Press(App, State, Tui.TuiKeyKind.Character, 'd');
+  // The prompt keeps its identity even when resize moves the visible list cursor.
+  App.InjectResizeForTest(Tui.TuiSize.Create(40, 14));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertEquals(0, State.Worlds.Row);
+  Test.AssertEquals('obsolete-01', State.Worlds.Confirmation.Unwrap());
+  State := Press(App, State, Tui.TuiKeyKind.Character, 'y');
+  Test.AssertFalse(Fs.Exists(PathOps.Join([Root, 'obsolete-01'])));
+  Test.AssertEquals(15, State.Worlds.Catalog.Total);
+  App.InjectResizeForTest(Tui.TuiSize.Create(80, 28));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Deleted world obsolete-01'));
+  // Native Tab/Enter reaches the next/previous page buttons instead of enumerating off-screen rows.
+  State := Press(App, State, Tui.TuiKeyKind.Tab, '');
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertEquals(12, State.Worlds.Catalog.Offset);
+  State := Press(App, State, Tui.TuiKeyKind.Tab, '');
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertEquals(0, State.Worlds.Catalog.Offset);
+  App.InjectResizeForTest(Tui.TuiSize.Create(40, 20));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Delete world'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Close'));
+  App.InjectResizeForTest(Tui.TuiSize.Create(80, 28));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Listener).Unwrap().Port;
+  scope
+    const Worker := go ListenerUnit.Run(Listener, Config, Token, false, ServerUnit.ServeConnection);
+    WaitKind(Logs, 'status');
+    const Client := Net.Connect('127.0.0.1', Port, 5000).Unwrap();
+    WaitKind(Logs, 'connected');
+    // Deliberately stale presentation: only the real admission permit can authorize deletion.
+    Test.AssertFalse(State.Connected);
+    State := Press(App, State, Tui.TuiKeyKind.Character, 'd');
+    Test.AssertEquals('obsolete-00', State.Worlds.Confirmation.Unwrap());
+    State := Press(App, State, Tui.TuiKeyKind.Character, 'y');
+    Test.AssertTrue(State.Worlds.Confirmation is Some(_));
+    Test.AssertTrue('Disconnect the player' in State.Worlds.Message);
+    Test.AssertEquals(
+      'old save',
+      Fs.ReadText(PathOps.Join([Root, 'obsolete-00', 'saves', 'default.json'])).Unwrap()
+    );
+    Test.AssertTrue(Net.Close(Client).Unwrap());
+    WaitKind(Logs, 'disconnected');
+    Test.AssertTrue(Tasks.ReceiveWithTimeout(Permit, 5000).Unwrap());
+    discard Tasks.Send(Permit, true);
+    State := Press(App, State, Tui.TuiKeyKind.Character, 'y');
+    Test.AssertFalse(Fs.Exists(PathOps.Join([Root, 'obsolete-00'])));
+    Test.AssertEquals(14, State.Worlds.Catalog.Total);
+    // Reserving administration excludes newly arriving clients too.
+    Test.AssertTrue(Tasks.TryReceive(Permit).Unwrap().Unwrap());
+    const Busy := Net.Connect('127.0.0.1', Port, 5000).Unwrap();
+    Test.AssertTrue(Net.SetTimeout(Busy, 5000).Unwrap());
+    const Reader := Transport.NewLineReader(Busy);
+    const Reply := Transport.ReadLine(Reader, Token).Unwrap();
+    case ServerMessages.DecodeServer(Reply.Line).Unwrap() of
+      when Protocol.ServerMessage.Rejected(const Code, _):
+        Test.AssertEquals('server_busy', Code);
+      when Protocol.ServerMessage.ErrorMessage(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_):
+        Test.Fail('administration must exclude a new connection');
+    end case;
+
+    Test.AssertTrue(Net.Close(Busy).Unwrap());
+    discard Tasks.Send(Permit, true);
+    discard Tasks.Cancel(Stop);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  // Listener shutdown must leave its caller-owned permit usable until the console closes.
+  Test.AssertTrue(Tasks.TryReceive(Permit).Unwrap().Unwrap());
+  State := Press(App, State, Tui.TuiKeyKind.Escape, '');
+  Test.AssertFalse(State.Worlds.Open);
+  Test.AssertEquals(
+    'old save',
+    Fs.ReadText(PathOps.Join([Root, 'obsolete-02', 'saves', 'default.json'])).Unwrap()
+  );
+  // Removing the final world leaves a usable empty list rather than a stale destructive selection.
+  discard Tasks.Send(Permit, true);
+  const SoloRoot := PathOps.Join([Test.ScratchDir(), 'solo-worlds']);
+  Test.AssertTrue(Fs.CreateDirAll(PathOps.Join([SoloRoot, 'last-world'])).Unwrap());
+  State.Worlds.Config := Some(Config with WorldsRoot := SoloRoot; end with);
+  State := Press(App, State, Tui.TuiKeyKind.F4, '');
+  Test.AssertEquals(1, State.Worlds.Catalog.Total);
+  State := Press(App, State, Tui.TuiKeyKind.Character, 'd');
+  State := Press(App, State, Tui.TuiKeyKind.Character, 'y');
+  Test.AssertEquals(0, State.Worlds.Catalog.Total);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'No worlds.'));
+  Test.AssertTrue(Fs.IsDir(SoloRoot));
+  State := Press(App, State, Tui.TuiKeyKind.Character, 'd');
+  Test.AssertTrue(State.Worlds.Confirmation is None);
+  Test.AssertEquals('No world is selected.', State.Worlds.Message);
+  State := Press(App, State, Tui.TuiKeyKind.Escape, '');
+  App.Close();
+  discard Tasks.CloseChannel(Permit);
+  discard Tasks.CloseChannel(Logs);
+end.
