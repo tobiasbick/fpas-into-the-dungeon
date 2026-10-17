@@ -1,6 +1,6 @@
 # 14c: dungeon levels
 
-Status: planned on 2026-10-17. No 14c changes are implemented.
+Status: checkpoints 01-10 implemented on 2026-10-17; user acceptance (11) is open.
 13b is accepted; this is the next gameplay slice.
 
 Implement the checkpoints in order. Each checkpoint must leave an executable,
@@ -108,12 +108,24 @@ These were open in the roadmap. They are fixed for this slice.
   not advance combat. Opponents stay in their own area. Fleeing up or down the
   stairs is therefore allowed. Alerted opponents stay alerted and remain where
   they were.
+- Decided during implementation (gap found in TCP play): opponents on a level
+  without the player never move, so one standing on an arrival field (start or
+  descent landing) would lock the player out of that level and, below level 0,
+  out of the exit. The player then arrives on the first free floor field in
+  breadth-first order north, east, south, west from the arrival field, keeping
+  the facing. This applies to entering from outdoors as well.
+- Decided during implementation: combat events identify only a kind, and deeper
+  levels hold two opponents of one kind. The client narrows player-blow effects
+  to the field directly ahead and attacker effects to fields orthogonally
+  adjacent to the player, which are the only fields the rules allow. No
+  protocol change is needed.
 
 ### Generation
 
 - Geometry seeds add the level: the existing attempt seed derivation gains a
-  `level * 15485863` term inside the same normalized modulo arithmetic, so the
-  term is zero for level 0. Level-0 rooms and corridors therefore keep their
+  `level * 32452843` term inside the same normalized modulo arithmetic, so the
+  term is zero for level 0. The multiplier differs from the attempt multiplier
+  15485863, so level 1 attempt 0 never reuses level 0 attempt 1. Level-0 rooms and corridors therefore keep their
   14b geometry; the pinned fingerprints change only through the new identity
   form and the stairs.
 - **Stairs down** goes to the top-left floor field of the room farthest from the
@@ -128,7 +140,7 @@ These were open in the roadmap. They are fixed for this slice.
 - Opponents per level are a formula of the level index `L`, not a table of
   fixed levels, so deeper dungeons need no new rules. All are existing kinds
   with unchanged statistics:
-  - count `N = min(2 + L, 5)`;
+  - count `N = min(2 + (L + 1) div 2, 5)`;
   - skeletons `min(1 + L div 2, N - 1)`, the rest rats (at least one rat);
   - slots list skeletons first, then rats; they take the farthest safe rooms
     in slot order. An attempt with too few safe rooms is rejected, as today.
@@ -187,11 +199,19 @@ These changes apply on top of format 2:
 
 ## Module ownership
 
-- `Dungeon.Areas.Identities` owns the level-aware identity, parsing,
-  `MaxDungeonDepth` and "previous/next level" helpers; whether a next level
-  exists is decided from the current map's depth.
-- `Dungeon.Interior` owns the new cell kinds, their codes and the endpoint
-  lookup helpers (arrival endpoint, stairs down, descent landing).
+- `Dungeon.Areas.Identities` owns the level-aware identity and its parsing
+  (`DungeonLevelId`). Neighbor levels are formed with `DungeonAreaId` from the
+  parsed region and the current map's level; whether a next level exists is
+  decided from the current map's depth.
+- `Dungeon.Movement` exposes `TransitionTargetOfValid` for callers that have
+  already validated the state, so `OpenLevelForEntry` does not validate the
+  whole state a second time per transition.
+- `Dungeon.Interior` owns `MaxDungeonDepth` (map validation needs it below the
+  identity unit), the new cell kinds, their codes, the `Level`/`Depth` map
+  fields, and the endpoint lookup helpers (arrival endpoint, stairs down,
+  descent landing). The map field `Exit` becomes `Arrival`.
+- Save validation additionally requires that a visited level L > 0 has level
+  L-1 of the same dungeon visited too.
 - `Dungeon.Interior.Generation` already has 460+ lines. Move the per-level
   content rules (`DungeonDepth`, hostile and item slot formulas, domains)
   into a new unit,
@@ -213,8 +233,8 @@ commit. Record the counts here. Gameplay and versions stay unchanged.
 
 ### 02. Level-aware identities and cells
 
-- Five-segment identities with parsing, formatting, level bounds and
-  previous/next helpers, and `MaxDungeonDepth`. Add `Depth` and `Level` to
+- Five-segment identities with parsing, formatting, level bounds, and
+  `MaxDungeonDepth`. Add `Depth` and `Level` to
   `InteriorMap`. Update all identity producers in game code.
 - `StairsUp`/`StairsDown` cells, their codes, and walkability.
 - Endpoint helpers and per-level structural validation in
@@ -242,7 +262,8 @@ commit. Record the counts here. Gameplay and versions stay unchanged.
   generating level 2 neither reads nor needs level 1.
 - Exhaustive formula tests for levels 0..`MaxDungeonDepth - 1`: hostile count,
   kinds and order. Generator tests with a depth of 1 (no stairs) and 5 through
-  a private seam, without changing `DungeonDepth`.
+  the public depth parameter of `GenerateDungeon`, without changing
+  `DungeonDepth`.
 - Measure generation time per level and record it here.
 - Negative tests: a level index at or beyond the depth, and an attempt without a valid
   stairs room or with too few safe rooms rejects that attempt.
@@ -345,14 +366,14 @@ delete this plan only after explicit acceptance.
 
 | Checkpoint | Status | Verification |
 | --- | --- | --- |
-| 01 | open | |
-| 02 | open | |
-| 03 | open | |
-| 04 | open | |
-| 05 | open | |
-| 06 | open | |
-| 07 | open | |
-| 08 | open | |
-| 09 | open | |
-| 10 | open | |
+| 01 | done | 21/21 projects checked, 122/122 test programs on 2edd12b |
+| 02 | done | identities, stairs cells, per-level validation; `dungeon_levels_test` |
+| 03 | done | generator 8, `Generation.Levels`, deliberate level-0 repin (only `:0` suffix and `>` differ), level 1/2 fingerprints, 1200 deep levels accepted; `dungeon_level_generation_test` |
+| 04 | done | level format 3, `<level>.json`, creation only for the current target; `multi_level_storage_test` |
+| 05 | done | stair targets, landings, occupied-arrival rule; `stair_transitions_test` |
+| 06 | done | save format 10, upper-level and depth/name invariants; `multi_level_storage_test` |
+| 07 | done | server stairs with read/write/invalid/candidate/send failures, dashboard level title; `stair_checkpoints_test` |
+| 08 | done | protocol 16 `<`/`>` and level/depth, raycaster steps, map glyphs, same-kind animation narrowing; `stairs_protocol_test`, `stairs_render_test`, `same_kind_animation_test` |
+| 09 | done | rewind, Start over, cross-level items, missing/mismatched levels; benchmark in persistence measurements |
+| 10 | done | TCP descent, save, reconnect replay, climb, Continue; `dungeon_levels_network_test`; docs synchronized; formatting, all 21 projects checked, 131/131 test programs |
 | 11 | open | |

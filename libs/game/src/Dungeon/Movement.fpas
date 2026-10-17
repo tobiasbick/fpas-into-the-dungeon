@@ -9,11 +9,10 @@ public type AreaTransition = record
   public View: GameState.AreaView;
 end record;
 
-// Validates entrance or exit eligibility and returns the server-owned target identity.
-// Does not load geometry or change player state.
-public function AreaTransitionTarget(View: GameState.AreaView; State: GameState.GameState): result of (string, string);
+// Returns the transition target of a state that the caller already validated against View,
+// without validating it again; see AreaTransitionTarget for the targets.
+public function TransitionTargetOfValid(View: GameState.AreaView; Valid: GameState.GameState): result of (string, string);
 begin
-  const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
   const Metadata: Terrain.WorldMetadata := View.Metadata;
   if Valid.Area = Coordinates.AreaKind.OutdoorRegion then
     begin
@@ -21,7 +20,7 @@ begin
       case Entrances.EntranceRegionAt(Metadata, Position) of
         when Some(const Region):
           begin
-            return Ok(Identities.DungeonAreaId(Metadata, Region));
+            return Ok(Identities.DungeonAreaId(Metadata, Region, 0));
           end;
         when None:
           begin
@@ -32,17 +31,104 @@ begin
   end if;
   const Map: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, Valid);
   const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(Valid);
-  if not Coordinates.SamePosition(Pose.Position, Map.Exit) then
-    begin
-      return Error('player is not standing on the interior exit');
-    end;
+  const Current: Identities.DungeonLevelId := try Identities.ParseDungeonLevelId(
+    Metadata,
+    Map.AreaId
+  );
+  if Coordinates.SamePosition(Pose.Position, Map.Arrival) then
+    if Map.Level = 0 then
+      return Ok(Metadata.OutdoorAreaId);
+    end if;
+
+    return Ok(Identities.DungeonAreaId(Metadata, Current.Region, Map.Level - 1));
   end if;
 
-  return Ok(Metadata.OutdoorAreaId);
+  case InteriorUnit.StairsDownPosition(Map) of
+    when Some(const Stairs):
+      if Coordinates.SamePosition(Pose.Position, Stairs) then
+        return Ok(Identities.DungeonAreaId(Metadata, Current.Region, Map.Level + 1));
+      end if;
+    when None:
+      null;
+  end case;
+
+  return Error('player is not standing on the interior exit or stairs');
+end function;
+
+// Validates entrance, exit or stairs eligibility and returns the server-owned target identity:
+// level 0 of the entrance's dungeon outdoors, the outdoor area from the level-0 exit, the level
+// above from stairs up, and the level below from stairs down. Does not load geometry or change state.
+public function AreaTransitionTarget(View: GameState.AreaView; State: GameState.GameState): result of (string, string);
+begin
+  return TransitionTargetOfValid(View, try GameState.ValidateGameState(View, State));
+end function;
+
+// Returns whether a validated first-person pose stands on an exit or stairs field of Map.
+public function OnTransitionField(Map: InteriorUnit.InteriorMap; Position: Coordinates.InteriorPosition): boolean;
+begin
+  if Coordinates.SamePosition(Position, Map.Arrival) then
+    return true;
+  end if;
+
+  case InteriorUnit.StairsDownPosition(Map) of
+    when Some(const Stairs):
+      return Coordinates.SamePosition(Position, Stairs);
+    when None:
+      return false;
+  end case;
+end function;
+
+// Returns Pose, or the first floor field free of standing opponents in breadth-first order
+// north, east, south, west from it when an opponent occupies Pose, keeping the facing. Opponents
+// on a level without the player never move, so an occupied arrival field must not block travel.
+function FreeArrival(Map: InteriorUnit.InteriorMap; State: GameState.GameState; Pose: Coordinates.FirstPersonPose): result of (Coordinates.FirstPersonPose, string);
+begin
+  if GameState.StandingHostileAt(State, Map.AreaId, Pose.Position) < 0 then
+    return Ok(Pose);
+  end if;
+  const Offsets: array of Coordinates.InteriorPosition := [
+    Coordinates.InteriorPosition(X := 0, Y := -1),
+    Coordinates.InteriorPosition(X := 1, Y := 0),
+    Coordinates.InteriorPosition(X := 0, Y := 1),
+    Coordinates.InteriorPosition(X := -1, Y := 0)
+  ];
+  var Visited: array of boolean := array.Fill(false, Map.Width * Map.Height);
+  var Queue: array of Coordinates.InteriorPosition := [Pose.Position];
+  Visited[(Pose.Position.Y * Map.Width) + Pose.Position.X] := true;
+  var ReadIndex: integer := 0;
+  while ReadIndex < Queue.Length() do
+    const Current: Coordinates.InteriorPosition := Queue[ReadIndex];
+    ReadIndex := ReadIndex + 1;
+    if (try InteriorUnit.InteriorCellAt(Map, Current) = InteriorUnit.InteriorCellKind.Floor)
+      and
+      (GameState.StandingHostileAt(State, Map.AreaId, Current) < 0)
+    then
+      return Ok(Pose with Position := Current; end with);
+    end if;
+
+    for Offset: Coordinates.InteriorPosition in Offsets do
+      const Next := Coordinates.InteriorPosition(
+        X := Current.X + Offset.X,
+        Y := Current.Y + Offset.Y
+      );
+      if (Next.X >= 0) and (Next.X < Map.Width) and (Next.Y >= 0) and (Next.Y < Map.Height) then
+        const Index: integer := (Next.Y * Map.Width) + Next.X;
+        if not Visited[Index] and (Map.Cells[Index] <> InteriorUnit.InteriorCellKind.Wall) then
+          Visited[Index] := true;
+          Queue.PushInPlace(Next);
+        end if;
+      end if;
+    end for;
+  end while;
+
+  return Error('no free arrival field on the target level');
 end function;
 
 // Applies an eligible transition using validated target geometry supplied by its owner.
-// Entry materializes validated target placements once; exit requires None and retains them.
+// Entry and stair travel require the target map and materialize its placements once; leaving
+// requires None. Stairs keep the outdoor return location, arrive at the start pose going down
+// and at the descent landing going up, and require the same stored depth and name. A standing
+// opponent on the arrival field moves the arrival to the nearest free floor field.
 public function ActivateAreaTransition(View: GameState.AreaView; State: GameState.GameState; TargetMap: option of InteriorUnit.InteriorMap): result of (AreaTransition, string);
 begin
   const Target: string := try AreaTransitionTarget(View, State);
@@ -59,8 +145,17 @@ begin
               end;
             end if;
 
-            Changed := Areas.MaterializeArea(State, ValidMap) with Area := Coordinates.AreaKind.Dungeon; AreaId := Target; Player := Coordinates.PlayerPosition.FirstPerson(
-              Coordinates.FirstPersonPose(Position := Map.Start, Facing := Map.StartFacing)
+            const Materialized := Areas.MaterializeArea(State, ValidMap);
+            const EntryPose := try FreeArrival(
+              ValidMap,
+              Materialized,
+              Coordinates.FirstPersonPose(
+                Position := ValidMap.Start,
+                Facing := ValidMap.StartFacing
+              )
+            );
+            Changed := Materialized with Area := Coordinates.AreaKind.Dungeon; AreaId := Target; Player := Coordinates.PlayerPosition.FirstPerson(
+              EntryPose
             ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
               View.Metadata.OutdoorAreaId,
               try GameState.OutdoorPlayerPosition(State)
@@ -73,6 +168,51 @@ begin
       end case;
     end;
   else
+    if Target <> View.Metadata.OutdoorAreaId then
+      const CurrentMap: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, State);
+      case TargetMap of
+        when Some(const Map):
+          const ValidMap: InteriorUnit.InteriorMap := try InteriorUnit.ValidateInteriorMap(Map);
+          if ValidMap.AreaId <> Target then
+            return Error('target map identity does not match the transition target');
+          end if;
+
+          if (ValidMap.Depth <> CurrentMap.Depth)
+            or
+            (ValidMap.DisplayName <> CurrentMap.DisplayName)
+          then
+            return Error('target level depth and name must match the current dungeon');
+          end if;
+          var Pose: Coordinates.FirstPersonPose := Coordinates.FirstPersonPose(
+            Position := ValidMap.Start, Facing := ValidMap.StartFacing
+          );
+          if ValidMap.Level < CurrentMap.Level then
+            case InteriorUnit.DescentLanding(ValidMap) of
+              when Some(const Landing):
+                Pose := Landing;
+              when None:
+                return Error('target level above has no stairs down');
+            end case;
+          end if;
+
+          const Materialized := Areas.MaterializeArea(State, ValidMap);
+          Changed := Materialized with AreaId := Target; Player := Coordinates.PlayerPosition.FirstPerson(
+            try FreeArrival(ValidMap, Materialized, Pose)
+          ); end with;
+        when None:
+          return Error('taking stairs requires the target level map');
+      end case;
+      const StairsView: GameState.AreaView := GameState.AreaView(
+        Metadata := View.Metadata,
+        Interior := TargetMap
+      );
+      return Ok(
+        AreaTransition(
+          State := try GameState.ValidateGameState(StairsView, Changed), View := StairsView
+        )
+      );
+    end if;
+
     begin
       case TargetMap of
         when Some(const Map):

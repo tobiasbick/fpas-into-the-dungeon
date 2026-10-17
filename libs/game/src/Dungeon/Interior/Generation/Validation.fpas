@@ -1,7 +1,7 @@
 // Structural rules of generated dungeons, shared by the generator and stored level validation.
 unit Dungeon.Interior.Generation.Validation;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Sight as Sight, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Std.Math as Math;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Sight as Sight, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Levels as Levels, Dungeon.Items as ItemRules, Std.Math as Math;
 
 // Fixed field dimensions of every generated dungeon, including the outer wall.
 public const GeneratedDungeonWidth: integer := 31;
@@ -65,16 +65,15 @@ end function;
 
 function PlacementsAccepted(Map: InteriorUnit.InteriorMap): result of (boolean, string);
 begin
-  const Kinds: array of ItemRules.ItemKind := [
-    ItemRules.ItemKind.AncientCoin,
-    ItemRules.ItemKind.RustyShortSword,
-    ItemRules.ItemKind.LeatherJerkin,
-    ItemRules.ItemKind.HealingPotion
-  ];
-  if (Map.Items.Length() < 4) or (Map.Items.Length() > 6) then
+  const Required: array of ItemRules.ItemKind := Levels.RequiredItemKinds(Map.Level);
+  const Optional: array of integer := Levels.OptionalItemSlots(Map.Level);
+  if (Map.Items.Length() < Required.Length())
+    or
+    (Map.Items.Length() > Required.Length() + Optional.Length())
+  then
     begin
       return Error(
-        'generated dungeon must place four required items and at most two optional finds'
+        'generated dungeon level must place its required items and at most two optional finds'
       );
     end;
   end if;
@@ -83,20 +82,22 @@ begin
   for Index: integer := 0 to Map.Items.Length() - 1 do
     begin
       const Item: ItemRules.ItemPlacement := Map.Items[Index];
-      var Slot := Index;
-      if Index < 4 then
-        if Item.Kind <> Kinds[Index] then
-          return Error('generated dungeon required slots must be coin, sword, jerkin and potion');
+      var Slot := -1;
+      if Index < Required.Length() then
+        if Item.Kind <> Required[Index] then
+          return Error('generated dungeon level required slots have unexpected item kinds');
         end if;
+
+        Slot := Index;
       else
-        if Item.ItemId = ItemRules.ItemPlacementId(Map.AreaId, 4) then
-          Slot := 4;
-        else
-          if Item.ItemId = ItemRules.ItemPlacementId(Map.AreaId, 5) then
-            Slot := 5;
-          else
-            return Error('generated dungeon optional finds must use original slot 4 or 5');
+        for Candidate: integer in Optional do
+          if Item.ItemId = ItemRules.ItemPlacementId(Map.AreaId, Candidate) then
+            Slot := Candidate;
           end if;
+        end for;
+
+        if Slot < 0 then
+          return Error('generated dungeon optional finds must use an original optional slot');
         end if;
       end if;
 
@@ -116,16 +117,13 @@ begin
     end;
   end for;
 
-  if Map.Hostiles.Length() <> 2 then
+  const HostileKinds := Levels.LevelHostileKinds(Map.Level);
+  if Map.Hostiles.Length() <> HostileKinds.Length() then
     begin
-      return Error('generated dungeon must place one skeleton and one rat');
+      return Error('generated dungeon level has an unexpected number of opponents');
     end;
   end if;
 
-  const HostileKinds := [
-    HostileRules.HostileKind.RestlessSkeleton,
-    HostileRules.HostileKind.GiantRat
-  ];
   for Index: integer := 0 to Map.Hostiles.Length() - 1 do
     begin
       const Hostile: HostileRules.HostilePlacement := Map.Hostiles[Index];
@@ -135,7 +133,7 @@ begin
       then
         begin
           return Error(
-            'generated dungeon opponents must be skeleton slot 0 and rat slot 1 with canonical identities'
+            'generated dungeon opponents must follow the level slot kinds with canonical identities'
           );
         end;
       end if;
@@ -152,8 +150,9 @@ begin
 end function;
 
 // Checks every structural rule a stored or freshly generated dungeon must satisfy without
-// rerunning the generator: dimensions, outer wall, start east of the exit facing east, map
-// validity, ordered placements, floor share, and no opponent that could see the start.
+// rerunning the generator: dimensions, outer wall, start east of the arrival endpoint facing
+// east, map validity including level endpoints, per-level ordered placements, floor share, and
+// no opponent that could see the start.
 // Room count is a generation-time rule only and is not checked here.
 public function ValidateGeneratedDungeon(Map: InteriorUnit.InteriorMap): result of (InteriorUnit.InteriorMap, string);
 begin
@@ -170,13 +169,15 @@ begin
   end if;
 
   if (
-    (Valid.StartFacing <> Coordinates.FacingDirection.East) or (Valid.Start.X <> Valid.Exit.X + 1)
+    (Valid.StartFacing <> Coordinates.FacingDirection.East)
+    or
+    (Valid.Start.X <> Valid.Arrival.X + 1)
   )
     or
-    (Valid.Start.Y <> Valid.Exit.Y)
+    (Valid.Start.Y <> Valid.Arrival.Y)
   then
     begin
-      return Error('generated dungeon start must face east one field east of the exit');
+      return Error('generated dungeon start must face east one field east of the arrival endpoint');
     end;
   end if;
   const Placements: boolean := try PlacementsAccepted(Valid);

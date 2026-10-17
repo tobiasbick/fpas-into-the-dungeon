@@ -1,7 +1,7 @@
 // Deterministic generated dungeon layouts: rooms, corridors, endpoints, opponents, and items.
 unit Dungeon.Interior.Generation;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Content as Content, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Items as ItemRules, Dungeon.Random as Random, Std.Math as Math;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Content as Content, Dungeon.Interior.Generation.Levels as Levels, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Items as ItemRules, Dungeon.Random as Random, Std.Math as Math;
 
 const RoomPlacementTries: integer := 40;
 const MaximumRooms: integer := 8;
@@ -261,10 +261,11 @@ begin
   return Order;
 end function;
 
-// Takes the first two safe room centers in walking-distance order; validation rejects shortages.
+// Takes the first safe room centers in walking-distance order, one per level opponent slot;
+// validation rejects shortages.
 function HostilePlacements(Map: InteriorUnit.InteriorMap; Rooms: array of GeneratedRoom; Order: array of integer): array of HostileRules.HostilePlacement;
 begin
-  const Kinds := [HostileRules.HostileKind.RestlessSkeleton, HostileRules.HostileKind.GiantRat];
+  const Kinds := Levels.LevelHostileKinds(Map.Level);
   var Placements: array of HostileRules.HostilePlacement := [];
   for RoomIndex: integer in Order do
     if Placements.Length() < Kinds.Length() then
@@ -280,17 +281,6 @@ begin
   end for;
 
   return Placements;
-end function;
-
-// Original slots survive omissions; these content draws never consume geometry state.
-function SelectedItems(Seed: integer; RegionX: integer; RegionY: integer): array of option of ItemRules.ItemKind;
-begin
-  return [
-    Some(ItemRules.ItemKind.AncientCoin), Some(ItemRules.ItemKind.RustyShortSword),
-    Some(ItemRules.ItemKind.LeatherJerkin), Some(ItemRules.ItemKind.HealingPotion),
-    Content.OptionalLoot(Seed, RegionX, RegionY, 4).Unwrap(),
-    Content.OptionalLoot(Seed, RegionX, RegionY, 5).Unwrap()
-  ];
 end function;
 
 function HoldsHostile(Room: GeneratedRoom; Hostiles: array of HostileRules.HostilePlacement): boolean;
@@ -312,12 +302,21 @@ function CornerIsFree(Corner: Coordinates.InteriorPosition; Map: InteriorUnit.In
 begin
   if (Map.Cells[FieldIndex(Corner)] <> InteriorUnit.InteriorCellKind.Floor)
     or
-    Coordinates.SamePosition(Corner, Map.Exit) or Coordinates.SamePosition(Corner, Map.Start)
+    Coordinates.SamePosition(Corner, Map.Arrival) or Coordinates.SamePosition(Corner, Map.Start)
   then
     begin
       return false;
     end;
   end if;
+
+  case InteriorUnit.DescentLanding(Map) of
+    when Some(const Landing):
+      if Coordinates.SamePosition(Corner, Landing.Position) then
+        return false;
+      end if;
+    when None:
+      null;
+  end case;
 
   for Hostile: HostileRules.HostilePlacement in Map.Hostiles do
     begin
@@ -406,7 +405,7 @@ begin
 end function;
 
 // Builds one candidate layout from an attempt seed and applies every acceptance rule.
-function GenerateAttempt(AttemptSeed: integer; AreaId: string; DisplayName: string; Selected: array of option of ItemRules.ItemKind): result of (InteriorUnit.InteriorMap, string);
+function GenerateAttempt(AttemptSeed: integer; AreaId: string; DisplayName: string; Level: integer; Depth: integer; Selected: array of option of ItemRules.ItemKind): result of (InteriorUnit.InteriorMap, string);
 begin
   const Empty: Layout := Layout(
     State := AttemptSeed, Cells := array.Fill(
@@ -422,7 +421,7 @@ begin
   end if;
   const Connected: Layout := ConnectAllRooms(Placed);
   const FirstRoom: GeneratedRoom := Connected.Rooms[0];
-  const Exit: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
+  const Arrival: Coordinates.InteriorPosition := Coordinates.InteriorPosition(
     X := FirstRoom.X,
     Y := FirstRoom.Y
   );
@@ -431,15 +430,22 @@ begin
     Y := FirstRoom.Y
   );
   var Cells: array of InteriorUnit.InteriorCellKind := Connected.Cells;
-  Cells[FieldIndex(Exit)] := InteriorUnit.InteriorCellKind.ExitField;
+  Cells[FieldIndex(Arrival)] := InteriorUnit.ArrivalCellKind(Level);
   const Order: array of integer := RoomsFarthestFirst(
     Connected.Rooms,
     WalkingDistances(Cells, Start)
   );
+  // Stairs down take the top-left field of the farthest room; rooms are at least three fields
+  // wide, so the descent landing east of it is floor of the same room and never a corner.
+  if InteriorUnit.LeadsDeeper(Level, Depth) then
+    const StairsRoom: GeneratedRoom := Connected.Rooms[Order[0]];
+    Cells[FieldIndex(Coordinates.InteriorPosition(X := StairsRoom.X, Y := StairsRoom.Y))] := InteriorUnit.InteriorCellKind.StairsDown;
+  end if;
   var Map: InteriorUnit.InteriorMap := InteriorUnit.InteriorMap(
-    AreaId := AreaId, DisplayName := DisplayName, Width := Validation.GeneratedDungeonWidth,
+    AreaId := AreaId, DisplayName := DisplayName, Level := Level, Depth := Depth,
+    Width := Validation.GeneratedDungeonWidth,
     Height := Validation.GeneratedDungeonHeight, Cells := Cells, Start := Start,
-    StartFacing := Coordinates.FacingDirection.East, Exit := Exit, Items := [],
+    StartFacing := Coordinates.FacingDirection.East, Arrival := Arrival, Items := [],
     Hostiles := []
   );
   Map.Hostiles := HostilePlacements(Map, Connected.Rooms, Order);
@@ -447,13 +453,17 @@ begin
   return Validation.ValidateGeneratedDungeon(Map);
 end function;
 
-// Generates the dungeon of one entrance region as a pure function of seed and region.
-// Up to 16 attempts with derived seeds run in order; the first accepted layout wins.
-// An error after all attempts is a generator defect, not a player-facing condition.
-public function GenerateDungeon(Seed: integer; RegionX: integer; RegionY: integer; AreaId: string): result of (InteriorUnit.InteriorMap, string);
+// Generates one level of an entrance region's dungeon as a pure function of seed, region,
+// level and depth; no other level is read or needed. Level 0 keeps the attempt seeds of the
+// single-level generator. Up to 16 attempts with derived seeds run in order; the first accepted
+// layout wins. An error after all attempts is a generator defect, not a player-facing condition.
+public function GenerateDungeon(Seed: integer; RegionX: integer; RegionY: integer; Level: integer; Depth: integer; AreaId: string): result of (InteriorUnit.InteriorMap, string);
 begin
+  if (Depth < 1) or (Depth > InteriorUnit.MaxDungeonDepth) or (Level < 0) or (Level >= Depth) then
+    return Error('generated dungeon level must lie within a depth of 1 through 16');
+  end if;
   const DisplayName: string := Content.DungeonName(Seed, RegionX, RegionY);
-  const Selected := SelectedItems(Seed, RegionX, RegionY);
+  const Selected := Levels.SelectedItems(Seed, RegionX, RegionY, Level);
   var LastError: string := 'generated dungeon was not attempted';
   for Attempt: integer := 0 to GenerationAttempts - 1 do
     begin
@@ -464,9 +474,9 @@ begin
             (RegionX * 104729)
           ) + (RegionY * 1299709)
         ) +
-        (Attempt * 15485863), Random.RandomStateModulus
+        (Attempt * 15485863) + (Level * 32452843), Random.RandomStateModulus
       );
-      case GenerateAttempt(AttemptSeed, AreaId, DisplayName, Selected) of
+      case GenerateAttempt(AttemptSeed, AreaId, DisplayName, Level, Depth, Selected) of
         when Ok(const Map):
           begin
             return Ok(Map);

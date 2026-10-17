@@ -12,7 +12,7 @@ default data root is:
 │   └── <world-id>/
 │       ├── world.json
 │       ├── chunks/
-│       ├── dungeons/<rx>_<ry>/0.json
+│       ├── dungeons/<rx>_<ry>/<level>.json
 │       └── saves/
 │           └── default.json
 ├── logs/
@@ -77,7 +77,7 @@ configuration is loaded.
 
 Runtime configuration, world, chunk, level and savegame formats support only
 their current schema and generator version. Current versions are world format
-3, generator 7, level format 2 and save format 9; protocol 15 connects the client
+3, generator 8, level format 3 and save format 10; protocol 16 connects the client
 and server. Obsolete runtime configuration reports an error asking the user to
 delete or recreate that configuration. Invalid or incompatible worlds and saves
 remain visible and are preserved; create a new world for incompatible world

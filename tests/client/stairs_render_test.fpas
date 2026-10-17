@@ -1,0 +1,129 @@
+// Verifies stairs presentation: distinct first-person floors for stairs up/down, exit and floor,
+// exploration-map glyphs, and the server title and hint in the running headless client.
+program DungeonStairsRenderTest;
+
+uses Dungeon.Client as ClientUnit, Dungeon.Client.Raycast as Raycast, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+// A corridor whose field two steps ahead of the player holds Code.
+function Corridor(Code: string): Protocol.FirstPersonVisibleState;
+begin
+  return Protocol.FirstPersonVisibleState(
+    Title := 'Ashen Keep — Level 2 of 3', Status := 'Stairs down — Enter: Go down', Level := 1,
+    Depth := 3,
+    Width := 7, Height := 3, Rows := ['#######', '#..' + Code + '..#', '#######'],
+    KnowledgeRows := ['vvvvvvv', 'vvvvvvv', 'vvvvvvv'], PlayerX := 1, PlayerY := 1,
+    Facing := Protocol.FirstPersonFacing.East, Inventory := [], Health := 20, MaxHealth := 20,
+    Character := [], CombatLog := [], CombatEvents := []
+  );
+end function;
+
+function DifferentCells(Left: Tui.TuiCellGrid; Right: Tui.TuiCellGrid): integer;
+begin
+  var Count: integer := 0;
+  for I: integer := 0 to Left.Cells.Length() - 1 do
+    const A: Tui.TuiStyle := Left.Cells[I].ConcreteStyle.Unwrap();
+    const B: Tui.TuiStyle := Right.Cells[I].ConcreteStyle.Unwrap();
+    if (Left.Cells[I].Glyph <> Right.Cells[I].Glyph) or (A.Background <> B.Background)
+      or
+      (A.Foreground <> B.Foreground)
+    then
+      Count := Count + 1;
+    end if;
+  end for;
+
+  return Count;
+end function;
+
+function SurfaceContains(Surface: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Y: integer := 0 to Surface.Height - 1 do
+    if Text in Surface.LineAt(Y) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function CountGlyph(Surface: Tui.TuiSurfaceSnapshot; Glyph: string): integer;
+begin
+  var Count := 0;
+  for Y: integer := 0 to Surface.Height - 1 do
+    for X: integer := 0 to Surface.Width - 1 do
+      if Surface.CellAt(X, Y).Glyph = Glyph then
+        Count := Count + 1;
+      end if;
+    end for;
+  end for;
+
+  return Count;
+end function;
+
+procedure FloorsDiffer();
+begin
+  const Codes: array of string := ['.', 'x', '<', '>'];
+  var Grids: array of Tui.TuiCellGrid := [];
+  for Code: string in Codes do
+    Grids.PushInPlace(Raycast.RenderFirstPersonGrid(Corridor(Code), 41, 21));
+  end for;
+
+  for Left: integer := 0 to Grids.Length() - 1 do
+    for Right: integer := Left + 1 to Grids.Length() - 1 do
+      Test.AssertTrue(DifferentCells(Grids[Left], Grids[Right]) > 0);
+    end for;
+  end for;
+
+  // Stairs only change the floor: the ceiling half stays identical to a plain corridor.
+  for Index: integer := 0 to 41 * 8 - 1 do
+    Test.AssertTrue(
+      Grids[0].Cells[Index].ConcreteStyle.Unwrap().Background =
+      Grids[3].Cells[Index].ConcreteStyle.Unwrap().Background
+    );
+  end for;
+end procedure;
+
+procedure ClientShowsStairs();
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of ClientUnit.ConnectionEvent := Tasks.CreateChannel(4);
+  var Model := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  const Cmd: Tui.TuiCmdOutput := Tui.TuiCmdOutput.Create();
+  Model.ViewportWidth := 60;
+  Model.ViewportHeight := 24;
+  Model := ClientUnit.UpdateClientEvent(
+    Model, ClientUnit.ClientEvent.State(Protocol.VisibleState.FirstPersonState(Corridor('>'))), Cmd
+  );
+  Test.AssertEquals(1, Model.PrimaryLevel);
+  Test.AssertEquals(3, Model.PrimaryDepth);
+  Model.Pending := false;
+  Model := ClientUnit.UpdateClientEvent(
+    Model, ClientUnit.ClientEvent.ExplorationMap(
+      Protocol.ExplorationMapState(
+        View := Protocol.ViewKind.FirstPerson, LabelText := 'Ashen Keep — Level 2 of 3',
+        OriginX := 0,
+        OriginY := 0, Width := 7, Height := 3, Rows := ['#######', '#<.>..#', '#######'],
+        KnowledgeRows := ['rrrrrrr', 'rrrrrrr', 'rrrrrrr'], PlayerWorldX := 5, PlayerWorldY := 1,
+        PlayerInWindow := true
+      )
+    ), Cmd
+  );
+  Model.Overlay := ClientUnit.ClientOverlay.ExplorationMapOverlay;
+  const App: Tui.TuiApplication := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(100, 40));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  const Surface := App.SurfaceSnapshot();
+  Test.AssertEquals(1, CountGlyph(Surface, '<'));
+  Test.AssertEquals(1, CountGlyph(Surface, '>'));
+  Test.AssertTrue(SurfaceContains(Surface, 'Level 2 of 3'));
+end procedure;
+
+begin
+  FloorsDiffer();
+  ClientShowsStairs();
+end.

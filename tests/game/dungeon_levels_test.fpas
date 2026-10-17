@@ -1,0 +1,216 @@
+// Covers level-aware dungeon identities, stairs cells, and per-level endpoint validation for several depths.
+program DungeonLevelsTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as PlacementRules, Std.Conv as Conv, Std.Test as Test;
+
+// A 7 by 5 hall: the arrival endpoint at (1,1), the start east of it, and an optional stairs down at (3,3).
+function Hall(ArrivalCode: string; DownCode: string): array of string;
+begin
+  return [
+    '#######',
+    '#' + ArrivalCode + '....#',
+    '#.....#',
+    '#..' + DownCode + '..#',
+    '#######'
+  ];
+end function;
+
+function Cells(Rows: array of string): array of InteriorUnit.InteriorCellKind;
+begin
+  var Collected: array of InteriorUnit.InteriorCellKind := [];
+  for Row: string in Rows do
+    for X: integer := 0 to Row.Length() - 1 do
+      Collected.PushInPlace(InteriorUnit.InteriorCellFromCode(Row[X]).Unwrap());
+    end for;
+  end for;
+
+  return Collected;
+end function;
+
+// Builds an unvalidated level whose arrival field is (1,1) with the start east of it.
+function LevelMap(Rows: array of string; Level: integer; Depth: integer): InteriorUnit.InteriorMap;
+begin
+  return InteriorUnit.InteriorMap(
+    AreaId := 'levels:dungeon:0:0:' + Conv.IntToStr(Level), DisplayName := 'Level hall',
+    Level := Level, Depth := Depth, Width := 7, Height := 5, Cells := Cells(Rows),
+    Start := Coordinates.InteriorPosition(X := 2, Y := 1),
+    StartFacing := Coordinates.FacingDirection.East,
+    Arrival := Coordinates.InteriorPosition(X := 1, Y := 1), Items := [], Hostiles := []
+  );
+end function;
+
+function Valid(Map: InteriorUnit.InteriorMap): boolean;
+begin
+  return InteriorUnit.ValidateInteriorMap(Map) is Ok(_);
+end function;
+
+// Returns the first region with an entrance site and negative coordinates, scanning a small square.
+function NegativeEntranceRegion(Metadata: Terrain.WorldMetadata): Entrances.RegionCoordinate;
+begin
+  for Y: integer := -1 downto -12 do
+    for X: integer := -1 downto -12 do
+      const Candidate := Entrances.RegionCoordinate(X := X, Y := Y);
+      if Entrances.EntranceSite(Metadata, Candidate) is Some(_) then
+        return Candidate;
+      end if;
+    end for;
+  end for;
+
+  Test.Fail('no negative entrance region found');
+  return Entrances.RegionCoordinate(X := 0, Y := 0);
+end function;
+
+procedure IdentitiesRoundTrip();
+begin
+  const Metadata := PlacementRules.NewWorldMetadata('levels', 12345, 4).Unwrap();
+  const Region := NegativeEntranceRegion(Metadata);
+  for Level: integer in [0, 1, 2, 4, InteriorUnit.MaxDungeonDepth - 1] do
+    const AreaId := Identities.DungeonAreaId(Metadata, Region, Level);
+    Test.AssertEquals(
+      ((('levels:dungeon:' + Conv.IntToStr(Region.X)) + ':') + Conv.IntToStr(Region.Y) + ':') +
+      Conv.IntToStr(Level),
+      AreaId
+    );
+    const Parsed := Identities.ParseDungeonLevelId(Metadata, AreaId).Unwrap();
+    Test.AssertTrue(Parsed.Region = Region);
+    Test.AssertEquals(Level, Parsed.Level);
+    Test.AssertTrue(Identities.ParseDungeonAreaId(Metadata, AreaId).Unwrap() = Region);
+  end for;
+  const Prefix := (('levels:dungeon:' + Conv.IntToStr(Region.X)) + ':') + Conv.IntToStr(Region.Y);
+  for Bad: string in [
+    Prefix,
+    Prefix + ':',
+    Prefix + ':16',
+    Prefix + ':-1',
+    Prefix + ':-0',
+    Prefix + ':01',
+    Prefix + ':+1',
+    Prefix + ': 1',
+    Prefix + ':1:0',
+    Prefix + ':x'
+  ] do
+    Test.AssertTrue(Identities.ParseDungeonLevelId(Metadata, Bad) is Error(_));
+  end for;
+end procedure;
+
+procedure StairsCells();
+begin
+  Test.AssertTrue(
+    InteriorUnit.InteriorCellFromCode('<').Unwrap() = InteriorUnit.InteriorCellKind.StairsUp
+  );
+  Test.AssertTrue(
+    InteriorUnit.InteriorCellFromCode('>').Unwrap() = InteriorUnit.InteriorCellKind.StairsDown
+  );
+  Test.AssertEquals('<', InteriorUnit.InteriorCellCode(InteriorUnit.InteriorCellKind.StairsUp));
+  Test.AssertEquals('>', InteriorUnit.InteriorCellCode(InteriorUnit.InteriorCellKind.StairsDown));
+  Test.AssertTrue(InteriorUnit.InteriorCellFromCode('^') is Error(_));
+  Test.AssertTrue(InteriorUnit.ArrivalCellKind(0) = InteriorUnit.InteriorCellKind.ExitField);
+  Test.AssertTrue(InteriorUnit.ArrivalCellKind(3) = InteriorUnit.InteriorCellKind.StairsUp);
+end procedure;
+
+procedure EndpointsPerDepth();
+begin
+  // Depth 1: only the exit.
+  Test.AssertTrue(Valid(LevelMap(Hall('x', '.'), 0, 1)));
+  Test.AssertTrue(not Valid(LevelMap(Hall('x', '>'), 0, 1)));
+  // Depth 2: exit plus stairs down above, stairs up only below.
+  Test.AssertTrue(Valid(LevelMap(Hall('x', '>'), 0, 2)));
+  Test.AssertTrue(Valid(LevelMap(Hall('<', '.'), 1, 2)));
+  Test.AssertTrue(not Valid(LevelMap(Hall('<', '>'), 1, 2)));
+  // Depth 3 and 5: middle levels need both stairs, the deepest only stairs up.
+  for Depth: integer in [3, 5] do
+    Test.AssertTrue(Valid(LevelMap(Hall('x', '>'), 0, Depth)));
+    Test.AssertTrue(not Valid(LevelMap(Hall('x', '.'), 0, Depth)));
+    for Level: integer := 1 to Depth - 2 do
+      Test.AssertTrue(Valid(LevelMap(Hall('<', '>'), Level, Depth)));
+      Test.AssertTrue(not Valid(LevelMap(Hall('<', '.'), Level, Depth)));
+      Test.AssertTrue(not Valid(LevelMap(Hall('x', '>'), Level, Depth)));
+    end for;
+
+    Test.AssertTrue(Valid(LevelMap(Hall('<', '.'), Depth - 1, Depth)));
+    Test.AssertTrue(not Valid(LevelMap(Hall('<', '>'), Depth - 1, Depth)));
+  end for;
+  // An exit below level 0 or stairs up on level 0 is rejected even with the other counts right.
+  var Mixed := Hall('x', '>');
+  Mixed[2] := '#<....#';
+  Test.AssertTrue(not Valid(LevelMap(Mixed, 0, 3)));
+  var TwoDown := Hall('x', '>');
+  TwoDown[2] := '#....>#';
+  Test.AssertTrue(not Valid(LevelMap(TwoDown, 0, 3)));
+end procedure;
+
+procedure DepthAndLevelBounds();
+begin
+  Test.AssertTrue(not Valid(LevelMap(Hall('x', '.'), 0, 0)));
+  Test.AssertTrue(not Valid(LevelMap(Hall('x', '>'), 0, InteriorUnit.MaxDungeonDepth + 1)));
+  Test.AssertTrue(Valid(LevelMap(Hall('x', '>'), 0, InteriorUnit.MaxDungeonDepth)));
+  Test.AssertTrue(not Valid(LevelMap(Hall('<', '.'), 3, 3)));
+  Test.AssertTrue(not Valid(LevelMap(Hall('<', '.'), -1, 3)));
+end procedure;
+
+procedure DescentLanding();
+begin
+  const Map := InteriorUnit.ValidateInteriorMap(LevelMap(Hall('x', '>'), 0, 3)).Unwrap();
+  const Stairs := InteriorUnit.StairsDownPosition(Map).Unwrap();
+  Test.AssertEquals(3, Stairs.X);
+  Test.AssertEquals(3, Stairs.Y);
+  const Landing := InteriorUnit.DescentLanding(Map).Unwrap();
+  Test.AssertEquals(4, Landing.Position.X);
+  Test.AssertEquals(3, Landing.Position.Y);
+  Test.AssertTrue(Landing.Facing = Coordinates.FacingDirection.East);
+  Test.AssertTrue(InteriorUnit.DescentLanding(LevelMap(Hall('<', '.'), 2, 3)) is None);
+  // A wall east of the stairs leaves no landing.
+  var Walled := Hall('x', '>');
+  Walled[3] := '#..>###';
+  Test.AssertTrue(not Valid(LevelMap(Walled, 0, 3)));
+  // Stairs against the east border cannot have a landing inside the map.
+  var Border := Hall('x', '.');
+  Border[3] := '#.....>';
+  Test.AssertTrue(not Valid(LevelMap(Border, 0, 3)));
+  // Placements must keep the landing free.
+  const OnLanding := LevelMap(Hall('x', '>'), 0, 3) with Items := [
+    ItemRules.ItemPlacement(
+      ItemId := 'levels:dungeon:0:0:0:item:0', Kind := ItemRules.ItemKind.AncientCoin,
+      Position := Coordinates.InteriorPosition(X := 4, Y := 3)
+    )
+  ]; end with;
+
+  Test.AssertTrue(not Valid(OnLanding));
+  // Placements cannot stand on stairs, which are not floor.
+  const OnStairs := LevelMap(Hall('x', '>'), 0, 3) with Items := [
+    ItemRules.ItemPlacement(
+      ItemId := 'levels:dungeon:0:0:0:item:0', Kind := ItemRules.ItemKind.AncientCoin,
+      Position := Coordinates.InteriorPosition(X := 3, Y := 3)
+    )
+  ]; end with;
+
+  Test.AssertTrue(not Valid(OnStairs));
+end procedure;
+
+procedure ArrivalDerivation();
+begin
+  const Level0 := Cells(Hall('x', '>'));
+  const Arrival := InteriorUnit.ArrivalFromCells(Level0, 7, 0).Unwrap();
+  Test.AssertEquals(1, Arrival.X);
+  Test.AssertEquals(1, Arrival.Y);
+  Test.AssertTrue(InteriorUnit.ArrivalFromCells(Level0, 7, 1) is Error(_));
+  var Twice := Hall('<', '.');
+  Twice[2] := '#<....#';
+  Test.AssertTrue(InteriorUnit.ArrivalFromCells(Cells(Twice), 7, 1) is Error(_));
+  // An arrival coordinate that names the stairs down instead is rejected.
+  const Wrong := LevelMap(Hall('x', '>'), 0, 3) with Arrival := Coordinates.InteriorPosition(
+    X := 3,
+    Y := 3
+  ); end with;
+
+  Test.AssertTrue(not Valid(Wrong));
+end procedure;
+
+begin
+  IdentitiesRoundTrip();
+  StairsCells();
+  EndpointsPerDepth();
+  DepthAndLevelBounds();
+  DescentLanding();
+  ArrivalDerivation();
+end.

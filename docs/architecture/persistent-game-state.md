@@ -50,7 +50,7 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `9` is an exact JSON object containing the selected world ID,
+Savegame format `10` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
 server-owned item state, the player's health, every opponent, the
@@ -60,15 +60,18 @@ First-person positions contain the local field coordinate and cardinal facing;
 their return location contains the outdoor area and the exact entrance site of
 the dungeon's region.
 
-`visited_areas` is a strictly sorted array of canonical dungeon identities
-(`<world>:dungeon:<rx>:<ry>`) with no duplicates. A new game starts with an empty list, no items, and no opponents.
+`visited_areas` is a strictly sorted array of canonical dungeon level identities
+(`<world>:dungeon:<rx>:<ry>:<level>`) with no duplicates. A visited level below 0
+requires the level above it in the same dungeon to be visited, and all visited
+levels of one dungeon must store the same depth and name. A new game starts with an empty list, no items, and no opponents.
 First entry materializes the map's placements and records the visit. Loading
 restores the list and entities together; revisiting never recreates taken items
 or defeated opponents. Interior discovery and dungeon entities may reference
 only visited areas. Saves without a required field are rejected. Format 8
-added the giant rat; format 9 (13b) adds `progression`. The version is checked
-before the payload, so an obsolete save reports its version. Format 8 and older
-saves remain intact and cannot be continued; recreate progress explicitly
+added the giant rat; format 9 (13b) added `progression`; format 10 (14c) uses
+level identities for every area and entity. The version is checked before the
+payload, so an obsolete save reports its version. Format 9 and older saves
+remain intact and cannot be continued; recreate progress explicitly
 through Start over.
 
 Outdoor discovery is stored sparsely as canonically ordered signed chunk

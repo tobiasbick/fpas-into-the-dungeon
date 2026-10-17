@@ -1,0 +1,252 @@
+// Covers pure stair transitions: targets, landing poses, retained return location and level state,
+// free actions, hints and titles, and rejections that leave the state unchanged.
+program StairTransitionsTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Placement as PlacementRules, Std.Math as Math, Std.Test as Test;
+
+function Metadata(): Terrain.WorldMetadata;
+begin
+  return PlacementRules.NewWorldMetadata('stairs', 12345, 4).Unwrap();
+end function;
+
+function SpawnRegion(): Entrances.RegionCoordinate;
+begin
+  const Value := Metadata();
+  return Entrances.RegionOf(Value, Value.Spawn);
+end function;
+
+function LevelId(Level: integer): string;
+begin
+  return Identities.DungeonAreaId(Metadata(), SpawnRegion(), Level);
+end function;
+
+function LevelMap(Level: integer; Depth: integer): InteriorUnit.InteriorMap;
+begin
+  const Region := SpawnRegion();
+  return Generation.GenerateDungeon(
+    Metadata().Seed,
+    Region.X,
+    Region.Y,
+    Level,
+    Depth,
+    LevelId(Level)
+  ).Unwrap();
+end function;
+
+function ViewOf(Map: option of InteriorUnit.InteriorMap): GameState.AreaView;
+begin
+  return GameState.AreaView(Metadata := Metadata(), Interior := Map);
+end function;
+
+function Pose(State: GameState.GameState): Coordinates.FirstPersonPose;
+begin
+  return GameState.FirstPersonPlayerPose(State).Unwrap();
+end function;
+
+function StandOn(State: GameState.GameState; Position: Coordinates.InteriorPosition): GameState.GameState;
+begin
+  return State with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Position, Facing := Coordinates.FacingDirection.North)
+  ); end with;
+end function;
+
+function Outside(): GameState.GameState;
+begin
+  const Value := Metadata();
+  return GameState.NewGame(Value) with Player := Coordinates.PlayerPosition.Outdoor(
+    Value.SpawnEntrance
+  ); end with;
+end function;
+
+function Take(State: GameState.GameState; From: InteriorUnit.InteriorMap; Target: option of InteriorUnit.InteriorMap): Movement.AreaTransition;
+begin
+  return Movement.ActivateAreaTransition(ViewOf(Some(From)), State, Target).Unwrap();
+end function;
+
+procedure DescendAndClimb();
+begin
+  const Level0 := LevelMap(0, 3);
+  const Level1 := LevelMap(1, 3);
+  const Level2 := LevelMap(2, 3);
+  const Entered := Movement.ActivateAreaTransition(ViewOf(None), Outside(), Some(Level0)).Unwrap();
+  const ReturnTo := Entered.State.ReturnLocation;
+  // Stairs down of level 0 lead to the start of level 1.
+  const OnStairs0 := StandOn(Entered.State, InteriorUnit.StairsDownPosition(Level0).Unwrap());
+  Test.AssertEquals(
+    LevelId(1),
+    Movement.AreaTransitionTarget(ViewOf(Some(Level0)), OnStairs0).Unwrap()
+  );
+  case Interaction.Interact(ViewOf(Some(Level0)), OnStairs0).Unwrap() of
+    when Interaction.InteractionOutcome.TransitionRequested(const Target):
+      Test.AssertEquals(LevelId(1), Target);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.Described(_, _):
+      Test.Fail('stairs down must request a transition');
+  end case;
+  const Down1 := Take(OnStairs0, Level0, Some(Level1));
+  Test.AssertEquals(LevelId(1), Down1.State.AreaId);
+  Test.AssertTrue(Pose(Down1.State).Position = Level1.Start);
+  Test.AssertTrue(Pose(Down1.State).Facing = Coordinates.FacingDirection.East);
+  Test.AssertTrue(Down1.State.ReturnLocation = ReturnTo);
+  Test.AssertTrue(Down1.State.Area = Coordinates.AreaKind.Dungeon);
+  Test.AssertEquals(2, Down1.State.VisitedAreas.Length());
+  Test.AssertEquals(5, Down1.State.Hostiles.Length());
+  // Free action: dice and health stay untouched.
+  Test.AssertEquals(OnStairs0.RandomState, Down1.State.RandomState);
+  Test.AssertEquals(OnStairs0.Health, Down1.State.Health);
+  // Alert and wound one level-1 opponent, then continue to level 2.
+  var Marked := Down1.State;
+  var Hostile := Marked.Hostiles[2];
+  Test.AssertEquals(LevelId(1), Hostile.AreaId);
+  Hostile.Alerted := true;
+  Hostile.Health := Hostile.Health - 1;
+  Marked.Hostiles[2] := Hostile;
+  const OnStairs1 := StandOn(Marked, InteriorUnit.StairsDownPosition(Level1).Unwrap());
+  const Down2 := Take(OnStairs1, Level1, Some(Level2));
+  Test.AssertEquals(LevelId(2), Down2.State.AreaId);
+  Test.AssertEquals(8, Down2.State.Hostiles.Length());
+  // The deepest level has no stairs down; its stairs up lead back to the level-1 landing.
+  Test.AssertTrue(InteriorUnit.StairsDownPosition(Level2) is None);
+  const OnUp2 := StandOn(Down2.State, Level2.Arrival);
+  Test.AssertEquals(
+    LevelId(1),
+    Movement.AreaTransitionTarget(ViewOf(Some(Level2)), OnUp2).Unwrap()
+  );
+  const Up1 := Take(OnUp2, Level2, Some(Level1));
+  const Landing1 := InteriorUnit.DescentLanding(Level1).Unwrap();
+  Test.AssertTrue(Pose(Up1.State) = Landing1);
+  // Revisiting does not materialize again and keeps the opponent's state.
+  Test.AssertEquals(8, Up1.State.Hostiles.Length());
+  Test.AssertTrue(Up1.State.Hostiles[2] = Hostile);
+  Test.AssertTrue(Up1.State.ReturnLocation = ReturnTo);
+  // Level 1 stairs up lead to the level-0 landing; only the level-0 exit leads outdoors.
+  const Up0 := Take(StandOn(Up1.State, Level1.Arrival), Level1, Some(Level0));
+  Test.AssertTrue(Pose(Up0.State) = InteriorUnit.DescentLanding(Level0).Unwrap());
+  const AtExit := StandOn(Up0.State, Level0.Arrival);
+  Test.AssertEquals(
+    Metadata().OutdoorAreaId,
+    Movement.AreaTransitionTarget(ViewOf(Some(Level0)), AtExit).Unwrap()
+  );
+  const Out := Take(AtExit, Level0, None);
+  Test.AssertTrue(Out.State.Area = Coordinates.AreaKind.OutdoorRegion);
+  Test.AssertTrue(GameState.OutdoorPlayerPosition(Out.State).Unwrap() = Metadata().SpawnEntrance);
+  Test.AssertTrue(Out.State.ReturnLocation is Coordinates.ReturnLocation.NoReturnLocation);
+  Test.AssertEquals(3, Out.State.VisitedAreas.Length());
+end procedure;
+
+procedure HintsAndTitles();
+begin
+  const Level0 := LevelMap(0, 3);
+  const Level1 := LevelMap(1, 3);
+  Test.AssertEquals(
+    'Press Enter to return to the outdoor region.',
+    Interaction.TransitionHint(Level0, Level0.Arrival)
+  );
+  Test.AssertEquals(
+    'Stairs down — Enter: Go down',
+    Interaction.TransitionHint(Level0, InteriorUnit.StairsDownPosition(Level0).Unwrap())
+  );
+  Test.AssertEquals('Stairs up — Enter: Go up', Interaction.TransitionHint(Level1, Level1.Arrival));
+  Test.AssertEquals('', Interaction.TransitionHint(Level1, Level1.Start));
+  Test.AssertEquals(Level1.DisplayName + ' — Level 2 of 3', Interaction.LevelTitle(Level1));
+  Test.AssertEquals(Level0.DisplayName, Interaction.LevelTitle(LevelMap(0, 1)));
+end procedure;
+
+procedure Rejections();
+begin
+  const Level0 := LevelMap(0, 3);
+  const Level1 := LevelMap(1, 3);
+  const Level2 := LevelMap(2, 3);
+  const Entered := Movement.ActivateAreaTransition(ViewOf(None), Outside(), Some(Level0)).Unwrap();
+  const OnStairs0 := StandOn(Entered.State, InteriorUnit.StairsDownPosition(Level0).Unwrap());
+  const View0 := ViewOf(Some(Level0));
+  // Wrong target identity, missing map, or another stored depth.
+  Test.AssertTrue(Movement.ActivateAreaTransition(View0, OnStairs0, Some(Level2)) is Error(_));
+  Test.AssertTrue(Movement.ActivateAreaTransition(View0, OnStairs0, None) is Error(_));
+  Test.AssertTrue(
+    Movement.ActivateAreaTransition(View0, OnStairs0, Some(LevelMap(1, 5))) is Error(_)
+  );
+  Test.AssertTrue(
+    Movement.ActivateAreaTransition(
+      View0,
+      OnStairs0,
+      Some(Level1 with DisplayName := 'Other name'; end with)
+    ) is Error(_)
+  );
+  // The level-0 exit refuses a target map; an ordinary field has no transition.
+  Test.AssertTrue(
+    Movement.ActivateAreaTransition(View0, StandOn(Entered.State, Level0.Arrival), Some(Level1)) is Error(_)
+  );
+  Test.AssertTrue(Movement.AreaTransitionTarget(View0, Entered.State) is Error(_));
+  // A deeper level never leads outdoors directly.
+  const Down1 := Movement.ActivateAreaTransition(View0, OnStairs0, Some(Level1)).Unwrap();
+  const OnUp1 := StandOn(Down1.State, Level1.Arrival);
+  Test.AssertTrue(Movement.ActivateAreaTransition(ViewOf(Some(Level1)), OnUp1, None) is Error(_));
+  // A stairs-up target without stairs down cannot provide a landing.
+  Test.AssertTrue(InteriorUnit.DescentLanding(LevelMap(0, 1)) is None);
+end procedure;
+
+function FirstHostileIn(State: GameState.GameState; AreaId: string): integer;
+begin
+  for Index: integer := 0 to State.Hostiles.Length() - 1 do
+    if State.Hostiles[Index].AreaId = AreaId then
+      return Index;
+    end if;
+  end for;
+
+  panic('no opponent in the area');
+end function;
+
+// An opponent left standing on an arrival field never blocks travel: the player arrives on the
+// nearest free floor field instead, keeping the facing.
+procedure OccupiedArrival();
+begin
+  const Level0 := LevelMap(0, 3);
+  const Level1 := LevelMap(1, 3);
+  const Entered := Movement.ActivateAreaTransition(ViewOf(None), Outside(), Some(Level0)).Unwrap();
+  const Down1 := Take(
+    StandOn(Entered.State, InteriorUnit.StairsDownPosition(Level0).Unwrap()),
+    Level0,
+    Some(Level1)
+  );
+  const Landing0 := InteriorUnit.DescentLanding(Level0).Unwrap();
+  var Blocked := Down1.State;
+  const Guard := FirstHostileIn(Blocked, LevelId(0));
+  Blocked.Hostiles[Guard] := Blocked.Hostiles[Guard] with Position := Landing0.Position; Alerted := true; end with;
+  const Up := Take(StandOn(Blocked, Level1.Arrival), Level1, Some(Level0));
+  const Arrived := Pose(Up.State);
+  Test.AssertTrue(not (Arrived.Position = Landing0.Position));
+  Test.AssertTrue(Arrived.Facing = Landing0.Facing);
+  Test.AssertTrue(
+    InteriorUnit.InteriorCellAt(Level0, Arrived.Position).Unwrap() =
+    InteriorUnit.InteriorCellKind.Floor
+  );
+  Test.AssertTrue(GameState.StandingHostileAt(Up.State, LevelId(0), Arrived.Position) < 0);
+  Test.AssertEquals(
+    1,
+    Math.Abs(Arrived.Position.X - Landing0.Position.X) +
+    Math.Abs(Arrived.Position.Y - Landing0.Position.Y)
+  );
+  // A destroyed opponent on the landing does not count.
+  var Destroyed := Blocked;
+  Destroyed.Hostiles[Guard] := Destroyed.Hostiles[Guard] with Health := 0; end with;
+
+  Test.AssertTrue(
+    Pose(Take(StandOn(Destroyed, Level1.Arrival), Level1, Some(Level0)).State) = Landing0
+  );
+  // Re-entering from outdoors onto an occupied start behaves the same way.
+  const Out := Take(StandOn(Up.State, Level0.Arrival), Level0, None).State;
+  var Waiting := Out;
+  Waiting.Hostiles[Guard] := Waiting.Hostiles[Guard] with Position := Level0.Start; end with;
+  const Again := Movement.ActivateAreaTransition(ViewOf(None), Waiting, Some(Level0)).Unwrap();
+  Test.AssertTrue(not (Pose(Again.State).Position = Level0.Start));
+  Test.AssertTrue(
+    GameState.StandingHostileAt(Again.State, LevelId(0), Pose(Again.State).Position) < 0
+  );
+end procedure;
+
+begin
+  DescendAndClimb();
+  OccupiedArrival();
+  HintsAndTitles();
+  Rejections();
+end.

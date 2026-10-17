@@ -89,17 +89,19 @@ begin
   var Maps: array of InteriorUnit.InteriorMap := [];
   var EntryMillis: integer := 0;
   var ConsumedCount: integer := 0;
+  var LevelCount: integer := 0;
   // Visit every dungeon once: discovery, a destroyed or surviving opponent, carried coins, and swords
   // transferred onto the next dungeon's entry field.
   for Index: integer := 0 to Regions.Length() - 1 do
     begin
-      const AreaId: string := Identities.DungeonAreaId(Metadata, Regions[Index]);
+      const AreaId: string := Identities.DungeonAreaId(Metadata, Regions[Index], 0);
       const Outside: GameState.GameState := State with Player := Coordinates.PlayerPosition.Outdoor(
         SiteOf(Metadata, Regions[Index])
       ); end with;
       const Started: integer := Time.MonotonicMillis();
       const Map: InteriorUnit.InteriorMap := Interiors.OpenLevelForEntry(
         World,
+        GameState.AreaView(Metadata := Metadata, Interior := None),
         Outside,
         AreaId
       ).Unwrap();
@@ -157,17 +159,64 @@ begin
           ); end with;
         end;
       end if;
+      // Descend through every deeper level, revealing each, then climb back to level 0.
+      var CurrentView: GameState.AreaView := Entered.View;
+      var LevelMaps: array of InteriorUnit.InteriorMap := [Map];
+      while InteriorUnit.StairsDownPosition(LevelMaps[LevelMaps.Length() - 1]) is Some(_) do
+        const Upper := LevelMaps[LevelMaps.Length() - 1];
+        const OnStairs := Inside with Player := Coordinates.PlayerPosition.FirstPerson(
+          Coordinates.FirstPersonPose(
+            Position := InteriorUnit.StairsDownPosition(Upper).Unwrap(),
+            Facing := Coordinates.FacingDirection.East
+          )
+        ); end with;
+        const DeeperId := Movement.AreaTransitionTarget(CurrentView, OnStairs).Unwrap();
+        const DeeperStarted: integer := Time.MonotonicMillis();
+        const Deeper := Interiors.OpenLevelForEntry(
+          World,
+          CurrentView,
+          OnStairs,
+          DeeperId
+        ).Unwrap();
+        EntryMillis := EntryMillis + Time.ElapsedMillis(DeeperStarted);
+        const Down := Movement.ActivateAreaTransition(CurrentView, OnStairs, Some(Deeper)).Unwrap();
+        Inside := Exploration.RevealCurrentArea(Down.View, Down.State).Unwrap();
+        CurrentView := Down.View;
+        LevelMaps.PushInPlace(Deeper);
+        LevelCount := LevelCount + 1;
+      end while;
+
+      for Level: integer := LevelMaps.Length() - 1 downto 1 do
+        const OnUp := Inside with Player := Coordinates.PlayerPosition.FirstPerson(
+          Coordinates.FirstPersonPose(
+            Position := LevelMaps[Level].Arrival,
+            Facing := Coordinates.FacingDirection.West
+          )
+        ); end with;
+        const Up := Movement.ActivateAreaTransition(
+          CurrentView,
+          OnUp,
+          Some(LevelMaps[Level - 1])
+        ).Unwrap();
+        Inside := Up.State;
+        CurrentView := Up.View;
+      end for;
       const AtExit: GameState.GameState := Inside with Player := Coordinates.PlayerPosition.FirstPerson(
-        Coordinates.FirstPersonPose(Position := Map.Exit, Facing := Map.StartFacing)
+        Coordinates.FirstPersonPose(Position := Map.Arrival, Facing := Map.StartFacing)
       ); end with;
 
-      State := Movement.ActivateAreaTransition(Entered.View, AtExit, None).Unwrap().State;
+      State := Movement.ActivateAreaTransition(CurrentView, AtExit, None).Unwrap().State;
     end;
   end for;
 
   Console.WriteLn(
     (
-      ((('visited=' + Conv.IntToStr(Count)) + ' items=') + Conv.IntToStr(State.Items.Length())) +
+      (
+        (
+          ('visited=' + Conv.IntToStr(Count)) + ' levels=' + Conv.IntToStr(Count + LevelCount) +
+          ' items='
+        ) + Conv.IntToStr(State.Items.Length())
+      ) +
       ' consumed='
     ) +
     Conv.IntToStr(ConsumedCount) + ' hostiles=' + Conv.IntToStr(State.Hostiles.Length()) +

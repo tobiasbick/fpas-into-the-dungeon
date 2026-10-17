@@ -5,26 +5,37 @@ uses Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dunge
 
 // Largest stored display name, in printable ASCII characters.
 public const MaximumInteriorNameLength: integer := 64;
+// Safety bound on the number of levels of one dungeon; not a gameplay value.
+public const MaxDungeonDepth: integer := 16;
 
-// Authoritative field material of the fixed initial interior.
+// Authoritative field material of an interior. Stairs are walkable endpoints like the exit.
 public type InteriorCellKind = enum
   Wall;
   Floor;
   ExitField;
+  StairsUp;
+  StairsDown;
 end enum;
 
-// Complete bounded interior geometry with one connected start and exit.
+// Complete bounded interior geometry of one dungeon level with a connected start and arrival endpoint.
+// Level 0 has the exit as arrival; deeper levels arrive on stairs up. Every level except the
+// deepest (Level = Depth - 1) has exactly one stairs down, whose east neighbor is the descent landing.
 public type InteriorMap = record
   // Stable server-owned identity of the area represented by this geometry.
   public AreaId: string;
   // Immutable player-facing name; nonempty printable ASCII without leading/trailing spaces.
   public DisplayName: string;
+  // Zero-based level index within its dungeon, below Depth.
+  public Level: integer;
+  // Number of levels of the dungeon, 1..MaxDungeonDepth; stored, never recomputed on read.
+  public Depth: integer;
   public Width: integer;
   public Height: integer;
   public Cells: array of InteriorCellKind;
   public Start: Coordinates.InteriorPosition;
   public StartFacing: Coordinates.FacingDirection;
-  public Exit: Coordinates.InteriorPosition;
+  // Exit field on level 0, stairs up on deeper levels.
+  public Arrival: Coordinates.InteriorPosition;
   // Initial floor placements of the area's items, each on a distinct floor field.
   public Items: array of ItemRules.ItemPlacement;
   // Initial opponent placements, on distinct floor fields away from items and endpoints.
@@ -47,6 +58,10 @@ begin
       begin
         return Ok(InteriorCellKind.ExitField);
       end;
+    when '<':
+      return Ok(InteriorCellKind.StairsUp);
+    when '>':
+      return Ok(InteriorCellKind.StairsDown);
     else
       begin
         return Error('interior row contains an unknown field code');
@@ -70,6 +85,10 @@ begin
       begin
         return 'x';
       end;
+    when InteriorCellKind.StairsUp:
+      return '<';
+    when InteriorCellKind.StairsDown:
+      return '>';
   end case;
 end function;
 
@@ -107,7 +126,84 @@ begin
   return Ok(InteriorCellCode(Cell));
 end function;
 
-// Validates the stored name, bounded shape, unique exit, traversable endpoints, and connected floor space.
+// Returns the endpoint kind the player arrives on: the exit on level 0, stairs up below it.
+public function ArrivalCellKind(Level: integer): InteriorCellKind;
+begin
+  if Level = 0 then
+    return InteriorCellKind.ExitField;
+  end if;
+
+  return InteriorCellKind.StairsUp;
+end function;
+
+// Returns whether a level of the given dungeon depth leads further down.
+public function LeadsDeeper(Level: integer; Depth: integer): boolean;
+begin
+  return Level < Depth - 1;
+end function;
+
+// Returns the first field of the given kind in row order, if any.
+function FirstCellOfKind(Map: InteriorMap; Kind: InteriorCellKind): option of Coordinates.InteriorPosition;
+begin
+  for Index: integer := 0 to Map.Cells.Length() - 1 do
+    if Map.Cells[Index] = Kind then
+      return Some(
+        Coordinates.InteriorPosition(X := Index mod Map.Width, Y := Index div Map.Width)
+      );
+    end if;
+  end for;
+
+  return None;
+end function;
+
+// Returns the stairs down of a validated map, or None on the deepest level.
+public function StairsDownPosition(Map: InteriorMap): option of Coordinates.InteriorPosition;
+begin
+  return FirstCellOfKind(Map, InteriorCellKind.StairsDown);
+end function;
+
+// Returns the pose of a player climbing up onto this validated level: one field east of its
+// stairs down, facing east. None on the deepest level.
+public function DescentLanding(Map: InteriorMap): option of Coordinates.FirstPersonPose;
+begin
+  case StairsDownPosition(Map) of
+    when Some(const Stairs):
+      return Some(
+        Coordinates.FirstPersonPose(
+          Position := Coordinates.InteriorPosition(X := Stairs.X + 1, Y := Stairs.Y),
+          Facing := Coordinates.FacingDirection.East
+        )
+      );
+    when None:
+      return None;
+  end case;
+end function;
+
+// Derives the arrival endpoint of a level from its cells; errors unless exactly one exists.
+public function ArrivalFromCells(Cells: array of InteriorCellKind; Width: integer; Level: integer): result of (Coordinates.InteriorPosition, string);
+begin
+  const Kind: InteriorCellKind := ArrivalCellKind(Level);
+  var Found: option of Coordinates.InteriorPosition := None;
+  for Index: integer := 0 to Cells.Length() - 1 do
+    if Cells[Index] = Kind then
+      if Found is Some(_) then
+        return Error('interior must contain exactly one arrival endpoint');
+      end if;
+
+      Found := Some(Coordinates.InteriorPosition(X := Index mod Width, Y := Index div Width));
+    end if;
+  end for;
+
+  case Found of
+    when Some(const Position):
+      return Ok(Position);
+    when None:
+      return Error('interior must contain exactly one arrival endpoint');
+  end case;
+end function;
+
+// Validates the stored name, level within depth, bounded shape, endpoint counts for the level,
+// a floor descent landing, traversable endpoints, and connected floor space.
 public function ValidateInteriorMap(Map: InteriorMap): result of (InteriorMap, string);
 begin
   if (Map.DisplayName.Length() = 0) or (Map.DisplayName.Length() > MaximumInteriorNameLength) then
@@ -122,6 +218,14 @@ begin
 
   if Map.DisplayName.StartsWith(' ') or Map.DisplayName.EndsWith(' ') then
     return Error('interior name must not start or end with a space');
+  end if;
+
+  if (Map.Depth < 1) or (Map.Depth > MaxDungeonDepth) then
+    return Error('interior depth must be from 1 through 16 levels');
+  end if;
+
+  if (Map.Level < 0) or (Map.Level >= Map.Depth) then
+    return Error('interior level must be below its dungeon depth');
   end if;
 
   if Map.AreaId = '' then
@@ -147,12 +251,23 @@ begin
       return Error('interior start must be a floor field');
     end;
   end if;
-  const ExitCell: InteriorCellKind := try InteriorCellAt(Map, Map.Exit);
-  if ExitCell <> InteriorCellKind.ExitField then
+  const ArrivalCell: InteriorCellKind := try InteriorCellAt(Map, Map.Arrival);
+  if ArrivalCell <> ArrivalCellKind(Map.Level) then
     begin
-      return Error('interior exit coordinate must name the exit field');
+      return Error('interior arrival coordinate must name the exit or stairs up of its level');
     end;
   end if;
+  var Landing: Coordinates.InteriorPosition := Map.Arrival;
+  case DescentLanding(Map) of
+    when Some(const Pose):
+      if try InteriorCellAt(Map, Pose.Position) <> InteriorCellKind.Floor then
+        return Error('interior descent landing east of the stairs down must be a floor field');
+      end if;
+
+      Landing := Pose.Position;
+    when None:
+      null;
+  end case;
 
   for Index: integer := 0 to Map.Hostiles.Length() - 1 do
     begin
@@ -165,10 +280,10 @@ begin
 
       if Coordinates.SamePosition(Placement.Position, Map.Start)
         or
-        Coordinates.SamePosition(Placement.Position, Map.Exit)
+        Coordinates.SamePosition(Placement.Position, Landing)
       then
         begin
-          return Error('interior opponent coordinate must differ from start and exit');
+          return Error('interior opponent coordinate must differ from start and descent landing');
         end;
       end if;
 
@@ -201,10 +316,10 @@ begin
 
       if Coordinates.SamePosition(Placement.Position, Map.Start)
         or
-        Coordinates.SamePosition(Placement.Position, Map.Exit)
+        Coordinates.SamePosition(Placement.Position, Landing)
       then
         begin
-          return Error('interior item coordinate must differ from start and exit');
+          return Error('interior item coordinate must differ from start and descent landing');
         end;
       end if;
 
@@ -242,6 +357,8 @@ begin
     end;
   end for;
   var ExitCount: integer := 0;
+  var UpCount: integer := 0;
+  var DownCount: integer := 0;
   var TraversableCount: integer := 0;
   for Cell: InteriorCellKind in Map.Cells do
     begin
@@ -256,13 +373,42 @@ begin
           ExitCount := ExitCount + 1;
         end;
       end if;
+
+      if Cell = InteriorCellKind.StairsUp then
+        UpCount := UpCount + 1;
+      end if;
+
+      if Cell = InteriorCellKind.StairsDown then
+        DownCount := DownCount + 1;
+      end if;
     end;
   end for;
 
-  if ExitCount <> 1 then
+  var ExpectedExits: integer := 0;
+  var ExpectedUps: integer := 1;
+  if Map.Level = 0 then
+    ExpectedExits := 1;
+    ExpectedUps := 0;
+  end if;
+  var ExpectedDowns: integer := 0;
+  if LeadsDeeper(Map.Level, Map.Depth) then
+    ExpectedDowns := 1;
+  end if;
+
+  if ExitCount <> ExpectedExits then
     begin
-      return Error('interior must contain exactly one exit field');
+      return Error('interior must contain exactly one exit field on level 0 and none below');
     end;
+  end if;
+
+  if UpCount <> ExpectedUps then
+    return Error('interior must contain exactly one stairs up below level 0 and none on it');
+  end if;
+
+  if DownCount <> ExpectedDowns then
+    return Error(
+      'interior must contain exactly one stairs down above the deepest level and none on it'
+    );
   end if;
   var Visited: array of boolean := array.Fill(false, Map.Width * Map.Height);
   var Queue: array of Coordinates.InteriorPosition := [Map.Start];

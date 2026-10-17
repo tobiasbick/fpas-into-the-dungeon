@@ -112,3 +112,25 @@ controls on a RAM filesystem while current data used the workspace filesystem.
 Those timings are excluded from the final tables; the final runs above use a
 common filesystem without a parallel suite. Temporary probes do not change
 production sources, exports or manifests.
+
+## 14c multi-level measurements
+
+The benchmark now descends through every level of each visited dungeon, reveals
+it, and climbs back before leaving, so each dungeon contributes three visited
+levels. Medians of three rounds on 2026-10-17, monotonic milliseconds:
+
+| Dungeons | Levels | Items / consumed | Opponents | First entries total ms | Save ms | Load ms | Save bytes |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 3 | 11 / 1 | 8 | 25 | 10 | 5 | 5472 |
+| 10 | 30 | 103 / 5 | 80 | 249 | 71 | 69 | 50589 |
+| 100 | 300 | 1022 / 50 | 800 | 2461 | 1651 | 1668 | 503101 |
+
+First entries grow linearly at about 8 ms per level, including generation, the
+round-trip check, and atomic storage. Two quadratic costs found during 14c were
+removed: save validation parsed every other map identity in a nested loop, and
+`OpenLevelForEntry` validated the whole state once more per transition.
+Save and load still grow faster than linearly (2.3 ms per level at 30 levels,
+5.5 ms at 300) through the existing pairwise item and identity checks noted
+above; at 300 levels these cover three times the areas and twice the items of the
+14b 100-visit scenario. No caching was added; this remains a measurement, not a
+limit on visited levels.

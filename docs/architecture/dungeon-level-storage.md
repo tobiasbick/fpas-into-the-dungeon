@@ -1,58 +1,61 @@
 # Dungeon level storage contract
 
 This is the level storage contract, extended by 14b checkpoint 02 with stored
-dungeon names, supplementing
+dungeon names and by 14c with one file per dungeon level, supplementing
 [generated dungeons](generated-dungeons.md). It is implemented by
 `Dungeon.World.Interiors` and its `.Encoding` and `.Errors` units, the
 three-phase savegame loading in `Dungeon.World.Savegame`, and the transition
 handling in `Dungeon.Server.Handling` and `Dungeon.Server.Replies`. The
 structural rules shared by the generator and stored levels live in
-`Dungeon.Interior.Generation.Validation`. Later multi-level support changes
-the format deliberately; 14a stores only level 0.
+`Dungeon.Interior.Generation.Validation`. Level format 3 (14c) stores every
+level of a dungeon separately.
 
 ## Immutable level file
 
-Use `worlds/<world-id>/dungeons/<rx>_<ry>/0.json`. Validate the world identity
-with the existing world-ID validator. Parse the area identity canonically into
-signed region coordinates, then build the path from those integers. Reject
-leading zeros, a leading plus, negative zero, extra segments, and an area with
-no entrance. Never insert a received area identity into a filesystem path.
+Use `worlds/<world-id>/dungeons/<rx>_<ry>/<level>.json`. Validate the world
+identity with the existing world-ID validator. Parse the area identity
+canonically into signed region coordinates and a level, then build the path from
+those integers. Reject leading zeros, a leading plus, negative zero, missing or
+extra segments, levels outside 0..15, and an area with no entrance. Never insert a received area identity into a filesystem path.
 
-The JSON root has exactly these 13 required keys. Object key order is not
+The JSON root has exactly these 13 required keys; format 3 replaced `exit`
+with `depth`. Object key order is not
 significant; the writer emits the order below. Unknown, missing, duplicate,
 null, or mistyped fields are errors, including in nested objects. Numeric
 fields must be integral and within their stated bounds.
 
 | Key | Format and requirement |
 | --- | --- |
-| `format_version` | Integer `2`. |
+| `format_version` | Integer `3`. |
 | `world_id` | String exactly equal to selected world metadata ID. |
-| `generator_version` | Integer equal to metadata generator version, currently `7`. |
-| `area_id` | Canonical `<world>:dungeon:<rx>:<ry>`, equal to the requested area. |
+| `generator_version` | Integer equal to metadata generator version, currently `8`. |
+| `area_id` | Canonical `<world>:dungeon:<rx>:<ry>:<level>`, equal to the requested area. |
 | `name` | Stored display name, 1..64 printable ASCII characters, no leading/trailing spaces. |
-| `level` | Integer `0`. |
+| `level` | Integer equal to the identity's level and below `depth`. |
+| `depth` | Integer 1..16, the dungeon's number of levels. |
 | `width` | Integer `31`. |
 | `height` | Integer `21`. |
-| `rows` | Exactly 21 strings, each exactly 31 ASCII characters: `#`, `.`, `x`. |
+| `rows` | Exactly 21 strings, each exactly 31 ASCII characters: `#`, `.`, `x`, `<`, `>`. |
 | `start` | Exact object `{ "x": integer, "y": integer, "facing": string }`. |
-| `exit` | Exact object `{ "x": integer, "y": integer }`. |
-| `items` | Four required placements and optional original slots 4/5, in ascending slot order. |
-| `hostiles` | Exactly two placements: skeleton slot 0 and giant rat slot 1. |
+| `items` | The level's required placements and optional original slots, in ascending slot order. |
+| `hostiles` | The level's opponent slots, skeletons first, then rats. |
 
 Positions use `0 <= x < 31` and `0 <= y < 21`. Facing uses the existing strings
-`north`, `east`, `south`, `west`; the generated start in 14a must be `east`, one
-field east of the exit on the same row. Rows are terrain only: item and actor
-markers must never be written into them. Reuse the existing interior cell-code
+`north`, `east`, `south`, `west`; the generated start must be `east`, one field
+east of the arrival endpoint on the same row. Endpoints exist only in the rows:
+the exit on level 0, stairs up below it, and stairs down above the deepest
+level, each exactly once. Rows are terrain only: item and actor markers must
+never be written into them. Reuse the existing interior cell-code
 functions.
 
 The name is generated once from world seed and numeric entrance region using
 an independent random stream. Readers validate its shape but never regenerate
 or compare it with a newly generated name. Projections and diagnostics use the
 name of the retained map. Duplicate display names are allowed; area identities
-remain unique. Level format 1 and generator-6 worlds are incompatible, remain
-untouched and cannot be continued with this server; create a new world for the
-current version. The current save format is 8 and protocol is 15. Guaranteed
-potions, optional original slots and both opponent kinds share those versions.
+remain unique; all levels of one dungeon store the same name. Level formats 1/2
+and generator-6/7 worlds are incompatible, remain untouched and cannot be
+continued with this server; create a new world for the current version. The
+current save format is 10 and protocol is 16.
 
 Each placement is exactly `{ "id": string, "kind": string, "x": integer,
 "y": integer }`. Items occur in ascending original slot order, with IDs `<area>:item:<slot>`.
@@ -61,8 +64,9 @@ Required slots 0..3 have kinds `ancient_coin`, `rusty_short_sword`,
 have any of those four kinds; missing slot 4 never renumbers slot 5. Four through
 six placements are accepted, including `[0,1,2,3,5]`. Missing or reordered
 required slots, duplicates, unknown slots and noncanonical IDs reject.
-Exactly two hostiles occur in order: slot 0 is `restless_skeleton`, slot 1 is
-`giant_rat`, with IDs `<area>:hostile:<slot>`. Selection, names, room corners
+Levels below 0 require one `healing_potion` at slot 0 and accept optional slots
+1/2. Hostiles follow `LevelHostileKinds(level)` in order, with IDs
+`<area>:hostile:<slot>`; level 0 is `restless_skeleton`, `giant_rat`. Selection, names, room corners
 and distance ordering are not regenerated on read; stored validation checks
 kinds, identities, ordinary floor placement, overlap and initial sight.
 A placement has
@@ -78,7 +82,8 @@ their established spellings; do not make the level codec depend on the
 savegame orchestration unit or copy the mappings.
 
 Reject level text longer than 65536 characters before parsing. Validate the
-outer wall, unique exit, connected walkable fields, start/exit relation, floor
+outer wall, the level's endpoint counts, a floor descent landing east of the
+stairs down, connected walkable fields, the start/arrival relation, floor
 share of 25 through 60 percent, and initial hostile sight restriction. Original
 placements occupy distinct ordinary floor fields, away from start and exit;
 items and hostiles do not overlap. Room count is checked at generation time
@@ -152,16 +157,18 @@ end enum;
 ```pascal
 public function ReadLevel(World: WorldSession; AreaId: string):
   result of (InteriorMap, LevelFailure);
-public function OpenLevelForEntry(World: WorldSession; State: GameState;
-  AreaId: string): result of (InteriorMap, LevelFailure);
+public function OpenLevelForEntry(World: WorldSession; View: AreaView;
+  State: GameState; AreaId: string): result of (InteriorMap, LevelFailure);
 public function ReadVisitedLevels(World: WorldSession; State: GameState):
   result of (array of InteriorMap, LevelFailure);
 ```
 
 `ReadLevel` never generates or writes. `OpenLevelForEntry` first tries a read;
 only `Missing` combined with an unvisited target permits generation and atomic
-storage. It verifies the target against the player's transition before creating
-anything. A missing already visited level remains an error. `ReadVisitedLevels`
+storage. It verifies the target against the player's current transition in View
+(an entrance outdoors, stairs indoors) before creating anything, using
+`TransitionTargetOfValid` on the already validated state. Level 0 takes its
+depth from `DungeonDepth`; a deeper level takes the depth of the current map. A missing already visited level remains an error. `ReadVisitedLevels`
 reads each visited area once in canonical order; it never calls the entry
 operation. It returns maps for the duration of validation, not a permanent
 unbounded cache. The server retains only the current map between intentions.
@@ -258,7 +265,9 @@ the unsaved session; do not retry a transition on the same connection or write
 a save. Reconnecting follows the existing explicit new/load choice. There is
 no autosave and no transaction spanning the socket and filesystem.
 
-Regression checkpoints: invalid interaction before storage; read failure;
+The same ordering applies to stairs; the current map stays installed until the
+candidate for the other level is sent. Regression checkpoints, for entry and for
+stairs: invalid interaction before storage; read failure;
 generation failure; atomic-write failure; valid file published then candidate
 validation/projection failure; send failure; successful transition. For each,
 assert player pose, visited areas, inventory, discovery, level-file contents,

@@ -52,7 +52,20 @@ presentation, including the first combat, equipment and progression terms. It do
   region border.
 - **Generated dungeon** is a dungeon whose geometry and original placements
   are generated from the world seed and its entrance region when it is first
-  entered, then stored as an immutable **level file**.
+  entered, then stored as an immutable **level file** per level.
+- **Dungeon level** is one area of a generated dungeon, numbered from 0 at the
+  entrance downward and shown to the player from 1 (`Level 2 of 3`). Each level
+  is generated and stored on its first visit only.
+- **Depth** is the number of levels of one dungeon. It is stored with every
+  level and never recomputed; every dungeon currently has three levels.
+- **Stairs up** and **stairs down** are walkable endpoint fields that connect a
+  level with the one above or below. `Enter` on them changes level. Level 0 has
+  the exit instead of stairs up; the deepest level has no stairs down.
+- **Arrival endpoint** is the field a level is entered next to: the exit on
+  level 0, the stairs up below it. The start pose lies one field east of it.
+- **Descent landing** is the field east of a level's stairs down, facing east,
+  where a player climbing up from the level below arrives. An opponent standing
+  there moves the arrival to the nearest free floor field.
 - **Dungeon name** is a stored display label generated from the world seed and
   entrance region on first entry. Different dungeons may share a name; their
   area identities remain distinct. Revisit, rendering and load use the stored name.
@@ -125,11 +138,11 @@ presentation, including the first combat, equipment and progression terms. It do
 - **Opponent** is a hostile actor with stable server-owned identity, kind,
   area, position, health, and alert status. A standing opponent blocks its
   field; a destroyed one stays recorded but is never projected.
-- **Restless skeleton** is the first opponent. Each generated dungeon places one
-  in its farthest eligible room outside the exit room.
-- **Giant rat** is the second opponent, with six health, a d2 attack and distinct
-  floor-level art. Each generated dungeon places one in the next farthest
-  eligible room. Neither opponent may initially see the start.
+- **Restless skeleton** is the first opponent and **Giant rat** the second,
+  with six health, a d2 attack and distinct floor-level art. Level 0 places one
+  of each; deeper levels place more (two rats on level 1, two skeletons and a
+  rat on level 2), skeletons first, in the farthest eligible rooms outside the
+  arrival room. No opponent may initially see the start.
 - **Health** is the player's current and full hit points. Reaching zero means
   defeat.
 - **Turn** is one accepted time-consuming player action: a step, attack, wait,
@@ -141,10 +154,10 @@ presentation, including the first combat, equipment and progression terms. It do
 - **Combat log** is the ordered list of messages describing one resolved turn.
 - **Combat event** is one structured fact of a resolved turn, such as a hit and
   its damage and involved opponent kind. Combat events drive the client's
-  animation and never change state. They currently identify a kind, not an
-  individual figure; generated levels contain at most one opponent of each
-  kind. Same-kind groups require figure or position identity before animation
-  can target them independently.
+  animation and never change state. They identify a kind; the client applies
+  player-blow effects only to the field directly ahead and attacker effects only
+  to fields orthogonally adjacent to the player, so several opponents of one
+  kind animate independently.
 - **Defeat** ends the current game session when the player's health reaches
   zero. The connection remains, and the player may load or start a game.
 - **Visible state** is the server-produced, client-safe projection of the
@@ -244,22 +257,24 @@ from the spawn; further entrances are rare, at most one per region. Walking onto
 an entrance remains ordinary outdoor movement; `Enter` requests a
 server-authoritative interaction, which activates the transition on that field.
 
-Each entrance leads to a named generated dungeon: a 31 by 21 area of
-rooms and corridors with a start beside one visible exit field, a Restless
-skeleton, a Giant rat, and guaranteed Ancient coin, Rusty short sword, Leather
-jerkin and Healing potion finds, plus optional original item slots 4/5.
-Its level is generated and stored on the first visit and read back
-afterwards. Items can be inspected from the field before them, picked up with
+Each entrance leads to a named generated dungeon of three levels, each a 31 by
+21 area of rooms and corridors. Level 0 has a start beside one visible exit
+field, a Restless skeleton, a Giant rat, and guaranteed Ancient coin, Rusty
+short sword, Leather jerkin and Healing potion finds, plus optional original
+item slots 4/5. Stairs down in its farthest room lead to deeper levels with more
+opponents, one guaranteed Healing potion and up to two optional finds. Each
+level is generated and stored on its first visit and read back afterwards. Items can be inspected from the field before them, picked up with
 `Enter`, worn, dropped with `D`, and carried into other dungeons. The server
-accepts the exit interaction only on the exit field and then returns the player
-to the dungeon's entrance site.
+accepts the exit interaction only on the level-0 exit field and then returns the
+player to the dungeon's entrance site; stairs move between levels without
+spending a turn.
 
 Accepted outdoor steps restore one health point, up to the player's maximum.
 
 Skeletons notice the player through line of sight, chase, and fight turn by
 turn; see [combat](../architecture/combat.md).
 
-Settlements, building interiors, multi-level dungeons, mutable terrain, broader
+Settlements, building interiors, mutable terrain, broader
 world simulation, isometric rendering, LLM integration, and broader mutable RPG
 systems remain outside this slice. Their intended order is tracked in the
 [roadmap](../roadmap.md).

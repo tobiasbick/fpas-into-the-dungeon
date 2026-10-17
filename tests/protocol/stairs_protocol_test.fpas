@@ -1,0 +1,76 @@
+// Verifies protocol-16 stairs codes and the strict level and depth of first-person states.
+program StairsProtocolTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages, Std.Test as Test;
+
+function Hall(Rows: array of string; Level: integer; Depth: integer): Protocol.FirstPersonVisibleState;
+begin
+  return Protocol.FirstPersonVisibleState(
+    Title := 'Stairs hall — Level 2 of 3', Status := 'Stairs down — Enter: Go down', Level := Level,
+    Depth := Depth, Width := 6, Height := 3, Rows := Rows,
+    KnowledgeRows := ['vvvvvv', 'vvvvvv', 'vvvvvv'], PlayerX := 2, PlayerY := 1,
+    Facing := Protocol.FirstPersonFacing.East, Inventory := [], Health := 20, MaxHealth := 20,
+    Character := [], CombatLog := [], CombatEvents := []
+  );
+end function;
+
+function Encoded(Value: Protocol.FirstPersonVisibleState): string;
+begin
+  return Messages.EncodeServer(
+    Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(Value))
+  );
+end function;
+
+function Decoded(Text: string): Protocol.FirstPersonVisibleState;
+begin
+  case Messages.DecodeServer(Text).Unwrap() of
+    when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const Value)):
+      return Value;
+    when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_)), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a first-person state');
+  end case;
+end function;
+
+begin
+  Test.AssertEquals(16, Protocol.ProtocolVersion);
+  Test.AssertEquals(16, Protocol.MaximumDungeonDepth);
+  Test.AssertTrue(Protocol.IsInteriorCellCode('<'));
+  Test.AssertTrue(Protocol.IsInteriorCellCode('>'));
+  const Rows := ['######', '#<..>#', '######'];
+  const Original := Encoded(Hall(Rows, 1, 3));
+  Test.AssertTrue('"level":1,"depth":3,' in Original);
+  const Value := Decoded(Original);
+  Test.AssertEquals(1, Value.Level);
+  Test.AssertEquals(3, Value.Depth);
+  Test.AssertEquals('<', Value.Rows[1][1]);
+  Test.AssertEquals('>', Value.Rows[1][4]);
+  // Boundary depths and levels.
+  Test.AssertEquals(0, Decoded(Encoded(Hall(Rows, 0, 1))).Level);
+  Test.AssertEquals(15, Decoded(Encoded(Hall(Rows, 15, Protocol.MaximumDungeonDepth))).Level);
+  // Out-of-range, missing, duplicate, or mistyped level and depth fields are rejected.
+  for Replacement: string in [
+    '"level":3,"depth":3,',
+    '"level":-1,"depth":3,',
+    '"level":0,"depth":0,',
+    '"level":0,"depth":17,',
+    '"depth":3,',
+    '"level":1,',
+    '"level":1,"depth":3,"depth":3,',
+    '"level":"1","depth":3,',
+    '"level":1,"depth":null,',
+    '"level":1.5,"depth":3,'
+  ] do
+    Test.AssertTrue(
+      Messages.DecodeServer(Original.Replace('"level":1,"depth":3,', Replacement)) is Error(_)
+    );
+  end for;
+
+  // At most one stairs of each direction is visible.
+  Test.AssertTrue(
+    Messages.DecodeServer(Encoded(Hall(['######', '#<.<.#', '######'], 1, 3))) is Error(_)
+  );
+  Test.AssertTrue(
+    Messages.DecodeServer(Encoded(Hall(['######', '#>..>#', '######'], 1, 3))) is Error(_)
+  );
+  Test.AssertTrue(Messages.DecodeServer(Original.Replace('#<..>#', '#^..>#')) is Error(_));
+end.

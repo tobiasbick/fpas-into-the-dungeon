@@ -154,9 +154,11 @@ these projects.
     entrance.
   - `Dungeon.Items`, `Dungeon.Hostiles`: kinds, identities,
     and per-kind texts and values.
-  - `Dungeon.Interior` with `.Generation`, `.Generation.Content` and `.Generation.Validation`:
-    interior geometry and its validation; the deterministic dungeon generator;
-    the structural rules shared by the generator and stored levels. `Content`
+  - `Dungeon.Interior` with `.Generation`, `.Generation.Content`, `.Generation.Levels`
+    and `.Generation.Validation`: interior geometry, stairs and per-level
+    endpoints and their validation; the deterministic dungeon level generator;
+    dungeon depth and per-level content rules; the structural rules shared by the
+    generator and stored levels. `Content`
     derives dungeon names and bounded optional loot using private domain seeds;
     the generator places its selected original slots without consuming geometry
     draws. The immutable map retains its display name for storage, projections

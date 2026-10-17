@@ -112,7 +112,7 @@ never becomes a movement or transition intention.
 
 ## Persistence
 
-Savegame format 9 stores accumulated discovery in the authoritative game
+Savegame format 10 stores accumulated discovery in the authoritative game
 snapshot together with item state. Outdoor masks are records containing signed
 `chunk_x`, `chunk_y`, and exactly 128 strings of 128 `0` or `1` characters. Interior records contain
 `area_id`, `width`, `height`, and exactly one equally sized `0`/`1` row per

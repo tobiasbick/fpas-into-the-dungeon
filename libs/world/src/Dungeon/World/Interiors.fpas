@@ -1,7 +1,7 @@
 // Immutable dungeon level files below the world directory: reading, first-visit creation, and save support.
 unit Dungeon.World.Interiors;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Interior.Generation.Levels as Levels, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps;
 
 // Directory of one region's dungeon levels, built only from validated region coordinates.
 function LevelDirectory(World: WorldUnit.WorldSession; Region: Entrances.RegionCoordinate): string;
@@ -13,14 +13,14 @@ begin
   ]);
 end function;
 
-function LevelPath(World: WorldUnit.WorldSession; Region: Entrances.RegionCoordinate): string;
+function LevelPath(World: WorldUnit.WorldSession; Id: Identities.DungeonLevelId): string;
 begin
-  return PathOps.Join([LevelDirectory(World, Region), '0.json']);
+  return PathOps.Join([LevelDirectory(World, Id.Region), Conv.IntToStr(Id.Level) + '.json']);
 end function;
 
-function LevelRegion(World: WorldUnit.WorldSession; AreaId: string): result of (Entrances.RegionCoordinate, Errors.LevelFailure);
+function LevelRegion(World: WorldUnit.WorldSession; AreaId: string): result of (Identities.DungeonLevelId, Errors.LevelFailure);
 begin
-  case Identities.ParseDungeonAreaId(World.Metadata, AreaId) of
+  case Identities.ParseDungeonLevelId(World.Metadata, AreaId) of
     when Ok(const Region):
       begin
         return Ok(Region);
@@ -32,12 +32,12 @@ begin
   end case;
 end function;
 
-// Reads and strictly validates an existing level 0; never generates or writes.
+// Reads and strictly validates an existing level file; never generates or writes.
 // A missing file is `Missing`; unusable content is `Invalid`; filesystem errors are `Io`.
 public function ReadLevel(World: WorldUnit.WorldSession; AreaId: string): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
 begin
-  const Region: Entrances.RegionCoordinate := try LevelRegion(World, AreaId);
-  const Path: string := LevelPath(World, Region);
+  const Id: Identities.DungeonLevelId := try LevelRegion(World, AreaId);
+  const Path: string := LevelPath(World, Id);
   if not Fs.Exists(Path) then
     begin
       return Error(Errors.LevelFailure.Missing(AreaId));
@@ -77,49 +77,37 @@ begin
   end case;
 end function;
 
-// Requires that the outdoor player stands on the entrance site of exactly this area's region.
-function RequireEntryTarget(
-  World: WorldUnit.WorldSession;
-  State: GameState.GameState;
-  AreaId: string;
-  Region: Entrances.RegionCoordinate
-): result of (boolean, Errors.LevelFailure);
+// Requires that AreaId is the target of the player's current transition in View. The caller has
+// validated State against View; the transition itself validates the state again before installing it.
+function RequireEntryTarget(View: GameState.AreaView; State: GameState.GameState; AreaId: string): result of (boolean, Errors.LevelFailure);
 begin
-  case GameState.OutdoorPlayerPosition(State) of
-    when Ok(const Position):
-      begin
-        case Entrances.EntranceRegionAt(World.Metadata, Position) of
-          when Some(const EntranceRegion):
-            begin
-              if (EntranceRegion.X = Region.X) and (EntranceRegion.Y = Region.Y) then
-                begin
-                  return Ok(true);
-                end;
-              end if;
-            end;
-          when None:
-            begin
-              null;
-            end;
-        end case;
-      end;
-    when Error(const Message):
-      begin
-        null;
-      end;
+  case Movement.TransitionTargetOfValid(View, State) of
+    when Ok(const Target):
+      if Target = AreaId then
+        return Ok(true);
+      end if;
+    when Error(_):
+      null;
   end case;
 
   return Error(
     Errors.LevelFailure.Invalid(
       AreaId,
-      'entry target does not match the entrance under the player'
+      'entry target does not match the transition under the player'
     )
   );
 end function;
 
-function GeneratedLevel(World: WorldUnit.WorldSession; AreaId: string; Region: Entrances.RegionCoordinate): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
+function GeneratedLevel(World: WorldUnit.WorldSession; AreaId: string; Id: Identities.DungeonLevelId; Depth: integer): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
 begin
-  case Generation.GenerateDungeon(World.Metadata.Seed, Region.X, Region.Y, AreaId) of
+  case Generation.GenerateDungeon(
+    World.Metadata.Seed,
+    Id.Region.X,
+    Id.Region.Y,
+    Id.Level,
+    Depth,
+    AreaId
+  ) of
     when Ok(const Map):
       begin
         return Ok(Map);
@@ -132,9 +120,9 @@ begin
 end function;
 
 // Generates a missing level, checks that it round-trips through the level format, and publishes it atomically.
-function CreateLevel(World: WorldUnit.WorldSession; AreaId: string; Region: Entrances.RegionCoordinate): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
+function CreateLevel(World: WorldUnit.WorldSession; AreaId: string; Id: Identities.DungeonLevelId; Depth: integer): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
 begin
-  const Map: InteriorUnit.InteriorMap := try GeneratedLevel(World, AreaId, Region);
+  const Map: InteriorUnit.InteriorMap := try GeneratedLevel(World, AreaId, Id, Depth);
   const Text: string := Encoding.EncodeLevel(World.Metadata, Map);
   case Encoding.DecodeLevel(Text, World.Metadata, AreaId) of
     when Ok(const Decoded):
@@ -147,7 +135,7 @@ begin
       end;
   end case;
 
-  case Fs.CreateDirAll(LevelDirectory(World, Region)) of
+  case Fs.CreateDirAll(LevelDirectory(World, Id.Region)) of
     when Ok(const Created):
       begin
         null;
@@ -163,7 +151,7 @@ begin
       end;
   end case;
 
-  case Fs.WriteTextAtomic(LevelPath(World, Region), Text) of
+  case Fs.WriteTextAtomic(LevelPath(World, Id), Text) of
     when Ok(const Written):
       begin
         return Ok(Map);
@@ -177,14 +165,25 @@ begin
   end case;
 end function;
 
-// Returns the level for a transition from the outdoor State into AreaId. Verifies the target
-// against the player's entrance first, then reads an existing file. Only a missing level of an
-// area not yet visited in this game is generated and atomically stored; a missing visited level
-// stays `Missing`. Existing files are never overwritten.
-public function OpenLevelForEntry(World: WorldUnit.WorldSession; State: GameState.GameState; AreaId: string): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
+// Returns the level for a transition from State in View into AreaId: an entrance outdoors or
+// stairs indoors. Verifies the target against the player's transition first, then reads an
+// existing file. Only a missing level of an area not yet visited in this game is generated and
+// atomically stored; a missing visited level stays `Missing`. Existing files are never
+// overwritten. Level 0 takes its depth from the generator; deeper levels take the stored depth
+// of the current level, so one dungeon never mixes depths. State must already be validated
+// against View; it is not validated again here.
+public function OpenLevelForEntry(World: WorldUnit.WorldSession; View: GameState.AreaView; State: GameState.GameState; AreaId: string): result of (InteriorUnit.InteriorMap, Errors.LevelFailure);
 begin
-  const Region: Entrances.RegionCoordinate := try LevelRegion(World, AreaId);
-  const Eligible: boolean := try RequireEntryTarget(World, State, AreaId, Region);
+  const Id: Identities.DungeonLevelId := try LevelRegion(World, AreaId);
+  const Eligible: boolean := try RequireEntryTarget(View, State, AreaId);
+  var Depth: integer := Levels.DungeonDepth(World.Metadata.Seed, Id.Region.X, Id.Region.Y);
+  case View.Interior of
+    when Some(const Current):
+      Depth := Current.Depth;
+    when None:
+      null;
+  end case;
+
   case ReadLevel(World, AreaId) of
     when Ok(const Map):
       begin
@@ -200,7 +199,7 @@ begin
               end;
             end if;
 
-            return CreateLevel(World, AreaId, Region);
+            return CreateLevel(World, AreaId, Id, Depth);
           when Errors.LevelFailure.Invalid(_, _), Errors.LevelFailure.Io(_), Errors.LevelFailure.Generation(_, _):
             return Error(Failure);
         end case;

@@ -64,7 +64,7 @@ Server: welcome, worlds, state, interaction, exploration_map,
         save_completed, defeated, rejected, error
 ```
 
-The current protocol version `15` is included in the handshake. `hello` includes the initial
+The current protocol version `16` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.

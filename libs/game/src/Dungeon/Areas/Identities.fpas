@@ -1,13 +1,24 @@
-// Canonical generated dungeon area identities and their entrance regions.
+// Canonical generated dungeon level identities, their entrance regions, and level indices.
 unit Dungeon.Areas.Identities;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv, Std.Parse as Parse;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv, Std.Parse as Parse;
 
-// Builds the canonical identity `<world>:dungeon:<rx>:<ry>` of one region's dungeon.
-public function DungeonAreaId(Metadata: Terrain.WorldMetadata; Region: Entrances.RegionCoordinate): string;
+// Parsed dungeon level identity: the entrance region and the zero-based level index.
+// The index is only bounded by MaxDungeonDepth; whether the level exists depends on the stored depth.
+public type DungeonLevelId = record
+  public Region: Entrances.RegionCoordinate;
+  public Level: integer;
+end record;
+
+// Builds the canonical identity `<world>:dungeon:<rx>:<ry>:<level>` of one dungeon level.
+public function DungeonAreaId(Metadata: Terrain.WorldMetadata; Region: Entrances.RegionCoordinate; Level: integer): string;
 begin
   return (
-    (((Metadata.Id + ':dungeon:') + Conv.IntToStr(Region.X)) + ':') + Conv.IntToStr(Region.Y)
+    (
+      ((((Metadata.Id + ':dungeon:') + Conv.IntToStr(Region.X)) + ':') + Conv.IntToStr(Region.Y)) +
+      ':'
+    ) +
+    Conv.IntToStr(Level)
   );
 end function;
 
@@ -16,16 +27,17 @@ begin
   const Value: integer := try Parse.Int(Text);
   if Conv.IntToStr(Value) <> Text then
     begin
-      return Error('dungeon area identity must use canonical region coordinates');
+      return Error('dungeon area identity must use canonical integers');
     end;
   end if;
 
   return Ok(Value);
 end function;
 
-// Parses a canonical dungeon identity of the selected world back into its region.
-// Rejects other worlds, extra segments, non-canonical integers, and regions without an entrance site.
-public function ParseDungeonAreaId(Metadata: Terrain.WorldMetadata; AreaId: string): result of (Entrances.RegionCoordinate, string);
+// Parses a canonical dungeon level identity of the selected world into region and level.
+// Rejects other worlds, missing or extra segments, non-canonical integers, levels outside
+// 0..MaxDungeonDepth - 1, and regions without an entrance site.
+public function ParseDungeonLevelId(Metadata: Terrain.WorldMetadata; AreaId: string): result of (DungeonLevelId, string);
 begin
   const Prefix: string := Metadata.Id + ':dungeon:';
   if not AreaId.StartsWith(Prefix) then
@@ -36,21 +48,32 @@ begin
   const PrefixLength: integer := Prefix.Length();
   const CoordinateText: string := AreaId.Slice(PrefixLength, AreaId.Length() - PrefixLength);
   const Segments: array of string := CoordinateText.Split(':');
-  if Segments.Length() <> 2 then
+  if Segments.Length() <> 3 then
     begin
-      return Error('dungeon area identity must name exactly one region');
+      return Error('dungeon area identity must name exactly one region and level');
     end;
   end if;
   const Region: Entrances.RegionCoordinate := Entrances.RegionCoordinate(
     X := try CanonicalInteger(Segments[0]),
     Y := try CanonicalInteger(Segments[1])
   );
+  const Level: integer := try CanonicalInteger(Segments[2]);
+  if (Level < 0) or (Level >= InteriorUnit.MaxDungeonDepth) then
+    return Error('dungeon area identity names a level outside the supported depth');
+  end if;
+
   if Entrances.EntranceSite(Metadata, Region) is None then
     begin
       return Error('dungeon area identity names a region without an entrance');
     end;
   end if;
 
-  return Ok(Region);
+  return Ok(DungeonLevelId(Region := Region, Level := Level));
+end function;
+
+// Parses a canonical dungeon level identity and returns only its entrance region.
+public function ParseDungeonAreaId(Metadata: Terrain.WorldMetadata; AreaId: string): result of (Entrances.RegionCoordinate, string);
+begin
+  return Ok((try ParseDungeonLevelId(Metadata, AreaId)).Region);
 end function;
 end unit;

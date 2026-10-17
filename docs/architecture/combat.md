@@ -103,7 +103,7 @@ Introduced with protocol version 11 and extended in versions 12 and 15:
   resolved turn, such as `You hit the restless skeleton for 3.`, and, since
   protocol version 12, `combat_events`: the same turn as structured facts that
   drive the client's combat animation.
-- In protocol 15 every event has exactly `kind`, `amount` and `hostile_code`.
+- Since protocol 15 every event has exactly `kind`, `amount` and `hostile_code`.
   The code is `h` or `r`: the target for player hit/miss/defeat and the actor
   for hostile hit/miss. Hit amounts are 1..999; miss/defeat amounts are zero.
   Missing, extra, duplicate or unknown values are rejected. Events retain the
@@ -118,7 +118,7 @@ Introduced with protocol version 11 and extended in versions 12 and 15:
 
 ## Persistence
 
-The save (format 9) holds the player's health, the random generator state, and
+The save (format 10) holds the player's health, the random generator state, and
 the complete record of every opponent of the visited dungeons with identity,
 kind, area, position, health, and alert status. Validation requires exactly one
 record per stored opponent placement, a traversable field in its own area that

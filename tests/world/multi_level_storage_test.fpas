@@ -1,0 +1,294 @@
+// Covers level format 3 and multi-level persistence: one file per visited level, creation only for
+// the current transition target, strict depth/level checks, and saves across levels.
+program MultiLevelStorageTest;
+
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation as Generation, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
+
+function EnsureTestRoot(Path: string): result of (boolean, string);
+begin
+  if not Fs.Exists('.temp-data') then
+    const Created: boolean := try Fs.CreateDir('.temp-data');
+  end if;
+
+  return Fs.CreateDirAll(Path);
+end function;
+
+function LevelFile(World: WorldUnit.WorldSession; Region: Entrances.RegionCoordinate; Level: integer): string;
+begin
+  return PathOps.Join([
+    World.Directory,
+    'dungeons',
+    (Conv.IntToStr(Region.X) + '_') + Conv.IntToStr(Region.Y),
+    Conv.IntToStr(Level) + '.json'
+  ]);
+end function;
+
+function FailureKind(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): string;
+begin
+  case Value of
+    when Ok(_):
+      return 'ok';
+    when Error(const Failure):
+      case Failure of
+        when Errors.LevelFailure.Missing(_):
+          return 'missing';
+        when Errors.LevelFailure.Invalid(_, _):
+          return 'invalid';
+        when Errors.LevelFailure.Io(_):
+          return 'io';
+        when Errors.LevelFailure.Generation(_, _):
+          return 'generation';
+      end case;
+  end case;
+end function;
+
+function ViewOf(World: WorldUnit.WorldSession; Map: option of InteriorUnit.InteriorMap): GameState.AreaView;
+begin
+  return GameState.AreaView(Metadata := World.Metadata, Interior := Map);
+end function;
+
+function StandOn(State: GameState.GameState; Position: Coordinates.InteriorPosition): GameState.GameState;
+begin
+  return State with Player := Coordinates.PlayerPosition.FirstPerson(
+    Coordinates.FirstPersonPose(Position := Position, Facing := Coordinates.FacingDirection.East)
+  ); end with;
+end function;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('expected a loaded save');
+  end case;
+end function;
+
+function LoadFails(World: WorldUnit.WorldSession): boolean;
+begin
+  case Savegame.LoadSaveGame(World) of
+    when Ok(const Value):
+      return not (Value is Savegame.SaveGameLoad.Loaded(_, _));
+    when Error(_):
+      return true;
+  end case;
+end function;
+
+procedure AssertRejected(Text: string; Old: string; New: string; Metadata: Terrain.WorldMetadata; AreaId: string);
+begin
+  Test.AssertTrue(Old in Text);
+  Test.AssertTrue(Encoding.DecodeLevel(Text.Replace(Old, New), Metadata, AreaId) is Error(_));
+end procedure;
+
+begin
+  const Root: string := '.temp-data/multi-level-storage-test-' +
+    Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(EnsureTestRoot(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'stack', 12345, 4, 16).Unwrap();
+  const Metadata := World.Metadata;
+  const Region := Entrances.RegionOf(Metadata, Metadata.Spawn);
+  const Id0 := Identities.DungeonAreaId(Metadata, Region, 0);
+  const Id1 := Identities.DungeonAreaId(Metadata, Region, 1);
+  const Id2 := Identities.DungeonAreaId(Metadata, Region, 2);
+  const Outside := GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SpawnEntrance
+  ); end with;
+
+  // Entering creates only level 0; deeper levels stay ungenerated.
+  Test.AssertEquals(
+    'invalid',
+    FailureKind(Interiors.OpenLevelForEntry(World, ViewOf(World, None), Outside, Id1))
+  );
+  const Level0 := Interiors.OpenLevelForEntry(World, ViewOf(World, None), Outside, Id0).Unwrap();
+  Test.AssertEquals(3, Level0.Depth);
+  Test.AssertTrue(Fs.IsFile(LevelFile(World, Region, 0)));
+  Test.AssertFalse(Fs.Exists(LevelFile(World, Region, 1)));
+  Test.AssertFalse(Fs.Exists(LevelFile(World, Region, 2)));
+  Test.AssertEquals('missing', FailureKind(Interiors.ReadLevel(World, Id1)));
+  const Inside := Movement.ActivateAreaTransition(
+    ViewOf(World, None),
+    Outside,
+    Some(Level0)
+  ).Unwrap();
+
+  // Only the current stairs target may be created: not from the start field, not two levels down.
+  Test.AssertEquals(
+    'invalid',
+    FailureKind(Interiors.OpenLevelForEntry(World, Inside.View, Inside.State, Id1))
+  );
+  const AtStairs0 := StandOn(Inside.State, InteriorUnit.StairsDownPosition(Level0).Unwrap());
+  Test.AssertEquals(
+    'invalid',
+    FailureKind(Interiors.OpenLevelForEntry(World, Inside.View, AtStairs0, Id2))
+  );
+  const Level1 := Interiors.OpenLevelForEntry(World, Inside.View, AtStairs0, Id1).Unwrap();
+  Test.AssertEquals(1, Level1.Level);
+  Test.AssertEquals(3, Level1.Depth);
+  Test.AssertEquals(Level0.DisplayName, Level1.DisplayName);
+  const Level1Text := Fs.ReadText(LevelFile(World, Region, 1)).Unwrap();
+  Test.AssertTrue('"level":1,"depth":3,' in Level1Text);
+  Test.AssertFalse('"exit"' in Level1Text);
+  Test.AssertFalse(Fs.Exists(LevelFile(World, Region, 2)));
+  // The generated file equals a direct, independent generation and round-trips.
+  Test.AssertEquals(
+    Encoding.EncodeLevel(
+      Metadata,
+      Generation.GenerateDungeon(Metadata.Seed, Region.X, Region.Y, 1, 3, Id1).Unwrap()
+    ),
+    Level1Text
+  );
+  Test.AssertEquals(
+    Level1Text,
+    Encoding.EncodeLevel(Metadata, Encoding.DecodeLevel(Level1Text, Metadata, Id1).Unwrap())
+  );
+  // A second open reads the stored file and never rewrites it.
+  Test.AssertEquals(
+    Level1.AreaId,
+    Interiors.OpenLevelForEntry(World, Inside.View, AtStairs0, Id1).Unwrap().AreaId
+  );
+  Test.AssertEquals(Level1Text, Fs.ReadText(LevelFile(World, Region, 1)).Unwrap());
+
+  // Format 3 rejects stale or inconsistent level files.
+  AssertRejected(Level1Text, '"level":1', '"level":0', Metadata, Id1);
+  AssertRejected(Level1Text, '"depth":3', '"depth":0', Metadata, Id1);
+  AssertRejected(Level1Text, '"depth":3', '"depth":1', Metadata, Id1);
+  AssertRejected(Level1Text, '"depth":3', '"depth":17', Metadata, Id1);
+  AssertRejected(Level1Text, '"depth":3,', '', Metadata, Id1);
+  AssertRejected(Level1Text, '"depth":3', '"depth":null', Metadata, Id1);
+  AssertRejected(Level1Text, '"depth":3', '"depth":3,"exit":{"x":1,"y":1}', Metadata, Id1);
+  AssertRejected(Level1Text, '<', '.', Metadata, Id1);
+  AssertRejected(Level1Text, '>', '.', Metadata, Id1);
+  // The deepest level of depth 2 must not have stairs down.
+  AssertRejected(Level1Text, '"depth":3', '"depth":2', Metadata, Id1);
+  // A level-0 file stored under 1.json is rejected on read and nothing is replaced.
+  const Level0Text := Fs.ReadText(LevelFile(World, Region, 0)).Unwrap();
+  Test.AssertTrue(Fs.WriteTextAtomic(LevelFile(World, Region, 1), Level0Text).Unwrap());
+  Test.AssertEquals('invalid', FailureKind(Interiors.ReadLevel(World, Id1)));
+  Test.AssertEquals(
+    'invalid',
+    FailureKind(Interiors.OpenLevelForEntry(World, Inside.View, AtStairs0, Id1))
+  );
+  Test.AssertEquals(Level0Text, Fs.ReadText(LevelFile(World, Region, 1)).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(LevelFile(World, Region, 1), Level1Text).Unwrap());
+
+  // Descend to level 2 and save there; loading restores the exact state.
+  const Down1 := Movement.ActivateAreaTransition(Inside.View, AtStairs0, Some(Level1)).Unwrap();
+  const AtStairs1 := StandOn(Down1.State, InteriorUnit.StairsDownPosition(Level1).Unwrap());
+  const Level2 := Interiors.OpenLevelForEntry(World, Down1.View, AtStairs1, Id2).Unwrap();
+  Test.AssertTrue(InteriorUnit.StairsDownPosition(Level2) is None);
+  const Down2 := Movement.ActivateAreaTransition(Down1.View, AtStairs1, Some(Level2)).Unwrap();
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Down2.State).Unwrap());
+  const Restored := Loaded(World);
+  Test.AssertEquals(
+    Savegame.EncodeSaveGame(Metadata.Id, Down2.State),
+    Savegame.EncodeSaveGame(Metadata.Id, Restored)
+  );
+  Test.AssertEquals(Id2, Restored.AreaId);
+  Test.AssertEquals(3, Restored.VisitedAreas.Length());
+  const SaveText := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  Test.AssertTrue('"format_version":10' in SaveText);
+
+  // A visited level whose upper level is not visited is rejected before levels are read.
+  const Gap := Down2.State with VisitedAreas := [Id0, Id2]; end with;
+
+  Test.AssertTrue(
+    Savegame.DecodeSaveGameState(Savegame.EncodeSaveGame(Metadata.Id, Gap), Metadata) is Error(_)
+  );
+
+  // A missing deeper level referenced by the save is a world-data error; the save stays untouched.
+  const Level2Text := Fs.ReadText(LevelFile(World, Region, 2)).Unwrap();
+  Test.AssertTrue(Fs.DeleteFile(LevelFile(World, Region, 2)).Unwrap());
+  Test.AssertTrue(LoadFails(World));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertFalse(Fs.Exists(LevelFile(World, Region, 2)));
+  Test.AssertTrue(Fs.WriteTextAtomic(LevelFile(World, Region, 2), Level2Text).Unwrap());
+  Test.AssertEquals(Id2, Loaded(World).AreaId);
+
+  // Visited levels of one dungeon must agree on depth: a valid level-1 file of depth 4 is rejected.
+  const Deeper1 := Generation.GenerateDungeon(
+    Metadata.Seed,
+    Region.X,
+    Region.Y,
+    1,
+    4,
+    Id1
+  ).Unwrap();
+  Test.AssertTrue(
+    Fs.WriteTextAtomic(
+      LevelFile(World, Region, 1),
+      Encoding.EncodeLevel(Metadata, Deeper1)
+    ).Unwrap()
+  );
+  Test.AssertEquals('ok', FailureKind(Interiors.ReadLevel(World, Id1)));
+  Test.AssertTrue(LoadFails(World));
+  Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(LevelFile(World, Region, 1), Level1Text).Unwrap());
+  Test.AssertEquals(Id2, Loaded(World).AreaId);
+
+  // An item carried between levels keeps its location across save and load: the level-0 coin lies
+  // where the level-2 potion was, and the potion is carried.
+  var Moved := Down2.State;
+  var CoinIndex := -1;
+  var PotionIndex := -1;
+  for Index: integer := 0 to Moved.Items.Length() - 1 do
+    if Moved.Items[Index].Id = Level0.Items[0].ItemId then
+      CoinIndex := Index;
+    end if;
+
+    if Moved.Items[Index].Id = Level2.Items[0].ItemId then
+      PotionIndex := Index;
+    end if;
+  end for;
+
+  Moved.Items[CoinIndex] := Moved.Items[CoinIndex] with Location := Items.ItemLocation.InInterior(
+    Id2,
+    Level2.Items[0].Position
+  ); end with;
+
+  Moved.Items[PotionIndex] := Moved.Items[PotionIndex] with Location := Items.ItemLocation.CarriedByPlayer; end with;
+
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Moved).Unwrap());
+  Test.AssertEquals(
+    Savegame.EncodeSaveGame(Metadata.Id, Moved),
+    Savegame.EncodeSaveGame(Metadata.Id, Loaded(World))
+  );
+
+  // Rewinding to a level-0 save forgets the deeper visits; their files stay and are reused.
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Inside.State).Unwrap());
+  const Rewound := Loaded(World);
+  Test.AssertEquals(1, Rewound.VisitedAreas.Length());
+  Test.AssertEquals(Level0.Hostiles.Length(), Rewound.Hostiles.Length());
+  Test.AssertTrue(Fs.IsFile(LevelFile(World, Region, 2)));
+  const AgainAtStairs := StandOn(Rewound, InteriorUnit.StairsDownPosition(Level0).Unwrap());
+  const Again1 := Interiors.OpenLevelForEntry(World, Inside.View, AgainAtStairs, Id1).Unwrap();
+  Test.AssertEquals(Level1Text, Fs.ReadText(LevelFile(World, Region, 1)).Unwrap());
+  const AgainDown := Movement.ActivateAreaTransition(
+    Inside.View,
+    AgainAtStairs,
+    Some(Again1)
+  ).Unwrap();
+  Test.AssertEquals(
+    Level0.Hostiles.Length() + Level1.Hostiles.Length(),
+    AgainDown.State.Hostiles.Length()
+  );
+  // Start over begins outdoors without visits; every stored level file remains.
+  const Fresh := GameState.NewGame(Metadata);
+  Test.AssertEquals(0, Fresh.VisitedAreas.Length());
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Fresh).Unwrap());
+  Test.AssertEquals(0, Loaded(World).VisitedAreas.Length());
+  for Level: integer := 0 to 2 do
+    Test.AssertTrue(Fs.IsFile(LevelFile(World, Region, Level)));
+  end for;
+
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), SaveText).Unwrap());
+
+  // A format-9 save is rejected and preserved.
+  Test.AssertTrue(
+    Fs.WriteTextAtomic(
+      Savegame.SaveGamePath(World),
+      SaveText.Replace('"format_version":10', '"format_version":9')
+    ).Unwrap()
+  );
+  Test.AssertTrue(LoadFails(World));
+  Test.AssertTrue('"format_version":9' in Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+end.

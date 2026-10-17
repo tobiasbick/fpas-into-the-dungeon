@@ -50,7 +50,7 @@ worlds/<world-id>/
 │       └── y_<signed-y>.json
 ├── dungeons/
 │   └── <rx>_<ry>/
-│       └── 0.json
+│       └── <level>.json
 └── saves/
     └── default.json
 ```
