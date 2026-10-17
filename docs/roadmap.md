@@ -663,7 +663,8 @@ savegame, protocol, and generator versions where their contracts change.
 
 Stairs between levels and deeper, harder levels of a generated dungeon.
 The [implementation plan](plans/14c-dungeon-levels.md) fixes the decisions and
-ordered checkpoints: every generated dungeon has exactly three levels; deeper
+ordered checkpoints: depth is stored per dungeon (currently three levels,
+later dynamic); deeper
 levels hold more opponents of the existing kinds and fewer guaranteed finds;
 paired stairs are terrain cells; only level 0 leads outdoors.
 

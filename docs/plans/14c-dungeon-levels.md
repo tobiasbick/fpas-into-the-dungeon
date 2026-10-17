@@ -15,8 +15,9 @@ push only when requested. Delete this plan after the user explicitly accepts
 
 ## Goal and fixed scope
 
-A generated dungeon becomes a stack of three levels connected by paired
-stairs. Deeper levels are more dangerous and offer fewer finds, so the
+A generated dungeon becomes a stack of levels connected by paired stairs.
+Its depth is a property of each dungeon; this slice gives every dungeon three
+levels, and later slices may vary the depth per dungeon. Deeper levels are more dangerous and offer fewer finds, so the
 progression from 13b has more opponents to train against. Each level is its own
 area. It is generated and stored on its first visit, materialized into the
 current game, and keeps its mutable state across stair travel, save, and load.
@@ -28,8 +29,8 @@ save with exact state. Unvisited deeper levels are never generated in advance.
 
 Outside this slice: new opponent kinds, per-level opponent stat scaling,
 opponents following the player across stairs, traps, keys, locked doors,
-overall dungeon completion rewards, teleporting, variable dungeon depth, and
-level sizes other than 31 by 21.
+overall dungeon completion rewards, teleporting, choosing depths other than
+three, and level sizes other than 31 by 21.
 
 ## Decisions
 
@@ -37,23 +38,35 @@ These were open in the roadmap. They are fixed for this slice.
 
 ### Depth
 
-- Every generated dungeon has exactly **three levels**, indices 0, 1 and 2.
-  The constant `DungeonLevelCount = 3` lives in the game layer. The player sees
-  levels numbered 1 to 3 (`Level 2 of 3`). Indices stay 0-based everywhere
-  else, including in identities, files and the protocol.
-- The depth is the same for every dungeon and is not a world parameter. Later
-  variable depth would be a new decision, with its own format bumps.
+- Depth is **per dungeon**, not a global constant. A pure function
+  `DungeonDepth(Metadata, Region)` in `Generation.Levels` decides it and
+  currently returns 3 for every region. A later slice may make it depend on the
+  seed and region; that changes generated output and raises the generator
+  version, but needs no format or protocol change.
+- The depth is stored in every level file of the dungeon (`depth`) and carried
+  in the interior projection. Rules, validation, storage and the client read
+  the depth from the stored map, never from a constant, and never recompute it
+  on read.
+- `MaxDungeonDepth = 16` bounds parsing, files and the protocol. It is a
+  safety bound only, not a gameplay value; `DungeonDepth` must return
+  1..`MaxDungeonDepth`.
+- The player sees levels numbered from 1 (`Level 2 of 3`). Indices stay
+  0-based everywhere else, including in identities, files and the protocol.
+- No code path may assume exactly three levels. Tests cover depth 3 from the
+  generator plus hand-built stored dungeons of depth 1, 2 and 5.
 
 ### Area identity and storage path
 
 - Every level, level 0 included, uses
   `<world>:dungeon:<rx>:<ry>:<level>`, where `<level>` is a canonical
-  non-negative integer below `DungeonLevelCount`. The old four-segment form is
+  non-negative integer below `MaxDungeonDepth`; whether the level exists is
+  checked against the dungeon's stored depth. The old four-segment form is
   rejected. A single identity form keeps parsing uniform. Its effect on
   level-0 item and hostile IDs is covered by the generator, level format and
   save format bumps below.
 - `ParseDungeonAreaId` returns region and level. It rejects a missing level,
-  leading zeros, a plus sign, negative zero and indices of 3 or more.
+  leading zeros, a plus sign, negative zero and indices of `MaxDungeonDepth`
+  or more.
 - Level files move from `0.json` to `dungeons/<rx>_<ry>/<level>.json`. The path
   is built from parsed integers, never from the raw identity.
 
@@ -62,14 +75,14 @@ These were open in the roadmap. They are fixed for this slice.
 - Two new interior cell kinds: `StairsDown` (code `>`) and `StairsUp`
   (code `<`). They are walkable and occupy no item or hostile placement field.
   The exit stays `x`.
-- Each level has a fixed set of endpoints. Validation enforces exactly these
-  counts:
+- Each level's endpoints follow from its index and the dungeon depth `D`.
+  Validation enforces exactly these counts:
 
   | Level | Exit `x` | Stairs up `<` | Stairs down `>` |
   | --- | ---: | ---: | ---: |
-  | 0 | 1 | 0 | 1 |
-  | 1 | 0 | 1 | 1 |
-  | 2 | 0 | 1 | 0 |
+  | 0 | 1 | 0 | 1 if `D > 1`, else 0 |
+  | 1 .. `D-2` | 0 | 1 | 1 |
+  | `D-1` (deepest, `D > 1`) | 0 | 1 | 0 |
 
 - The **arrival endpoint** is the exit on level 0 and the stairs up on deeper
   levels. As today, the start pose is the field east of the arrival endpoint,
@@ -110,17 +123,26 @@ These were open in the roadmap. They are fixed for this slice.
   landing count as endpoints, so item corners skip them. Opponents keep their
   room-center rule and may share the stairs room, so a guard on the way down is
   possible.
-- **Stairs up** replaces the exit position on levels 1 and 2. The first room's
+- **Stairs up** replaces the exit position on every level below 0. The first room's
   top-left field becomes `<` instead of `x`.
-- Opponents per level, all of the existing kinds with unchanged statistics.
-  They take the farthest safe rooms in the order shown. An attempt with too few
-  safe rooms is rejected, as today:
+- Opponents per level are a formula of the level index `L`, not a table of
+  fixed levels, so deeper dungeons need no new rules. All are existing kinds
+  with unchanged statistics:
+  - count `N = min(2 + L, 5)`;
+  - skeletons `min(1 + L div 2, N - 1)`, the rest rats (at least one rat);
+  - slots list skeletons first, then rats; they take the farthest safe rooms
+    in slot order. An attempt with too few safe rooms is rejected, as today.
+
+  For the current depth of three this gives:
 
   | Level | Hostile slots in order | Total health |
   | --- | --- | ---: |
   | 0 | skeleton, rat | 18 |
   | 1 | skeleton, rat, rat | 24 |
   | 2 | skeleton, skeleton, rat | 30 |
+
+  The difficulty depends on the level index, not on the depth. Levels 3 and
+  deeper are covered by formula tests only while generation stops at depth 3.
 
 - Finds per level. Level 0 is unchanged (slots 0..3 guaranteed, optional 4/5).
   Deeper levels have only one guaranteed **healing potion** at slot 0, plus
@@ -152,8 +174,12 @@ their catalog entries tell the user to create a new world.
 
 These changes apply on top of format 2:
 
-- `level` is an integer 0..2 and must match the identity's level.
-- `rows` may contain `<` and `>`. Endpoint counts follow the table above.
+- New key `depth`, an integer 1..`MaxDungeonDepth`.
+- `level` is an integer 0..`depth - 1` and must match the identity's level.
+- Every level file of one dungeon must store the same `depth` and name. Save
+  validation and entry reject a mismatch between visited levels as a
+  world-data error; nothing is repaired.
+- `rows` may contain `<` and `>`. Endpoint counts follow the depth table above.
 - `exit` is removed; all endpoints are derived from `rows`. `start` stays and
   must be the field east of the arrival endpoint, facing east.
 - `items` and `hostiles` follow the per-level slot tables above. IDs use the
@@ -161,12 +187,14 @@ These changes apply on top of format 2:
 
 ## Module ownership
 
-- `Dungeon.Areas.Identities` owns the level-aware identity, parsing, the level
-  count and "previous/next level" helpers.
+- `Dungeon.Areas.Identities` owns the level-aware identity, parsing,
+  `MaxDungeonDepth` and "previous/next level" helpers; whether a next level
+  exists is decided from the current map's depth.
 - `Dungeon.Interior` owns the new cell kinds, their codes and the endpoint
   lookup helpers (arrival endpoint, stairs down, descent landing).
 - `Dungeon.Interior.Generation` already has 460+ lines. Move the per-level
-  content tables (hostile slots, item slots, domains) into a new unit,
+  content rules (`DungeonDepth`, hostile and item slot formulas, domains)
+  into a new unit,
   `Dungeon.Interior.Generation.Levels`, instead of growing the existing file.
   Stairs placement stays in the geometry unit.
 - `Dungeon.Movement` owns stair targets and landings.
@@ -186,30 +214,37 @@ commit. Record the counts here. Gameplay and versions stay unchanged.
 ### 02. Level-aware identities and cells
 
 - Five-segment identities with parsing, formatting, level bounds and
-  previous/next helpers. Update all identity producers in game code.
+  previous/next helpers, and `MaxDungeonDepth`. Add `Depth` and `Level` to
+  `InteriorMap`. Update all identity producers in game code.
 - `StairsUp`/`StairsDown` cells, their codes, and walkability.
 - Endpoint helpers and per-level structural validation in
-  `Generation.Validation`: endpoint counts, start relation, descent landing.
+  `Generation.Validation`: endpoint counts by level and depth, start relation,
+  descent landing.
 - Tests:
-  - Positive: every level 0..2 and negative region coordinates.
-  - Negative: four segments, level 3, `-0`, `01`, `+1`, extra segments, unknown
+  - Positive: depths 1, 2, 3 and 5 with every level, and negative region
+    coordinates.
+  - Negative: four segments, level `MaxDungeonDepth`, level at or beyond the
+    depth, depth 0 or above the bound, `-0`, `01`, `+1`, extra segments, unknown
     cell codes, wrong endpoint counts, a stairs down without a valid landing,
     a placement on stairs.
   - Edge: stairs adjacent to a wall, and a landing on the map border column.
 
 ### 03. Generator 8
 
-- Level-aware geometry seed, stairs placement, the new
-  `Generation.Levels` tables, and per-level hostile and item placement with
-  the new content domains.
+- Level-aware geometry seed, stairs placement, the new `Generation.Levels`
+  unit with `DungeonDepth` (returns 3) and the hostile/item formulas, and
+  per-level placement with the new content domains.
 - Raise `WorldGeneratorVersion` to 8. Deliberately update the three pinned
   region fingerprints and add level 1 and level 2 fingerprints for the same
   regions. The fingerprints include name, geometry, endpoints, and every
   placement kind, identity and position.
 - Prove that level-0 rooms and corridors equal the 14b geometry, and that
   generating level 2 neither reads nor needs level 1.
+- Exhaustive formula tests for levels 0..`MaxDungeonDepth - 1`: hostile count,
+  kinds and order. Generator tests with a depth of 1 (no stairs) and 5 through
+  a private seam, without changing `DungeonDepth`.
 - Measure generation time per level and record it here.
-- Negative tests: an invalid level index, and an attempt without a valid
+- Negative tests: a level index at or beyond the depth, and an attempt without a valid
   stairs room or with too few safe rooms rejects that attempt.
 
 ### 04. Level file format 3
@@ -219,9 +254,11 @@ commit. Record the counts here. Gameplay and versions stay unchanged.
 - `OpenLevelForEntry` creates only the requested transition target. Reading
   never generates.
 - Tests:
-  - Round trip for all three levels.
+  - Round trip for all three levels, and for hand-built dungeons of depth 1
+    and 5.
   - Rejection of format 2, `exit` present, `level` mismatching the identity,
-    a level-0 file stored under `1.json`, and bad endpoint counts.
+    a level-0 file stored under `1.json`, missing or out-of-range `depth`,
+    a level at or beyond its depth, and bad endpoint counts.
   - Level files are never overwritten.
   - A missing level 1 referenced by a visited area is a typed `Missing`
     failure.
@@ -234,10 +271,12 @@ commit. Record the counts here. Gameplay and versions stay unchanged.
 - `ReturnLocation` is kept across stairs. Transitions are free and leave the
   dice, hostiles and turn state untouched.
 - Materialize a level on its first entry. Reveal the destination area.
-- Tests: every direction, a round trip L0→L2→L0 with exact poses, outdoor
-  return only from L0, rejections (stairs not ahead/occupied, a target map
-  with the wrong ID or level, an exit on a deeper level), alerted opponents
-  left behind, and a state unchanged on every rejection.
+- Tests: every direction, a round trip from level 0 to the deepest level and
+  back with exact poses, depth-1 and depth-5 fixtures, outdoor return only from
+  level 0, rejections (stairs not ahead/occupied, a target map with the wrong
+  ID, level or depth, an exit on a deeper level, no stairs down on the deepest
+  level), alerted opponents left behind, and a state unchanged on every
+  rejection.
 
 ### 06. Savegame format 10
 
@@ -247,7 +286,8 @@ commit. Record the counts here. Gameplay and versions stay unchanged.
 - Tests: save/load on each level, an item carried from level 2 and dropped on
   level 0 of another dungeon, rejected format-9 saves with the bytes
   preserved, and a missing deeper level file reported as a level failure
-  without deleting the save.
+  without deleting the save, and visited levels of one dungeon with differing
+  stored depth or name rejected as a world-data error.
 
 ### 07. Server stair handling
 
@@ -261,11 +301,12 @@ commit. Record the counts here. Gameplay and versions stay unchanged.
 
 ### 08. Protocol 16 and client
 
-- Wire codes for both stairs cells and `level`/`level_count` in the interior
-  area projection. The strict decoder rejects levels out of range.
+- Wire codes for both stairs cells and `level`/`depth` in the interior area
+  projection. The strict decoder rejects a depth outside 1..`MaxDungeonDepth`
+  and a level at or beyond the depth.
 - First-person rendering: stairs fields get a distinct floor treatment like the
   exit, with an up or down marker. The exploration map uses `<` and `>`. The
-  title reads `<Name> — Level n of 3`. The Environment panel shows the hint
+  title reads `<Name> — Level n of <depth>`. The Environment panel shows the hint
   `Enter: go down` or `Enter: go up`.
 - Tests: protocol positive, negative and bounds tests; headless TUI tests for
   both stairs, the title, the hint, the hidden-sidebar fallback, and the map
@@ -282,11 +323,11 @@ Real play through the rules:
   earlier save forgets later levels while reusing their files.
 - A filesystem trace confirms one read per visited level per save and load.
 - Extend the [persistence measurements](../architecture/persistence-measurements.md)
-  with 1/10/100 dungeons × 3 visited levels.
+  with 1/10/100 dungeons, each with all of its levels visited.
 
 ### 10. Complete TCP play and documentation
 
-- A complete TCP session goes from the outdoors down to level 2 and back out.
+- A complete TCP session goes from the outdoors down to the deepest level and back out.
   It includes a reconnect with exact replay of unsaved turns, followed by
   explicit save and Continue.
 - Synchronize the generated-dungeons, level-storage, area-transitions,
