@@ -687,22 +687,62 @@ change view family. Replace the assumption of a single interior-to-outdoor
 return with explicit stair links, and cover multi-level save/load and revisits.
 Choose the initial finite depth and difficulty curve when detailing this slice.
 
-## 15. Broader world simulation — LATER
+## 15. Settlements and a living world — PARTIAL
 
-Settlements, changing world state, time, weather, and other simulation systems
-will be split further when their first concrete gameplay requirement is known.
-The first settlement slice restores NPCs and deterministic dialogue removed in
-14a, including interaction, presentation, persistence, and end-to-end coverage.
-It does not depend on LLM integration.
+Settlements, NPCs, deterministic quests, an economy, time, and weather follow
+the vertical slice in `DUNGEON_RPG_IDEAS.md`: enter a settlement, talk to an
+NPC, take a solvable quest into a dungeon, and return to a character that
+remembers the outcome. Every substage is deterministic and server-owned and does
+not depend on LLM integration (stage 16). Only 15a is detailed; later substages
+give an ordering direction and are planned when they become next.
 
-## 16. Multiplayer behavior — LATER
+### 15a. Home settlement and Mara — NEXT
 
-Multiple simultaneous players require separate authority, visibility,
-conflict-resolution, lifecycle, and persistence decisions. The current
-single-player client-server model does not imply those rules.
+One authored settlement near the spawn, entered through a gate like a dungeon
+entrance and shown in the first-person view. Mara returns as its first NPC with
+the deterministic dialogue removed in 14a: greetings that remember the player,
+questions about herself, the nearby dungeon and the Ancient coin, and free
+healing while the player is hurt. The
+[implementation plan](plans/15a-home-settlement.md) fixes the decisions and
+ordered checkpoints.
 
-## 17. LLM integration — LATER
+### 15b. First deterministic quest — LATER
+
+Mara offers one quest whose target exists by construction, for example
+retrieving an item from the deepest level of the spawn dungeon or defeating its
+guardian. Quest state, its validated objective, a reward, and Mara's remembered
+outcome persist; the server proves the objective is reachable before offering it.
+
+### 15c. Generated settlements — LATER
+
+Settlements spread across the outdoor world with stored names and generated
+layouts, reusing the gate, area, and NPC model from 15a. A small set of NPC
+roles replaces the single authored character.
+
+### 15d. Trade and economy — LATER
+
+A merchant buys and sells for coins, giving the Ancient coin and loot a use.
+Prices, stock, and capacity rules are deterministic and persistent.
+
+### 15e. Time and rest — LATER
+
+A world clock advances with turns and outdoor travel, with a day/night
+presentation and resting at an inn as an alternative way to heal.
+
+### 15f. Weather and changing world state — LATER
+
+Weather and world changes caused by quest outcomes, such as cleared dungeons or
+altered settlement dialogue, once a concrete gameplay requirement is known.
+
+## 16. LLM integration — LATER
 
 LLM integration is explicitly postponed. Its authority boundaries, failure
 behavior, cost controls, and effect on deterministic game rules will be
 designed separately before implementation begins.
+
+## 17. Multiplayer behavior — LATER
+
+Multiple simultaneous players require separate authority, visibility,
+conflict-resolution, lifecycle, and persistence decisions. The current
+single-player client-server model does not imply those rules. Multiplayer is
+deliberately the last stage.

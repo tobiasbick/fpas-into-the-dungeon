@@ -356,4 +356,4 @@ Stage 13b followed 14b with progression; 14c adds separate level areas and
 paired stairs without changing the first-person view family. Variable depths,
 new opponent kinds, opponents following the player across stairs, and per-level
 opponent scaling remain open. Settlements with NPCs and dialogue belong to stage
-15; LLM-generated content to stage 17.
+15; LLM-generated content to stage 16.
