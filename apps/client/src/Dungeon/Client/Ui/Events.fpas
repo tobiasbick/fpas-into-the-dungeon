@@ -9,10 +9,42 @@ begin
   Cmd.Set(Tui.TuiCmd.NoCommand);
   const ViewportResponse := Value is Model.ClientEvent.ViewportState(_);
   var Next: Model.ClientModel := State;
+  if (Value is Model.ClientEvent.Connected(_)) or (Value is Model.ClientEvent.Worlds(_))
+    or
+    (Value is Model.ClientEvent.Failed(_)) or (Value is Model.ClientEvent.Disconnected)
+    or
+    (Value is Model.ClientEvent.Defeated(_))
+  then
+    Next.ActiveDialogue := None;
+    Next.DialogueSelection := 0;
+    Next.DialogueOffset := 0;
+  end if;
+
   case Value of
+    when Model.ClientEvent.Dialogue(const Projection, const Frame, const Dirty):
+      var DialogState := UpdateClientEvent(
+        State with PendingChangesProgress := false; Overlay := Model.ClientOverlay.NoOverlay; end with,
+        Model.ClientEvent.State(Projection), Cmd
+      );
+      DialogState.ActiveDialogue := Some(Frame);
+      DialogState.DialogueSelection := 0;
+      DialogState.DialogueOffset := 0;
+      DialogState.Dirty := Dirty;
+      DialogState.Status := 'Talking to ' + Frame.Speaker + '.';
+      return DialogState;
+    when Model.ClientEvent.DialogueEnded(const Projection, const Dirty):
+      var Ended := UpdateClientEvent(
+        State with PendingChangesProgress := false; Overlay := Model.ClientOverlay.NoOverlay; end with,
+        Model.ClientEvent.State(Projection), Cmd
+      );
+      Ended.ActiveDialogue := None;
+      Ended.DialogueSelection := 0;
+      Ended.DialogueOffset := 0;
+      Ended.Dirty := Dirty;
+      return Ended;
     when Model.ClientEvent.Connected(const Catalog), Model.ClientEvent.Worlds(const Catalog):
       begin
-        const Installed: Model.ClientModel := UiWorlds.InstallCatalog(State, Catalog, Cmd);
+        const Installed: Model.ClientModel := UiWorlds.InstallCatalog(Next, Catalog, Cmd);
         if State.Overlay = Model.ClientOverlay.DefeatOverlay then
           return Installed with Overlay := Model.ClientOverlay.DefeatOverlay; FocusedControl := Controls.OverlayBackControlId; Status := 'You have fallen.'; end with;
         end if;
@@ -22,6 +54,10 @@ begin
     when Model.ClientEvent.State(const Value), Model.ClientEvent.ViewportState(const Value):
       begin
         Next.Screen := Model.ClientScreen.GameScreen;
+        if not ViewportResponse then
+          Next.ActiveDialogue := None;
+        end if;
+
         Next.Overlay := if ViewportResponse then State.Overlay
           else Model.ClientOverlay.NoOverlay
           end if;
@@ -69,10 +105,10 @@ begin
               Next.WorldY := MapValue.WorldY;
               Next.Inventory := MapValue.Inventory;
               Next.Character := MapValue.Character;
-              Next.PrimaryTitle := '';
+              Next.PrimaryTitle := MapValue.Title;
               Next.PrimaryLevel := 0;
               Next.PrimaryDepth := 1;
-              Next.PrimaryStatus := '';
+              Next.PrimaryStatus := MapValue.Status;
             end;
           when Protocol.VisibleState.FirstPersonState(const FirstPersonValue):
             begin

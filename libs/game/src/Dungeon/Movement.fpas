@@ -1,7 +1,7 @@
-// Player movement: outdoor steps, first-person steps and turns, and area transitions.
+// Player movement: outdoor and bounded settlement steps, first-person movement, and area transitions.
 unit Dungeon.Movement;
 
-uses Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Math as Math;
+uses Dungeon.Npcs as NpcRules, Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Math as Math;
 
 // Atomic pure transition result: replacement player state and its matching current view.
 public type AreaTransition = record
@@ -17,6 +17,10 @@ begin
   if Valid.Area = Coordinates.AreaKind.OutdoorRegion then
     begin
       const Position: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(Valid);
+      if Position = Metadata.SettlementGate then
+        return Ok(Settlements.HomeAreaId(Metadata));
+      end if;
+
       case Entrances.EntranceRegionAt(Metadata, Position) of
         when Some(const Region):
           begin
@@ -28,6 +32,15 @@ begin
           end;
       end case;
     end;
+  end if;
+
+  if Valid.Area = Coordinates.AreaKind.Settlement then
+    const Map := try GameState.CurrentInterior(View, Valid);
+    if (try GameState.SettlementPlayerPosition(Valid)) = Map.Arrival then
+      return Ok(Metadata.OutdoorAreaId);
+    end if;
+
+    return Error('player is not standing on the settlement gate');
   end if;
   const Map: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, Valid);
   const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(Valid);
@@ -125,13 +138,33 @@ begin
 end function;
 
 // Applies an eligible transition using validated target geometry supplied by its owner.
-// Entry and stair travel require the target map and materialize its placements once; leaving
+// Dungeon entry and stair travel require a target map and materialize its placements once; leaving
 // requires None. Stairs keep the outdoor return location, arrive at the start pose going down
 // and at the descent landing going up, and require the same stored depth and name. A standing
-// opponent on the arrival field moves the arrival to the nearest free floor field.
+// opponent on the arrival field moves the arrival to the nearest free floor field. Settlement
+// entry resolves its authored map from code and records a visit without dungeon entities.
 public function ActivateAreaTransition(View: GameState.AreaView; State: GameState.GameState; TargetMap: option of InteriorUnit.InteriorMap): result of (AreaTransition, string);
 begin
   const Target: string := try AreaTransitionTarget(View, State);
+  if Target = Settlements.HomeAreaId(View.Metadata) then
+    const Map := Settlements.HomeMap(View.Metadata);
+    case TargetMap of
+      when Some(const Supplied):
+        const ValidMap := try Settlements.ValidateHomeMap(View.Metadata, Supplied);
+      when None:
+        null;
+    end case;
+    const Changed := Areas.MaterializeArea(State, Map) with Area := Coordinates.AreaKind.Settlement; AreaId := Target; Player := Coordinates.PlayerPosition.Settlement(
+      Map.Start
+    ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+      View.Metadata.OutdoorAreaId,
+      View.Metadata.SettlementGate
+    ); end with;
+    const NextView := GameState.AreaView(Metadata := View.Metadata, Interior := Some(Map));
+    return Ok(
+      AreaTransition(State := try GameState.ValidateGameState(NextView, Changed), View := NextView)
+    );
+  end if;
   var Changed: GameState.GameState := State;
   if State.Area = Coordinates.AreaKind.OutdoorRegion then
     begin
@@ -242,6 +275,30 @@ begin
   return Ok(
     AreaTransition(State := try GameState.ValidateGameState(NextView, Changed), View := NextView)
   );
+end function;
+
+// Applies one bounded cardinal map step without outdoor healing or first-person facing.
+public function MoveSettlement(View: GameState.AreaView; State: GameState.GameState; DeltaX: integer; DeltaY: integer): result of (GameState.GameState, string);
+begin
+  const Valid := try GameState.ValidateGameState(View, State);
+  if Valid.Area <> Coordinates.AreaKind.Settlement then
+    return Error('player is not in a settlement');
+  end if;
+
+  if Math.Abs(DeltaX) + Math.Abs(DeltaY) <> 1 then
+    return Error('movement must be one cardinal step');
+  end if;
+  const Position := try GameState.SettlementPlayerPosition(Valid);
+  const Target := Coordinates.InteriorPosition(X := Position.X + DeltaX, Y := Position.Y + DeltaY);
+  if NpcRules.At(State.Npcs, State.AreaId, Target) >= 0 then
+    return Error('Mara blocks the way');
+  end if;
+  const Map := try GameState.CurrentInterior(View, State);
+  if (try InteriorUnit.InteriorCellAt(Map, Target)) = InteriorUnit.InteriorCellKind.Wall then
+    return Error('a wall blocks the way');
+  end if;
+
+  return Ok(Valid with Player := Coordinates.PlayerPosition.Settlement(Target); end with);
 end function;
 
 // Applies one cardinal outdoor step, healing one point only after an accepted move.

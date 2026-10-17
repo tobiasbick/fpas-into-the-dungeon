@@ -1,7 +1,7 @@
 // Sends projections and rejections and commits accepted states and turns.
 unit Dungeon.Server.Replies;
 
-uses Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
+uses Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
 
 // Encodes and sends one server message.
 public function SendMessage(ConnectionValue: Net.Connection; Message: Protocol.ServerMessage; Token: Tasks.CancellationToken): result of (boolean, string);
@@ -28,7 +28,8 @@ end record;
 
 function PrepareProjection(
   Candidate: SessionUnit.ServerSession;
-  Report: ProjectionUnit.TurnReport
+  Report: ProjectionUnit.TurnReport;
+  DialogueResponse: boolean
 ): result of (PreparedReply, string);
 begin
   const State := try SessionUnit.RequireActiveState(Candidate.State);
@@ -36,7 +37,19 @@ begin
   const Projection := try ProjectionUnit.ProjectSession(
     Candidate.World, View, State, Candidate.Viewport, Report
   );
-  const Line := ServerMessages.EncodeServer(Protocol.ServerMessage.State(Projection.State));
+  var Message := Protocol.ServerMessage.State(Projection.State);
+  if DialogueResponse then
+    case Candidate.ActiveDialogue of
+      when Some(const Frame):
+        Message := Protocol.ServerMessage.Dialogue(
+          Projection.State,
+          Mapping.ProtocolDialogue(Frame), Candidate.Dirty
+        );
+      when None:
+        Message := Protocol.ServerMessage.DialogueEnded(Projection.State, Candidate.Dirty);
+    end case;
+  end if;
+  const Line := ServerMessages.EncodeServer(Message);
   if Utf8.Encode(Line).Length() > Protocol.MaximumLineBytes then
     return Error(Transport.LineTooLongError);
   end if;
@@ -57,7 +70,7 @@ begin
   const View := try SessionUnit.SessionAreaView(Candidate, State);
   const Revealed := try Exploration.RevealCurrentArea(View, State);
   return PrepareProjection(
-    Candidate with State := Some(Revealed); Dirty := true; end with, Report
+    Candidate with State := Some(Revealed); Dirty := true; end with, Report, false
   );
 end function;
 
@@ -100,6 +113,19 @@ begin
   );
 end function;
 
+// Sends an atomic dialogue projection before installing state/frame/dirty changes.
+// Speaking does not move or reveal new fields; preparation failure preserves the complete original session.
+public function CommitDialogue(
+  Session: SessionUnit.ServerSession; Candidate: SessionUnit.ServerSession;
+  ConnectionValue: Net.Connection; Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
+): result of (SessionUnit.ServerSession, string);
+begin
+  return CommitPreparedReply(
+    Session, PrepareProjection(Candidate, ProjectionUnit.NoTurnReport(), true),
+    'dialogue_rejected', ConnectionValue, Token, Logs
+  );
+end function;
+
 // Sends a read-only viewport candidate; failed preparation retains even the old viewport/cache.
 // Successful resizing changes no game state or dirty/save facts; write errors remain fatal.
 // Viewport must already be bounded by Session.ResolveViewport and the server policy.
@@ -113,7 +139,11 @@ public function ChangeViewport(
 begin
   return CommitPreparedReply(
     Session,
-    PrepareProjection(Session with Viewport := Viewport; end with, ProjectionUnit.NoTurnReport()),
+    PrepareProjection(
+      Session with Viewport := Viewport; end with,
+      ProjectionUnit.NoTurnReport(),
+      false
+    ),
     'viewport_rejected', ConnectionValue, Token, Logs
   );
 end function;

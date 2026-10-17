@@ -77,7 +77,7 @@ configuration is loaded.
 
 Runtime configuration, world, chunk, level and savegame formats support only
 their current schema and generator version. Current versions are world format
-3, generator 8, level format 3 and save format 10; protocol 16 connects the client
+4, generator 9, level format 3 and save format 11; protocol 17 connects the client
 and server. Obsolete runtime configuration reports an error asking the user to
 delete or recreate that configuration. Invalid or incompatible worlds and saves
 remain visible and are preserved; create a new world for incompatible world

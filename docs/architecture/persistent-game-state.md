@@ -24,8 +24,8 @@ The running rules use `ValidateGameState(View, State)` for local state,
 equipment, identity uniqueness, and geometry checks against the supplied
 current map. Full placement checks belong to
 `Dungeon.Areas.ValidateSavedGame(Metadata, State, Maps)`, which loads no maps.
-The save layer reads the stored level of every visited dungeon and supplies
-those maps. Both loading and writing use this full check: an unvisited game has no dungeon entities; a visited dungeon has
+The save layer reads the stored level of every visited dungeon, resolves the
+authored settlement from code, and supplies those maps. Both loading and writing use this full check: an unvisited game has no dungeon entities; a visited dungeon has
 exactly its original entity identities and kinds, with their mutable state.
 Missing or unknown entities remain invalid even while the player is outdoors.
 The pure validator accepts the supplied visited maps in any order, with exactly
@@ -50,10 +50,10 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `10` is an exact JSON object containing the selected world ID,
+Savegame format `11` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
-server-owned item state, the player's health, every opponent, the
+server-owned item state, NPC meeting records, the player's health, every opponent, the
 dice generator state, and the `progression` object with the two cumulative
 skill experience counters (see [progression](progression.md)). Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
@@ -61,16 +61,21 @@ their return location contains the outdoor area and the exact entrance site of
 the dungeon's region.
 
 `visited_areas` is a strictly sorted array of canonical dungeon level identities
-(`<world>:dungeon:<rx>:<ry>:<level>`) with no duplicates. A visited level below 0
+(`<world>:dungeon:<rx>:<ry>:<level>`) and the optional home settlement
+(`<world>:settlement:home`), with no duplicates. A visited level deeper than 0
 requires the level above it in the same dungeon to be visited, and all visited
-levels of one dungeon must store the same depth and name. A new game starts with an empty list, no items, and no opponents.
+levels of one dungeon must store the same depth and name. A new game starts with an empty list, no items, no opponents, and Mara
+with `has_met_player = false`.
 First entry materializes the map's placements and records the visit. Loading
 restores the list and entities together; revisiting never recreates taken items
 or defeated opponents. Interior discovery and dungeon entities may reference
 only visited areas. Saves without a required field are rejected. Format 8
 added the giant rat; format 9 (13b) added `progression`; format 10 (14c) uses
-level identities for every area and entity. The version is checked before the
-payload, so an obsolete save reports its version. Format 9 and older saves
+level identities for every area and entity. Format 11 adds settlement-local
+positions and exact NPC meeting records. The authored settlement map is resolved
+from code, never read or generated as a level file. Active dialogue is absent.
+The version is checked before the
+payload, so an obsolete save reports its version. Format 10 and older saves
 remain intact and cannot be continued; recreate progress explicitly
 through Start over.
 

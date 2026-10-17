@@ -1,4 +1,4 @@
-// World metadata creation and validation: natural spawn search and the spawn entrance near it.
+// World metadata creation and validation: natural spawn, nearby dungeon entrance, and settlement gate.
 unit Dungeon.Terrain.Placement;
 
 uses Dungeon.Coordinates as Coordinates, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Generation as TerrainGeneration, Dungeon.Terrain.Noise as Noise, Std.Math as Math;
@@ -90,57 +90,18 @@ begin
   return false;
 end function;
 
-function EntranceOffset(Index: integer): Coordinates.WorldPosition;
+function CardinalOffset(Index: integer; Distance: integer): Coordinates.WorldPosition;
 begin
-  case Index of
+  const Along: integer := Index mod Distance;
+  case Index div Distance of
     when 0:
-      begin
-        return Coordinates.WorldPosition(X := 3, Y := 0);
-      end;
+      return Coordinates.WorldPosition(X := Distance - Along, Y := Along);
     when 1:
-      begin
-        return Coordinates.WorldPosition(X := 2, Y := 1);
-      end;
+      return Coordinates.WorldPosition(X := - Along, Y := Distance - Along);
     when 2:
-      begin
-        return Coordinates.WorldPosition(X := 1, Y := 2);
-      end;
-    when 3:
-      begin
-        return Coordinates.WorldPosition(X := 0, Y := 3);
-      end;
-    when 4:
-      begin
-        return Coordinates.WorldPosition(X := -1, Y := 2);
-      end;
-    when 5:
-      begin
-        return Coordinates.WorldPosition(X := -2, Y := 1);
-      end;
-    when 6:
-      begin
-        return Coordinates.WorldPosition(X := -3, Y := 0);
-      end;
-    when 7:
-      begin
-        return Coordinates.WorldPosition(X := -2, Y := -1);
-      end;
-    when 8:
-      begin
-        return Coordinates.WorldPosition(X := -1, Y := -2);
-      end;
-    when 9:
-      begin
-        return Coordinates.WorldPosition(X := 0, Y := -3);
-      end;
-    when 10:
-      begin
-        return Coordinates.WorldPosition(X := 1, Y := -2);
-      end;
+      return Coordinates.WorldPosition(X := Along - Distance, Y := - Along);
     else
-      begin
-        return Coordinates.WorldPosition(X := 2, Y := -1);
-      end;
+      return Coordinates.WorldPosition(X := Along, Y := Along - Distance);
   end case;
 end function;
 
@@ -201,7 +162,7 @@ begin
   const Start: integer := Noise.CoordinateHash(Seed, Spawn.X, Spawn.Y, 211) mod 12;
   for Candidate: integer := 0 to 11 do
     begin
-      const Offset: Coordinates.WorldPosition := EntranceOffset((Start + Candidate) mod 12);
+      const Offset: Coordinates.WorldPosition := CardinalOffset((Start + Candidate) mod 12, 3);
       const Position: Coordinates.WorldPosition := Coordinates.WorldPosition(
         X := Spawn.X + Offset.X, Y := Spawn.Y +
         Offset.Y
@@ -294,7 +255,38 @@ begin
   return Error('unable to find a natural spawn site with a valid entrance for world seed');
 end function;
 
-// Creates current metadata with the deterministic spawn, spawn entrance, and region size.
+function FindSettlementGate(Metadata: Terrain.WorldMetadata): result of (Coordinates.WorldPosition, string);
+begin
+  const Start: integer := Noise.CoordinateHash(
+    Metadata.Seed,
+    Metadata.Spawn.X,
+    Metadata.Spawn.Y,
+    223
+  ) mod 24;
+  for Candidate: integer := 0 to 23 do
+    const Offset: Coordinates.WorldPosition := CardinalOffset((Start + Candidate) mod 24, 6);
+    const Position: Coordinates.WorldPosition := Coordinates.WorldPosition(
+      X := Metadata.Spawn.X + Offset.X, Y := Metadata.Spawn.Y + Offset.Y
+    );
+    if (
+      Math.Abs(Position.X - Metadata.SpawnEntrance.X) +
+      Math.Abs(Position.Y - Metadata.SpawnEntrance.Y) > 1
+    )
+      and
+      (Entrances.EntranceRegionAt(Metadata, Position) is None)
+      and
+      IsClearEntranceCell(Metadata.Seed, Position)
+      and
+      HasTraversableCardinalRoute(Metadata.Seed, Metadata.Spawn, Position)
+    then
+      return Ok(Position);
+    end if;
+  end for;
+
+  return Error('unable to place a settlement gate exactly six traversable steps from spawn');
+end function;
+
+// Creates current metadata with deterministic spawn, dungeon entrance, settlement gate, and region size.
 // Rejects region sizes outside MinimumDungeonRegionChunks through MaximumDungeonRegionChunks.
 public function NewWorldMetadata(Id: string; Seed: integer; DungeonRegionChunks: integer): result of (Terrain.WorldMetadata, string);
 begin
@@ -307,15 +299,16 @@ begin
     end;
   end if;
   const Spawn: Coordinates.WorldPosition := try FindNaturalSpawn(Seed);
-  return Ok(
-    Terrain.WorldMetadata(
-      Id := Id, Seed := Seed, FormatVersion := Terrain.WorldFormatVersion,
-      GeneratorVersion := Terrain.WorldGeneratorVersion, ChunkSize := Coordinates.WorldChunkSize,
-      Spawn := Spawn, OutdoorAreaId := Id +
-      ':outdoor', OutdoorAreaLabel := 'Outdoor region',
-      SpawnEntrance := try FindEntrance(Seed, Spawn), DungeonRegionChunks := DungeonRegionChunks
-    )
+  var Metadata: Terrain.WorldMetadata := Terrain.WorldMetadata(
+    Id := Id, Seed := Seed, FormatVersion := Terrain.WorldFormatVersion,
+    GeneratorVersion := Terrain.WorldGeneratorVersion, ChunkSize := Coordinates.WorldChunkSize,
+    Spawn := Spawn, OutdoorAreaId := Id +
+    ':outdoor', OutdoorAreaLabel := 'Outdoor region',
+    SpawnEntrance := try FindEntrance(Seed, Spawn), SettlementGate := Spawn,
+    DungeonRegionChunks := DungeonRegionChunks
   );
+  Metadata.SettlementGate := try FindSettlementGate(Metadata);
+  return Ok(Metadata);
 end function;
 
 // Rejects metadata that does not exactly match the deterministic current-schema world contract.
@@ -343,6 +336,10 @@ begin
     Metadata.Seed,
     Metadata.DungeonRegionChunks
   );
+  if Metadata.SettlementGate <> Expected.SettlementGate then
+    return Error('settlement gate coordinate is invalid for this generator version');
+  end if;
+
   if (Metadata.Spawn.X <> Expected.Spawn.X) or (Metadata.Spawn.Y <> Expected.Spawn.Y) then
     begin
       return Error('world spawn position is invalid for this generator version');

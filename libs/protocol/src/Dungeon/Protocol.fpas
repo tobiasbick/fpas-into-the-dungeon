@@ -2,7 +2,7 @@
 unit Dungeon.Protocol;
 
 // Wire compatibility version required during the hello/welcome handshake.
-public const ProtocolVersion: integer := 16;
+public const ProtocolVersion: integer := 17;
 // Catalog pages and text are bounded to fit one transport line.
 public const MaximumWorldsPerPage: integer := 64;
 public const MaximumWorldReasonLength: integer := 256;
@@ -28,6 +28,14 @@ public const MaximumDungeonDepth: integer := 16;
 // Defensive bounds for the server-formatted character sheet lines.
 public const MaximumCharacterValues: integer := 8;
 public const MaximumCharacterTextLength: integer := 64;
+// Bounded conversation payloads and map labels; response envelopes retain one reply per request.
+public const MaximumDialogueChoices: integer := 6;
+public const MaximumDialogueIdLength: integer := 160;
+public const MaximumDialogueTextLength: integer := 4096;
+public const MaximumDialogueChoiceTextLength: integer := 160;
+public const MaximumDialogueSpeakerLength: integer := 64;
+public const MaximumMapTitleLength: integer := 64;
+public const MaximumMapStatusLength: integer := 256;
 // One-character wire alphabet for visible-state and exploration-map rows. Dungeon.Terrain
 // and Dungeon.Interior produce these codes; the server contract test keeps both aligned.
 // Field whose content is undiscovered in both map and interior rows.
@@ -43,6 +51,10 @@ public const MapRiverCode: string := 'r';
 public const MapLakeCode: string := 'l';
 public const MapPathCode: string := 'p';
 public const MapEntranceCode: string := 'e';
+// Walkable outdoor gate leading to the home settlement.
+public const MapSettlementGateCode: string := 's';
+// A currently visible settlement NPC; never a remembered map field.
+public const MapNpcCode: string := 'n';
 // First-person and interior map rows; item codes appear only in currently visible fields.
 public const InteriorWallCode: string := '#';
 public const InteriorFloorCode: string := '.';
@@ -137,6 +149,9 @@ end record;
 
 // Client-safe map projection; dimensions, rows, and player coordinates must agree.
 public type MapVisibleState = record
+  // Server-projected area label and interaction hint; empty is valid when no label or action is supplied.
+  public Title: string := '';
+  public Status: string := '';
   public OriginX: integer;
   public OriginY: integer;
   public Width: integer;
@@ -190,6 +205,20 @@ public type VisibleState = enum
   MapState(Value: MapVisibleState);
   FirstPersonState(Value: FirstPersonVisibleState);
 end enum;
+
+// Ordered server-authored dialogue choice; the client displays it and returns its identity unchanged.
+public type DialogueChoice = record
+  public Id: string;
+  public Text: string;
+end record;
+
+// Bounded conversation projection; no choice availability or game rules are evaluated by the client.
+public type DialogueFrame = record
+  public NpcId: string;
+  public Speaker: string;
+  public Text: string;
+  public Choices: array of DialogueChoice;
+end record;
 
 // Client-safe current-area map window; u fields must contain ? and dimensions match both row planes.
 public type ExplorationMapState = record
@@ -253,6 +282,10 @@ public type ClientMessage = enum
   TurnFirstPerson(Direction: FirstPersonTurnDirection);
   // Requests server-side interaction with the current field or field directly ahead.
   Interact;
+  // Selects one choice from the current authoritative conversation frame.
+  DialogueChoice(NpcId: string; ChoiceId: string);
+  // Explicitly closes the active conversation without saving it.
+  EndDialogue;
   // Attacks the field directly ahead; consumes one combat turn.
   Attack;
   // Passes one combat turn without acting.
@@ -276,6 +309,10 @@ public type ServerMessage = enum
   ExplorationMap(Value: ExplorationMapState);
   // Read-only result; nonempty title opens a description, empty title denotes status feedback.
   Interaction(Title: string; Message: string);
+  // Atomic response with the current state and the replacement conversation frame.
+  Dialogue(State: VisibleState; Frame: DialogueFrame; Dirty: boolean);
+  // Atomic end acknowledgement with the current state, including any completed healing.
+  DialogueEnded(State: VisibleState; Dirty: boolean);
   SaveCompleted;
   // Replaces the state response of the turn in which the character fell; the session has ended.
   Defeated(Message: string);
@@ -298,7 +335,8 @@ begin
       MapRiverCode,
       MapLakeCode,
       MapPathCode,
-      MapEntranceCode
+      MapEntranceCode,
+      MapSettlementGateCode, MapNpcCode, InteriorWallCode, InteriorFloorCode, InteriorExitCode
     ];
 end function;
 

@@ -72,13 +72,14 @@ The server selects one of two view-specific protocol states:
   title, and status instruction.
 
 Viewport messages update the retained terminal dimensions in both areas, but
-the server loads and projects outdoor chunks only for a map state. Entry and
+the server loads and projects outdoor chunks only in the outdoor region.
+Settlement map states use the retained authored geometry without chunk I/O. Entry and
 exit reuse the same selected world session and chunk cache.
 
 ## Versions and lifecycle
 
-World and chunk format version `3`, generator version `8`, level-file format
-`3`, protocol version `16`, and savegame format `10` are required. Development
+World and chunk format version `4`, generator version `9`, level-file format
+`3`, protocol version `17`, and savegame format `11` are required. Development
 data from older schemas is rejected and preserved without migration or repair. The retained
 return location is part of the authoritative savegame, so a saved interior can
 be loaded and later return to its exact outdoor coordinate. Connecting alone
@@ -86,3 +87,8 @@ does not implicitly start or load a session.
 
 Interior navigation and projection are detailed in
 [first-person interior](first-person-interior.md).
+
+The [home settlement](npcs-and-dialogue.md) uses the same atomic transition
+ordering while retaining the map view. Its gate changes the area identity and
+coordinate space to bounded local fields without facing. Exit returns to the
+retained outdoor gate. The authored map is supplied directly by game rules.

@@ -1,14 +1,14 @@
 // The authoritative game state: creation, validation, and read-only queries of its parts.
 unit Dungeon.GameState;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Progression as Progression, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
+uses Dungeon.Npcs as NpcRules, Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Progression as Progression, Dungeon.Random as Random, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
 
 // Full health of a new player character; health never exceeds it.
 public const PlayerMaximumHealth: integer := 20;
 // Most items the player can carry and wear together.
 public const MaximumInventoryItems: integer := 64;
 
-// Selected world and caller-supplied current interior; absent outdoors.
+// Selected world and supplied finite geometry for a dungeon or settlement; absent outdoors.
 // The caller retains validated geometry; pure rules never load or generate it.
 public type AreaView = record
   public Metadata: Terrain.WorldMetadata;
@@ -21,7 +21,7 @@ public type GameState = record
   public AreaId: string;
   public Player: Coordinates.PlayerPosition;
   public ReturnLocation: Coordinates.ReturnLocation;
-  // Materialized dungeon identities, strictly sorted without duplicates.
+  // Visited dungeon and settlement identities, strictly sorted without duplicates.
   public VisitedAreas: array of string;
   // Persistent server-owned discovery; current visibility is derived by exploration rules.
   public Exploration: Model.ExplorationState;
@@ -31,9 +31,11 @@ public type GameState = record
   public Health: integer;
   // Every opponent of the world, including destroyed ones.
   public Hostiles: array of HostileRules.GameHostile;
+  // Stable world NPC records, including the home settlement before its first visit.
+  public Npcs: array of NpcRules.GameNpc;
   // Dice generator state in 0 until RandomStateModulus; advancing it makes fights reproducible.
   public RandomState: integer;
-  // Cumulative skill experience; levels and bonuses are derived, never stored.
+  // Cumulative skill experience; levels and bonuses Dungeon.Npcs as NpcRules, are derived, never stored.
   public Progression: Progression.ProgressionState;
 end record;
 
@@ -148,7 +150,7 @@ begin
   case State.Player of
     when Coordinates.PlayerPosition.Outdoor(const Value):
       return Ok(Value);
-    when Coordinates.PlayerPosition.FirstPerson(_):
+    when Coordinates.PlayerPosition.FirstPerson(_), Coordinates.PlayerPosition.Settlement(_):
       return Error('player does not occupy an outdoor position');
   end case;
 end function;
@@ -159,12 +161,23 @@ begin
   case State.Player of
     when Coordinates.PlayerPosition.FirstPerson(const Value):
       return Ok(Value);
-    when Coordinates.PlayerPosition.Outdoor(_):
+    when Coordinates.PlayerPosition.Outdoor(_), Coordinates.PlayerPosition.Settlement(_):
       return Error('player does not occupy a first-person position');
   end case;
 end function;
 
-// Creates the player at spawn; dungeon entities are materialized only on first entry.
+// Returns the bounded local field only for a settlement player position.
+public function SettlementPlayerPosition(State: GameState): result of (Coordinates.InteriorPosition, string);
+begin
+  case State.Player of
+    when Coordinates.PlayerPosition.Settlement(const Position):
+      return Ok(Position);
+    when Coordinates.PlayerPosition.Outdoor(_), Coordinates.PlayerPosition.FirstPerson(_):
+      return Error('player does not occupy a settlement position');
+  end case;
+end function;
+
+// Creates the player at spawn; bounded area entities are materialized only on first entry.
 public function NewGame(Metadata: Terrain.WorldMetadata): GameState;
 begin
   return GameState(
@@ -177,6 +190,7 @@ begin
     Items := [],
     Health := PlayerMaximumHealth,
     Hostiles := [],
+    Npcs := NpcRules.NewNpcs(Metadata),
     RandomState := InitialRandomState(Metadata.Seed),
     Progression := Progression.NewProgression()
   );
@@ -198,13 +212,16 @@ begin
   return false;
 end function;
 
-// Returns the supplied current dungeon map, rejecting absent or mismatched geometry.
+// Returns the supplied current finite map, rejecting absent or mismatched geometry.
 // Geometry must already be validated by its owner; this helper performs no loading.
 public function CurrentInterior(View: AreaView; State: GameState): result of (InteriorUnit.InteriorMap, string);
 begin
-  if State.Area <> Coordinates.AreaKind.Dungeon then
+  if (State.Area <> Coordinates.AreaKind.Dungeon)
+    and
+    (State.Area <> Coordinates.AreaKind.Settlement)
+  then
     begin
-      return Error('current area does not have dungeon geometry');
+      return Error('current area does not have bounded geometry');
     end;
   end if;
 
@@ -231,6 +248,10 @@ end function;
 // of the current area is checked by ValidateGameState and placements by ValidateSavedGame.
 public function ValidateStateShape(Metadata: Terrain.WorldMetadata; State: GameState): result of (GameState, string);
 begin
+  const ValidNpcs := try NpcRules.ValidateNpcs(Metadata, State.Npcs);
+  if State.Npcs[0].HasMetPlayer and not HasVisitedArea(State, Settlements.HomeAreaId(Metadata)) then
+    return Error('a met NPC requires its settlement to have been visited');
+  end if;
   const ValidExploration: Model.ExplorationState := try Model.ValidateExploration(
     State.Exploration,
     Coordinates.WorldChunkSize
@@ -455,6 +476,28 @@ begin
     end;
   end if;
 
+  if State.Area = Coordinates.AreaKind.Settlement then
+    if State.AreaId <> Settlements.HomeAreaId(Metadata) then
+      return Error('unknown settlement identity');
+    end if;
+    const Position := try SettlementPlayerPosition(State);
+    if NpcRules.At(State.Npcs, State.AreaId, Position) >= 0 then
+      return Error('settlement player position must not overlap an NPC');
+    end if;
+
+    if not HasVisitedArea(State, State.AreaId) then
+      return Error('current settlement must be visited');
+    end if;
+
+    if State.ReturnLocation <>
+      Coordinates.ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.SettlementGate)
+    then
+      return Error('settlement return location must name its outdoor gate');
+    end if;
+
+    return Ok(State);
+  end if;
+
   if State.Area = Coordinates.AreaKind.Dungeon then
     begin
       if not HasVisitedArea(State, State.AreaId) then
@@ -507,11 +550,52 @@ begin
   return Error('game state names an unknown area identity');
 end function;
 
+function ValidateMapDiscovery(Areas: array of Model.InteriorDiscoveryArea; Map: InteriorUnit.InteriorMap): result of (boolean, string);
+begin
+  for Area: Model.InteriorDiscoveryArea in Areas do
+    if (Area.AreaId = Map.AreaId) and ((Area.Width <> Map.Width) or (Area.Height <> Map.Height)) then
+      return Error('discovery dimensions do not match the authoritative area');
+    end if;
+  end for;
+
+  return Ok(true);
+end function;
+
 // Performs per-intention state checks: the self-contained shape plus the current area's geometry
 // from the supplied view. Placement completeness and non-current geometry are checked by ValidateSavedGame.
 public function ValidateGameState(View: AreaView; State: GameState): result of (GameState, string);
 begin
   const Shaped: GameState := try ValidateStateShape(View.Metadata, State);
+  if State.Area = Coordinates.AreaKind.Settlement then
+    const Map := try CurrentInterior(View, State);
+    const ValidMap := try Settlements.ValidateHomeMap(View.Metadata, Map);
+    const DiscoveryValid := try ValidateMapDiscovery(State.Exploration.InteriorAreas, Map);
+    if (try InteriorUnit.InteriorCellAt(Map, try SettlementPlayerPosition(State))) =
+      InteriorUnit.InteriorCellKind.Wall
+    then
+      return Error('settlement player position must be traversable');
+    end if;
+
+    for Item: ItemRules.GameItem in State.Items do
+      case Item.Location of
+        when ItemRules.ItemLocation.InInterior(const AreaId, _):
+          if AreaId = State.AreaId then
+            return Error('settlement cannot contain floor items');
+          end if;
+        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.Consumed:
+          null;
+      end case;
+    end for;
+
+    for Hostile: HostileRules.GameHostile in State.Hostiles do
+      if Hostile.AreaId = State.AreaId then
+        return Error('settlement cannot contain opponents');
+      end if;
+    end for;
+
+    return Ok(State);
+  end if;
+
   if State.Area <> Coordinates.AreaKind.Dungeon then
     begin
       case View.Interior of
@@ -571,19 +655,7 @@ begin
     end;
   end for;
 
-  for Area: Model.InteriorDiscoveryArea in State.Exploration.InteriorAreas do
-    begin
-      if Area.AreaId = State.AreaId then
-        begin
-          if (Area.Width <> Map.Width) or (Area.Height <> Map.Height) then
-            begin
-              return Error('interior discovery dimensions do not match the authoritative area');
-            end;
-          end if;
-        end;
-      end if;
-    end;
-  end for;
+  const DiscoveryValid := try ValidateMapDiscovery(State.Exploration.InteriorAreas, Map);
 
   return Ok(State);
 end function;

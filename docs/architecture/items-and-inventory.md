@@ -155,7 +155,7 @@ narrow-screen overlay; no new preference or configuration schema is introduced.
 
 ## Persistence
 
-Savegame format 10 stores the complete item array alongside player, return, and
+Savegame format 11 stores the complete item array alongside player, return, and
 exploration state. Each location is an explicit variant: an interior area and
 field, carried by the player, equipped in a slot, or consumed. A consumed
 location is exactly `{"kind":"consumed"}`; extra coordinates, owner, area or

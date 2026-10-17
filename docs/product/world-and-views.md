@@ -23,15 +23,25 @@ presentation, including the first combat, equipment and progression terms. It do
 - **Area identity** is the stable server-owned identifier of one area. It is
   deterministic within the selected world and remains separate from the
   display label shown to players.
-- **Visited area** is a dungeon whose original entities have been created in
-  the current game. It remains visited after leaving, and its visit record
-  survives save/load. A new game starts with no visited areas.
+- **Visited area** is a dungeon level or settlement entered in the current
+  game. Dungeon entry materializes its original entities; settlement entry
+  records its authored geometry and discovery. Visits survive leaving and
+  save/load. A new game starts with no visited areas.
 - **Materialization** is the one-time creation of mutable items and opponents
   from a dungeon's original placements on its first entry in a game. Revisits
   retain their current state.
 - **Outdoor region** is an exterior area such as countryside, wilderness, or
   the land between settlements. Outdoor regions may be practically unbounded.
 - **Settlement** is an exterior built-up area such as a village or town.
+- **Home settlement** is the world's authored settlement near spawn, currently
+  Hearthmoor, with stable identity `<world>:settlement:home`.
+- **Settlement gate** is the outdoor location leading to a settlement. The
+  home gate lies six traversable cardinal steps from spawn; its marker is `s`.
+- **NPC** is a non-hostile server-owned character with stable identity, kind,
+  area and persistent meeting state. Mara is the first NPC and blocks her field.
+- **Dialogue** is a deterministic server-owned conversation with an NPC. Each
+  frame offers ordered choices with stable IDs. Answers refresh that frame;
+  the active conversation belongs to the connection and is never saved.
 - **Interior** is an entered, enclosed part of a building such as a house or
   castle.
 - **Dungeon** is an enclosed exploration area. It remains a distinct kind of
@@ -85,7 +95,7 @@ presentation, including the first combat, equipment and progression terms. It do
   coordinates use floor-based conversion so negative positions map
   consistently to chunk and local coordinates.
 - **Visible window** is the bounded rectangular part of an area sent to a
-  client. It has a world-coordinate origin and is independent of chunk
+  client. It has an area-coordinate origin and is independent of chunk
   boundaries.
 - **Player intention** is an action requested by the client. It is not an
   authoritative result.
@@ -176,9 +186,9 @@ presentation, including the first combat, equipment and progression terms. It do
   turn changes the facing direction without changing the occupied field.
 
 Walking across a chunk boundary is seamless movement within the same outdoor
-region. A transition changes both area identity and view family and occurs only
-when entering or leaving a settlement, interior, dungeon, or another distinct
-area.
+region. A transition changes area identity and may retain or change the view
+family. Entering a settlement from the outdoor region retains the map view;
+entering a house from the settlement changes to the first-person view.
 
 ## UI terminology
 
@@ -270,11 +280,15 @@ player to the dungeon's entrance site; stairs move between levels without
 spending a turn.
 
 Accepted outdoor steps restore one health point, up to the player's maximum.
+Hearthmoor is a separate authored 23 by 15 area using the map view and bounded
+local positions without facing. Its gate returns to the same outdoor field.
+Mara offers information and free healing from any cardinally adjacent field;
+settlement steps do not heal. See [NPCs and dialogue](../architecture/npcs-and-dialogue.md).
 
 Skeletons notice the player through line of sight, chase, and fight turn by
 turn; see [combat](../architecture/combat.md).
 
-Settlements, building interiors, mutable terrain, broader
+Further settlements, building interiors, mutable terrain, broader
 world simulation, isometric rendering, LLM integration, and broader mutable RPG
 systems remain outside this slice. Their intended order is tracked in the
 [roadmap](../roadmap.md).

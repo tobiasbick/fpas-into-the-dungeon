@@ -118,7 +118,7 @@ Introduced with protocol version 11 and extended in versions 12 and 15:
 
 ## Persistence
 
-The save (format 10) holds the player's health, the random generator state, and
+The save (format 11) holds the player's health, the random generator state, and
 the complete record of every opponent of the visited dungeons with identity,
 kind, area, position, health, and alert status. Validation requires exactly one
 record per stored opponent placement, a traversable field in its own area that

@@ -1,0 +1,179 @@
+// Deterministic Mara dialogue: authoritative frames, conditional topics, meeting state and free healing.
+unit Dungeon.Dialogue;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior.Generation.Content as Content,
+  Dungeon.Interior.Generation.Levels as Levels, Dungeon.Items as Items, Dungeon.Npcs as Npcs,
+  Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv, Std.Math as Math;
+
+// Stable topic identity and player-facing label; the server alone selects available choices.
+public type Choice = record
+  public Id: string;
+  public Text: string;
+end record;
+
+// Connection-local conversation projection; this frame is never part of a savegame.
+public type Frame = record
+  public NpcId: string;
+  public Speaker: string;
+  public Text: string;
+  public Choices: array of Choice;
+end record;
+
+// One atomic dialogue result. Continuing supplies refreshed choices and whether progress changed;
+// ending retains only game state. Text-only answers and repeated greetings do not dirty a saved game.
+public type Outcome = enum
+  Continued(State: GameState.GameState; Dialogue: Frame; ChangesGame: boolean);
+  Ended(State: GameState.GameState);
+end enum;
+
+// Returns whether Mara is in cardinal interaction reach in the current settlement map.
+// A gate interaction has precedence, even if an authored NPC were adjacent to the gate.
+public function MaraInReach(View: GameState.AreaView; State: GameState.GameState): boolean;
+begin
+  if State.Area <> Coordinates.AreaKind.Settlement then
+    return false;
+  end if;
+
+  case GameState.SettlementPlayerPosition(State) of
+    when Error(_):
+      return false;
+    when Ok(const Position):
+      case View.Interior of
+        when None:
+          return false;
+        when Some(const Map):
+          if Position = Map.Arrival then
+            return false;
+          end if;
+      end case;
+
+      if State.Npcs.Length() <> 1 then
+        return false;
+      end if;
+      const Npc := State.Npcs[0];
+      const Field := Npcs.Position(Npc.Kind);
+      return (Npc.AreaId = State.AreaId)
+        and
+        (Math.Abs(Field.X - Position.X) + Math.Abs(Field.Y - Position.Y) = 1);
+  end case;
+end function;
+
+function ChoicesFor(State: GameState.GameState): array of Choice;
+begin
+  var Choices: array of Choice := [
+    Choice(Id := 'identity', Text := 'Who are you?'),
+    Choice(Id := 'dungeon', Text := 'What lies beneath the hills?')
+  ];
+  var CarriesCoin := false;
+  for Item: Items.GameItem in State.Items do
+    if (Item.Kind = Items.ItemKind.AncientCoin)
+      and
+      (Item.Location is Items.ItemLocation.CarriedByPlayer)
+    then
+      CarriesCoin := true;
+    end if;
+  end for;
+
+  if CarriesCoin then
+    Choices.PushInPlace(Choice(Id := 'coin', Text := 'What do you know about this coin?'));
+  end if;
+
+  if State.Health < GameState.PlayerMaximumHealth then
+    Choices.PushInPlace(Choice(Id := 'wounds', Text := 'Could you tend my wounds?'));
+  end if;
+
+  Choices.PushInPlace(Choice(Id := 'goodbye', Text := 'Goodbye.'));
+  return Choices;
+end function;
+
+function CurrentFrame(State: GameState.GameState; Text: string): Frame;
+begin
+  return Frame(
+    NpcId := State.Npcs[0].Id, Speaker := Npcs.DisplayName(State.Npcs[0].Kind),
+    Text := Text, Choices := ChoicesFor(State)
+  );
+end function;
+
+function Contains(Choices: array of Choice; Id: string): boolean;
+begin
+  for Entry: Choice in Choices do
+    if Entry.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+// Starts only next to Mara. The opening uses the previous meeting flag, then changes it to true once.
+public function Start(View: GameState.AreaView; State: GameState.GameState): result of (Outcome, string);
+begin
+  const Valid := try GameState.ValidateGameState(View, State);
+  if not MaraInReach(View, Valid) then
+    return Error('Mara is not in interaction reach');
+  end if;
+  const Text := if Valid.Npcs[0].HasMetPlayer then 'Mara recognizes you and rests both hands on her worn walking staff.'
+    else 'A weathered adventurer lowers her lantern. She introduces herself as Mara and invites your questions.'
+    end if;
+  var Changed := Valid;
+  Changed.Npcs[0].HasMetPlayer := true;
+  return Ok(
+    Outcome.Continued(Changed, CurrentFrame(Changed, Text), not Valid.Npcs[0].HasMetPlayer)
+  );
+end function;
+
+function ValidateConversation(View: GameState.AreaView; State: GameState.GameState; Current: Frame): result of (GameState.GameState, string);
+begin
+  const Valid := try GameState.ValidateGameState(View, State);
+  if not MaraInReach(View, Valid) or (Current.NpcId <> Valid.Npcs[0].Id)
+    or
+    not Valid.Npcs[0].HasMetPlayer
+  then
+    return Error('dialogue does not match the current NPC');
+  end if;
+
+  return Ok(Valid);
+end function;
+
+// Ends an active, matching conversation without changing time, items or dice.
+public function EndConversation(View: GameState.AreaView; State: GameState.GameState; Current: Frame): result of (Outcome, string);
+begin
+  return Ok(Outcome.Ended(try ValidateConversation(View, State, Current)));
+end function;
+
+// Applies only a topic present in both the active authoritative frame and current game-state choices.
+// Every answer keeps the conversation open; healing changes only health and never consumes dice or a turn.
+public function Choose(View: GameState.AreaView; State: GameState.GameState; Current: Frame; ChoiceId: string): result of (Outcome, string);
+begin
+  const Valid := try ValidateConversation(View, State, Current);
+  if not Contains(Current.Choices, ChoiceId) or not Contains(ChoicesFor(Valid), ChoiceId) then
+    return Error('dialogue choice is not currently available');
+  end if;
+
+  if ChoiceId = 'goodbye' then
+    return Ok(Outcome.Ended(Valid));
+  end if;
+  var Changed := Valid;
+  var Text := '';
+  case ChoiceId of
+    when 'identity':
+      Text := 'Mara once mapped the nearby halls. She now lives in Hearthmoor and warns travelers who follow the same path.';
+    when 'dungeon':
+      const Region := Entrances.RegionOf(View.Metadata, View.Metadata.Spawn);
+      Text := 'The nearby dungeon is ' +
+        Content.DungeonName(View.Metadata.Seed, Region.X, Region.Y) +
+        '. It has ' + Conv.IntToStr(Levels.DungeonDepth(View.Metadata.Seed, Region.X, Region.Y)) +
+        ' levels. Mark each turn and look for the way back. Something restless still walks the inner passages.';
+    when 'coin':
+      Text := 'Mara studies the crescent-marked coin. She has seen the doorway symbol before, but not who minted it.';
+    when 'wounds':
+      Changed.Health := GameState.PlayerMaximumHealth;
+      Text := 'Mara cleans and binds your wounds with practiced hands. You feel whole again.';
+    else
+      return Error('unknown dialogue choice');
+  end case;
+
+  return Ok(Outcome.Continued(Changed, CurrentFrame(Changed, Text), ChoiceId = 'wounds'));
+end function;
+end unit;

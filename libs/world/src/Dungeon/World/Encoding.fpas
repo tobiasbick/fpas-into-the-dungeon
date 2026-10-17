@@ -53,6 +53,10 @@ begin
       'outdoor_area_label': Json.JsonValue.String(Metadata.OutdoorAreaLabel),
       'spawn_entrance_x': Json.JsonValue.Number(Conv.IntToReal(Metadata.SpawnEntrance.X)),
       'spawn_entrance_y': Json.JsonValue.Number(Conv.IntToReal(Metadata.SpawnEntrance.Y)),
+      'settlement_gate': Json.JsonValue.Object([
+        'x': Json.JsonValue.Number(Conv.IntToReal(Metadata.SettlementGate.X)),
+        'y': Json.JsonValue.Number(Conv.IntToReal(Metadata.SettlementGate.Y))
+      ]),
       'dungeon_region_chunks': Json.JsonValue.Number(Conv.IntToReal(Metadata.DungeonRegionChunks))
     ])
   );
@@ -61,11 +65,20 @@ end function;
 function DecodeMetadataFields(Text: string; ExpectedId: string): result of (Terrain.WorldMetadata, string);
 begin
   const Fields: dict of string to Json.JsonValue := try JsonFields.ParseObject(Text);
-  if Fields.Length() <> 12 then
+  if (try JsonFields.IntegerField(Fields, 'version')) <> Terrain.WorldFormatVersion then
+    return Error('unsupported world format version');
+  end if;
+
+  if Fields.Length() <> 13 then
     begin
       return Error('world metadata must contain exactly the current schema fields');
     end;
   end if;
+  const Gate: dict of string to Json.JsonValue := try JsonFields.ObjectField(
+    Fields,
+    'settlement_gate'
+  );
+  const GateFields: boolean := try JsonFields.RequireOnlyFields(Gate, ['x', 'y']);
   const Metadata: Terrain.WorldMetadata := Terrain.WorldMetadata(
     FormatVersion := try JsonFields.IntegerField(Fields, 'version'),
     Id := try JsonFields.StringField(Fields, 'id'),
@@ -81,6 +94,9 @@ begin
     SpawnEntrance := Coordinates.WorldPosition(
       X := try JsonFields.IntegerField(Fields, 'spawn_entrance_x'),
       Y := try JsonFields.IntegerField(Fields, 'spawn_entrance_y')
+    ),
+    SettlementGate := Coordinates.WorldPosition(
+      X := try JsonFields.IntegerField(Gate, 'x'), Y := try JsonFields.IntegerField(Gate, 'y')
     ),
     DungeonRegionChunks := try JsonFields.IntegerField(Fields, 'dungeon_region_chunks')
   );
@@ -175,6 +191,8 @@ begin
       begin
         return 'e';
       end;
+    when Terrain.TerrainFeatureKind.SettlementGate:
+      return 's';
   end case;
 end function;
 
@@ -253,6 +271,8 @@ begin
       begin
         return Ok(Terrain.TerrainFeatureKind.Entrance);
       end;
+    when 's':
+      return Ok(Terrain.TerrainFeatureKind.SettlementGate);
     else
       begin
         return Error('chunk contains an unknown terrain feature code');
@@ -443,6 +463,28 @@ begin
 
   for Index: integer := 0 to Chunk.Cells.Length() - 1 do
     begin
+      const IsGate: boolean := (
+        ExpectedCoordinate.X * Coordinates.WorldChunkSize + (Index mod Coordinates.WorldChunkSize) =
+        Metadata.SettlementGate.X
+      )
+        and
+        (
+          ExpectedCoordinate.Y * Coordinates.WorldChunkSize +
+          (Index div Coordinates.WorldChunkSize) = Metadata.SettlementGate.Y
+        );
+      if IsGate <> (Chunk.Cells[Index].Feature = Terrain.TerrainFeatureKind.SettlementGate) then
+        return Error('chunk settlement gate feature does not match world metadata');
+      end if;
+
+      if IsGate
+        and
+        not Entrances.CellIsClearEntrance(
+          Chunk.Cells[Index] with Feature := Terrain.TerrainFeatureKind.NoFeature; end with
+        )
+      then
+        return Error('chunk settlement gate requires clear walkable land');
+      end if;
+
       if ExpectedEntrances[Index] <>
         (Chunk.Cells[Index].Feature = Terrain.TerrainFeatureKind.Entrance)
       then

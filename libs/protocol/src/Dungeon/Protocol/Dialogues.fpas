@@ -1,0 +1,122 @@
+// Exact bounded dialogue wire frames and intentions, without evaluating choice availability.
+unit Dungeon.Protocol.Dialogues;
+
+uses Dungeon.Protocol as Protocol, Std.Json as Json, Std.Json.Fields as Fields;
+
+// Accepts a bounded opaque NPC identity from the established world/area identity alphabet.
+public function ValidateNpcId(Value: string): result of (string, string);
+begin
+  if (Value.Length() = 0) or (Value.Length() > Protocol.MaximumDialogueIdLength) then
+    return Error('dialogue NPC id has an invalid length');
+  end if;
+
+  for Index: integer := 0 to Value.Length() - 1 do
+    if not (Value[Index] in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:') then
+      return Error('dialogue NPC id contains an invalid character');
+    end if;
+  end for;
+
+  return Ok(Value);
+end function;
+
+// Admits the stable topic IDs in protocol 17; the server still checks the current frame's availability.
+public function ValidateChoiceId(Value: string): result of (string, string);
+begin
+  if not (Value in ['identity', 'dungeon', 'coin', 'wounds', 'goodbye']) then
+    return Error('unknown dialogue choice id');
+  end if;
+
+  return Ok(Value);
+end function;
+
+function ValidText(Value: string; Maximum: integer; Multiline: boolean): boolean;
+begin
+  if (Value.Length() = 0) or (Value.Length() > Maximum) then
+    return false;
+  end if;
+
+  for Index: integer := 0 to Value.Length() - 1 do
+    const Code := Value[Index].Ord();
+    if ((Code < 32) and not (Multiline and ((Code = 9) or (Code = 10)))) or (Code = 127) then
+      return false;
+    end if;
+  end for;
+
+  return true;
+end function;
+
+// Encodes one server-authored conversation frame; decoding enforces bounds and exact field sets.
+public function EncodeFrame(Value: Protocol.DialogueFrame): Json.JsonValue;
+begin
+  var Choices: array of Json.JsonValue := [];
+  for Choice: Protocol.DialogueChoice in Value.Choices do
+    Choices.PushInPlace(
+      Json.JsonValue.Object([
+        'id': Json.JsonValue.String(Choice.Id),
+        'text': Json.JsonValue.String(Choice.Text)
+      ])
+    );
+  end for;
+
+  return Json.JsonValue.Object([
+    'npc_id': Json.JsonValue.String(Value.NpcId),
+    'speaker': Json.JsonValue.String(Value.Speaker), 'text': Json.JsonValue.String(Value.Text),
+    'choices': Json.JsonValue.ArrayValue(Choices)
+  ]);
+end function;
+
+// Requires bounded text, at least one choice, unique known IDs and exact typed nested field sets.
+public function DecodeFrame(ObjectFields: dict of string to Json.JsonValue): result of (Protocol.DialogueFrame, string);
+begin
+  const Known := try Fields.RequireOnlyFields(
+    ObjectFields,
+    ['npc_id', 'speaker', 'text', 'choices']
+  );
+  if ObjectFields.Length() <> 4 then
+    return Error('dialogue frame has an unexpected field set');
+  end if;
+  const Id := try ValidateNpcId(try Fields.StringField(ObjectFields, 'npc_id'));
+  const Speaker := try Fields.StringField(ObjectFields, 'speaker');
+  const Text := try Fields.StringField(ObjectFields, 'text');
+  if not ValidText(Speaker, Protocol.MaximumDialogueSpeakerLength, false) then
+    return Error('dialogue speaker has invalid text');
+  end if;
+
+  if not ValidText(Text, Protocol.MaximumDialogueTextLength, true) then
+    return Error('dialogue text has invalid text');
+  end if;
+  const Values := try Fields.ArrayField(ObjectFields, 'choices');
+  if (Values.Length() < 1) or (Values.Length() > Protocol.MaximumDialogueChoices) then
+    return Error('dialogue choice count is outside its bound');
+  end if;
+  var Choices: array of Protocol.DialogueChoice := [];
+  for Value: Json.JsonValue in Values do
+    case Value of
+      when Json.JsonValue.Object(const ChoiceFields):
+        const ChoiceKnown := try Fields.RequireOnlyFields(ChoiceFields, ['id', 'text']);
+        if ChoiceFields.Length() <> 2 then
+          return Error('dialogue choice must contain id and text');
+        end if;
+        const ChoiceId := try ValidateChoiceId(try Fields.StringField(ChoiceFields, 'id'));
+        const ChoiceText := try Fields.StringField(ChoiceFields, 'text');
+        if not ValidText(ChoiceText, Protocol.MaximumDialogueChoiceTextLength, false) then
+          return Error('dialogue choice text has invalid length or controls');
+        end if;
+
+        for Previous: Protocol.DialogueChoice in Choices do
+          if Previous.Id = ChoiceId then
+            return Error('dialogue choices must have unique ids');
+          end if;
+        end for;
+
+        Choices.PushInPlace(Protocol.DialogueChoice(Id := ChoiceId, Text := ChoiceText));
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+        return Error('dialogue choices must be objects');
+    end case;
+  end for;
+
+  return Ok(
+    Protocol.DialogueFrame(NpcId := Id, Speaker := Speaker, Text := Text, Choices := Choices)
+  );
+end function;
+end unit;

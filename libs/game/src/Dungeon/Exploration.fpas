@@ -94,6 +94,12 @@ begin
   return Sorted;
 end function;
 
+// Returns whether the exploration state records any discovery for one outdoor chunk.
+public function OutdoorChunkHasDiscovery(State: Model.ExplorationState; ChunkX: integer; ChunkY: integer): boolean;
+begin
+  return FindOutdoorChunk(State.OutdoorChunks, ChunkX, ChunkY) >= 0;
+end function;
+
 // Returns whether one signed outdoor world coordinate was discovered earlier.
 public function OutdoorIsDiscovered(State: Model.ExplorationState; X: integer; Y: integer): boolean;
 begin
@@ -258,11 +264,11 @@ begin
 end function;
 
 // Merges facing-aware interior visibility, rejecting an existing mask with different dimensions.
-public function RevealInterior(
+function MergeFiniteVisibility(
   State: Model.ExplorationState;
   AreaId: string;
   Map: InteriorUnit.InteriorMap;
-  Pose: Coordinates.FirstPersonPose
+  Visible: array of boolean
 ): result of (Model.ExplorationState, string);
 begin
   var Areas: array of Model.InteriorDiscoveryArea := State.InteriorAreas;
@@ -288,7 +294,6 @@ begin
     end;
   end if;
   var Fields: array of boolean := Area.Fields;
-  const Visible: array of boolean := Sight.InteriorVisibility(Map, Pose);
   for FieldIndex: integer := 0 to Fields.Length() - 1 do
     begin
       Fields[FieldIndex] := Fields[FieldIndex] or Visible[FieldIndex];
@@ -298,6 +303,36 @@ begin
   Area.Fields := Fields;
   Areas[Index] := Area;
   return Ok(Model.ExplorationState(OutdoorChunks := State.OutdoorChunks, InteriorAreas := Areas));
+end function;
+
+// Returns the outdoor non-occluded sight circle clipped to a finite settlement layout.
+public function SettlementVisibility(Map: InteriorUnit.InteriorMap; Position: Coordinates.InteriorPosition): array of boolean;
+begin
+  return OutdoorVisibility(
+    0,
+    0,
+    Map.Width,
+    Map.Height,
+    Coordinates.WorldPosition(X := Position.X, Y := Position.Y)
+  );
+end function;
+
+// Merges facing-aware interior sight into the area's bounded persistent discovery mask.
+public function RevealInterior(
+  State: Model.ExplorationState; AreaId: string; Map: InteriorUnit.InteriorMap;
+  Pose: Coordinates.FirstPersonPose
+): result of (Model.ExplorationState, string);
+begin
+  return MergeFiniteVisibility(State, AreaId, Map, Sight.InteriorVisibility(Map, Pose));
+end function;
+
+// Merges non-occluded settlement sight without creating outdoor discovery chunks or a facing.
+public function RevealSettlement(
+  State: Model.ExplorationState; AreaId: string; Map: InteriorUnit.InteriorMap;
+  Position: Coordinates.InteriorPosition
+): result of (Model.ExplorationState, string);
+begin
+  return MergeFiniteVisibility(State, AreaId, Map, SettlementVisibility(Map, Position));
 end function;
 
 // Classifies one field without retaining derived current visibility.
@@ -330,6 +365,15 @@ begin
       );
       return Ok(RevealedState);
     end;
+  end if;
+
+  if RevealedState.Area = Coordinates.AreaKind.Settlement then
+    RevealedState.Exploration := try RevealSettlement(
+      RevealedState.Exploration, RevealedState.AreaId,
+      try GameState.CurrentInterior(View, State),
+      try GameState.SettlementPlayerPosition(RevealedState)
+    );
+    return Ok(RevealedState);
   end if;
 
   if RevealedState.Area = Coordinates.AreaKind.Dungeon then

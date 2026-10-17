@@ -1,0 +1,144 @@
+// Presents server-owned dialogue frames and queues choices without deriving game rules.
+unit Dungeon.Client.Ui.Dialogue;
+
+uses
+  Dungeon.Client.Model as Model, Dungeon.Client.Ui.Layout as Layout,
+  Dungeon.Protocol as Protocol, Std.Math as Math, Std.Tasks as Tasks, Std.Tui as Tui;
+
+function Width(State: Model.ClientModel): integer;
+begin
+  return Math.Clamp(State.ViewportWidth - 8, 1, 64);
+end function;
+
+function PageHeight(State: Model.ClientModel): integer;
+begin
+  return Math.Clamp(State.ViewportHeight - 6, 1, 22);
+end function;
+
+function Lines(State: Model.ClientModel; Frame: Protocol.DialogueFrame): array of string;
+begin
+  var Values := Layout.WrappedLines(Frame.Text, Width(State));
+  Values.PushInPlace('');
+  for Index: integer := 0 to Frame.Choices.Length() - 1 do
+    const Prefix := if Index = State.DialogueSelection then '> ' else '  ' end if;
+    for Line: string in Layout.WrappedLines(Prefix + Frame.Choices[Index].Text, Width(State)) do
+      Values.PushInPlace(Line);
+    end for;
+  end for;
+
+  return Values;
+end function;
+
+function SelectedLine(State: Model.ClientModel; Frame: Protocol.DialogueFrame): integer;
+begin
+  var Line := Layout.WrappedLines(Frame.Text, Width(State)).Length() + 1;
+  for Index: integer := 0 to State.DialogueSelection - 1 do
+    Line := Line + Layout.WrappedLines('  ' + Frame.Choices[Index].Text, Width(State)).Length();
+  end for;
+
+  return Line;
+end function;
+
+function Queue(State: Model.ClientModel; Message: Protocol.ClientMessage): Model.ClientModel;
+begin
+  if State.Pending or (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) then
+    return State;
+  end if;
+
+  case Tasks.TrySend(State.Requests, Message) of
+    when Ok(true):
+      return State with Pending := true; PendingChangesProgress := false; Status := 'Talking...'; end with;
+    when Ok(false), Error(_):
+      return State;
+  end case;
+end function;
+
+// Owns all keys while the modal is open; Escape waits for the server's end acknowledgement.
+public function HandleKey(State: Model.ClientModel; Key: Tui.TuiKeyEvent): Model.ClientModel;
+begin
+  const Frame := State.ActiveDialogue.Unwrap();
+  if State.Pending then
+    return State;
+  end if;
+
+  if Key.kind = Tui.TuiKeyKind.Escape then
+    return Queue(State, Protocol.ClientMessage.EndDialogue);
+  end if;
+
+  if Key.kind = Tui.TuiKeyKind.Enter then
+    return Queue(
+      State,
+      Protocol.ClientMessage.DialogueChoice(Frame.NpcId, Frame.Choices[State.DialogueSelection].Id)
+    );
+  end if;
+  var Delta := 0;
+  if (Key.kind = Tui.TuiKeyKind.Up)
+    or
+    ((Key.kind = Tui.TuiKeyKind.Character) and ((Key.ch = 'w') or (Key.ch = 'W')))
+  then
+    Delta := -1;
+  end if;
+
+  if (Key.kind = Tui.TuiKeyKind.Down)
+    or
+    ((Key.kind = Tui.TuiKeyKind.Character) and ((Key.ch = 's') or (Key.ch = 'S')))
+  then
+    Delta := 1;
+  end if;
+  var Next := State;
+  const Maximum := Math.Max(0, Lines(State, Frame).Length() - PageHeight(State));
+  if Delta <> 0 then
+    Next.DialogueSelection := (State.DialogueSelection + Delta + Frame.Choices.Length()) mod
+      Frame.Choices.Length();
+    const Line := SelectedLine(Next, Frame);
+    if Line < Next.DialogueOffset then
+      Next.DialogueOffset := Line;
+    end if;
+
+    if Line >= Next.DialogueOffset + PageHeight(State) then
+      Next.DialogueOffset := Line - PageHeight(State) + 1;
+    end if;
+  end if;
+
+  if Key.kind = Tui.TuiKeyKind.PageUp then
+    Next.DialogueOffset := Next.DialogueOffset - PageHeight(State);
+  end if;
+
+  if Key.kind = Tui.TuiKeyKind.PageDown then
+    Next.DialogueOffset := Next.DialogueOffset + PageHeight(State);
+  end if;
+
+  Next.DialogueOffset := Math.Clamp(Next.DialogueOffset, 0, Maximum);
+  return Next;
+end function;
+
+// Wraps the complete frame into a scrollable page so narrow terminals retain every topic and answer.
+public function View(State: Model.ClientModel): Tui.TuiElement;
+begin
+  const Frame := State.ActiveDialogue.Unwrap();
+  const Values := Lines(State, Frame);
+  const Offset := Math.Clamp(
+    State.DialogueOffset,
+    0,
+    Math.Max(0, Values.Length() - PageHeight(State))
+  );
+  var Content: array of Tui.TuiElement := [];
+  for Index: integer := Offset to Math.Min(Values.Length(), Offset + PageHeight(State)) - 1 do
+    Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Values[Index]));
+  end for;
+
+  Content.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(
+      Layout.FitLine(
+        if State.Pending then 'Waiting for Mara...'
+          else 'W/S: select  Enter: choose  Esc: end  PgUp/PgDn: scroll'
+          end if, Width(State)
+      )
+    )
+  );
+  return Tui.TuiElementBuilders.MakeOverlay(
+    Frame.Speaker,
+    [Tui.TuiElementBuilders.MakeColumn(Content)]
+  );
+end function;
+end unit;

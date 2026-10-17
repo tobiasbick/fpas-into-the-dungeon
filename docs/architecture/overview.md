@@ -54,7 +54,8 @@ these projects.
   `Controls` (control and action identities), `Layout` (docking and viewports),
   `Session` (connection and session lifecycle), `Worlds` (catalog, creation
   editor and discard confirmation),
-  `Intentions` (queued player requests), `Input` (keys and actions), `Events`
+  `Intentions` (queued player requests), `Dialogue` (modal frame and input),
+  `Input` (keys and actions), `Events`
   (network events), `Playback` (combat animation clock), `MapCells`,
   `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`,
   `.Character` and `.CharacterSheet` render the first-person view, combat
@@ -104,7 +105,7 @@ these projects.
   own the policy (`Config`), per-connection session rules (`Session`),
   enumeration conversions (`Mapping`), client-safe projections (`Projection`),
   replies, turn and transition commits (`Replies`), message handling
-  (`Handling`), and the mapping of typed storage failures to stable rejection
+  (`Handling`), connection-local dialogue (`Dialogue`), and the mapping of typed storage failures to stable rejection
   codes (`Failures`), world lifecycle (`Worlds`), bounded diagnostics (`Logging`)
   and optional dashboard/settings (`Console`). `Diagnostics` projects committed
   session facts into typed snapshots, separately from timestamped log text.
@@ -131,8 +132,9 @@ these projects.
   panels and settings overlays (`View`), and validated keyboard events (`Input`).
   The facade owns only the cancellable listener subscription and event inbox.
   `Session` retains
-  the current interior map and builds area views from it. Entry opens the target
-  level through the world layer; loading
+  the current finite map and builds area views from it. Dungeon entry opens the target
+  level through the world layer; settlement entry resolves authored geometry
+  from `Dungeon.Settlements` without files. Loading
   installs the already validated view returned by the world layer.
   Turn and ordinary state replies prepare discovery, projection and a bounded
   UTF-8 response before installing a replacement session. Preparation failures
@@ -276,3 +278,13 @@ and ownership rules.
 - The [server console](../product/server-console.md) describes the optional
   full-terminal administration dashboard, log controls and creation defaults.
 - `docs/architecture` describes the system structure and module interfaces.
+
+## Home settlement
+
+`Dungeon.Settlements`, `Dungeon.Npcs` and `Dungeon.Dialogue` in `libs/game`
+own authored geometry, NPC records and deterministic conversation effects.
+The world save layer owns the exact NPC codec; it resolves settlement maps
+from code. The protocol shares its visible-state codec between ordinary and
+atomic dialogue replies. The server retains the active authoritative frame;
+the client retains its projection and local selection. See
+[NPCs and dialogue](npcs-and-dialogue.md) for the complete contract.

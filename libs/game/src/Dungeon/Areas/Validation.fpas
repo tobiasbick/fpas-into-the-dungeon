@@ -1,7 +1,7 @@
-// Full saved-state validation against exactly one supplied map per visited dungeon.
+// Full saved-state validation against exactly one supplied map per visited dungeon or settlement.
 unit Dungeon.Areas.Validation;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv, Std.Parse as Parse;
+uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv, Std.Parse as Parse;
 
 function MapIndex(Maps: array of InteriorUnit.InteriorMap; AreaId: string): result of (integer, string);
 begin
@@ -43,18 +43,20 @@ begin
   const Shaped: GameState.GameState := try GameState.ValidateStateShape(Metadata, State);
   for AreaId: string in State.VisitedAreas do
     begin
-      const Parsed: Identities.DungeonLevelId := try Identities.ParseDungeonLevelId(
-        Metadata,
-        AreaId
-      );
-      if (Parsed.Level > 0)
-        and
-        not GameState.HasVisitedArea(
-          State,
-          Identities.DungeonAreaId(Metadata, Parsed.Region, Parsed.Level - 1)
-        )
-      then
-        return Error('a visited dungeon level requires the level above it to be visited');
+      if AreaId <> Settlements.HomeAreaId(Metadata) then
+        const Parsed: Identities.DungeonLevelId := try Identities.ParseDungeonLevelId(
+          Metadata,
+          AreaId
+        );
+        if (Parsed.Level > 0)
+          and
+          not GameState.HasVisitedArea(
+            State,
+            Identities.DungeonAreaId(Metadata, Parsed.Region, Parsed.Level - 1)
+          )
+        then
+          return Error('a visited dungeon level requires the level above it to be visited');
+        end if;
       end if;
     end;
   end for;
@@ -105,54 +107,68 @@ begin
   end if;
   var ValidMaps: array of InteriorUnit.InteriorMap := [];
   // Regions of ValidMaps by index, parsed once because parsing derives the entrance site.
-  var Regions: array of Entrances.RegionCoordinate := [];
+  var Regions: array of option of Entrances.RegionCoordinate := [];
   var ItemCount: integer := 0;
   var HostileCount: integer := 0;
   for Index: integer := 0 to Maps.Length() - 1 do
     begin
       const Map: InteriorUnit.InteriorMap := try InteriorUnit.ValidateInteriorMap(Maps[Index]);
-      if not GameState.HasVisitedArea(State, Map.AreaId)
-        or
-        not Map.AreaId.StartsWith(Metadata.Id + ':dungeon:')
-      then
-        begin
-          return Error('saved game map must name a visited dungeon of the selected world');
-        end;
-      end if;
+      if Map.AreaId = Settlements.HomeAreaId(Metadata) then
+        if not GameState.HasVisitedArea(State, Map.AreaId) then
+          return Error('settlement map must name a visited area');
+        end if;
+        const Authored := try Settlements.ValidateHomeMap(Metadata, Map);
+        Regions.PushInPlace(None);
+      else
+        if not GameState.HasVisitedArea(State, Map.AreaId)
+          or
+          not Map.AreaId.StartsWith(Metadata.Id + ':dungeon:')
+        then
+          begin
+            return Error('saved game map must name a visited dungeon of the selected world');
+          end;
+        end if;
 
-      const Parsed: Identities.DungeonLevelId := try Identities.ParseDungeonLevelId(
-        Metadata,
-        Map.AreaId
-      );
-      if Parsed.Level <> Map.Level then
-        return Error('saved game map level does not match its area identity');
-      end if;
+        const Parsed: Identities.DungeonLevelId := try Identities.ParseDungeonLevelId(
+          Metadata,
+          Map.AreaId
+        );
+        if Parsed.Level <> Map.Level then
+          return Error('saved game map level does not match its area identity');
+        end if;
 
-      for Other: integer := 0 to Index - 1 do
-        begin
-          if ValidMaps[Other].AreaId = Map.AreaId then
-            begin
-              return Error('saved game contains duplicate area maps');
-            end;
-          end if;
-          const OtherRegion: Entrances.RegionCoordinate := Regions[Other];
-          if (OtherRegion.X = Parsed.Region.X) and (OtherRegion.Y = Parsed.Region.Y)
-            and
-            (
-              (ValidMaps[Other].Depth <> Map.Depth)
-              or
-              (ValidMaps[Other].DisplayName <> Map.DisplayName)
-            )
-          then
-            return Error('levels of one dungeon must store the same depth and name');
-          end if;
-        end;
-      end for;
+        for Other: integer := 0 to Index - 1 do
+          begin
+            if ValidMaps[Other].AreaId = Map.AreaId then
+              begin
+                return Error('saved game contains duplicate area maps');
+              end;
+            end if;
+
+            case Regions[Other] of
+              when Some(const OtherRegion):
+                if (OtherRegion.X = Parsed.Region.X) and (OtherRegion.Y = Parsed.Region.Y)
+                  and
+                  (
+                    (ValidMaps[Other].Depth <> Map.Depth)
+                    or
+                    (ValidMaps[Other].DisplayName <> Map.DisplayName)
+                  )
+                then
+                  return Error('levels of one dungeon must store the same depth and name');
+                end if;
+              when None:
+                null;
+            end case;
+          end;
+        end for;
+
+        Regions.PushInPlace(Some(Parsed.Region));
+      end if;
 
       ItemCount := ItemCount + Map.Items.Length();
       HostileCount := HostileCount + Map.Hostiles.Length();
       ValidMaps.PushInPlace(Map);
-      Regions.PushInPlace(Parsed.Region);
     end;
   end for;
 
@@ -193,6 +209,9 @@ begin
 
       case Item.Location of
         when ItemRules.ItemLocation.InInterior(const AreaId, const Position):
+          if AreaId = Settlements.HomeAreaId(Metadata) then
+            return Error('settlement cannot contain floor items');
+          end if;
           const Destination: integer := try MapIndex(ValidMaps, AreaId);
           if try InteriorUnit.InteriorCellAt(ValidMaps[Destination], Position) <>
             InteriorUnit.InteriorCellKind.Floor
@@ -254,7 +273,7 @@ begin
     end;
   end for;
   var Current: option of InteriorUnit.InteriorMap := None;
-  if State.Area = Coordinates.AreaKind.Dungeon then
+  if (State.Area = Coordinates.AreaKind.Dungeon) or (State.Area = Coordinates.AreaKind.Settlement) then
     begin
       Current := Some(ValidMaps[try MapIndex(ValidMaps, State.AreaId)]);
     end;

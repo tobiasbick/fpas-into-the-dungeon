@@ -1,0 +1,135 @@
+// Verifies the authored settlement, map-coordinate movement, free gate travel, and rejected foreign states.
+program SettlementTest;
+
+uses
+  Dungeon.Exploration.Model as Model,
+  Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment,
+  Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit,
+  Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Settlements as Settlements,
+  Dungeon.Terrain.Placement as Placement, Dungeon.Test.Fixtures as Fixtures, Std.Test as Test;
+
+begin
+  const Metadata := Placement.NewWorldMetadata('settlement', 12345, 4).Unwrap();
+  const Map := Settlements.HomeMap(Metadata);
+  Test.AssertEquals(23, Map.Width);
+  Test.AssertEquals(15, Map.Height);
+  Test.AssertEquals('Hearthmoor', Map.DisplayName);
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(Map) is Ok(_));
+  const Initial := GameState.NewGame(Metadata) with Health := 3; end with;
+  const OutsideView := GameState.AreaView(Metadata := Metadata, Interior := None);
+  Test.AssertTrue(Movement.AreaTransitionTarget(OutsideView, Initial) is Error(_));
+  const Outside := Initial with Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SettlementGate
+  ); end with;
+
+  Test.AssertEquals(
+    Settlements.HomeAreaId(Metadata),
+    Movement.AreaTransitionTarget(OutsideView, Outside).Unwrap()
+  );
+  const Entry := Movement.ActivateAreaTransition(OutsideView, Outside, None).Unwrap();
+  const State := Entry.State;
+  const WrongDiscovery := State with Exploration := Model.ExplorationState(
+    OutdoorChunks := [], InteriorAreas := [
+      Model.InteriorDiscoveryArea(
+        AreaId := State.AreaId,
+        Width := 22,
+        Height := 15,
+        Fields := array.Fill(true, 22 * 15)
+      )
+    ]
+  ); end with;
+
+  Test.AssertTrue(GameState.ValidateGameState(Entry.View, WrongDiscovery) is Error(_));
+  Test.AssertTrue(State.Area = Coordinates.AreaKind.Settlement);
+  Test.AssertTrue(
+    GameState.SettlementPlayerPosition(State).Unwrap() =
+    Coordinates.InteriorPosition(X := 11, Y := 12)
+  );
+  Test.AssertTrue(GameState.FirstPersonPlayerPose(State) is Error(_));
+  Test.AssertTrue(GameState.OutdoorPlayerPosition(State) is Error(_));
+  Test.AssertTrue(GameState.HasVisitedArea(State, State.AreaId));
+  Test.AssertTrue(
+    State.ReturnLocation =
+    Coordinates.ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.SettlementGate)
+  );
+  for Offset: Coordinates.InteriorPosition in [
+    Coordinates.InteriorPosition(X := 0, Y := -1),
+    Coordinates.InteriorPosition(X := 1, Y := 0), Coordinates.InteriorPosition(X := 0, Y := 1),
+    Coordinates.InteriorPosition(X := -1, Y := 0)
+  ] do
+    const Moved := Movement.MoveSettlement(Entry.View, State, Offset.X, Offset.Y).Unwrap();
+    Test.AssertTrue(
+      GameState.SettlementPlayerPosition(Moved).Unwrap() =
+      Coordinates.InteriorPosition(X := 11 + Offset.X, Y := 12 + Offset.Y)
+    );
+    Test.AssertEquals(3, Moved.Health);
+    Test.AssertEquals(State.RandomState, Moved.RandomState);
+  end for;
+
+  Test.AssertTrue(Movement.MoveSettlement(Entry.View, State, 1, 1) is Error(_));
+  const AtWall := State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 1, Y := 1)
+  ); end with;
+
+  Test.AssertTrue(Movement.MoveSettlement(Entry.View, AtWall, -1, 0) is Error(_));
+  Test.AssertTrue(
+    Movement.StepFirstPerson(Entry.View, State, Coordinates.RelativeStep.Forward) is Error(_)
+  );
+  Test.AssertTrue(
+    Movement.TurnFirstPerson(Entry.View, State, Coordinates.RelativeTurn.TurnLeft) is Error(_)
+  );
+  Test.AssertTrue(
+    GameState.ValidateGameState(Entry.View, State with AreaId := 'other:settlement:home'; end with) is Error(_)
+  );
+  Test.AssertTrue(
+    GameState.ValidateGameState(
+      Entry.View,
+      State with ReturnLocation := Coordinates.ReturnLocation.NoReturnLocation; end with
+    ) is Error(_)
+  );
+  Test.AssertTrue(
+    Areas.AreaViewFor(
+      Metadata,
+      State with AreaId := Metadata.Id + ':settlement:other'; end with,
+      None
+    ) is Error(_)
+  );
+  const Carrying := State with Items := [
+    Items.GameItem(
+      Id := 'carried',
+      Kind := Items.ItemKind.AncientCoin,
+      Location := Items.ItemLocation.CarriedByPlayer
+    )
+  ]; end with;
+
+  Test.AssertTrue(Equipment.DropItem(Entry.View, Carrying, 'carried') is Error(_));
+  const AtExit := Movement.MoveSettlement(Entry.View, State, 0, 1).Unwrap();
+  case Interaction.Interact(Entry.View, AtExit).Unwrap() of
+    when Interaction.InteractionOutcome.TransitionRequested(const Target):
+      Test.AssertEquals(Metadata.OutdoorAreaId, Target);
+    when Interaction.InteractionOutcome.StateChanged(_), Interaction.InteractionOutcome.Described(_, _):
+      panic('expected settlement exit');
+  end case;
+  const Left := Movement.ActivateAreaTransition(Entry.View, AtExit, None).Unwrap();
+  Test.AssertTrue(GameState.OutdoorPlayerPosition(Left.State).Unwrap() = Metadata.SettlementGate);
+  Test.AssertEquals(3, Left.State.Health);
+  Test.AssertTrue(Left.View.Interior is None);
+  Test.AssertEquals(1, Left.State.VisitedAreas.Length());
+  const Reentered := Movement.ActivateAreaTransition(Left.View, Left.State, None).Unwrap();
+  Test.AssertEquals(1, Reentered.State.VisitedAreas.Length());
+  // Full-save validation must reject settlement floor items even while the player is outdoors.
+  const DungeonMap := Fixtures.FixtureDungeonMapFor(Fixtures.SpawnDungeonAreaId(Metadata));
+  const Mixed := Areas.MaterializeArea(Left.State, DungeonMap);
+  Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Mixed, [Map, DungeonMap]) is Ok(_));
+  var InvalidFloor := Mixed;
+  InvalidFloor.Items[0].Location := Items.ItemLocation.InInterior(
+    Map.AreaId,
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  );
+  case Areas.ValidateSavedGame(Metadata, InvalidFloor, [Map, DungeonMap]) of
+    when Ok(_):
+      panic('saved settlement must never contain floor items');
+    when Error(const Reason):
+      Test.AssertTrue('settlement cannot contain floor items' in Reason);
+  end case;
+end.

@@ -1,0 +1,179 @@
+// Plays natural dungeon damage, Mara healing, explicit save and Continue across a real listener restart.
+program SettlementPlayTest;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Protocol as Protocol, Dungeon.Interior as InteriorUnit, Dungeon.Server as Server,
+  Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Test.Routes as Routes,
+  Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame,
+  Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type Healing = record
+  Before: integer;
+  After: integer;
+  RepeatGreeting: boolean;
+end record;
+
+function Walk(
+  Client: Wire.WireClient; Map: InteriorUnit.InteriorMap; Target: Coordinates.InteriorPosition;
+  LabelText: string; Token: Tasks.CancellationToken
+): result of (Wire.WireClient, string);
+begin
+  case Wire.WalkPastOpponents(Client, Map, Target, Token) of
+    when Ok(const Arrived):
+      return Ok(Arrived);
+    when Error(const Reason):
+      return Error(LabelText + ': ' + Reason);
+  end case;
+end function;
+
+function Play(
+  Client: Wire.WireClient; World: WorldUnit.WorldSession; Restarted: boolean;
+  Token: Tasks.CancellationToken
+): result of (Healing, string);
+begin
+  var Current := Wire.Exchange(
+    Client,
+    if Restarted then Protocol.ClientMessage.LoadGame
+      else Protocol.ClientMessage.StartNewGame
+      end if, Token
+  );
+  if not Restarted then
+    Current := Wire.WalkOutdoors(Current, World.Metadata.SpawnEntrance, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const Dungeon := Routes.SpawnDungeonMap(World.Metadata);
+    // Prepare with the world's ordinary finds; no player or opponent state is injected.
+    for Slot: integer in [1, 2] do
+      Current := try Walk(
+        Current,
+        Dungeon,
+        Dungeon.Items[Slot].Position,
+        'equipment ' + Conv.IntToStr(Slot),
+        Token
+      );
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+      Current := Wire.Exchange(
+        Current,
+        Protocol.ClientMessage.Equip(Dungeon.Items[Slot].ItemId),
+        Token
+      );
+    end for;
+
+    Current := Wire.FaceOpponent(Current, Dungeon, Dungeon.Hostiles[0].Position, Token);
+    while Wire.FirstPersonOf(Current).Health > 14 do
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.Wait, Token);
+    end while;
+
+    Current := try Wire.FightAhead(Current, Token);
+    Current := try Walk(Current, Dungeon, Dungeon.Arrival, 'exit', Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const Route := Routes.OutdoorRoute(
+      World.Metadata,
+      World.Metadata.SpawnEntrance,
+      World.Metadata.SettlementGate,
+      2
+    );
+    Current := Wire.WalkOutdoorRoute(Current, Route, Token);
+  end if;
+  const Before := Wire.MapOf(Current).Health;
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  Test.AssertTrue(Wire.MapOf(Current).Title = 'Hearthmoor');
+  for Step: integer := 1 to 4 do
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Move(0, -1), Token);
+  end for;
+
+  Test.AssertEquals(Before, Wire.MapOf(Current).Health);
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  var After := 0;
+  var RepeatGreeting := false;
+  case Current.Last of
+    when Protocol.ServerMessage.Dialogue(_, const Frame, _):
+      RepeatGreeting := 'recognizes you' in Frame.Text;
+      if not Restarted then
+        Current := Wire.Exchange(
+          Current,
+          Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'),
+          Token
+        );
+      end if;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      return Error('expected Mara greeting');
+  end case;
+
+  case Current.Last of
+    when Protocol.ServerMessage.Dialogue(Protocol.VisibleState.MapState(const Map), const Frame, _):
+      After := Map.Health;
+      for Choice: Protocol.DialogueChoice in Frame.Choices do
+        Test.AssertFalse(Choice.Id = 'wounds');
+      end for;
+    when Protocol.ServerMessage.Dialogue(Protocol.VisibleState.FirstPersonState(_), _, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      return Error('expected healed map and refreshed topics');
+  end case;
+
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.EndDialogue, Token);
+  for Step: integer := 1 to 5 do
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Move(0, 1), Token);
+  end for;
+
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  Test.AssertEquals(World.Metadata.SettlementGate.X, Wire.MapOf(Current).WorldX);
+  Test.AssertEquals(World.Metadata.SettlementGate.Y, Wire.MapOf(Current).WorldY);
+  if not Restarted then
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.SaveGame, Token);
+    Wire.RequireSaved(Current);
+  end if;
+
+  return Ok(Healing(Before := Before, After := After, RepeatGreeting := RepeatGreeting));
+end function;
+
+begin
+  const Root := '.temp-data/settlement-play-' + Conv.IntToStr(Time.TimestampMillis());
+  discard Fs.CreateDirAll(Root).Unwrap();
+  const World := WorldUnit.OpenWorld(Root, 'home', 12345, 4, 32).Unwrap();
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(512);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := Some(Logs), WorldsRoot := Root,
+    WorldId := 'home', WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  var Saved := '';
+  for Restarted: boolean in [false, true] do
+    const Reservation := Net.Listen('127.0.0.1', 0).Unwrap();
+    const Port := Net.ListenerLocalAddress(Reservation).Unwrap().Port;
+    discard Net.CloseListener(Reservation).Unwrap();
+    const Stop := Tasks.CreateCancellationSource();
+    scope
+      const Worker := go Server.RunServerWithCancellation(
+        '127.0.0.1',
+        Port,
+        Config,
+        Tasks.GetCancellationToken(Stop)
+      );
+      while Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap().Kind <> 'status' do
+        null;
+      end while;
+      const Client := Wire.ConnectClient(Port, Token);
+      const Outcome := Play(Client, World, Restarted, Token);
+      discard Net.Close(Client.Connection).Unwrap();
+      discard Tasks.Cancel(Stop);
+      Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+      const Facts := Outcome.Unwrap();
+      Test.AssertEquals(20, Facts.After);
+      Test.AssertEquals(Restarted, Facts.RepeatGreeting);
+      if not Restarted then
+        Test.AssertTrue((Facts.Before > 0) and (Facts.Before < 20));
+        Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+        Test.AssertTrue('"has_met_player":true' in Saved);
+        Test.AssertFalse('dialogue' in Saved);
+      else
+        Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+      end if;
+    end scope;
+
+    while Tasks.TryReceive(Logs).Unwrap() is Some(_) do
+      null;
+    end while;
+  end for;
+
+  discard Tasks.CloseChannel(Logs);
+end.

@@ -1,7 +1,7 @@
 // Applies one decoded client message to a session after the handshake.
 unit Dungeon.Server.Handling;
 
-uses Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Logging as Logging, Dungeon.Server.Failures as FailuresUnit, Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Std.Net as Net, Std.Tasks as Tasks;
+uses Dungeon.Server.Dialogue as SessionDialogue, Dungeon.Dialogue as DialogueRules, Dungeon.Settlements as Settlements, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Logging as Logging, Dungeon.Server.Failures as FailuresUnit, Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Std.Net as Net, Std.Tasks as Tasks;
 
 function RejectLogged(
   Config: ConfigUnit.ServerConfig;
@@ -42,7 +42,10 @@ function HandleTransition(
 ): result of (SessionUnit.ServerSession, string);
 begin
   var TargetMap: option of InteriorUnit.InteriorMap := None;
-  if TargetAreaId <> Session.World.Metadata.OutdoorAreaId then
+  if (TargetAreaId <> Session.World.Metadata.OutdoorAreaId)
+    and
+    (TargetAreaId <> Settlements.HomeAreaId(Session.World.Metadata))
+  then
     begin
       case Interiors.OpenLevelForEntry(Session.World, View, State, TargetAreaId) of
         when Ok(const Map):
@@ -92,6 +95,17 @@ public function HandleSessionMessage(
   Token: Tasks.CancellationToken
 ): result of (SessionUnit.ServerSession, string);
 begin
+  if not SessionDialogue.AllowsMessage(Session, Message) then
+    const Sent := try RejectLogged(
+      Config,
+      ConnectionValue,
+      'dialogue_active',
+      'Finish the conversation first.',
+      Token
+    );
+    return Ok(Session);
+  end if;
+
   case try Worlds.HandleWorldMessage(Session, Message, ConnectionValue, Config, Token) of
     when Some(const Handled):
       begin
@@ -115,6 +129,13 @@ begin
       return Ok(Session);
     end;
   end if;
+
+  case try SessionDialogue.HandleMessage(Session, Message, ConnectionValue, Token, Config.Logs) of
+    when Some(const Handled):
+      return Ok(Handled);
+    when None:
+      null;
+  end case;
   var Next: SessionUnit.ServerSession := Session;
   case Message of
     when Protocol.ClientMessage.Disconnect:
@@ -167,9 +188,22 @@ begin
         else
           begin
             const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
+            const View: GameState.AreaView := try SessionUnit.SessionAreaView(Session, State);
+            if State.Area = Coordinates.AreaKind.OutdoorRegion then
+              // Outdoor windows read stored chunks; the session keeps the refreshed chunk cache.
+              const Loaded: ProjectionUnit.OutdoorExplorationLoad := try ProjectionUnit.ProjectOutdoorExplorationMap(
+                Session.World, State, View, OriginX, OriginY, Width, Height
+              );
+              const SentOutdoor: boolean := try Replies.SendMessage(
+                ConnectionValue,
+                Protocol.ServerMessage.ExplorationMap(Loaded.Map),
+                Token
+              );
+              return Ok(Session with World := Loaded.World; end with);
+            end if;
             const MapValue: Protocol.ExplorationMapState := try ProjectionUnit.ProjectExplorationMap(
               State,
-              try SessionUnit.SessionAreaView(Session, State),
+              View,
               OriginX,
               OriginY,
               Width,
@@ -185,6 +219,31 @@ begin
       end;
     when Protocol.ClientMessage.Move(const DeltaX, const DeltaY):
       begin
+        const State := try SessionUnit.RequireActiveState(Session.State);
+        if State.Area = Coordinates.AreaKind.Settlement then
+          case Movement.MoveSettlement(
+            try SessionUnit.SessionAreaView(Session, State),
+            State,
+            DeltaX,
+            DeltaY
+          ) of
+            when Ok(const Moved):
+              return Replies.CommitState(
+                Session, Session with State := Some(Moved); end with,
+                'movement_rejected', ConnectionValue, Token, Config.Logs
+              );
+            when Error(const Reason):
+              const Sent := try RejectLogged(
+                Config,
+                ConnectionValue,
+                'movement_rejected',
+                Reason,
+                Token
+              );
+              return Ok(Session);
+          end case;
+        end if;
+
         case WorldUnit.MoveInWorld(
           Session.World,
           try SessionUnit.RequireActiveState(Session.State),
@@ -313,6 +372,10 @@ begin
       begin
         const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
         const View: GameState.AreaView := try SessionUnit.SessionAreaView(Session, State);
+        if DialogueRules.MaraInReach(View, State) then
+          return SessionDialogue.StartConversation(Session, ConnectionValue, Token, Config.Logs);
+        end if;
+
         case Interaction.Interact(View, State) of
           when Ok(const Outcome):
             begin
@@ -358,7 +421,7 @@ begin
             end;
         end case;
       end;
-    when Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _):
+    when Protocol.ClientMessage.DialogueChoice(_, _), Protocol.ClientMessage.EndDialogue, Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _):
       begin
         null;
       end;

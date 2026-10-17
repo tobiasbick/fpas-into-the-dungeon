@@ -696,15 +696,35 @@ remembers the outcome. Every substage is deterministic and server-owned and does
 not depend on LLM integration (stage 16). Only 15a is detailed; later substages
 give an ordering direction and are planned when they become next.
 
-### 15a. Home settlement and Mara — NEXT
+### 15a. Home settlement and Mara — DONE
 
 One authored settlement near the spawn, entered through a gate like a dungeon
-entrance and shown in the first-person view. Mara returns as its first NPC with
+entrance and shown in the map view. Entered houses use the first-person view;
+building interiors follow later. Mara returns as its first NPC with
 the deterministic dialogue removed in 14a: greetings that remember the player,
 questions about herself, the nearby dungeon and the Ancient coin, and free
-healing while the player is hurt. The
-[implementation plan](plans/15a-home-settlement.md) fixes the decisions and
-ordered checkpoints.
+healing while the player is hurt. Outdoor-step regeneration remains available.
+Answers keep the dialogue window open with refreshed topic choices. The user
+accepted 15a on 2026-10-17.
+
+Implemented and verified on 2026-10-17. Hearthmoor has bounded map movement,
+visible-only Mara markers, deterministic dialogue with refreshed choices, free
+healing and explicit persistence of her meeting state. The server gates other
+intentions during dialogue and commits replies atomically; the client owns only
+the projected modal, selection and scroll position. Settlement projection uses
+no outdoor chunk I/O. Houses remain closed until building interiors are added.
+
+World format 4, generator 9, savegame format 11 and protocol 17 are current;
+level-file format stays 3. Obsolete data is rejected and preserved. Formatting,
+all 21 project checks and the complete suite pass: **146/146 test programs**.
+A natural TCP play test takes dungeon damage, reaches Mara still hurt, heals,
+saves, restarts the complete listener and verifies Continue and her repeat
+greeting. Final review also closed a save-validation gap for settlement floor
+items while the player is outdoors.
+
+All eleven checkpoints are complete. The implementation plan was removed
+after acceptance; the permanent contract is documented in
+[NPCs and dialogue](architecture/npcs-and-dialogue.md).
 
 ### 15b. First deterministic quest — LATER
 

@@ -491,3 +491,20 @@ The client UI foundation is complete when:
 Inventory use, gear controls, kind-specific combat art and death animation have
 headless and TCP coverage. The user accepted 14b on 2026-10-16. Accessibility
 conventions and further first-person styling remain later work.
+
+## Settlement dialogue
+
+Hearthmoor retains the map view with bounded local coordinates and no facing.
+WASD or arrows request absolute cardinal steps. Server-projected titles name
+the area; Environment shows gate entry/exit and `Mara — Enter: Talk` hints.
+House blocks use `▩`, gates `⌂`, and Mara `M`; fog applies in both map views.
+
+Enter beside Mara opens a framed dialogue with the server's text and ordered
+choices. W/S and arrows wrap the selection; Enter submits the stable choice ID.
+Answers refresh the same window, including removal of healing after health
+is restored. Escape requests an end and retains the window until the reply.
+Pending requests suppress repeated input, and ordinary movement or other
+overlays are blocked while talking. Alt+X still exits cleanly. Text wraps and
+Page Up/Down scrolls long frames on small terminals. Resize preserves the
+frame and selection; new answers reset selection. No choices or NPC behavior
+are inferred by the client.

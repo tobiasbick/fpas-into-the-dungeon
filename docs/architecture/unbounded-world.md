@@ -55,8 +55,9 @@ worlds/<world-id>/
     └── default.json
 ```
 
-World format version `3` records the id, seed, generator version, chunk size,
-spawn coordinate, the outdoor identity and label, the spawn entrance, and the
+World format version `4` records the id, seed, generator version, chunk size,
+spawn coordinate, the outdoor identity and label, the spawn entrance,
+the nested `settlement_gate` coordinate, and the
 entrance region size (`dungeon_region_chunks`) in `world.json`. Level files of
 generated dungeons are described in [level storage](dungeon-level-storage.md). A chunk file
 records its format version, world id, coordinates, and three 128-row layers.
@@ -75,7 +76,7 @@ atomic write wins.
 
 ## Generation and visible cells
 
-Generator version 7 retains the outdoor terrain algorithm introduced in
+Generator version 9 retains the outdoor terrain algorithm introduced in
 version 6. It evaluates several smooth deterministic integer fields from the
 seed and absolute world coordinate. Very broad and regional noise establish
 continentalness; regional elevation and coast detail shape land and water at
@@ -96,8 +97,9 @@ and another generated landscape is reachable within 512 horizontal and 256
 vertical cells. It also requires a clear natural entrance candidate connected
 by exactly three traversable cardinal steps: the spawn entrance. Generation
 composes entrance features only over the spawn entrance and the clear entrance
-sites of [entrance regions](generated-dungeons.md) and otherwise never
-overwrites terrain.
+sites of [entrance regions](generated-dungeons.md). Generator 9 also overlays
+the home settlement gate six traversable steps from spawn, excluding entrance
+sites and the spawn entrance and its neighbors. Other terrain stays unchanged.
 
 The `dungeon-world-preview` tool samples final terrain or continentalness,
 land, elevation, ruggedness, moisture, vegetation, lake-shape, and land-bridge
@@ -150,6 +152,6 @@ larger requests. These values are server configuration, not wire assumptions.
 ## Deliberately deferred
 
 This slice does not define mutable terrain, persistent player savegames,
-settlements, additional locations, bridges, movement costs, weather, seasons,
+additional settlements, locations, bridges, movement costs, weather, seasons,
 world time, interior or dungeon geometry, raycasting, or simulated erosion and
 hydrology.

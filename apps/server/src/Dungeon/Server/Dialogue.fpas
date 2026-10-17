@@ -1,0 +1,151 @@
+// Connection-local dialogue dispatch, authoritative choice validation and atomic state/frame commits.
+unit Dungeon.Server.Dialogue;
+
+uses
+  Dungeon.Dialogue as Rules, Dungeon.Protocol as Protocol, Dungeon.Server.Logging as Logging,
+  Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Std.Net as Net, Std.Tasks as Tasks;
+
+// Gates all lifecycle and gameplay dispatch while a conversation is active; resize and disconnect remain valid.
+public function AllowsMessage(Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage): boolean;
+begin
+  if Session.ActiveDialogue is None then
+    return true;
+  end if;
+
+  return (Message is Protocol.ClientMessage.DialogueChoice(_, _))
+    or
+    (Message is Protocol.ClientMessage.EndDialogue)
+    or
+    (Message is Protocol.ClientMessage.Viewport(_, _))
+    or
+    (Message is Protocol.ClientMessage.Disconnect);
+end function;
+
+function Rejected(
+  Session: SessionUnit.ServerSession; Code: string; Reason: string; Connection: Net.Connection;
+  Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
+): result of (SessionUnit.ServerSession, string);
+begin
+  Logging.LogServer(Logs, 'rejected', Code + ': ' + Reason);
+  const Sent := try Replies.Reject(Connection, Code, Reason, Token);
+  return Ok(Session);
+end function;
+
+function Commit(
+  Session: SessionUnit.ServerSession; Outcome: Rules.Outcome; Connection: Net.Connection;
+  Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
+): result of (SessionUnit.ServerSession, string);
+begin
+  var Candidate := Session;
+  case Outcome of
+    when Rules.Outcome.Continued(const State, const Frame, const ChangesGame):
+      Candidate.State := Some(State);
+      Candidate.ActiveDialogue := Some(Frame);
+      Candidate.Dirty := Session.Dirty or ChangesGame;
+    when Rules.Outcome.Ended(const State):
+      Candidate.State := Some(State);
+      Candidate.ActiveDialogue := None;
+  end case;
+
+  return Replies.CommitDialogue(Session, Candidate, Connection, Token, Logs);
+end function;
+
+// Starts the generic Enter conversation after the caller has selected the game-rule NPC target.
+// A first meeting marks progress dirty; repeat greetings and text-only choices retain the previous save status.
+public function StartConversation(
+  Session: SessionUnit.ServerSession; Connection: Net.Connection;
+  Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
+): result of (SessionUnit.ServerSession, string);
+begin
+  const State := try SessionUnit.RequireActiveState(Session.State);
+  case Rules.Start(try SessionUnit.SessionAreaView(Session, State), State) of
+    when Ok(const Outcome):
+      return Commit(Session, Outcome, Connection, Token, Logs);
+    when Error(const Reason):
+      return Rejected(Session, 'interaction_rejected', Reason, Connection, Token, Logs);
+  end case;
+end function;
+
+// Handles dialogue intentions after the active-game prerequisite; returns None for other dispatch owners.
+public function HandleMessage(
+  Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage; Connection: Net.Connection;
+  Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
+): result of (option of SessionUnit.ServerSession, string);
+begin
+  case Message of
+    when Protocol.ClientMessage.DialogueChoice(const NpcId, const ChoiceId):
+      case Session.ActiveDialogue of
+        when None:
+          return Ok(
+            Some(
+              try Rejected(
+                Session,
+                'dialogue_not_active',
+                'No dialogue is active.',
+                Connection,
+                Token,
+                Logs
+              )
+            )
+          );
+        when Some(const Frame):
+          if NpcId <> Frame.NpcId then
+            return Ok(
+              Some(
+                try Rejected(
+                  Session,
+                  'dialogue_rejected',
+                  'Dialogue names an unknown NPC.',
+                  Connection,
+                  Token,
+                  Logs
+                )
+              )
+            );
+          end if;
+          const State := try SessionUnit.RequireActiveState(Session.State);
+          case Rules.Choose(
+            try SessionUnit.SessionAreaView(Session, State),
+            State,
+            Frame,
+            ChoiceId
+          ) of
+            when Ok(const Outcome):
+              return Ok(Some(try Commit(Session, Outcome, Connection, Token, Logs)));
+            when Error(const Reason):
+              return Ok(
+                Some(try Rejected(Session, 'dialogue_rejected', Reason, Connection, Token, Logs))
+              );
+          end case;
+      end case;
+    when Protocol.ClientMessage.EndDialogue:
+      case Session.ActiveDialogue of
+        when None:
+          return Ok(
+            Some(
+              try Rejected(
+                Session,
+                'dialogue_not_active',
+                'No dialogue is active.',
+                Connection,
+                Token,
+                Logs
+              )
+            )
+          );
+        when Some(const Frame):
+          const State := try SessionUnit.RequireActiveState(Session.State);
+          case Rules.EndConversation(try SessionUnit.SessionAreaView(Session, State), State, Frame) of
+            when Ok(const Outcome):
+              return Ok(Some(try Commit(Session, Outcome, Connection, Token, Logs)));
+            when Error(const Reason):
+              return Ok(
+                Some(try Rejected(Session, 'dialogue_rejected', Reason, Connection, Token, Logs))
+              );
+          end case;
+      end case;
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_), Protocol.ClientMessage.Disconnect:
+      return Ok(None);
+  end case;
+end function;
+end unit;

@@ -28,7 +28,7 @@ fields must be integral and within their stated bounds.
 | --- | --- |
 | `format_version` | Integer `3`. |
 | `world_id` | String exactly equal to selected world metadata ID. |
-| `generator_version` | Integer equal to metadata generator version, currently `8`. |
+| `generator_version` | Integer equal to metadata generator version, currently `9`. |
 | `area_id` | Canonical `<world>:dungeon:<rx>:<ry>:<level>`, equal to the requested area. |
 | `name` | Stored display name, 1..64 printable ASCII characters, no leading/trailing spaces. |
 | `level` | Integer equal to the identity's level and below `depth`. |
@@ -55,7 +55,7 @@ name of the retained map. Duplicate display names are allowed; area identities
 remain unique; all levels of one dungeon store the same name. Level formats 1/2
 and generator-6/7 worlds are incompatible, remain untouched and cannot be
 continued with this server; create a new world for the current version. The
-current save format is 10 and protocol is 16.
+current save format is 11 and protocol is 17.
 
 Each placement is exactly `{ "id": string, "kind": string, "x": integer,
 "y": integer }`. Items occur in ascending original slot order, with IDs `<area>:item:<slot>`.

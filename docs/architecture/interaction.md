@@ -5,18 +5,20 @@ defining a general scripting system.
 
 ## Semantics
 
-`Enter` sends the protocol version 16 `interact` intention while the game screen
+`Enter` sends the protocol version 17 `interact` intention while the game screen
 is active, no overlay owns input, and no earlier request is pending. The server
 resolves the occupied field first for state-changing actions, then the field
 directly ahead for an inspectable object. Interaction never moves or turns the
 player implicitly.
 
-There are three successful outcomes:
+There are four successful outcomes:
 
 - a transition replaces authoritative game state and returns a complete visible
   state;
 - a state change, such as picking up an item, replaces authoritative game state
   and returns a complete visible state;
+- a conversation with an adjacent settlement NPC returns an atomic dialogue
+  frame and resulting visible state; see [NPCs and dialogue](npcs-and-dialogue.md);
 - a description leaves authoritative game state unchanged and returns an
   `interaction` message containing a title and text. A nonempty title opens a
   centered, framed description overlay. An empty title denotes a short status

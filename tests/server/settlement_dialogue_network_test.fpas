@@ -1,0 +1,251 @@
+// Drives the real client adapter through settlement travel, dialogue gating, explicit saves and reconnects.
+program SettlementDialogueNetworkTest;
+
+uses
+  Dungeon.Client as ClientUnit, Dungeon.Coordinates as Coordinates, Dungeon.Protocol as Protocol,
+  Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Test.ClientSession as ClientSession,
+  Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs,
+  Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+type Driver = record
+  Requests: channel of Protocol.ClientMessage;
+  Events: channel of ClientUnit.ClientEvent;
+  Outcomes: channel of string;
+end record;
+
+type Conversation = record
+  Map: Protocol.MapVisibleState;
+  Frame: Protocol.DialogueFrame;
+  Dirty: boolean;
+end record;
+
+function Serve(
+  Listener: Net.Listener; Config: ConfigUnit.ServerConfig; Outcomes: channel of string;
+  Token: Tasks.CancellationToken
+): result of (boolean, string);
+begin
+  const Connection := try Net.AcceptWithCancellation(Listener, Token);
+  const Outcome := Server.ServeConnection(Connection, Config, Token);
+  discard Net.Close(Connection);
+  ClientSession.ReportOutcome(Outcomes, 'server', Outcome);
+  return Outcome;
+end function;
+
+function Exchange(TestClient: Driver; Message: Protocol.ClientMessage): ClientUnit.ClientEvent;
+begin
+  Test.AssertTrue(Tasks.SendWithTimeout(TestClient.Requests, Message, 1000).Unwrap());
+  return ClientSession.NextClientEvent(TestClient.Events, TestClient.Outcomes, 30000);
+end function;
+
+function MapOf(EventValue: ClientUnit.ClientEvent): Protocol.MapVisibleState;
+begin
+  case EventValue of
+    when ClientUnit.ClientEvent.State(const Value), ClientUnit.ClientEvent.ViewportState(const Value), ClientUnit.ClientEvent.Dialogue(const Value, _, _), ClientUnit.ClientEvent.DialogueEnded(const Value, _):
+      case Value of
+        when Protocol.VisibleState.MapState(const Map):
+          return Map;
+        when Protocol.VisibleState.FirstPersonState(_):
+          panic('expected map view');
+      end case;
+    when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected:
+      panic('expected projected map');
+  end case;
+end function;
+
+function DialogueOf(EventValue: ClientUnit.ClientEvent): Conversation;
+begin
+  case EventValue of
+    when ClientUnit.ClientEvent.Dialogue(const Value, const Frame, const Dirty):
+      return Conversation(Map := MapOf(EventValue), Frame := Frame, Dirty := Dirty);
+    when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.State(_), ClientUnit.ClientEvent.ViewportState(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Rejected(_, _), ClientUnit.ClientEvent.MapRejected(_, _), ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected, ClientUnit.ClientEvent.DialogueEnded(_, _):
+      panic('expected dialogue frame');
+  end case;
+end function;
+
+procedure Rejected(EventValue: ClientUnit.ClientEvent; Expected: string);
+begin
+  case EventValue of
+    when ClientUnit.ClientEvent.Rejected(const Code, _), ClientUnit.ClientEvent.MapRejected(const Code, _):
+      Test.AssertEquals(Expected, Code);
+    when ClientUnit.ClientEvent.Connected(_), ClientUnit.ClientEvent.Worlds(_), ClientUnit.ClientEvent.State(_), ClientUnit.ClientEvent.ViewportState(_), ClientUnit.ClientEvent.ExplorationMap(_), ClientUnit.ClientEvent.Interaction(_, _), ClientUnit.ClientEvent.SaveCompleted, ClientUnit.ClientEvent.Defeated(_), ClientUnit.ClientEvent.Failed(_), ClientUnit.ClientEvent.Disconnected, ClientUnit.ClientEvent.Dialogue(_, _, _), ClientUnit.ClientEvent.DialogueEnded(_, _):
+      panic('expected classified rejection');
+  end case;
+end procedure;
+
+function WalkTo(TestClient: Driver; Current: Protocol.MapVisibleState; Target: Coordinates.WorldPosition): Protocol.MapVisibleState;
+begin
+  var Position := Current;
+  while (Position.WorldX <> Target.X) or (Position.WorldY <> Target.Y) do
+    var Dx := 0;
+    var Dy := 0;
+    if Position.WorldX <> Target.X then
+      Dx := if Position.WorldX < Target.X then 1 else -1 end if;
+    else
+      Dy := if Position.WorldY < Target.Y then 1 else -1 end if;
+    end if;
+
+    Position := MapOf(Exchange(TestClient, Protocol.ClientMessage.Move(Dx, Dy)));
+  end while;
+
+  return Position;
+end function;
+
+function ReachMara(TestClient: Driver; Current: Protocol.MapVisibleState; Gate: Coordinates.WorldPosition): Protocol.MapVisibleState;
+begin
+  const Outside := WalkTo(TestClient, Current, Gate);
+  Test.AssertTrue('Hearthmoor' in Outside.Status);
+  var Inside := MapOf(Exchange(TestClient, Protocol.ClientMessage.Interact));
+  Test.AssertEquals('Hearthmoor', Inside.Title);
+  Test.AssertEquals(11, Inside.WorldX);
+  Test.AssertEquals(12, Inside.WorldY);
+  for Step: integer := 1 to 4 do
+    Inside := MapOf(Exchange(TestClient, Protocol.ClientMessage.Move(0, -1)));
+  end for;
+
+  Test.AssertTrue('Mara' in Inside.Status);
+  Test.AssertEquals(8, Inside.WorldY);
+  return Inside;
+end function;
+
+begin
+  const Root := '.temp-data/settlement-adapter-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'home', 12345, 4, 32).Unwrap();
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := 'home',
+    WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32, MaximumViewWidth := 80,
+    MaximumViewHeight := 24
+  );
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Address := Net.ListenerLocalAddress(Listener).Unwrap();
+  var Saved := '';
+  for SessionIndex: integer := 0 to 2 do
+    const TestClient := Driver(
+      Requests := Tasks.CreateChannel(4),
+      Events := Tasks.CreateChannel(4),
+      Outcomes := Tasks.CreateChannel(4)
+    );
+    scope
+      const ServerWorker := go Serve(Listener, Config, TestClient.Outcomes, Token);
+      const ClientWorker := go ClientSession.RunReportedClient(
+        '127.0.0.1', Address.Port, 20, 10,
+        TestClient.Requests, TestClient.Events, TestClient.Outcomes, Token
+      );
+      Test.AssertTrue(
+        ClientSession.NextClientEvent(TestClient.Events, TestClient.Outcomes, 30000) is ClientUnit.ClientEvent.Connected(_)
+      );
+      var Map := MapOf(
+        Exchange(
+          TestClient,
+          if SessionIndex = 0 then Protocol.ClientMessage.StartNewGame
+            else Protocol.ClientMessage.LoadGame
+            end if
+        )
+      );
+      if SessionIndex = 0 then
+        Map := ReachMara(TestClient, Map, World.Metadata.SettlementGate);
+        Rejected(Exchange(TestClient, Protocol.ClientMessage.Move(0, -1)), 'movement_rejected');
+        Test.AssertTrue(
+          Exchange(TestClient, Protocol.ClientMessage.SaveGame) is ClientUnit.ClientEvent.SaveCompleted
+        );
+        Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+        Test.AssertTrue('"has_met_player":false' in Saved);
+      end if;
+
+      Test.AssertEquals('Hearthmoor', Map.Title);
+      Test.AssertFalse(Fs.Exists(World.Directory + '/chunks/x_0'));
+      const Talk := DialogueOf(Exchange(TestClient, Protocol.ClientMessage.Interact));
+      Test.AssertEquals(20, Talk.Map.Health);
+      if SessionIndex < 2 then
+        Test.AssertTrue('introduces herself' in Talk.Frame.Text);
+        Test.AssertTrue(Talk.Dirty);
+      else
+        Test.AssertTrue('recognizes you' in Talk.Frame.Text);
+        Test.AssertFalse(Talk.Dirty);
+      end if;
+
+      if SessionIndex = 0 then
+        for Message: Protocol.ClientMessage in [
+          Protocol.ClientMessage.Move(1, 0), Protocol.ClientMessage.Interact,
+          Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait,
+          Protocol.ClientMessage.Equip('missing'),
+          Protocol.ClientMessage.Unequip('missing'), Protocol.ClientMessage.DropItem('missing'),
+          Protocol.ClientMessage.UseItem('missing'),
+          Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Forward),
+          Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Left),
+          Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame,
+          Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame,
+          Protocol.ClientMessage.ListWorlds(0, true), Protocol.ClientMessage.SelectWorld('home'),
+          Protocol.ClientMessage.CreateWorld(1, 4),
+          Protocol.ClientMessage.ExplorationMap(0, 0, 23, 15)
+        ] do
+          Rejected(Exchange(TestClient, Message), 'dialogue_active');
+        end for;
+
+        Test.AssertTrue(
+          Exchange(TestClient, Protocol.ClientMessage.Viewport(9, 5)) is ClientUnit.ClientEvent.ViewportState(_)
+        );
+        Rejected(
+          Exchange(TestClient, Protocol.ClientMessage.DialogueChoice('foreign', 'identity')),
+          'dialogue_rejected'
+        );
+        Rejected(
+          Exchange(TestClient, Protocol.ClientMessage.DialogueChoice(Talk.Frame.NpcId, 'coin')),
+          'dialogue_rejected'
+        );
+        const Answer := DialogueOf(
+          Exchange(TestClient, Protocol.ClientMessage.DialogueChoice(Talk.Frame.NpcId, 'identity'))
+        );
+        Test.AssertEquals(11, Answer.Map.WorldX);
+        Test.AssertEquals(8, Answer.Map.WorldY);
+      else
+        Test.AssertTrue(
+          Exchange(TestClient, Protocol.ClientMessage.EndDialogue) is ClientUnit.ClientEvent.DialogueEnded(_, _)
+        );
+        if SessionIndex = 1 then
+          Test.AssertTrue(
+            Exchange(TestClient, Protocol.ClientMessage.OverwriteSaveGame) is ClientUnit.ClientEvent.SaveCompleted
+          );
+          Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+          Test.AssertTrue('"has_met_player":true' in Saved);
+          const RepeatedGreeting := DialogueOf(
+            Exchange(TestClient, Protocol.ClientMessage.Interact)
+          );
+          Test.AssertTrue('recognizes you' in RepeatedGreeting.Frame.Text);
+          Test.AssertFalse(RepeatedGreeting.Dirty);
+          const Answer := DialogueOf(
+            Exchange(
+              TestClient,
+              Protocol.ClientMessage.DialogueChoice(RepeatedGreeting.Frame.NpcId, 'identity')
+            )
+          );
+          Test.AssertFalse(Answer.Dirty);
+        else
+          Test.AssertTrue(
+            Exchange(TestClient, Protocol.ClientMessage.ListWorlds(0, false)) is ClientUnit.ClientEvent.Worlds(_)
+          );
+          const Fresh := MapOf(Exchange(TestClient, Protocol.ClientMessage.StartNewGame));
+          const Inside := ReachMara(TestClient, Fresh, World.Metadata.SettlementGate);
+          const FirstAgain := DialogueOf(Exchange(TestClient, Protocol.ClientMessage.Interact));
+          Test.AssertTrue('introduces herself' in FirstAgain.Frame.Text);
+        end if;
+      end if;
+
+      Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+      Test.AssertTrue(Tasks.Send(TestClient.Requests, Protocol.ClientMessage.Disconnect).Unwrap());
+      Test.AssertTrue(Tasks.Wait(ClientWorker).Unwrap());
+      Test.AssertTrue(Tasks.Wait(ServerWorker).Unwrap());
+      Test.AssertTrue(
+        ClientSession.NextClientEvent(TestClient.Events, TestClient.Outcomes, 1000) is ClientUnit.ClientEvent.Disconnected
+      );
+    end scope;
+
+    Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    discard Tasks.CloseChannel(TestClient.Requests);
+    discard Tasks.CloseChannel(TestClient.Events);
+    discard Tasks.CloseChannel(TestClient.Outcomes);
+  end for;
+
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+end.

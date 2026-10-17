@@ -1,7 +1,7 @@
 // The generic Enter interaction: environment hints, pickup, inspection, and exits.
 unit Dungeon.Interaction;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv;
+uses Dungeon.Dialogue as DialogueRules, Dungeon.Npcs as NpcRules, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Movement as Movement, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv;
 
 // Successful interaction text when neither the current nor forward field offers an action.
 public const NoInteractionMessage: string := 'There is nothing to interact with.';
@@ -60,7 +60,7 @@ begin
           end case;
         end;
       end for;
-    when Coordinates.PlayerPosition.Outdoor(_):
+    when Coordinates.PlayerPosition.Outdoor(_), Coordinates.PlayerPosition.Settlement(_):
       null;
   end case;
 
@@ -82,7 +82,7 @@ begin
           Offset.Y
         )
       );
-    when Coordinates.PlayerPosition.Outdoor(_):
+    when Coordinates.PlayerPosition.Outdoor(_), Coordinates.PlayerPosition.Settlement(_):
       return -1;
   end case;
 end function;
@@ -115,6 +115,47 @@ begin
   end if;
 
   return ItemInteractionHint(State);
+end function;
+
+// Projects authoritative map interaction hints for an outdoor gate or an adjacent settlement NPC.
+public function MapInteractionHint(View: GameState.AreaView; State: GameState.GameState): string;
+begin
+  if State.Area = Coordinates.AreaKind.OutdoorRegion then
+    case GameState.OutdoorPlayerPosition(State) of
+      when Error(_):
+        return '';
+      when Ok(const Position):
+        if Position = View.Metadata.SettlementGate then
+          return 'Press Enter to enter ' + Settlements.HomeName + '.';
+        end if;
+
+        if Entrances.EntranceRegionAt(View.Metadata, Position) is Some(_) then
+          return 'Press Enter to enter the dungeon.';
+        end if;
+    end case;
+  end if;
+
+  if State.Area = Coordinates.AreaKind.Settlement then
+    case GameState.SettlementPlayerPosition(State) of
+      when Error(_):
+        return '';
+      when Ok(const Position):
+        case View.Interior of
+          when Some(const Map):
+            if Position = Map.Arrival then
+              return 'Press Enter to leave ' + Map.DisplayName + '.';
+            end if;
+          when None:
+            return '';
+        end case;
+
+        if DialogueRules.MaraInReach(View, State) then
+          return NpcRules.DisplayName(State.Npcs[0].Kind) + ' — Enter: Talk';
+        end if;
+    end case;
+  end if;
+
+  return '';
 end function;
 
 // Returns the status text for standing on the exit or stairs of Map, or '' elsewhere.
@@ -157,7 +198,10 @@ begin
       const OutdoorPosition: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(
         Valid
       );
-      if Entrances.EntranceRegionAt(Metadata, OutdoorPosition) is Some(_) then
+      if (OutdoorPosition = Metadata.SettlementGate)
+        or
+        (Entrances.EntranceRegionAt(Metadata, OutdoorPosition) is Some(_))
+      then
         begin
           return Ok(
             InteractionOutcome.TransitionRequested(try Movement.AreaTransitionTarget(View, Valid))
@@ -167,6 +211,15 @@ begin
 
       return Ok(InteractionOutcome.Described('', NoInteractionMessage));
     end;
+  end if;
+
+  if Valid.Area = Coordinates.AreaKind.Settlement then
+    const Map := try GameState.CurrentInterior(View, Valid);
+    if (try GameState.SettlementPlayerPosition(Valid)) = Map.Arrival then
+      return Ok(InteractionOutcome.TransitionRequested(Metadata.OutdoorAreaId));
+    end if;
+
+    return Ok(InteractionOutcome.Described('', NoInteractionMessage));
   end if;
   const Map: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, State);
   const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(Valid);

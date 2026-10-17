@@ -108,7 +108,7 @@ See [items and inventory](items-and-inventory.md) for potion use.
 
 ## Persistence
 
-The savegame (currently format 10) stores equipped items as their own location
+The savegame (currently format 11) stores equipped items as their own location
 variant with their slot. Validation requires exactly one record per original
 item placement with matching identity and kind, at most one item per slot, and a
 slot that fits the item. Obsolete saves are rejected and preserved without

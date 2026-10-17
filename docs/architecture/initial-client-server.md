@@ -59,12 +59,13 @@ a previous catalog status does not authorize loading changed or damaged data.
 Client: hello, list_worlds, select_world, create_world, new_game, load_game,
          save_game, overwrite_save, viewport, move,
          first_person_step, first_person_turn, interact, exploration_map,
-         attack, wait, equip, unequip, drop_item, use_item, disconnect
+         attack, wait, equip, unequip, drop_item, use_item,
+         dialogue_choice, end_dialogue, disconnect
 Server: welcome, worlds, state, interaction, exploration_map,
-        save_completed, defeated, rejected, error
+        dialogue, dialogue_ended, save_completed, defeated, rejected, error
 ```
 
-The current protocol version `16` is included in the handshake. `hello` includes the initial
+The current protocol version `17` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.

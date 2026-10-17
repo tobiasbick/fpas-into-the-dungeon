@@ -1,0 +1,196 @@
+// Exercises map travel and the server-owned dialogue modal through real headless TUI input.
+program SettlementDialogueUiTest;
+
+uses
+  Dungeon.Client as ClientUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients, Dungeon.RuntimeData as RuntimeData,
+  Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Key(Kind: Tui.TuiKeyKind; Character: string): Tui.TuiKeyEvent;
+begin
+  return Tui.TuiKeyEvent(
+    kind := Kind,
+    ch := Character,
+    shift := false,
+    ctrl := false,
+    alt := false,
+    meta := false
+  );
+end function;
+
+function Contains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Snapshot.Height - 1 do
+    if Text in Snapshot.LineAt(Row) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function Map(Title: string; Health: integer): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      Title := Title,
+      Status := 'Mara — Enter: Talk', OriginX := 9, OriginY := 6, Width := 5, Height := 3,
+      Rows := ['##.##', '..n..', '..x..'], KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'],
+      PlayerX := 2, PlayerY := 2, WorldX := 11, WorldY := 8,
+      Inventory := [], Health := Health, MaxHealth := 20, Character := []
+    )
+  );
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(4);
+  const Events: channel of ClientUnit.ConnectionEvent := Tasks.CreateChannel(1);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var Model := ClientUnit.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  Model.ViewportWidth := 120;
+  Model.ViewportHeight := 30;
+  Model.RequestedWorldWidth := 39;
+  Model.RequestedWorldHeight := 25;
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.State(Map('Outdoor region', 3)),
+    Cmd
+  );
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.State(Map('Hearthmoor', 3)),
+    Cmd
+  );
+  Test.AssertTrue(Model.View = Protocol.ViewKind.Map);
+  Test.AssertEquals('Hearthmoor', Model.PrimaryTitle);
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 30));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Hearthmoor'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Mara'));
+  for Entry: Tui.TuiKeyEvent in [Key(Tui.TuiKeyKind.Up, ''), Key(Tui.TuiKeyKind.Character, 'a')] do
+    App.InjectKeyForTest(Entry);
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+    const Actual := Tasks.ReceiveWithTimeout(Requests, 0).Unwrap();
+    case Actual of
+      when Protocol.ClientMessage.Move(const X, const Y):
+        Test.AssertEquals(1, if X < 0 then - X else X end if + if Y < 0 then - Y else Y end if);
+      when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_), Protocol.ClientMessage.DialogueChoice(_, _), Protocol.ClientMessage.EndDialogue, Protocol.ClientMessage.Disconnect:
+        panic('map movement must be absolute: ' + Clients.EncodeClient(Actual));
+    end case;
+
+    Model := ClientUnit.UpdateClientEvent(
+      Model,
+      ClientUnit.ClientEvent.State(Map('Hearthmoor', 3)),
+      Cmd
+    );
+  end for;
+  const Frame := Protocol.DialogueFrame(
+    NpcId := 'home:settlement:home:npc:mara', Speaker := 'Mara',
+    Text := 'Mara introduces herself. She can help you find your way through the nearby dungeon.',
+    Choices := [
+      Protocol.DialogueChoice(Id := 'identity', Text := 'Who are you?'),
+      Protocol.DialogueChoice(Id := 'wounds', Text := 'Can you tend my wounds?'),
+      Protocol.DialogueChoice(Id := 'goodbye', Text := 'Goodbye.')
+    ]
+  );
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Dialogue(Map('Hearthmoor', 3), Frame, true),
+    Cmd
+  );
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), '> Who are you?'));
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Up, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertEquals(2, Model.DialogueSelection);
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Character, 's'));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertEquals(0, Model.DialogueSelection);
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Down, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertEquals(1, Model.DialogueSelection);
+  for Entry: Tui.TuiKeyEvent in [
+    Key(Tui.TuiKeyKind.Character, 'a'),
+    Key(Tui.TuiKeyKind.Character, 'i'),
+    Key(Tui.TuiKeyKind.Character, 'm'),
+    Key(Tui.TuiKeyKind.F2, '')
+  ] do
+    App.InjectKeyForTest(Entry);
+    Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+    Test.AssertTrue(Model.Overlay = ClientUnit.ClientOverlay.NoOverlay);
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  end for;
+
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Enter, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertTrue(Model.Pending);
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap() is Some(Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'))
+  );
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Escape, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  Test.AssertTrue(Model.ActiveDialogue is Some(_));
+  const HealedFrame := Frame with Text := 'Mara binds your wounds. You feel whole again.'; Choices := [
+    Frame.Choices[0],
+    Frame.Choices[2]
+  ]; end with;
+
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Dialogue(Map('Hearthmoor', 20), HealedFrame, true),
+    Cmd
+  );
+  Test.AssertEquals(20, Model.Health);
+  Test.AssertEquals(0, Model.DialogueSelection);
+  Test.AssertEquals(2, Model.ActiveDialogue.Unwrap().Choices.Length());
+  // Resize is allowed and preserves the authoritative frame and local selection.
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Down, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  App.InjectResizeForTest(Tui.TuiSize.Create(28, 12));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap() is Some(Protocol.ClientMessage.Viewport(_, _))
+  );
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.ViewportState(Map('Hearthmoor', 20)),
+    Cmd
+  );
+  Test.AssertEquals(1, Model.DialogueSelection);
+  Test.AssertEquals(HealedFrame.Text, Model.ActiveDialogue.Unwrap().Text);
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.PageDown, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Goodbye.'));
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.PageUp, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Mara binds your'));
+  App.InjectKeyForTest(Key(Tui.TuiKeyKind.Escape, ''));
+  Model := App.RunIterations(Model, ClientUnit.UpdateClient, ClientUnit.ViewClient, 1, 0);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is Some(Protocol.ClientMessage.EndDialogue));
+  Test.AssertTrue(Model.ActiveDialogue is Some(_));
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.DialogueEnded(Map('Hearthmoor', 20), true),
+    Cmd
+  );
+  Test.AssertTrue(Model.ActiveDialogue is None);
+  // Global Alt+X still closes the connection's request queue while talking.
+  Model := ClientUnit.UpdateClientEvent(
+    Model,
+    ClientUnit.ClientEvent.Dialogue(Map('Hearthmoor', 20), HealedFrame, false),
+    Cmd
+  );
+  const QuitKey := Key(Tui.TuiKeyKind.Character, 'x') with alt := true; end with;
+
+  Model := ClientUnit.UpdateClient(Model, Tui.TuiMsg.Key(QuitKey), Cmd);
+  Test.AssertTrue(Tasks.TrySend(Requests, Protocol.ClientMessage.Interact) is Error(_));
+  App.Close();
+  discard Tasks.CloseChannel(Events);
+end.

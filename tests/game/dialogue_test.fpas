@@ -1,0 +1,140 @@
+// Verifies authoritative Mara topics, remembered greetings and free healing without changing items or dice.
+program DialogueTest;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.GameState as GameState,
+  Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Test.StateComparison as Comparison,
+  Dungeon.Terrain.Placement as Placement, Std.Test as Test;
+
+type Conversation = record
+  State: GameState.GameState;
+  Frame: Dialogue.Frame;
+end record;
+
+function Continued(Value: Dialogue.Outcome): Conversation;
+begin
+  case Value of
+    when Dialogue.Outcome.Continued(const State, const Frame, _):
+      return Conversation(State := State, Frame := Frame);
+    when Dialogue.Outcome.Ended(_):
+      panic('expected continued dialogue');
+  end case;
+end function;
+
+function Has(Frame: Dialogue.Frame; Id: string): boolean;
+begin
+  for Choice: Dialogue.Choice in Frame.Choices do
+    if Choice.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+begin
+  const Metadata := Placement.NewWorldMetadata('dialogue', 12345, 4).Unwrap();
+  const Outside := GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Metadata.SettlementGate
+  ); end with;
+  const Entry := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := Metadata, Interior := None),
+    Outside,
+    None
+  ).Unwrap();
+  Test.AssertTrue(Dialogue.Start(Entry.View, Entry.State) is Error(_));
+  for Position: Coordinates.InteriorPosition in [
+    Coordinates.InteriorPosition(X := 11, Y := 6),
+    Coordinates.InteriorPosition(X := 12, Y := 7), Coordinates.InteriorPosition(X := 11, Y := 8),
+    Coordinates.InteriorPosition(X := 10, Y := 7)
+  ] do
+    Test.AssertTrue(
+      Dialogue.Start(
+        Entry.View,
+        Entry.State with Player := Coordinates.PlayerPosition.Settlement(Position); end with
+      ) is Ok(_)
+    );
+  end for;
+
+  Test.AssertTrue(
+    Dialogue.Start(
+      Entry.View,
+      Entry.State with Player := Coordinates.PlayerPosition.Settlement(
+        Coordinates.InteriorPosition(X := 12, Y := 8)
+      ); end with
+    ) is Error(_)
+  );
+  const Ready := Entry.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); Health := 3; Items := [
+    Items.GameItem(
+      Id := 'carried-coin',
+      Kind := Items.ItemKind.AncientCoin,
+      Location := Items.ItemLocation.CarriedByPlayer
+    )
+  ]; end with;
+  const First := Continued(Dialogue.Start(Entry.View, Ready).Unwrap());
+  Test.AssertFalse(Ready.Npcs[0].HasMetPlayer);
+  Test.AssertEquals('Mara', First.Frame.Speaker);
+  Test.AssertTrue('introduces herself' in First.Frame.Text);
+  Test.AssertTrue(First.State.Npcs[0].HasMetPlayer);
+  var Expected := Ready;
+  Expected.Npcs[0].HasMetPlayer := true;
+  Test.AssertTrue(Comparison.SameState(Expected, First.State));
+  Test.AssertEquals(5, First.Frame.Choices.Length());
+  Test.AssertEquals('identity', First.Frame.Choices[0].Id);
+  Test.AssertEquals('dungeon', First.Frame.Choices[1].Id);
+  Test.AssertEquals('coin', First.Frame.Choices[2].Id);
+  Test.AssertEquals('wounds', First.Frame.Choices[3].Id);
+  Test.AssertEquals('goodbye', First.Frame.Choices[4].Id);
+  for Id: string in ['identity', 'dungeon', 'coin'] do
+    const Answer := Continued(Dialogue.Choose(Entry.View, First.State, First.Frame, Id).Unwrap());
+    Test.AssertTrue(Comparison.SameState(First.State, Answer.State));
+    Test.AssertTrue(Answer.Frame.Text <> First.Frame.Text);
+    Test.AssertEquals(5, Answer.Frame.Choices.Length());
+    if Id = 'dungeon' then
+      // Independent name vector for seed 12345, spawn region (29,-12), with three levels.
+      Test.AssertTrue('Hollow Sanctum' in Answer.Frame.Text);
+      Test.AssertTrue('3 levels' in Answer.Frame.Text);
+    end if;
+  end for;
+  const Healed := Continued(
+    Dialogue.Choose(Entry.View, First.State, First.Frame, 'wounds').Unwrap()
+  );
+  Test.AssertTrue(Comparison.SameState(First.State with Health := 20; end with, Healed.State));
+  Test.AssertFalse(Has(Healed.Frame, 'wounds'));
+  Test.AssertTrue(Has(Healed.Frame, 'coin'));
+  Test.AssertTrue(Dialogue.Choose(Entry.View, Healed.State, Healed.Frame, 'wounds') is Error(_));
+  Test.AssertTrue(Dialogue.Choose(Entry.View, First.State, First.Frame, 'unknown') is Error(_));
+  Test.AssertTrue(
+    Dialogue.Choose(Entry.View, First.State, First.Frame with Choices := []; end with, 'identity') is Error(_)
+  );
+  Test.AssertTrue(
+    Dialogue.Choose(
+      Entry.View,
+      First.State,
+      First.Frame with NpcId := 'foreign'; end with,
+      'identity'
+    ) is Error(_)
+  );
+  const Healthy := Continued(
+    Dialogue.Start(Entry.View, Entry.State with Player := Ready.Player; end with).Unwrap()
+  );
+  Test.AssertFalse(Has(Healthy.Frame, 'coin'));
+  Test.AssertFalse(Has(Healthy.Frame, 'wounds'));
+  Test.AssertEquals(3, Healthy.Frame.Choices.Length());
+  const Repeated := Continued(Dialogue.Start(Entry.View, First.State).Unwrap());
+  Test.AssertTrue('recognizes you' in Repeated.Frame.Text);
+  Test.AssertTrue(Comparison.SameState(First.State, Repeated.State));
+  for Resolution: Dialogue.Outcome in [
+    Dialogue.EndConversation(Entry.View, Healed.State, Healed.Frame).Unwrap(),
+    Dialogue.Choose(Entry.View, Healed.State, Healed.Frame, 'goodbye').Unwrap()
+  ] do
+    case Resolution of
+      when Dialogue.Outcome.Ended(const State):
+        Test.AssertTrue(Comparison.SameState(Healed.State, State));
+      when Dialogue.Outcome.Continued(_, _, _):
+        panic('expected conversation to end');
+    end case;
+  end for;
+end.

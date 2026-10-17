@@ -82,9 +82,14 @@ coordinate. Interior windows use the same rectangular response contract;
 fields outside the finite current floor are returned as undiscovered `?`
 padding. Only the current area's map can be requested.
 
-A map request is read-only. It does not move the player, update discovery, or
-load or generate unknown terrain. For an outdoor field, the server obtains
-terrain only after discovery proves that the field may be disclosed. This
+A map request does not move the player, update discovery, or load or generate
+unknown terrain. For an outdoor field, the server obtains terrain only after
+discovery proves that the field may be disclosed. It reads that terrain from the
+stored chunks through the session's chunk cache, loading only chunks that
+contain discovered fields or lie within current sight, and keeps the refreshed
+cache; it never recomputes terrain field by field. A full 240 by 120 window
+from cached chunks takes about 50 ms, compared with about 1.8 s for the earlier
+field-by-field generation of a densely explored window. This
 keeps overlay panning, viewport changes, and terminal resizing outside the
 discovery lifecycle and prevents exploring the world by requesting distant
 windows.
@@ -112,7 +117,7 @@ never becomes a movement or transition intention.
 
 ## Persistence
 
-Savegame format 10 stores accumulated discovery in the authoritative game
+Savegame format 11 stores accumulated discovery in the authoritative game
 snapshot together with item state. Outdoor masks are records containing signed
 `chunk_x`, `chunk_y`, and exactly 128 strings of 128 `0` or `1` characters. Interior records contain
 `area_id`, `width`, `height`, and exactly one equally sized `0`/`1` row per
@@ -123,3 +128,12 @@ There is no legacy reader or migration. An obsolete or invalid save is reported
 and preserved unchanged. Replacing an existing save requires explicit overwrite
 confirmation. Explicit atomic saving is the only operation that persists newly
 discovered fields.
+
+## Settlement discovery
+
+Hearthmoor uses the same non-occluded radius-eight map visibility as outdoors,
+clipped to its authored bounds. Its local discovery uses a finite-area mask.
+The primary projection clamps to the map, and panning beyond it yields unknown
+padding. Projection and resize never access outdoor chunks. Mara's `n` code is
+currently visible only; remembered fields keep static geometry. See
+[NPCs and dialogue](npcs-and-dialogue.md).

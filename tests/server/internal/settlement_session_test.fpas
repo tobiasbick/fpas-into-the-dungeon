@@ -1,0 +1,144 @@
+// Proves finite settlement projection and atomic dialogue failure/retry behavior on a live socket.
+program SettlementSessionTest;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.Exploration as Exploration,
+  Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol,
+  Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport,
+  Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection,
+  Dungeon.Server.Session as SessionUnit, Dungeon.Test.SessionAssertions as Sessions,
+  Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+
+begin
+  const Metadata := Placement.NewWorldMetadata('settlement-session', 12345, 4).Unwrap();
+  const Entry := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := Metadata, Interior := None),
+    GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+      Metadata.SettlementGate
+    ); end with,
+    None
+  ).Unwrap();
+  const Near := Exploration.RevealCurrentArea(
+    Entry.View,
+    Entry.State with Player := Coordinates.PlayerPosition.Settlement(
+      Coordinates.InteriorPosition(X := 11, Y := 8)
+    ); Health := 3; end with
+  ).Unwrap();
+  const World := WorldUnit.WorldSession(
+    Directory := '.temp-data/unused-settlement-projection',
+    Metadata := Metadata, Cache := [], Clock := 0, CacheLimit := 32
+  );
+  Test.AssertEquals(0, Near.Exploration.OutdoorChunks.Length());
+  const Whole := Projection.ProjectExplorationMap(Near, Entry.View, -1, -1, 25, 17).Unwrap();
+  Test.AssertEquals('Hearthmoor', Whole.LabelText);
+  Test.AssertTrue(Whole.View = Protocol.ViewKind.Map);
+  Test.AssertEquals('?', Whole.Rows[0][0]);
+  Test.AssertEquals('n', Whole.Rows[8][12]);
+  Test.AssertEquals('v', Whole.KnowledgeRows[8][12]);
+  Test.AssertEquals('x', Whole.Rows[14][12]);
+  const Far := Exploration.RevealCurrentArea(
+    Entry.View,
+    Near with Player := Coordinates.PlayerPosition.Settlement(
+      Coordinates.InteriorPosition(X := 1, Y := 1)
+    ); end with
+  ).Unwrap();
+  const Remembered := Projection.ProjectExplorationMap(Far, Entry.View, 11, 7, 1, 1).Unwrap();
+  Test.AssertEquals('.', Remembered.Rows[0]);
+  Test.AssertEquals('r', Remembered.KnowledgeRows[0]);
+  const Projected := Projection.ProjectSession(
+    World, Entry.View, Near,
+    SessionUnit.ViewportSize(Width := 80, Height := 24), Projection.NoTurnReport()
+  ).Unwrap();
+  Test.AssertEquals(0, Projected.World.Cache.Length());
+  Test.AssertEquals(0, Projected.World.Clock);
+  case Projected.State of
+    when Protocol.VisibleState.MapState(const Map):
+      Test.AssertEquals(23, Map.Width);
+      Test.AssertEquals(15, Map.Height);
+      Test.AssertEquals(0, Map.OriginX);
+      Test.AssertEquals(0, Map.OriginY);
+      Test.AssertEquals('Mara — Enter: Talk', Map.Status);
+    when Protocol.VisibleState.FirstPersonState(_):
+      panic('settlement must stay a map');
+  end case;
+
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None,
+    WorldsRoot := '.temp-data/unused-settlement-projection', WorldId := Metadata.Id,
+    WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  var Session := SessionUnit.ServerSession(
+    World := World, WorldSelected := true,
+    State := Some(Near), Interior := Entry.View.Interior, Dirty := false,
+    LastSavedAt := 42, Finished := false,
+    Viewport := SessionUnit.ViewportSize(Width := 23, Height := 15)
+  );
+  Session := Handling.HandleSessionMessage(
+    Session,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  const Started := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(Started.Line).Unwrap() is Protocol.ServerMessage.Dialogue(_, _, true)
+  );
+  Session.Dirty := false;
+  const Frame := Session.ActiveDialogue.Unwrap();
+  const Broken := Session with Viewport := SessionUnit.ViewportSize(Width := 0, Height := 1); end with;
+  const Failed := Handling.HandleSessionMessage(
+    Broken,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'), Server, Config, Token
+  ).Unwrap();
+  const Rejection := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(Rejection.Line).Unwrap() is Protocol.ServerMessage.Rejected('dialogue_rejected', _)
+  );
+  Sessions.AssertUnchanged(Broken, Failed);
+  const Resized := Handling.HandleSessionMessage(
+    Session,
+    Protocol.ClientMessage.Viewport(9, 5),
+    Server,
+    Config,
+    Token
+  ).Unwrap();
+  const ResizeReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(ResizeReply.Line).Unwrap() is Protocol.ServerMessage.State(_)
+  );
+  Sessions.AssertUnchanged(Session with Viewport := Resized.Viewport; end with, Resized);
+  const Healed := Handling.HandleSessionMessage(
+    Resized,
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'), Server, Config, Token
+  ).Unwrap();
+  const HealingReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(HealingReply.Line).Unwrap() is Protocol.ServerMessage.Dialogue(_, _, true)
+  );
+  Test.AssertEquals(20, Healed.State.Unwrap().Health);
+  Test.AssertEquals(42, Healed.LastSavedAt);
+  Test.AssertEquals(Frame.Choices.Length() - 1, Healed.ActiveDialogue.Unwrap().Choices.Length());
+  discard Net.Close(Server).Unwrap();
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(
+      Resized,
+      Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'), Server, Config, Token
+    ) is Error(_)
+  );
+  Test.AssertEquals(3, Resized.State.Unwrap().Health);
+  Test.AssertFalse(Resized.Dirty);
+  Test.AssertEquals(Frame.Text, Resized.ActiveDialogue.Unwrap().Text);
+  discard Net.Close(Client).Unwrap();
+end.

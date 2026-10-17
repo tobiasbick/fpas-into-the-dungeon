@@ -1,0 +1,62 @@
+// Verifies exact persisted gate metadata and preserves obsolete or malformed world and chunk files.
+program SettlementGateStorageTest;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Terrain as Terrain, Dungeon.World as WorldUnit,
+  Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as Fields, Std.Test as Test, Std.Time as Time;
+
+begin
+  const Root := '.temp-data/gate-storage-' + Conv.IntToStr(Time.TimestampMillis());
+  Test.AssertTrue(Fs.CreateDirAll(Root).Unwrap());
+  const World := WorldUnit.OpenWorld(Root, 'gate', 12345, 4, 8).Unwrap();
+  const Path := World.Directory + '/world.json';
+  const Original := Fs.ReadText(Path).Unwrap();
+  Test.AssertTrue(
+    World.Metadata.SettlementGate =
+    WorldUnit.OpenWorld(Root, 'gate', 0, 1, 8).Unwrap().Metadata.SettlementGate
+  );
+  const GateField := '"settlement_gate":' +
+    Json.Stringify(Fields.Field(Fields.ParseObject(Original).Unwrap(), 'settlement_gate').Unwrap());
+  for Broken: string in [
+    Original.Replace('"version":4', '"version":3'),
+    Original.Replace(GateField + ',', ''),
+    Original.Replace(GateField, '"settlement_gate":null'),
+    Original.Replace(GateField, '"settlement_gate":{"x":0,"y":0}'),
+    Original.Replace(GateField, '"settlement_gate":{"x":0,"y":0,"extra":1}'),
+    Original.Replace(GateField, '"settlement_gate":{"x":0}'),
+    Original.Replace(GateField, GateField + ',' + GateField)
+  ] do
+    Test.AssertTrue(Broken <> Original);
+    Test.AssertTrue(Fs.WriteTextAtomic(Path, Broken).Unwrap());
+    Test.AssertTrue(WorldUnit.OpenWorld(Root, 'gate', 12345, 4, 8) is Error(_));
+    Test.AssertEquals(Broken, Fs.ReadText(Path).Unwrap());
+  end for;
+
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Original).Unwrap());
+  const Gate := World.Metadata.SettlementGate;
+  const Coordinate := Coordinates.ChunkCoordinate(
+    X := Coordinates.ChunkForCoordinate(Gate.X),
+    Y := Coordinates.ChunkForCoordinate(Gate.Y)
+  );
+  const Loaded := WorldUnit.LoadWorldChunk(World, Coordinate).Unwrap();
+  const ChunkPath := WorldUnit.WorldChunkPath(World, Coordinate);
+  const ChunkText := Fs.ReadText(ChunkPath).Unwrap();
+  Test.AssertTrue(
+    WorldUnit.LoadWorldChunk(WorldUnit.OpenWorld(Root, 'gate', 0, 1, 8).Unwrap(), Coordinate) is Ok(_)
+  );
+  // Feature s occurs only for the settlement gate, so removing it cannot affect a base or water row.
+  var ChunkFields := Fields.ParseObject(ChunkText).Unwrap();
+  const Features := Fields.StringArrayField(ChunkFields, 'feature_rows').Unwrap();
+  var Missing: array of Json.JsonValue := [];
+  for Row: string in Features do
+    Missing.PushInPlace(Json.JsonValue.String(Row.Replace('s', '.')));
+  end for;
+
+  ChunkFields['feature_rows'] := Json.JsonValue.ArrayValue(Missing);
+  const MissingGate := Json.Stringify(Json.JsonValue.Object(ChunkFields));
+  Test.AssertTrue(Fs.WriteTextAtomic(ChunkPath, MissingGate).Unwrap());
+  Test.AssertTrue(
+    WorldUnit.LoadWorldChunk(WorldUnit.OpenWorld(Root, 'gate', 0, 1, 8).Unwrap(), Coordinate) is Error(_)
+  );
+  Test.AssertEquals(MissingGate, Fs.ReadText(ChunkPath).Unwrap());
+end.

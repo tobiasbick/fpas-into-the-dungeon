@@ -22,6 +22,8 @@ run headless or with a full-terminal dashboard.
   rare dungeon entrances. Movement across terrain chunks is seamless.
 - Enter generated dungeons with rooms, corridors, and stored names. A dungeon's
   layout is fixed on first entry and retained when you revisit it.
+- Visit Hearthmoor, talk to Mara, and receive free healing. Her meeting state
+  persists through explicit saves.
 - Discover the world through Fog of War and open a pannable exploration map.
 - Inspect and collect ancient coins, equip a rusty short sword and leather
   jerkin, find and use healing potions, and drop carried items.
@@ -32,9 +34,10 @@ run headless or with a full-terminal dashboard.
 - Monitor the server through status panels, a live log, filters, and settings
   for new-world defaults.
 
-Each dungeon has one skeleton, one giant rat, four guaranteed floor finds and
-up to two optional finds. The server currently accepts **one connected player
-at a time**. Deeper dungeon levels are still planned.
+Each dungeon has three levels. Its entrance level has one skeleton, one giant
+rat, four guaranteed floor finds and up to two optional finds; deeper levels
+have more opponents. The server currently accepts **one connected player
+at a time**.
 
 ## Quick start
 
@@ -88,9 +91,9 @@ fpas run apps/server/server.fpasprj
 
 | Key | Action |
 | --- | --- |
-| WASD | Move outdoors; forward, left, backward, right inside a dungeon |
+| WASD / arrows | Move on outdoor and settlement maps; WASD moves relative to facing in dungeons |
 | Q / E | Turn left / right by 90 degrees inside a dungeon |
-| Enter | Interact: inspect, pick up, or use an entrance or exit |
+| Enter | Interact: inspect, pick up, use a gate/exit, or talk to Mara |
 | Space / Z | Attack ahead / wait one turn inside a dungeon |
 | I | Inventory; Enter uses a consumable or wears/removes gear, D drops the selected item |
 | C | Character sheet with health, equipment, and derived values |
@@ -104,6 +107,12 @@ items, and potion use advance a turn. A carried potion restores up to six health
 points before the opponents act once. At full health the server rejects use
 without consuming the potion or a turn. Turning, inspecting and rejected actions
 do not advance time. The in-game system menu also lists the controls.
+
+Hearthmoor's home gate is six steps from spawn. Inside the settlement, walk
+beside Mara and press Enter to talk. W/S or arrows select a topic, Enter submits,
+Escape ends the conversation, and Page Up/Down scrolls long text. Mara offers
+free healing while hurt. End the conversation before saving; her meeting state
+persists only through an explicit save. Houses remain closed in 15a.
 
 ## Screenshots
 
@@ -164,8 +173,8 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 `server.toml`; existing worlds keep their original parameters. Each new world
 gets its own identity, even when another world uses the same seed.
 
-Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 3**,
-**generator 7**, **level format 2**, **protocol 15** and **save format 9**.
+Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 4**,
+**generator 9**, **level format 3**, **protocol 17** and **save format 11**.
 Format-8 and older saves remain intact but cannot be continued with this server.
 Generator-6 worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds

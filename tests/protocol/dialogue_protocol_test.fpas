@@ -1,0 +1,134 @@
+// Verifies atomic dialogue responses, exact intention fields, bounded frames and rejected malformed payloads.
+program DialogueProtocolTest;
+
+uses
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as ClientMessages,
+  Dungeon.Protocol.ServerMessages as Messages, Std.Test as Test;
+
+function State(): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      Title := 'Hearthmoor', Status := 'Mara - Enter: Talk',
+      OriginX := 0, OriginY := 0, Width := 1, Height := 1, Rows := ['.'], KnowledgeRows := ['v'],
+      PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0, Inventory := [], Health := 3,
+      MaxHealth := 20, Character := []
+    )
+  );
+end function;
+
+function Encoded(Frame: Protocol.DialogueFrame): string;
+begin
+  return Messages.EncodeServer(Protocol.ServerMessage.Dialogue(State(), Frame, true));
+end function;
+
+procedure Reject(Text: string);
+begin
+  Test.AssertTrue(Messages.DecodeServer(Text) is Error(_));
+end procedure;
+
+begin
+  const NpcId := 'home:settlement:home:npc:mara';
+  const Choice := Protocol.ClientMessage.DialogueChoice(NpcId, 'wounds');
+  const Intent := '{"type":"dialogue_choice","npc_id":"home:settlement:home:npc:mara","choice_id":"wounds"}';
+  Test.AssertTrue(ClientMessages.DecodeClient(Intent).Unwrap() = Choice);
+  Test.AssertEquals(Intent, ClientMessages.EncodeClient(Choice));
+  Test.AssertEquals(
+    '{"type":"end_dialogue"}',
+    ClientMessages.EncodeClient(Protocol.ClientMessage.EndDialogue)
+  );
+  Test.AssertTrue(
+    ClientMessages.DecodeClient('{"type":"end_dialogue"}').Unwrap() =
+    Protocol.ClientMessage.EndDialogue
+  );
+  for Broken: string in [
+    Intent.Replace(',"choice_id":"wounds"', ''),
+    Intent.Replace('"choice_id":"wounds"', '"choice_id":"unknown"'),
+    Intent.Replace('"choice_id":"wounds"', '"choice_id":1'),
+    Intent.Replace('"choice_id":"wounds"', '"choice_id":"wounds","extra":1'),
+    Intent.Replace('"choice_id":"wounds"', '"choice_id":"wounds","choice_id":"coin"'),
+    Intent.Replace(NpcId, ''), Intent.Replace(NpcId, 'a'.RepeatStr(161)),
+    Intent.Replace(NpcId, 'bad id'),
+    '{"type":"end_dialogue","npc_id":"extra"}'
+  ] do
+    Test.AssertTrue(ClientMessages.DecodeClient(Broken) is Error(_));
+  end for;
+  const Frame := Protocol.DialogueFrame(
+    NpcId := NpcId, Speaker := 'Mara', Text := 'Welcome.', Choices := [
+      Protocol.DialogueChoice(Id := 'identity', Text := 'Who are you?'),
+      Protocol.DialogueChoice(Id := 'wounds', Text := 'Help me.'),
+      Protocol.DialogueChoice(Id := 'goodbye', Text := 'Goodbye.')
+    ]
+  );
+  const Original := Encoded(Frame);
+  case Messages.DecodeServer(Original).Unwrap() of
+    when Protocol.ServerMessage.Dialogue(Protocol.VisibleState.MapState(const Map), const Dialogue, const Dirty):
+      Test.AssertEquals(3, Map.Health);
+      Test.AssertTrue(Dirty);
+      Test.AssertEquals('Hearthmoor', Map.Title);
+      Test.AssertEquals('Mara - Enter: Talk', Map.Status);
+      Test.AssertEquals(NpcId, Dialogue.NpcId);
+      Test.AssertEquals('Welcome.', Dialogue.Text);
+      Test.AssertEquals(3, Dialogue.Choices.Length());
+      Test.AssertEquals('wounds', Dialogue.Choices[1].Id);
+    when Protocol.ServerMessage.Dialogue(Protocol.VisibleState.FirstPersonState(_), _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected dialogue map response');
+  end case;
+
+  Test.AssertTrue(
+    Messages.DecodeServer(
+      Messages.EncodeServer(Protocol.ServerMessage.DialogueEnded(State(), false))
+    ).Unwrap() is Protocol.ServerMessage.DialogueEnded(_, _)
+  );
+  for Text: string in [
+    Original.Replace('"type":"state"', '"type":"worlds"'),
+    Original.Replace('"speaker":"Mara"', '"speaker":"Mara","extra":1'),
+    Original.Replace('"speaker":"Mara"', '"speaker":"Mara","speaker":"Other"'),
+    Original.Replace('"title":"Hearthmoor",', ''),
+    Original.Replace(
+      '"id":"identity","text":"Who are you?"',
+      '"id":"identity","text":"Who are you?","extra":1'
+    )
+  ] do
+    Test.AssertTrue(Text <> Original);
+    Reject(Text);
+  end for;
+
+  Reject(Encoded(Frame with NpcId := ''; end with));
+  Reject(Encoded(Frame with NpcId := 'a'.RepeatStr(161); end with));
+  Reject(Encoded(Frame with Speaker := ''; end with));
+  Reject(Encoded(Frame with Speaker := 'a'.RepeatStr(65); end with));
+  Reject(Encoded(Frame with Text := ''; end with));
+  Reject(Encoded(Frame with Text := 'a'.RepeatStr(4097); end with));
+  Reject(Encoded(Frame with Text := string.Chr(0); end with));
+  Reject(Encoded(Frame with Choices := []; end with));
+  Reject(Encoded(Frame with Choices := [Frame.Choices[0], Frame.Choices[0]]; end with));
+  Reject(
+    Encoded(
+      Frame with Choices := [Protocol.DialogueChoice(Id := 'unknown', Text := 'Unknown')]; end with
+    )
+  );
+  Reject(
+    Encoded(
+      Frame with Choices := [Protocol.DialogueChoice(Id := 'goodbye', Text := 'a'.RepeatStr(161))]; end with
+    )
+  );
+  case Messages.DecodeServer(
+    Encoded(Frame with Choices := array.Fill(Frame.Choices[0], 7); end with)
+  ) of
+    when Error(const Reason):
+      Test.AssertTrue('count' in Reason);
+    when Ok(_):
+      panic('choice-count bound must be enforced before entry validation');
+  end case;
+
+  Test.AssertTrue(
+    Messages.DecodeServer(
+      Encoded(
+        Frame with NpcId := 'a'.RepeatStr(160); Speaker := 'a'.RepeatStr(64); Text := 'a'.RepeatStr(
+          4096
+        ); Choices := [Protocol.DialogueChoice(Id := 'goodbye', Text := 'a'.RepeatStr(160))]; end with
+      )
+    ) is Ok(_)
+  );
+end.

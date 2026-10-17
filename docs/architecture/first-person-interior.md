@@ -108,8 +108,8 @@ view.
 
 ## Persistence and lifecycle
 
-Dungeon geometry is world data: world and chunk format `3`, generator version
-`8`, and level-file format `3`. The current savegame format `10`
+Dungeon geometry is world data: world and chunk format `4`, generator version
+`9`, and level-file format `3`. The current savegame format `11`
 persists the active interior level's area ID, local field, cardinal facing, and exact
 outdoor return location, together with accumulated discovery and item state.
 Reconnecting does not restore it implicitly: the

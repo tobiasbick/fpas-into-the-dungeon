@@ -242,11 +242,13 @@ and carried items stay recorded, so re-entering never restores them.
 - Item and opponent identities are `<area>:item:<n>` and `<area>:hostile:<n>`.
 - In 14a, savegame format 7 removed the NPC and added visited areas. Format 8
   added rat state and terminal potion locations, format 9 progression, and the
-  current format 10 level identities; obsolete saves are rejected and preserved.
-  A visited level below 0 requires its upper level to be visited, and visited
+  format 10 level identities. Current format 11 adds settlement/NPC records;
+  obsolete saves are rejected and preserved.
+  A visited level deeper than 0 requires its upper level to be visited, and visited
   levels of one dungeon must agree on depth and name.
 - Loading or writing a savegame runs the complete validation: every visited
-  area's level file is read and validated once, and every item and opponent
+  dungeon's level file is read and validated once, the home settlement resolves
+  from code, and every item and opponent
   must match exactly one origin placement of a visited area by identity and
   kind. An item's current
   location may differ from its origin, including another visited dungeon.

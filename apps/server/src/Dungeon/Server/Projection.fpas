@@ -1,7 +1,7 @@
 // Client-safe projections of the authoritative state: masked rows, inventory, character, and map windows.
 unit Dungeon.Server.Projection;
 
-uses Dungeon.Server.Mapping as Mapping, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.Exploration as Exploration, Dungeon.Exploration.Sight as Sight, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Protocol as Protocol, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as ChunksUnit, Dungeon.World as WorldUnit;
+uses Dungeon.Npcs as NpcRules, Std.Math as Math, Dungeon.Server.Mapping as Mapping, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment, Dungeon.Exploration as Exploration, Dungeon.Exploration.Sight as Sight, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Protocol as Protocol, Dungeon.Terrain as Terrain, Dungeon.World as WorldUnit;
 
 // Visible state of one projection and the world session whose chunk cache it may have grown.
 public type SessionProjection = record
@@ -126,7 +126,17 @@ begin
   var Code := Protocol.UnknownFieldCode;
   case Knowledge of
     when Model.FieldKnowledge.Visible:
-      Code := try GameState.InteriorVisibleCodeForState(Map, State, Position);
+      if State.Area = Coordinates.AreaKind.Settlement then
+        Code := NpcRules.MapCellCode(
+          State.Npcs,
+          State.AreaId,
+          Position,
+          true,
+          try InteriorUnit.InteriorVisibleCode(Map, Position)
+        );
+      else
+        Code := try GameState.InteriorVisibleCodeForState(Map, State, Position);
+      end if;
     when Model.FieldKnowledge.Remembered:
       // Memory retains geometry, never the current position of a dynamic entity.
       Code := try InteriorUnit.InteriorVisibleCode(Map, Position);
@@ -231,7 +241,146 @@ begin
     (PlayerY < OriginY + Height);
 end function;
 
-// Projects one exploration-map window of the current area with Fog of War.
+// Returns one discovered field's cell from the chunks loaded for an exploration window.
+function LoadedCell(Chunks: array of Terrain.WorldChunk; X: integer; Y: integer): result of (Terrain.WorldCell, string);
+begin
+  const ChunkX: integer := Coordinates.ChunkForCoordinate(X);
+  const ChunkY: integer := Coordinates.ChunkForCoordinate(Y);
+  for Chunk: Terrain.WorldChunk in Chunks do
+    if (Chunk.Coordinate.X = ChunkX) and (Chunk.Coordinate.Y = ChunkY) then
+      return Ok(
+        Terrain.ChunkCell(
+          Chunk,
+          Coordinates.LocalForCoordinate(X),
+          Coordinates.LocalForCoordinate(Y)
+        )
+      );
+    end if;
+  end for;
+
+  return Error('discovered field lies outside the loaded exploration chunks');
+end function;
+
+// Outdoor exploration window together with the world session whose chunk cache served it.
+public type OutdoorExplorationLoad = record
+  public World: WorldUnit.WorldSession;
+  public Map: Protocol.ExplorationMapState;
+end record;
+
+// Projects one outdoor exploration-map window with Fog of War from the stored chunks. Only
+// chunks containing discovered fields or lying within current sight are loaded, from the cache
+// or their chunk files; other chunks stay unknown and are neither read nor generated.
+public function ProjectOutdoorExplorationMap(
+  World: WorldUnit.WorldSession;
+  State: GameState.GameState;
+  View: GameState.AreaView;
+  OriginX: integer;
+  OriginY: integer;
+  Width: integer;
+  Height: integer
+): result of (OutdoorExplorationLoad, string);
+begin
+  const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
+  if State.Area <> Coordinates.AreaKind.OutdoorRegion then
+    return Error('outdoor exploration windows require the outdoor area');
+  end if;
+  const Metadata: Terrain.WorldMetadata := View.Metadata;
+  const Range: WorldUnit.ChunkRange := try WorldUnit.ChunkRangeForWindow(
+    OriginX,
+    OriginY,
+    Width,
+    Height
+  );
+  const Player: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(State);
+  // Chunks within the current sight square may hold visible fields before they are recorded.
+  const SightChunks: WorldUnit.ChunkRange := try WorldUnit.ChunkRangeForWindow(
+    Player.X - Exploration.OutdoorSightRadius,
+    Player.Y - Exploration.OutdoorSightRadius,
+    (2 * Exploration.OutdoorSightRadius) + 1,
+    (2 * Exploration.OutdoorSightRadius) + 1
+  );
+  var Current: WorldUnit.WorldSession := World;
+  var Chunks: array of Terrain.WorldChunk := [];
+  for ChunkY: integer := Range.MinimumY to Range.MaximumY do
+    for ChunkX: integer := Range.MinimumX to Range.MaximumX do
+      const InSight: boolean := (ChunkX >= SightChunks.MinimumX)
+        and
+        (ChunkX <= SightChunks.MaximumX)
+        and
+        (ChunkY >= SightChunks.MinimumY) and (ChunkY <= SightChunks.MaximumY);
+      if InSight or Exploration.OutdoorChunkHasDiscovery(State.Exploration, ChunkX, ChunkY) then
+        const Loaded: WorldUnit.ChunkLoad := try WorldUnit.LoadWorldChunk(
+          Current,
+          Coordinates.ChunkCoordinate(X := ChunkX, Y := ChunkY)
+        );
+        Current := Loaded.World;
+        Chunks.PushInPlace(Loaded.Chunk);
+      end if;
+    end for;
+  end for;
+  var Rows: array of string := [];
+  var KnowledgeRows: array of string := [];
+  const VisibleFields: array of boolean := Exploration.OutdoorVisibility(
+    OriginX,
+    OriginY,
+    Width,
+    Height,
+    Player
+  );
+  for Y: integer := 0 to Height - 1 do
+    begin
+      var Row: string := '';
+      var KnowledgeRow: string := '';
+      for X: integer := 0 to Width - 1 do
+        begin
+          const WorldX: integer := OriginX + X;
+          const WorldY: integer := OriginY + Y;
+          const Knowledge: Model.FieldKnowledge := Exploration.ClassifyField(
+            Exploration.OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[
+              (Y * Width) +
+              X
+            ]
+          );
+          if Knowledge = Model.FieldKnowledge.Undiscovered then
+            begin
+              Row := Row + Protocol.UnknownFieldCode;
+            end;
+          else
+            begin
+              Row := Row + Terrain.VisibleCellCode(try LoadedCell(Chunks, WorldX, WorldY));
+            end;
+          end if;
+
+          KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
+        end;
+      end for;
+
+      Rows.PushInPlace(Row);
+      KnowledgeRows.PushInPlace(KnowledgeRow);
+    end;
+  end for;
+
+  return Ok(
+    OutdoorExplorationLoad(
+      World := Current, Map := Protocol.ExplorationMapState(
+        View := Protocol.ViewKind.Map,
+        LabelText := Metadata.OutdoorAreaLabel,
+        OriginX := OriginX,
+        OriginY := OriginY,
+        Width := Width,
+        Height := Height,
+        Rows := Rows,
+        KnowledgeRows := KnowledgeRows,
+        PlayerWorldX := Player.X,
+        PlayerWorldY := Player.Y,
+        PlayerInWindow := PlayerInWindow(Player.X, Player.Y, OriginX, OriginY, Width, Height)
+      )
+    )
+  );
+end function;
+
+// Projects one exploration-map window of the current interior or settlement with Fog of War;
+// outdoor windows use ProjectOutdoorExplorationMap.
 public function ProjectExplorationMap(
   State: GameState.GameState;
   View: GameState.AreaView;
@@ -242,73 +391,23 @@ public function ProjectExplorationMap(
 ): result of (Protocol.ExplorationMapState, string);
 begin
   const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
-  const Metadata: Terrain.WorldMetadata := View.Metadata;
   var Rows: array of string := [];
   var KnowledgeRows: array of string := [];
   if State.Area = Coordinates.AreaKind.OutdoorRegion then
-    begin
-      const Player: Coordinates.WorldPosition := try GameState.OutdoorPlayerPosition(State);
-      const VisibleFields: array of boolean := Exploration.OutdoorVisibility(
-        OriginX,
-        OriginY,
-        Width,
-        Height,
-        Player
-      );
-      for Y: integer := 0 to Height - 1 do
-        begin
-          var Row: string := '';
-          var KnowledgeRow: string := '';
-          for X: integer := 0 to Width - 1 do
-            begin
-              const WorldX: integer := OriginX + X;
-              const WorldY: integer := OriginY + Y;
-              const Knowledge: Model.FieldKnowledge := Exploration.ClassifyField(
-                Exploration.OutdoorIsDiscovered(State.Exploration, WorldX, WorldY), VisibleFields[
-                  (Y * Width) +
-                  X
-                ]
-              );
-              if Knowledge = Model.FieldKnowledge.Undiscovered then
-                begin
-                  Row := Row + Protocol.UnknownFieldCode;
-                end;
-              else
-                begin
-                  Row := Row +
-                    Terrain.VisibleCellCode(ChunksUnit.GenerateWorldCell(Metadata, WorldX, WorldY));
-                end;
-              end if;
-
-              KnowledgeRow := KnowledgeRow + KnowledgeCode(Knowledge);
-            end;
-          end for;
-
-          Rows.PushInPlace(Row);
-          KnowledgeRows.PushInPlace(KnowledgeRow);
-        end;
-      end for;
-
-      return Ok(
-        Protocol.ExplorationMapState(
-          View := Protocol.ViewKind.Map,
-          LabelText := Metadata.OutdoorAreaLabel,
-          OriginX := OriginX,
-          OriginY := OriginY,
-          Width := Width,
-          Height := Height,
-          Rows := Rows,
-          KnowledgeRows := KnowledgeRows,
-          PlayerWorldX := Player.X,
-          PlayerWorldY := Player.Y,
-          PlayerInWindow := PlayerInWindow(Player.X, Player.Y, OriginX, OriginY, Width, Height)
-        )
-      );
-    end;
+    return Error('outdoor exploration windows are loaded through the world session');
   end if;
   const Map: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, State);
-  const Pose: Coordinates.FirstPersonPose := try GameState.FirstPersonPlayerPose(State);
-  const VisibleFields: array of boolean := Sight.InteriorVisibility(Map, Pose);
+  var Player: Coordinates.InteriorPosition := Map.Start;
+  var VisibleFields: array of boolean := [];
+  if State.Area = Coordinates.AreaKind.Settlement then
+    Player := try GameState.SettlementPlayerPosition(State);
+    VisibleFields := Exploration.SettlementVisibility(Map, Player);
+  else
+    const Pose := try GameState.FirstPersonPlayerPose(State);
+    Player := Pose.Position;
+    VisibleFields := Sight.InteriorVisibility(Map, Pose);
+  end if;
+
   for LocalY: integer := 0 to Height - 1 do
     begin
       var Row: string := '';
@@ -330,7 +429,9 @@ begin
 
   return Ok(
     Protocol.ExplorationMapState(
-      View := Protocol.ViewKind.FirstPerson,
+      View := if State.Area = Coordinates.AreaKind.Settlement then Protocol.ViewKind.Map
+        else Protocol.ViewKind.FirstPerson
+        end if,
       LabelText := Map.DisplayName,
       OriginX := OriginX,
       OriginY := OriginY,
@@ -338,11 +439,11 @@ begin
       Height := Height,
       Rows := Rows,
       KnowledgeRows := KnowledgeRows,
-      PlayerWorldX := Pose.Position.X,
-      PlayerWorldY := Pose.Position.Y,
+      PlayerWorldX := Player.X,
+      PlayerWorldY := Player.Y,
       PlayerInWindow := PlayerInWindow(
-        Pose.Position.X,
-        Pose.Position.Y,
+        Player.X,
+        Player.Y,
         OriginX,
         OriginY,
         Width,
@@ -362,6 +463,35 @@ public function ProjectSession(
 ): result of (SessionProjection, string);
 begin
   const Valid: GameState.GameState := try GameState.ValidateGameState(View, State);
+  if State.Area = Coordinates.AreaKind.Settlement then
+    if (Viewport.Width < 1) or (Viewport.Height < 1) then
+      return Error('viewport dimensions must be positive');
+    end if;
+    const Map := try GameState.CurrentInterior(View, State);
+    const Position := try GameState.SettlementPlayerPosition(State);
+    const Width := Math.Min(Viewport.Width, Map.Width);
+    const Height := Math.Min(Viewport.Height, Map.Height);
+    const OriginX := Math.Clamp(Position.X - Width div 2, 0, Map.Width - Width);
+    const OriginY := Math.Clamp(Position.Y - Height div 2, 0, Map.Height - Height);
+    const Window := try ProjectExplorationMap(State, View, OriginX, OriginY, Width, Height);
+    return Ok(
+      SessionProjection(
+        World := World, State := Protocol.VisibleState.MapState(
+          Protocol.MapVisibleState(
+            Title := Map.DisplayName, Status := Interaction.MapInteractionHint(View, State),
+            OriginX := OriginX, OriginY := OriginY, Width := Width, Height := Height,
+            Rows := Window.Rows, KnowledgeRows := Window.KnowledgeRows,
+            PlayerX := Position.X - OriginX, PlayerY := Position.Y - OriginY, WorldX := Position.X,
+            WorldY := Position.Y,
+            Inventory := ProjectInventory(State), Health := State.Health,
+            MaxHealth := Equipment.DeriveCharacterValues(State).MaximumHealth,
+            Character := ProjectCharacter(State)
+          )
+        )
+      )
+    );
+  end if;
+
   if State.Area = Coordinates.AreaKind.Dungeon then
     begin
       const Map: InteriorUnit.InteriorMap := try GameState.CurrentInterior(View, State);
@@ -426,6 +556,7 @@ begin
     OutdoorPosition
   );
   const MapValue: Protocol.MapVisibleState := Protocol.MapVisibleState(
+    Title := View.Metadata.OutdoorAreaLabel, Status := Interaction.MapInteractionHint(View, State),
     OriginX := Loaded.Window.OriginX,
     OriginY := Loaded.Window.OriginY,
     Width := Loaded.Window.Width,
