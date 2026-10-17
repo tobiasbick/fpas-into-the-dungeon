@@ -395,7 +395,7 @@ defensive training, ranged combat or spells. World format 3, generator 7 and
 immutable level format 2 stay unchanged. Implement 13b before deeper dungeon
 levels (14c), so progression is established against the current opponent kinds.
 
-## 14. Generated game content — PARTIAL
+## 14. Generated game content — DONE
 
 Expand beyond the fixed initial dungeon with generated interiors, dungeons,
 locations, and their contents. Generation remains deterministic and
@@ -659,12 +659,10 @@ one turn when successful; rejected use changes nothing. Outdoor step healing
 remains available; consumables provide healing inside a dungeon. Revise the
 savegame, protocol, and generator versions where their contracts change.
 
-### 14c. Dungeon levels — IN REVIEW
+### 14c. Dungeon levels — DONE
 
 Stairs between levels and deeper, harder levels of a generated dungeon.
-The [implementation plan](plans/14c-dungeon-levels.md) fixes the decisions and
-ordered checkpoints: depth is stored per dungeon (currently three levels,
-later dynamic); deeper
+Depth is stored per dungeon (currently three levels, later dynamic); deeper
 levels hold more opponents of the existing kinds and fewer guaranteed finds;
 paired stairs are terrain cells; only level 0 leads outdoors.
 
@@ -673,7 +671,10 @@ generator 8, level format 3, save format 10 and protocol 16. Formatting, all 21
 project checks and the complete suite (131/131 programs) pass on 2026-10-17.
 An opponent left on an arrival field shifts the arrival to the nearest free
 floor field, and same-kind combat animation is narrowed to the affected field.
-User acceptance in the running game is open.
+The user accepted 14c on 2026-10-17, and its temporary plan is removed. The
+lasting contracts are in [generated dungeons](architecture/generated-dungeons.md),
+[level storage](architecture/dungeon-level-storage.md) and
+[area transitions](architecture/area-transitions.md).
 
 13b is complete. Each level is a separate area with an identity derived
 from the dungeon and level index. Generate and permanently store its immutable
