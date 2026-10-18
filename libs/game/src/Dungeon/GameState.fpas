@@ -1,7 +1,7 @@
 // The authoritative game state: creation, validation, and read-only queries of its parts.
 unit Dungeon.GameState;
 
-uses Dungeon.Quests.Items as QuestItems, Dungeon.Quests.Model as QuestModel, Dungeon.Npcs as NpcRules, Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Progression as Progression, Dungeon.Random as Random, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
+uses Dungeon.Settlements.Identities as SettlementIds, Dungeon.Settlements.Validation as SettlementValidation, Dungeon.Quests.Items as QuestItems, Dungeon.Quests.Model as QuestModel, Dungeon.Npcs as NpcRules, Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Progression as Progression, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
 
 // Full health of a new player character; health never exceeds it.
 public const PlayerMaximumHealth: integer := 20;
@@ -251,7 +251,7 @@ end function;
 // of the current area is checked by ValidateGameState and placements by ValidateSavedGame.
 public function ValidateStateShape(Metadata: Terrain.WorldMetadata; State: GameState): result of (GameState, string);
 begin
-  const ValidNpcs := try NpcRules.ValidateNpcs(Metadata, State.Npcs);
+  const ValidNpcs := try NpcRules.ValidateNpcs(Metadata, State.VisitedAreas, State.Npcs);
   const ValidQuest := try QuestModel.ValidateQuest(Metadata, State.Quest);
   var TargetVisited := false;
   case QuestModel.ObjectiveOf(State.Quest) of
@@ -266,12 +266,12 @@ begin
     State.Items,
     TargetVisited
   );
-  if not (State.Quest is QuestModel.QuestState.NotAccepted) and not State.Npcs[0].HasMetPlayer then
+  const MaraIndex := NpcRules.IndexOf(State.Npcs, NpcRules.MaraId(Metadata));
+  if not (State.Quest is QuestModel.QuestState.NotAccepted)
+    and
+    not State.Npcs[MaraIndex].HasMetPlayer
+  then
     return Error('an accepted quest requires meeting Mara');
-  end if;
-
-  if State.Npcs[0].HasMetPlayer and not HasVisitedArea(State, Settlements.HomeAreaId(Metadata)) then
-    return Error('a met NPC requires its settlement to have been visited');
   end if;
   const ValidExploration: Model.ExplorationState := try Model.ValidateExploration(
     State.Exploration,
@@ -500,20 +500,14 @@ begin
   end if;
 
   if State.Area = Coordinates.AreaKind.Settlement then
-    if State.AreaId <> Settlements.HomeAreaId(Metadata) then
-      return Error('unknown settlement identity');
-    end if;
+    const Gate := try SettlementIds.GateForAreaId(Metadata, State.AreaId);
     const Position := try SettlementPlayerPosition(State);
-    if NpcRules.At(State.Npcs, State.AreaId, Position) >= 0 then
-      return Error('settlement player position must not overlap an NPC');
-    end if;
-
     if not HasVisitedArea(State, State.AreaId) then
       return Error('current settlement must be visited');
     end if;
 
     if State.ReturnLocation <>
-      Coordinates.ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Metadata.SettlementGate)
+      Coordinates.ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Gate)
     then
       return Error('settlement return location must name its outdoor gate');
     end if;
@@ -591,8 +585,13 @@ begin
   const Shaped: GameState := try ValidateStateShape(View.Metadata, State);
   if State.Area = Coordinates.AreaKind.Settlement then
     const Map := try CurrentInterior(View, State);
-    const ValidMap := try Settlements.ValidateHomeMap(View.Metadata, Map);
+    const ValidMap := try SettlementValidation.ValidateMap(View.Metadata, Map);
+    const Roster := try NpcRules.RequirePlacements(State.Npcs, State.AreaId, Map.Npcs);
     const DiscoveryValid := try ValidateMapDiscovery(State.Exploration.InteriorAreas, Map);
+    if NpcRules.At(Map.Npcs, State.AreaId, try SettlementPlayerPosition(State)) >= 0 then
+      return Error('settlement player position must not overlap an NPC');
+    end if;
+
     if (try InteriorUnit.InteriorCellAt(Map, try SettlementPlayerPosition(State))) =
       InteriorUnit.InteriorCellKind.Wall
     then
@@ -678,7 +677,6 @@ begin
       end if;
     end;
   end for;
-
   const DiscoveryValid := try ValidateMapDiscovery(State.Exploration.InteriorAreas, Map);
 
   return Ok(State);

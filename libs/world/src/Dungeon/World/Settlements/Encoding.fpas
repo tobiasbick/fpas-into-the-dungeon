@@ -1,0 +1,227 @@
+// Exact current-version immutable village files, including placement identities and original world parameters.
+unit Dungeon.World.Settlements.Encoding;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Npcs as Npcs,
+  Dungeon.Settlements.Identities as Identities, Dungeon.Settlements.Sites as Sites,
+  Dungeon.Settlements.Validation as Validation, Dungeon.Terrain as Terrain, Dungeon.World.Names as Names,
+  Std.Conv as Conv, Std.Json as Json, Std.Json.Fields as Fields;
+
+// Version of the immutable settlement definition; obsolete versions are rejected without migration.
+public const SettlementFormatVersion: integer := 1;
+// Defensive text bound before parsing; all valid layouts fit well below this limit.
+public const MaximumSettlementTextLength: integer := 65536;
+
+function Point(X: integer; Y: integer): Json.JsonValue;
+begin
+  return Json.JsonValue.Object([
+    'x': Json.JsonValue.Number(Conv.IntToReal(X)),
+    'y': Json.JsonValue.Number(Conv.IntToReal(Y))
+  ]);
+end function;
+
+function DecodePoint(Value: Json.JsonValue): result of (Coordinates.WorldPosition, string);
+begin
+  case Value of
+    when Json.JsonValue.Object(const Values):
+      const Known := try Fields.RequireOnlyFields(Values, ['x', 'y']);
+      if Values.Length() <> 2 then
+        return Error('settlement point requires exactly x and y');
+      end if;
+
+      return Ok(
+        Coordinates.WorldPosition(
+          X := try Fields.IntegerField(Values, 'x'),
+          Y := try Fields.IntegerField(Values, 'y')
+        )
+      );
+    when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+      return Error('settlement point must be an object');
+  end case;
+end function;
+
+function Code(Cell: InteriorUnit.InteriorCellKind): string;
+begin
+  case Cell of
+    when InteriorUnit.InteriorCellKind.Wall:
+      return '#';
+    when InteriorUnit.InteriorCellKind.Floor:
+      return '.';
+    when InteriorUnit.InteriorCellKind.ExitField:
+      return 'x';
+    when InteriorUnit.InteriorCellKind.StairsUp, InteriorUnit.InteriorCellKind.StairsDown:
+      panic('settlement encoding requires validated static cells');
+  end case;
+end function;
+
+// Encodes an already validated generated definition; callers round-trip it before first publication.
+public function EncodeMap(Metadata: Terrain.WorldMetadata; Map: InteriorUnit.InteriorMap): string;
+begin
+  const Region := Identities.ParseAreaId(Metadata, Map.AreaId).Unwrap();
+  const Gate := Sites.Site(Metadata, Region).Unwrap();
+  var Rows: array of Json.JsonValue := [];
+  for Y: integer := 0 to Map.Height - 1 do
+    var Row := '';
+    for X: integer := 0 to Map.Width - 1 do
+      Row := Row + Code(Map.Cells[Y * Map.Width + X]);
+    end for;
+
+    Rows.PushInPlace(Json.JsonValue.String(Row));
+  end for;
+  var Values: array of Json.JsonValue := [];
+  for Npc: Npcs.NpcPlacement in Map.Npcs do
+    Values.PushInPlace(
+      Json.JsonValue.Object([
+        'id': Json.JsonValue.String(Npc.Id),
+        'kind': Json.JsonValue.String(Names.NpcKindName(Npc.Kind)),
+        'name': Json.JsonValue.String(Npc.DisplayName),
+        'position': Point(Npc.Position.X, Npc.Position.Y)
+      ])
+    );
+  end for;
+
+  return Json.Stringify(
+    Json.JsonValue.Object([
+      'format_version': Json.JsonValue.Number(Conv.IntToReal(SettlementFormatVersion)),
+      'world_id': Json.JsonValue.String(Metadata.Id),
+      'world_format_version': Json.JsonValue.Number(Conv.IntToReal(Metadata.FormatVersion)),
+      'world_seed': Json.JsonValue.Number(Conv.IntToReal(Metadata.Seed)),
+      'generator_version': Json.JsonValue.Number(Conv.IntToReal(Metadata.GeneratorVersion)),
+      'dungeon_region_chunks': Json.JsonValue.Number(Conv.IntToReal(Metadata.DungeonRegionChunks)),
+      'area_id': Json.JsonValue.String(Map.AreaId), 'region': Point(Region.X, Region.Y),
+      'gate': Point(Gate.X, Gate.Y), 'name': Json.JsonValue.String(Map.DisplayName),
+      'width': Json.JsonValue.Number(Conv.IntToReal(Map.Width)),
+      'height': Json.JsonValue.Number(Conv.IntToReal(Map.Height)),
+      'rows': Json.JsonValue.ArrayValue(Rows), 'start': Point(Map.Start.X, Map.Start.Y),
+      'exit': Point(Map.Arrival.X, Map.Arrival.Y), 'npcs': Json.JsonValue.ArrayValue(Values)
+    ])
+  );
+end function;
+
+function DecodeNpcs(Values: array of Json.JsonValue): result of (array of Npcs.NpcPlacement, string);
+begin
+  if Values.Length() <> 3 then
+    return Error('village requires exactly three NPC placements');
+  end if;
+  var Placements: array of Npcs.NpcPlacement := [];
+  for Value: Json.JsonValue in Values do
+    case Value of
+      when Json.JsonValue.Object(const ObjectFields):
+        const Known := try Fields.RequireOnlyFields(
+          ObjectFields,
+          ['id', 'kind', 'name', 'position']
+        );
+        if ObjectFields.Length() <> 4 then
+          return Error('NPC placement has an unexpected field set');
+        end if;
+        const Position := try DecodePoint(try Fields.Field(ObjectFields, 'position'));
+        Placements.PushInPlace(
+          Npcs.NpcPlacement(
+            Id := try Fields.StringField(ObjectFields, 'id'),
+            Kind := try Names.DecodeNpcKind(try Fields.StringField(ObjectFields, 'kind')),
+            DisplayName := try Fields.StringField(ObjectFields, 'name'),
+            Position := Coordinates.InteriorPosition(X := Position.X, Y := Position.Y)
+          )
+        );
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+        return Error('NPC placement must be an object');
+    end case;
+  end for;
+
+  return Ok(Placements);
+end function;
+
+// Strictly validates stored facts against the selected world and structural rules, without generation.
+public function DecodeMap(Text: string; Metadata: Terrain.WorldMetadata; AreaId: string): result of (InteriorUnit.InteriorMap, string);
+begin
+  if Text.Length() > MaximumSettlementTextLength then
+    return Error('settlement text is too long');
+  end if;
+  const Values := try Fields.ParseObject(Text);
+  const Known := try Fields.RequireOnlyFields(
+    Values, [
+      'format_version', 'world_id', 'world_format_version',
+      'world_seed', 'generator_version', 'dungeon_region_chunks', 'area_id', 'region', 'gate',
+      'name', 'width', 'height', 'rows', 'start', 'exit', 'npcs'
+    ]
+  );
+  if Values.Length() <> 16 then
+    return Error('settlement has an unexpected field set');
+  end if;
+
+  if (try Fields.IntegerField(Values, 'format_version')) <> SettlementFormatVersion then
+    return Error('unsupported settlement format version');
+  end if;
+
+  if ((try Fields.StringField(Values, 'world_id')) <> Metadata.Id)
+    or
+    ((try Fields.IntegerField(Values, 'world_format_version')) <> Metadata.FormatVersion)
+    or
+    ((try Fields.IntegerField(Values, 'world_seed')) <> Metadata.Seed)
+    or
+    ((try Fields.IntegerField(Values, 'generator_version')) <> Metadata.GeneratorVersion)
+    or
+    ((try Fields.IntegerField(Values, 'dungeon_region_chunks')) <> Metadata.DungeonRegionChunks)
+    or
+    ((try Fields.StringField(Values, 'area_id')) <> AreaId)
+  then
+    return Error('settlement header does not match the selected world and area');
+  end if;
+  const Region := try Identities.ParseAreaId(Metadata, AreaId);
+  const StoredRegion := try DecodePoint(try Fields.Field(Values, 'region'));
+  const Gate := try DecodePoint(try Fields.Field(Values, 'gate'));
+  if (StoredRegion.X <> Region.X) or (StoredRegion.Y <> Region.Y)
+    or
+    (Gate <> Sites.Site(Metadata, Region).Unwrap())
+  then
+    return Error('settlement region or gate does not match its canonical identity');
+  end if;
+  const Width := try Fields.IntegerField(Values, 'width');
+  const Height := try Fields.IntegerField(Values, 'height');
+  if not (
+    ((Width = 23) and (Height = 15)) or ((Width = 27) and (Height = 19))
+    or
+    ((Width = 31) and (Height = 21))
+  )
+  then
+    return Error('settlement dimensions are outside the supported sizes');
+  end if;
+  const Rows := try Fields.ArrayField(Values, 'rows');
+  if Rows.Length() <> Height then
+    return Error('settlement row count is invalid');
+  end if;
+  var Cells: array of InteriorUnit.InteriorCellKind := [];
+  for Row: Json.JsonValue in Rows do
+    case Row of
+      when Json.JsonValue.String(const TextRow):
+        if TextRow.Length() <> Width then
+          return Error('settlement row width is invalid');
+        end if;
+
+        for X: integer := 0 to Width - 1 do
+          if not (TextRow[X] in '#.x') then
+            return Error('settlement row contains an invalid cell');
+          end if;
+
+          Cells.PushInPlace(try InteriorUnit.InteriorCellFromCode(TextRow[X]));
+        end for;
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.ArrayValue(_), Json.JsonValue.Object(_):
+        return Error('settlement rows must be strings');
+    end case;
+  end for;
+  const Start := try DecodePoint(try Fields.Field(Values, 'start'));
+  const Arrival := try DecodePoint(try Fields.Field(Values, 'exit'));
+  return Validation.ValidateMap(
+    Metadata, InteriorUnit.InteriorMap(
+      AreaId := AreaId,
+      DisplayName := try Fields.StringField(Values, 'name'), Level := 0, Depth := 1,
+      Width := Width, Height := Height, Cells := Cells,
+      Start := Coordinates.InteriorPosition(X := Start.X, Y := Start.Y),
+      StartFacing := Coordinates.FacingDirection.North,
+      Arrival := Coordinates.InteriorPosition(X := Arrival.X, Y := Arrival.Y), Items := [],
+      Hostiles := [],
+      Npcs := try DecodeNpcs(try Fields.ArrayField(Values, 'npcs'))
+    )
+  );
+end function;
+end unit;

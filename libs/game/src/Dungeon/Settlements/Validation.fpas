@@ -1,0 +1,180 @@
+// Shared authoritative validation of authored and stored generated settlement definitions.
+unit Dungeon.Settlements.Validation;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Npcs.Model as Npcs,
+  Dungeon.Settlements as Home, Dungeon.Settlements.Identities as Identities,
+  Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Math as Math;
+
+function ValidName(Value: string): boolean;
+begin
+  if (Value.Length() < 1) or (Value.Length() > 64) or Value.StartsWith(' ') or Value.EndsWith(' ') then
+    return false;
+  end if;
+
+  for Index: integer := 0 to Value.Length() - 1 do
+    if (Value[Index].Ord() < 32) or (Value[Index].Ord() > 126) then
+      return false;
+    end if;
+  end for;
+
+  return true;
+end function;
+
+function ValidateRoutes(Map: InteriorUnit.InteriorMap): result of (boolean, string);
+begin
+  var Blocked := array.Fill(false, Map.Cells.Length());
+  for Npc: Npcs.NpcPlacement in Map.Npcs do
+    Blocked[Npc.Position.Y * Map.Width + Npc.Position.X] := true;
+  end for;
+  var Seen := array.Fill(false, Map.Cells.Length());
+  const Start := Map.Start.Y * Map.Width + Map.Start.X;
+  var Pending: array of integer := [Start];
+  Seen[Start] := true;
+  var Head := 0;
+  while Head < Pending.Length() do
+    const Index := Pending[Head];
+    Head := Head + 1;
+    for Offset: Coordinates.InteriorPosition in [
+      Coordinates.InteriorPosition(X := 1, Y := 0),
+      Coordinates.InteriorPosition(X := -1, Y := 0), Coordinates.InteriorPosition(X := 0, Y := 1),
+      Coordinates.InteriorPosition(X := 0, Y := -1)
+    ] do
+      const X := Index mod Map.Width + Offset.X;
+      const Y := Index div Map.Width + Offset.Y;
+      if (X >= 0) and (Y >= 0) and (X < Map.Width) and (Y < Map.Height) then
+        const Next := Y * Map.Width + X;
+        if not Seen[Next] and not Blocked[Next]
+          and
+          (Map.Cells[Next] <> InteriorUnit.InteriorCellKind.Wall)
+        then
+          Seen[Next] := true;
+          Pending.PushInPlace(Next);
+        end if;
+      end if;
+    end for;
+  end while;
+
+  for Index: integer := 0 to Map.Cells.Length() - 1 do
+    if not Blocked[Index] and (Map.Cells[Index] <> InteriorUnit.InteriorCellKind.Wall)
+      and
+      not Seen[Index]
+    then
+      return Error('village floor and exit must remain reachable with NPCs blocking');
+    end if;
+  end for;
+
+  for Npc: Npcs.NpcPlacement in Map.Npcs do
+    var Talk := false;
+    for Offset: Coordinates.InteriorPosition in [
+      Coordinates.InteriorPosition(X := 1, Y := 0),
+      Coordinates.InteriorPosition(X := -1, Y := 0), Coordinates.InteriorPosition(X := 0, Y := 1),
+      Coordinates.InteriorPosition(X := 0, Y := -1)
+    ] do
+      const X := Npc.Position.X + Offset.X;
+      const Y := Npc.Position.Y + Offset.Y;
+      if (X >= 0) and (Y >= 0) and (X < Map.Width) and (Y < Map.Height) then
+        Talk := Talk
+          or
+          (
+            Seen[Y * Map.Width + X]
+            and
+            (Map.Cells[Y * Map.Width + X] = InteriorUnit.InteriorCellKind.Floor)
+          );
+      end if;
+    end for;
+
+    if not Talk then
+      return Error('every village NPC needs a reachable talk field');
+    end if;
+  end for;
+
+  return Ok(true);
+end function;
+
+// Reads stored geometry as authoritative: checks identities and structure, never regenerates layouts.
+// Home retains its exact authored contract; generated villages require all three role placements.
+public function ValidateMap(Metadata: Terrain.WorldMetadata; Map: InteriorUnit.InteriorMap): result of (InteriorUnit.InteriorMap, string);
+begin
+  if Map.AreaId = Home.HomeAreaId(Metadata) then
+    return Home.ValidateHomeMap(Metadata, Map);
+  end if;
+  const Region := try Identities.ParseAreaId(Metadata, Map.AreaId);
+  if not (
+    ((Map.Width = 23) and (Map.Height = 15)) or ((Map.Width = 27) and (Map.Height = 19))
+    or
+    ((Map.Width = 31) and (Map.Height = 21))
+  )
+  then
+    return Error('village dimensions must be 23x15, 27x19 or 31x21');
+  end if;
+
+  if (Map.Level <> 0) or (Map.Depth <> 1) or (Map.Items.Length() <> 0)
+    or
+    (Map.Hostiles.Length() <> 0) or (Map.Npcs.Length() <> 3)
+    or
+    (Map.StartFacing <> Coordinates.FacingDirection.North)
+  then
+    return Error('village requires one map and exactly three NPCs, without loot or opponents');
+  end if;
+  const Valid := try InteriorUnit.ValidateInteriorMap(Map);
+  if Math.Abs(Map.Start.X - Map.Arrival.X) + Math.Abs(Map.Start.Y - Map.Arrival.Y) <> 1 then
+    return Error('village start must be beside its exit');
+  end if;
+
+  for Y: integer := 0 to Map.Height - 1 do
+    for X: integer := 0 to Map.Width - 1 do
+      const Cell := Map.Cells[Y * Map.Width + X];
+      if ((X = 0) or (Y = 0) or (X = Map.Width - 1) or (Y = Map.Height - 1))
+        and
+        (Cell <> InteriorUnit.InteriorCellKind.Wall)
+      then
+        return Error('village boundary must remain closed');
+      end if;
+
+      if (Cell <> InteriorUnit.InteriorCellKind.Wall)
+        and
+        (Cell <> InteriorUnit.InteriorCellKind.Floor)
+        and
+        (Cell <> InteriorUnit.InteriorCellKind.ExitField)
+      then
+        return Error('village rows permit only walls, floor and one exit');
+      end if;
+    end for;
+  end for;
+
+  for Slot: integer := 0 to 2 do
+    const Npc := Map.Npcs[Slot];
+    if (Npc.Id <> Map.AreaId + ':npc:' + Conv.IntToStr(Slot))
+      or
+      (Npc.Kind <> Npcs.RoleForSlot(Slot))
+      or
+      not ValidName(Npc.DisplayName)
+    then
+      return Error('village NPC identity, role or name is invalid');
+    end if;
+
+    if (try InteriorUnit.InteriorCellAt(Map, Npc.Position)) <> InteriorUnit.InteriorCellKind.Floor
+      or
+      (Npc.Position = Map.Start) or (Npc.Position = Map.Arrival)
+    then
+      return Error('village NPC must stand on ordinary floor away from start and exit');
+    end if;
+
+    for Previous: integer := 0 to Slot - 1 do
+      const Other := Map.Npcs[Previous];
+      if (Npc.DisplayName = Other.DisplayName)
+        or
+        (
+          Math.Abs(Npc.Position.X - Other.Position.X) + Math.Abs(Npc.Position.Y - Other.Position.Y) <
+          4
+        )
+      then
+        return Error('village NPC names and talk positions must be distinct');
+      end if;
+    end for;
+  end for;
+  const Routes := try ValidateRoutes(Map);
+  return Ok(Map);
+end function;
+end unit;

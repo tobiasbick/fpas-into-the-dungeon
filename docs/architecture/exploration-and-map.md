@@ -131,9 +131,9 @@ discovered fields.
 
 ## Settlement discovery
 
-Hearthmoor uses the same non-occluded radius-eight map visibility as outdoors,
-clipped to its authored bounds. Its local discovery uses a finite-area mask.
+Every settlement uses the same non-occluded radius-eight map visibility as outdoors,
+clipped to its retained map bounds. Its local discovery uses a finite-area mask.
 The primary projection clamps to the map, and panning beyond it yields unknown
-padding. Projection and resize never access outdoor chunks. Mara's `n` code is
+padding. Projection and resize never access outdoor chunks. An NPC's `n` code is
 currently visible only; remembered fields keep static geometry. See
 [NPCs and dialogue](npcs-and-dialogue.md).

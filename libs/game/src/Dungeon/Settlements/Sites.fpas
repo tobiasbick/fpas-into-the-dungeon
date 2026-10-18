@@ -1,0 +1,117 @@
+// Bounded deterministic village gates, independent of dungeon region size and visitation.
+unit Dungeon.Settlements.Sites;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances,
+  Dungeon.Terrain.Generation as Natural, Dungeon.Terrain.Noise as Noise, Std.Math as Math;
+
+// Arithmetic margin for local terrain and neighboring dungeon-site queries near integer limits.
+public const MaximumRegionCoordinate: integer := 72057594037927903;
+
+// Settlement regions coincide with the fixed 128-field chunk grid.
+public function RegionOf(Position: Coordinates.WorldPosition): Coordinates.ChunkCoordinate;
+begin
+  return Coordinates.ChunkCoordinate(
+    X := Coordinates.ChunkForCoordinate(Position.X),
+    Y := Coordinates.ChunkForCoordinate(Position.Y)
+  );
+end function;
+
+// Rejects region coordinates whose neighborhood cannot be evaluated without arithmetic overflow.
+public function ValidRegion(Region: Coordinates.ChunkCoordinate): boolean;
+begin
+  return (Region.X >= - MaximumRegionCoordinate) and (Region.X <= MaximumRegionCoordinate)
+    and
+    (Region.Y >= - MaximumRegionCoordinate) and (Region.Y <= MaximumRegionCoordinate);
+end function;
+
+function TooClose(Position: Coordinates.WorldPosition; Center: Coordinates.WorldPosition): boolean;
+begin
+  // Authored spawn/home positions are bounded by metadata validation. Only subtract nearby coordinates.
+  if (Position.X < Center.X - 31) or (Position.X > Center.X + 31)
+    or
+    (Position.Y < Center.Y - 31) or (Position.Y > Center.Y + 31)
+  then
+    return false;
+  end if;
+
+  return Math.Abs(Position.X - Center.X) + Math.Abs(Position.Y - Center.Y) < 32;
+end function;
+
+function ClearSite(Metadata: Terrain.WorldMetadata; Position: Coordinates.WorldPosition): boolean;
+begin
+  if TooClose(Position, Metadata.Spawn) or TooClose(Position, Metadata.SettlementGate) then
+    return false;
+  end if;
+
+  if not Entrances.CellIsClearEntrance(Natural.NaturalCell(Metadata.Seed, Position.X, Position.Y)) then
+    return false;
+  end if;
+  var Approach := false;
+  for Offset: Coordinates.WorldPosition in [
+    Coordinates.WorldPosition(X := 0, Y := 0),
+    Coordinates.WorldPosition(X := 1, Y := 0), Coordinates.WorldPosition(X := -1, Y := 0),
+    Coordinates.WorldPosition(X := 0, Y := 1), Coordinates.WorldPosition(X := 0, Y := -1)
+  ] do
+    const Field := Coordinates.WorldPosition(
+      X := Position.X + Offset.X,
+      Y := Position.Y + Offset.Y
+    );
+    if Entrances.EntranceRegionAt(Metadata, Field) is Some(_) then
+      return false;
+    end if;
+
+    if ((Offset.X <> 0) or (Offset.Y <> 0))
+      and
+      Terrain.CellIsWalkable(Natural.NaturalCell(Metadata.Seed, Field.X, Field.Y))
+    then
+      Approach := true;
+    end if;
+  end for;
+
+  return Approach;
+end function;
+
+// One eligible region in approximately three; at most sixteen seeded clear-land candidates.
+// Absence is ordinary placement, not a failed layout generation. No files or mutable RNG are used.
+public function Site(Metadata: Terrain.WorldMetadata; Region: Coordinates.ChunkCoordinate): option of Coordinates.WorldPosition;
+begin
+  if not ValidRegion(Region) then
+    return None;
+  end if;
+
+  if Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 1601) mod 3 <> 0 then
+    return None;
+  end if;
+
+  for Index: integer := 0 to 15 do
+    const Position := Coordinates.WorldPosition(
+      X := Region.X * Coordinates.WorldChunkSize + 16 +
+      Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 1607 + Index * 37) mod 96,
+      Y := Region.Y * Coordinates.WorldChunkSize + 16 +
+      Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 1609 + Index * 53) mod 96
+    );
+    if ClearSite(Metadata, Position) then
+      return Some(Position);
+    end if;
+  end for;
+
+  return None;
+end function;
+
+// Identifies only an exact generated gate; the authored home gate remains a separate identity.
+public function RegionAt(Metadata: Terrain.WorldMetadata; Position: Coordinates.WorldPosition): option of Coordinates.ChunkCoordinate;
+begin
+  const Region := RegionOf(Position);
+  case Site(Metadata, Region) of
+    when Some(const Gate):
+      if Gate = Position then
+        return Some(Region);
+      end if;
+    when None:
+      null;
+  end case;
+
+  return None;
+end function;
+end unit;

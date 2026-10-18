@@ -1,0 +1,132 @@
+// Proves per-NPC meeting memory, role permissions and effect-free dialogue outside Mara's quest.
+program VillageDialogueTest;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue,
+  Dungeon.GameState as GameState, Dungeon.Npcs as Npcs, Dungeon.Quests.Model as Quests,
+  Dungeon.Settlements.Generation as Generation, Dungeon.Settlements.Identities as Identities,
+  Dungeon.Settlements.Sites as Sites, Dungeon.Terrain.Placement as Placement,
+  Dungeon.Test.StateComparison as Comparison, Std.Test as Test;
+
+type Conversation = record
+  State: GameState.GameState;
+  Frame: Dialogue.Frame;
+  Changed: boolean;
+end record;
+
+function Continued(Value: Dialogue.Outcome): Conversation;
+begin
+  case Value of
+    when Dialogue.Outcome.Continued(const State, const Frame, const Changed):
+      return Conversation(State := State, Frame := Frame, Changed := Changed);
+    when Dialogue.Outcome.Ended(_):
+      panic('expected continued conversation');
+  end case;
+end function;
+
+function Has(Frame: Dialogue.Frame; Id: string): boolean;
+begin
+  for Choice: Dialogue.Choice in Frame.Choices do
+    if Choice.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+begin
+  const Metadata := Placement.NewWorldMetadata('role-dialogue', 25, 1).Unwrap();
+  const Region := Coordinates.ChunkCoordinate(X := 85, Y := -83);
+  const Map := Generation.GenerateMap(Metadata, Region).Unwrap();
+  const View := GameState.AreaView(Metadata := Metadata, Interior := Some(Map));
+  const Initial := Areas.MaterializeArea(GameState.NewGame(Metadata), Map) with Area := Coordinates.AreaKind.Settlement; AreaId := Map.AreaId; Player := Coordinates.PlayerPosition.Settlement(
+    Map.Start
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    Metadata.OutdoorAreaId,
+    Sites.Site(Metadata, Region).Unwrap()
+  ); Health := 3; end with;
+  var Remembered := Initial;
+  for Slot: integer := 0 to 2 do
+    const Npc := Map.Npcs[Slot];
+    const Ready := Remembered with Player := Coordinates.PlayerPosition.Settlement(
+      Coordinates.InteriorPosition(X := Npc.Position.X, Y := Npc.Position.Y + 1)
+    ); end with;
+    const First := Continued(Dialogue.Start(View, Ready).Unwrap());
+    const Index := Npcs.IndexOf(Ready.Npcs, Npc.Id);
+    Test.AssertTrue(First.Changed);
+    Test.AssertEquals(Npc.Id, First.Frame.NpcId);
+    Test.AssertEquals(Npc.DisplayName, First.Frame.Speaker);
+    Test.AssertTrue(Map.DisplayName in First.Frame.Text);
+    var Expected := Ready;
+    Expected.Npcs[Index].HasMetPlayer := true;
+    Test.AssertTrue(Comparison.SameState(Expected, First.State));
+    Test.AssertTrue(Has(First.Frame, 'identity'));
+    Test.AssertTrue(Has(First.Frame, 'settlement'));
+    Test.AssertFalse(Has(First.Frame, 'quest'));
+    Test.AssertFalse(Has(First.Frame, 'coin'));
+    Test.AssertTrue(Has(First.Frame, 'wounds') = (Slot = 2));
+    for Topic: string in ['identity', 'settlement'] do
+      const Answer := Continued(Dialogue.Choose(View, First.State, First.Frame, Topic).Unwrap());
+      Test.AssertFalse(Answer.Changed);
+      Test.AssertTrue(Comparison.SameState(First.State, Answer.State));
+      Test.AssertTrue(Map.DisplayName in Answer.Frame.Text);
+    end for;
+    const Again := Continued(Dialogue.Start(View, First.State).Unwrap());
+    Test.AssertFalse(Again.Changed);
+    Test.AssertTrue('recognizes you' in Again.Frame.Text);
+    Test.AssertTrue(Comparison.SameState(First.State, Again.State));
+    const Forged := First.Frame with Choices := [Dialogue.Choice(Id := 'quest', Text := 'Forged')]; end with;
+
+    Test.AssertFalse(Dialogue.MayOfferCompass(View, First.State, Forged));
+    Test.AssertTrue(
+      Dialogue.OfferCompass(View, First.State, Forged, Quests.CompassTarget(Metadata, 3)) is Error(_)
+    );
+    for Topic: string in ['quest', 'quest_accept', 'quest_report', 'dungeon', 'coin'] do
+      Test.AssertTrue(Dialogue.Choose(View, First.State, Forged, Topic) is Error(_));
+    end for;
+
+    Test.AssertTrue(
+      Dialogue.Choose(
+        View,
+        First.State,
+        First.Frame with NpcId := Identities.AreaId(
+          Metadata,
+          Coordinates.ChunkCoordinate(X := 87, Y := -85)
+        ) + ':npc:0'; end with,
+        'identity'
+      ) is Error(_)
+    );
+    Test.AssertTrue(
+      Dialogue.Choose(
+        View,
+        First.State,
+        First.Frame with Node := Dialogue.Node.CompassStatus; end with,
+        'quest_report'
+      ) is Error(_)
+    );
+    if Slot = 2 then
+      const Healed := Continued(Dialogue.Choose(View, First.State, First.Frame, 'wounds').Unwrap());
+      Test.AssertTrue(Healed.Changed);
+      Test.AssertTrue(Comparison.SameState(First.State with Health := 20; end with, Healed.State));
+      Test.AssertFalse(Has(Healed.Frame, 'wounds'));
+      Test.AssertTrue(Dialogue.Choose(View, Healed.State, First.Frame, 'wounds') is Error(_));
+      Test.AssertTrue(Dialogue.Choose(View, Healed.State, Healed.Frame, 'wounds') is Error(_));
+    else
+      Test.AssertTrue(
+        Dialogue.Choose(
+          View,
+          First.State,
+          First.Frame with Choices := [Dialogue.Choice(Id := 'wounds', Text := 'Forged')]; end with,
+          'wounds'
+        ) is Error(_)
+      );
+    end if;
+
+    Remembered := First.State;
+  end for;
+
+  Test.AssertFalse(
+    Remembered.Npcs[Npcs.IndexOf(Remembered.Npcs, Npcs.MaraId(Metadata))].HasMetPlayer
+  );
+end.

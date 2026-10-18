@@ -1,0 +1,59 @@
+// Canonical generated settlement identities, distinct from the authored home identity.
+unit Dungeon.Settlements.Identities;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Settlements.Sites as Sites,
+  Dungeon.Terrain as Terrain, Std.Conv as Conv, Std.Parse as Parse;
+
+// Identity depends on the world and region, never its display name or the number of visits.
+public function AreaId(Metadata: Terrain.WorldMetadata; Region: Coordinates.ChunkCoordinate): string;
+begin
+  return Metadata.Id + ':settlement:' + Conv.IntToStr(Region.X) + ':' + Conv.IntToStr(Region.Y);
+end function;
+
+function CanonicalInteger(Value: string): result of (integer, string);
+begin
+  const Number := try Parse.Int(Value);
+  if Conv.IntToStr(Number) <> Value then
+    return Error('settlement identity requires canonical signed coordinates');
+  end if;
+
+  return Ok(Number);
+end function;
+
+// Rejects foreign, malformed and overflowing coordinates, or a region with no generated gate.
+public function ParseAreaId(Metadata: Terrain.WorldMetadata; Value: string): result of (Coordinates.ChunkCoordinate, string);
+begin
+  const Prefix := Metadata.Id + ':settlement:';
+  if not Value.StartsWith(Prefix) then
+    return Error('settlement identity belongs to another world or area kind');
+  end if;
+  const Parts := Value.Slice(Prefix.Length(), Value.Length() - Prefix.Length()).Split(':');
+  if Parts.Length() <> 2 then
+    return Error('generated settlement identity must name exactly one region');
+  end if;
+  const Region := Coordinates.ChunkCoordinate(
+    X := try CanonicalInteger(Parts[0]),
+    Y := try CanonicalInteger(Parts[1])
+  );
+  if not Sites.ValidRegion(Region) then
+    return Error('settlement region would overflow world arithmetic');
+  end if;
+
+  if Sites.Site(Metadata, Region) is None then
+    return Error('settlement region has no generated gate');
+  end if;
+
+  return Ok(Region);
+end function;
+
+// Exact outdoor gate of either the authored home or a canonical generated settlement.
+public function GateForAreaId(Metadata: Terrain.WorldMetadata; Value: string): result of (Coordinates.WorldPosition, string);
+begin
+  if Value = Metadata.Id + ':settlement:home' then
+    return Ok(Metadata.SettlementGate);
+  end if;
+
+  return Ok(Sites.Site(Metadata, try ParseAreaId(Metadata, Value)).Unwrap());
+end function;
+end unit;

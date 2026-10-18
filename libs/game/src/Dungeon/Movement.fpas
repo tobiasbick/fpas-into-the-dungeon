@@ -1,7 +1,7 @@
 // Player movement: outdoor and bounded settlement steps, first-person movement, and area transitions.
 unit Dungeon.Movement;
 
-uses Dungeon.Npcs as NpcRules, Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Math as Math;
+uses Dungeon.Settlements.Sites as Sites, Dungeon.Settlements.Identities as SettlementIds, Dungeon.Settlements.Validation as SettlementValidation, Dungeon.Npcs as NpcRules, Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Std.Math as Math;
 
 // Atomic pure transition result: replacement player state and its matching current view.
 public type AreaTransition = record
@@ -20,6 +20,13 @@ begin
       if Position = Metadata.SettlementGate then
         return Ok(Settlements.HomeAreaId(Metadata));
       end if;
+
+      case Sites.RegionAt(Metadata, Position) of
+        when Some(const Region):
+          return Ok(SettlementIds.AreaId(Metadata, Region));
+        when None:
+          null;
+      end case;
 
       case Entrances.EntranceRegionAt(Metadata, Position) of
         when Some(const Region):
@@ -142,23 +149,29 @@ end function;
 // requires None. Stairs keep the outdoor return location, arrive at the start pose going down
 // and at the descent landing going up, and require the same stored depth and name. A standing
 // opponent on the arrival field moves the arrival to the nearest free floor field. Settlement
-// entry resolves its authored map from code and records a visit without dungeon entities.
+// entry resolves home from code; generated settlements require a supplied immutable map.
 public function ActivateAreaTransition(View: GameState.AreaView; State: GameState.GameState; TargetMap: option of InteriorUnit.InteriorMap): result of (AreaTransition, string);
 begin
   const Target: string := try AreaTransitionTarget(View, State);
-  if Target = Settlements.HomeAreaId(View.Metadata) then
-    const Map := Settlements.HomeMap(View.Metadata);
+  if Target.StartsWith(View.Metadata.Id + ':settlement:') then
+    var Map := Settlements.HomeMap(View.Metadata);
     case TargetMap of
       when Some(const Supplied):
-        const ValidMap := try Settlements.ValidateHomeMap(View.Metadata, Supplied);
+        Map := try SettlementValidation.ValidateMap(View.Metadata, Supplied);
       when None:
-        null;
+        if Target <> Settlements.HomeAreaId(View.Metadata) then
+          return Error('entering a generated settlement requires its target map');
+        end if;
     end case;
+
+    if Map.AreaId <> Target then
+      return Error('target map identity does not match the settlement transition');
+    end if;
     const Changed := Areas.MaterializeArea(State, Map) with Area := Coordinates.AreaKind.Settlement; AreaId := Target; Player := Coordinates.PlayerPosition.Settlement(
       Map.Start
     ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
       View.Metadata.OutdoorAreaId,
-      View.Metadata.SettlementGate
+      try SettlementIds.GateForAreaId(View.Metadata, Target)
     ); end with;
     const NextView := GameState.AreaView(Metadata := View.Metadata, Interior := Some(Map));
     return Ok(
@@ -177,7 +190,6 @@ begin
                 return Error('target map identity does not match the transition target');
               end;
             end if;
-
             const Materialized := Areas.MaterializeArea(State, ValidMap);
             const EntryPose := try FreeArrival(
               ValidMap,
@@ -227,7 +239,6 @@ begin
                 return Error('target level above has no stairs down');
             end case;
           end if;
-
           const Materialized := Areas.MaterializeArea(State, ValidMap);
           Changed := Materialized with AreaId := Target; Player := Coordinates.PlayerPosition.FirstPerson(
             try FreeArrival(ValidMap, Materialized, Pose)
@@ -290,10 +301,13 @@ begin
   end if;
   const Position := try GameState.SettlementPlayerPosition(Valid);
   const Target := Coordinates.InteriorPosition(X := Position.X + DeltaX, Y := Position.Y + DeltaY);
-  if NpcRules.At(State.Npcs, State.AreaId, Target) >= 0 then
-    return Error('Mara blocks the way');
-  end if;
   const Map := try GameState.CurrentInterior(View, State);
+  if NpcRules.At(Map.Npcs, State.AreaId, Target) >= 0 then
+    return Error(
+      Map.Npcs[NpcRules.At(Map.Npcs, State.AreaId, Target)].DisplayName + ' blocks the way'
+    );
+  end if;
+
   if (try InteriorUnit.InteriorCellAt(Map, Target)) = InteriorUnit.InteriorCellKind.Wall then
     return Error('a wall blocks the way');
   end if;

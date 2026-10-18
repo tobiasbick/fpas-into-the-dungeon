@@ -693,8 +693,9 @@ Settlements, NPCs, deterministic quests, an economy, time, and weather follow
 the vertical slice in `DUNGEON_RPG_IDEAS.md`: enter a settlement, talk to an
 NPC, take a solvable quest into a dungeon, and return to a character that
 remembers the outcome. Every substage is deterministic and server-owned and does
-not depend on LLM integration (stage 16). Stages 15a and 15b are accepted.
-Later substages give an ordering direction and are planned when they become next.
+not depend on LLM integration (stage 16). Stages 15a and 15b are accepted;
+15c is implemented, verified and awaiting user acceptance. Later substages give an ordering direction and are planned when
+they become next.
 
 ### 15a. Home settlement and Mara — DONE
 
@@ -740,7 +741,7 @@ after testing the running feature. All nine gameplay checkpoints are complete.
 A natural TCP test covers active, ready and rewarded saves over four listener lifetimes.
 Final verification, including world administration, passes on 2026-10-17:
 formatting, all 21 project checks and the complete suite (**154/154 test programs**).
-Current versions are world metadata 4, generator 10, level file 4, savegame 12
+At 15b acceptance, versions were world metadata 4, generator 10, level file 4, savegame 12
 and protocol 18; obsolete
 data is rejected and preserved. The lasting contract is documented in
 [quests](architecture/quests.md). The accepted implementation plans are removed.
@@ -753,11 +754,35 @@ programs, passes **154/154 tests** and all 21 project checks. Stored formats and
 the client world-selection flow are unchanged. See the
 [console guide](product/server-console.md#deleting-worlds).
 
-### 15c. Generated settlements — LATER
+### 15c. Generated settlements — READY FOR ACCEPTANCE
 
-Settlements spread across the outdoor world with stored names and generated
-layouts, reusing the gate, area, and NPC model from 15a. A small set of NPC
-roles replaces the single authored character.
+The [implementation plan](plans/15c-generated-settlements.md) was prepared on
+2026-10-18. The user confirmed occasional small villages (about 23 by 15 through
+31 by 21 fields), residents/guards/healers with deterministic dialogue and free
+healing, and closed houses until building interiors are planned separately.
+All nine implementation checkpoints are complete. Verification on 2026-10-18
+passes formatting, all 21 project checks and **159/159 test programs**.
+User acceptance remains pending.
+
+Hearthmoor, Mara and the compass quest remain the authored starting point.
+Additional villages spread across the outdoor world with stable gate/area/NPC
+identities and immutable stored names, layouts and placements. NPC meeting
+state and discovery belong to explicit saves; revisits and Continue reuse the
+same definitions. The plan separates generation, storage, generic NPC dialogue
+and entry, with nine ordered implementation checkpoints and a real TCP route
+through two villages and a listener restart.
+
+Current versions are generator 11, settlement format 1, savegame 13 and protocol
+19; world format 4, dungeon level format 4 and runtime configuration remain.
+Obsolete worlds and saves are preserved without migration. Trade follows in
+15d; time/rest, weather, LLMs and multiplayer remain later work.
+
+The natural seed-25 TCP play visits two villages and verifies injury/healing,
+inside/outdoor Continue, independent meetings, unchanged definitions and Start
+over over four listener lifetimes. The full compass play visits generated NPCs
+before returning to Mara and verifies remembered completion. The permanent
+[settlement contract and review route](architecture/generated-settlements.md)
+describe the implementation and manual review.
 
 ### 15d. Trade and economy — LATER
 

@@ -1,114 +1,116 @@
 # NPCs and dialogue
 
-Every world has one home settlement, Hearthmoor. Its outdoor gate is exactly
-six traversable cardinal steps from spawn, excluding dungeon entrances and
-the spawn entrance's neighbors. World format 4 stores `settlement_gate` as
-`{x,y}`; generator 10 overlays it with feature code `s`. Invalid or obsolete
-world data is rejected and preserved.
+Hearthmoor is the authored home settlement; generated villages add residents,
+guards and healers. All use a bounded map view. Houses stay closed; entered
+building interiors need a separate plan. See [generated settlements](generated-settlements.md)
+for site rules, identities, immutable files and the reproducible review route.
 
 ## Geometry and state
 
-`Dungeon.Settlements` owns `<world>:settlement:home` and its authored 23 by 15
-map. The server resolves this map from code; it never writes a settlement
-level file. Shared finite-grid geometry uses depth 1 and level 0 only to reuse
-validation. The settlement has its own local player-position variant without
-facing. WASD and arrows send absolute cardinal `move` intentions. Walls,
-house blocks and Mara block movement. Houses cannot be entered in 15a; future
-building interiors use first-person views.
+`Dungeon.Settlements` owns Hearthmoor's unchanged 23 by 15 map and
+`<world>:settlement:home` identity. Its gate is six traversable cardinal steps
+from spawn. Entry starts at (11,12), beside the exit at (11,13). Mara occupies
+(11,7), with ID `<world>:settlement:home:npc:mara`. Home geometry and her
+placement resolve from code without a settlement file.
 
-Entry starts at (11,12), one field north of the exit at (11,13). Activating the
-exit returns to the exact outdoor gate. Entry records the visit and the return
-location. Settlement steps do not regenerate health; accepted outdoor steps
-still restore one point. There are no floor items or opponents, and dropping
-items is rejected.
+Generated maps have 23 by 15, 27 by 19 or 31 by 21 fields. Immutable geometry
+and `NpcPlacement` records travel together in `InteriorMap`; the server retains
+this checked map for the active area. A placement supplies stable ID, kind,
+display name and local position. Generated IDs are `<area>:npc:0` (resident),
+`:npc:1` (guard) and `:npc:2` (healer). Names may repeat across villages, but
+identity never depends on a name. NPCs block movement, stay away from start
+and exit, and leave connected routes to every talk position.
 
-`Dungeon.Npcs` owns Mara's stable identity
-`<world>:settlement:home:npc:mara`, kind, area and `HasMetPlayer` flag. Her
-position (11,7) is derived from her kind. A new game has exactly this record,
-with the flag false, even before visiting the settlement. Validation rejects
-unknown, duplicate, missing and foreign records, and player overlap.
+A new game has one unmet Mara record before its first visit. First entry into
+a generated village adds exactly its three initially unmet records. Every
+mutable record stores ID, kind, area and `HasMetPlayer`; records are sorted
+canonically. Rules find Mara by exact ID, even when generated NPCs sort before
+her. Validation rejects missing, duplicate, foreign, wrong-role and unvisited
+village records, including invented unmet ones. Met NPCs require their own
+settlement to have been visited.
 
-Settlement visibility uses the non-occluded outdoor radius of eight, clipped
-to the map. Discovery uses the existing bounded-area masks. Primary windows
-are clipped and centered; exploration windows may pan beyond the layout and
-receive unknown padding. Neither projection loads outdoor chunks. Map codes
-are `#` for walls/houses, `.` for the square, `x` for the exit, and `n` for Mara.
-Only a currently visible NPC projects `n`; remembered fields show geometry.
+WASD/arrows send absolute cardinal movement. Settlement steps neither heal
+nor run combat; outdoor steps still restore one point. Enter on local `x`
+returns to that village's exact source gate. Settlements have no floor items
+or opponents; dropping items is rejected. Radius-eight map visibility is
+clipped to each map, with independent finite discovery masks. Primary windows
+are clipped; exploration windows may pan into unknown padding. `n` appears
+only for currently visible NPC placements; remembered fields retain geometry.
+Map and resize projection use retained facts without area-file or outdoor I/O.
 
 ## Dialogue rules
 
-`Dungeon.Dialogue` owns a deterministic typed graph. Enter starts Mara's
-conversation from any cardinally adjacent field; no facing is required.
-The occupied exit has precedence. The first greeting changes `HasMetPlayer`
-to true; later greetings use that flag without changing progress.
+Enter from a cardinally adjacent field starts the selected NPC's conversation.
+The occupied exit takes precedence. Its exact ID remains in the active frame;
+a character of the same role in another village cannot replace it. First
+greeting marks only that character met and unsaved. Repeat greetings remember
+that flag without changing progress. Talking and healing consume no turn,
+opponent phase, XP or dice. Read-only answers change no items or health.
 
-Each frame contains the NPC ID, speaker, text and ordered choices. The server
-also retains a private node; a quest offer binds its preflighted objective. Root
-topics are:
+Each frame contains speaker, text and ordered choices. The server additionally
+retains the private node and any preflighted quest objective. Mara keeps her
+existing root topics:
 
 | ID | Available | Result |
 | --- | --- | --- |
 | `identity` | Always | Mara's background. |
-| `dungeon` | Always | Spawn dungeon name and depth, derived without level access. |
+| `dungeon` | Always | Spawn dungeon name and depth, without reading levels. |
 | `coin` | Ancient coin carried | Information about its crescent mark. |
-| `wounds` | Health below maximum | Free healing to maximum health. |
-| `quest` | Always | Proved offer, current progress or remembered quest outcome. |
-| `goodbye` | Always | End the conversation. |
+| `wounds` | Injured | Free full healing. |
+| `quest` | Always | Proved offer, progress or remembered outcome. |
+| `goodbye` | Always | End conversation. |
 
-Every answer refreshes the same frame. Healing removes `wounds`; only goodbye,
-explicit end or disconnect closes the dialogue. Rules check both the active
-frame and currently available choices. Talking consumes no turn and changes
-no opponent state or dice. Information and healing do not change items; quest
-hand-in returns the compass and grants its potions atomically. A first meeting,
-healing, quest acceptance or successful hand-in marks progress unsaved. Quest
-frames use `quest_accept`, `quest_report` and `quest_back`, with eligibility
-checked for the active node. See [quests](quests.md).
+Residents, guards and healers offer `identity`, `settlement` and `goodbye`,
+with fixed role-specific text using their stored name and village. Only an
+injured player's healer additionally offers `wounds`. Healing refreshes topics,
+removes `wounds` and changes only health. It marks progress unsaved only when
+health changes. Repeated or unavailable healing is rejected. Quest offer,
+preflight, acceptance and report remain restricted to Mara's stable home ID,
+reach and active node. Generic NPCs never trigger world quest preflight. Quest
+hand-in still returns the compass and grants two potions atomically; see
+[quests](quests.md).
 
 ## Connection and protocol
 
-`Dungeon.Server.Dialogue` owns dispatch and `ServerSession.ActiveDialogue`
-retains the authoritative frame. While active, only `dialogue_choice`,
-`end_dialogue`, `viewport` and disconnect are accepted. Other intentions,
-including world selection and saves, receive `dialogue_active`. A foreign NPC
-or unavailable topic receives `dialogue_rejected`; an inactive conversation
-receives `dialogue_not_active`.
+`Dungeon.Server.Dialogue` owns dispatch; `ServerSession.ActiveDialogue` retains
+the authoritative frame. While active, only `dialogue_choice`, `end_dialogue`,
+`viewport` and disconnect are accepted. Other intentions, including Save,
+receive `dialogue_active`. Foreign/stale NPC IDs and unavailable topics receive
+`dialogue_rejected`; absent conversations receive `dialogue_not_active`.
 
-Protocol 18 has exact message fields. `dialogue_choice` contains `type`,
-`npc_id` and `choice_id`; `end_dialogue` contains only `type`. A `dialogue`
-reply contains `type`, `dirty`, `state` and `dialogue`; `dialogue_ended`
-contains `type`, `dirty` and `state`. The embedded state is the complete
-resulting visible projection. The frame has `npc_id`, `speaker`, `text` and
-`choices`; each choice has `id` and `text`. IDs, text lengths and choice count
-are bounded, duplicate and unknown topic IDs are rejected, and NPC markers
-are forbidden in remembered rows. `Dungeon.Protocol.States` provides the
-shared state codec for ordinary and dialogue replies.
+Protocol 19 adds `settlement` to the existing bounded topic vocabulary.
+`dialogue_choice` contains exactly `type`, `npc_id`, `choice_id`; `end_dialogue`
+contains only `type`. Replies contain the complete resulting visible state and
+dirty flag, plus the projected frame for `dialogue`. A frame has `npc_id`,
+`speaker`, `text`, `choices`; each choice has `id`, `text`. Existing bounds,
+unique choices and exact field validation remain in force.
 
-Replies prepare state, frame, projection and the bounded UTF-8 line before
-installation. Preparation failure retains the entire old session; a failed
-write terminates the connection without installing the candidate. Resize is
-read-only and retains the frame, dirty flag and discovery. The dashboard names
-the current area Hearthmoor. Map states carry server-projected titles and
-Environment hints, including `Mara — Enter: Talk`.
+Replies prepare state, frame, discovery, projection and bounded wire text
+before sending and installing. Preparation failures preserve the complete
+installed session; write failures terminate the connection without installing
+a candidate. Resize retains conversation, selection, dirty state and discovery.
+Area titles, talk hints and console status use the retained stored names.
 
-The client retains only the projected frame, selection and scroll offset.
-W/S and arrows wrap the selection, Enter submits its stable ID, and Escape
-requests an explicit end. Pending input is suppressed, other overlays and
-movement are blocked, and Alt+X retains normal cancellation. Text wraps to
-the terminal; Page Up/Down scrolls long frames. A new answer resets selection;
-a viewport reply preserves it.
+The client renders the supplied frame and pending speaker name. W/S/arrows
+wrap selection, Enter sends the stable choice ID, Escape requests explicit
+end, and Page Up/Down scrolls. Pending input and other overlays are gated.
+Alt+X keeps normal cancellation. New answers reset selection; resize preserves it.
 
 ## Persistence and verification
 
-Savegame 12 stores settlement positions as `{kind:"settlement",x,y}` and exact
-NPC records as `{id,kind,area_id,has_met_player}`. It resolves settlement
-visits and discovery against the authored map. A met NPC requires a visited
-home settlement. Active frames, choices, scroll positions and speaker text
-never enter a save. Explicit saving after ending the dialogue persists the
-flag and the separate quest state; disconnect and server shutdown never autosave. Start over resets it and
-keeps the prior save. Obsolete save versions are rejected without migration.
+Savegame 13 stores local positions as `{kind:"settlement",x,y}` and exact NPC
+records as `{id,kind,area_id,has_met_player}`. It validates every visited
+settlement's complete roster against authored or immutable stored definitions,
+including while the player is elsewhere. Positions/names belong to those
+definitions. Frames, choice state and scroll position are never saved.
 
-Game tests own topic availability, reach and effects. World tests own exact
-NPC decoding, settlement discovery and file preservation. Protocol tests own
-bounds and wire shapes. Server tests cover real adapter gating, reconnect,
-projection and atomic failures. Headless TUI tests cover modal input, pending
-requests, narrow terminals, refreshed choices, resize and native Escape.
+Save explicitly after ending dialogue. Continue restores that snapshot;
+disconnect and shutdown never autosave. Start over resets meetings and visits,
+retaining definitions and the prior save. Obsolete saves remain preserved and
+incompatible, without migration.
+
+Game tests own reach, role permissions, independent meetings and effects.
+Storage tests own exact decoding, complete rosters, off-screen validation and
+file preservation. Protocol and native TUI tests own wire/input behavior.
+Server tests exercise atomic failures and natural TCP travel, healing,
+inside/outdoor Continue and the full compass quest after generated NPC visits.

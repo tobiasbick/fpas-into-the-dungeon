@@ -1,32 +1,37 @@
-// Deterministic Mara dialogue: authoritative frames, conditional topics, meeting state and free healing.
+// Identity-bound stationary NPC dialogue, meeting memory and atomic healing/quest outcomes.
 unit Dungeon.Dialogue;
 
 uses
-  Dungeon.Dialogue.Model as Model, Dungeon.Dialogue.Quests as QuestDialogue, Dungeon.Quests.Model as QuestModel, Dungeon.Npcs.Interaction as NpcInteraction, Dungeon.GameState as GameState, Dungeon.Interior.Generation.Content as Content,
-  Dungeon.Interior.Generation.Levels as Levels, Dungeon.Items as Items, Dungeon.Npcs as Npcs,
-  Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv;
+  Dungeon.Dialogue.Model as Model, Dungeon.Dialogue.Quests as QuestDialogue,
+  Dungeon.Dialogue.Villages as Villages, Dungeon.Quests.Model as QuestModel,
+  Dungeon.Npcs.Interaction as NpcInteraction, Dungeon.GameState as GameState,
+  Dungeon.Interior.Generation.Content as Content, Dungeon.Interior.Generation.Levels as Levels,
+  Dungeon.Items as Items, Dungeon.Npcs as Npcs, Dungeon.Terrain.Entrances as Entrances, Std.Conv as Conv;
 
-// Shared stable choice projection; availability belongs to the current authoritative node.
+// Shared stable choice projection; availability belongs to the current authoritative NPC and node.
 public type Choice = Model.Choice;
 
-// Server-only conversation node, including a preflighted offer objective.
+// Server-only conversation node; compass offers retain their preflighted objective.
 public type Node = Model.Node;
 
-// Connection-local frame, never persisted; only its display fields enter the protocol.
+// Connection-local authoritative frame; only display fields enter the protocol.
 public type Frame = Model.Frame;
 
 // Atomic replacement state/frame and actual unsaved-progress effect.
 public type Outcome = Model.Outcome;
 
-// Returns the shared authoritative NPC reach rule used by dialogue and hand-in.
+// Shared exact-identity reach check retained for Mara's authored compass rules.
 public function MaraInReach(View: GameState.AreaView; State: GameState.GameState): boolean;
 begin
   return NpcInteraction.MaraInReach(View, State);
 end function;
 
-function ChoicesFor(State: GameState.GameState): array of Choice;
+function ChoicesFor(State: GameState.GameState; Npc: Npcs.NpcPlacement): array of Choice;
 begin
-  var Choices: array of Choice := [
+  if Npc.Kind <> Npcs.NpcKind.Mara then
+    return Villages.Choices(Npc.Kind, State.Health < GameState.PlayerMaximumHealth);
+  end if;
+  var Choices := [
     Choice(Id := 'identity', Text := 'Who are you?'),
     Choice(Id := 'dungeon', Text := 'What lies beneath the hills?')
   ];
@@ -53,76 +58,118 @@ begin
   return Choices;
 end function;
 
-function CurrentFrame(State: GameState.GameState; Text: string): Frame;
+function RootFrame(State: GameState.GameState; Npc: Npcs.NpcPlacement; Text: string): Frame;
 begin
   return Frame(
-    Node := Node.Root, NpcId := State.Npcs[0].Id, Speaker := Npcs.DisplayName(State.Npcs[0].Kind),
-    Text := Text, Choices := ChoicesFor(State)
+    Node := Node.Root, NpcId := Npc.Id, Speaker := Npc.DisplayName,
+    Text := Text, Choices := ChoicesFor(State, Npc)
   );
 end function;
 
-// Starts only next to Mara. The opening remembers quest progress and the previous meeting flag.
-// Meeting Mara changes that flag to true once; opening an existing conversation changes no progress.
+// Starts next to the selected placement; first meeting changes only that NPC's flag.
+// Repeated greetings and quest remembrance consume no turn or random draw.
 public function Start(View: GameState.AreaView; State: GameState.GameState): result of (Outcome, string);
 begin
   const Valid := try GameState.ValidateGameState(View, State);
-  if not MaraInReach(View, Valid) then
-    return Error('Mara is not in interaction reach');
+  var Id := '';
+  case NpcInteraction.InReach(View, Valid) of
+    when None:
+      return Error('no NPC is in interaction reach');
+    when Some(const Reached):
+      Id := Reached;
+  end case;
+  const Map := try GameState.CurrentInterior(View, Valid);
+  const Npc := try Npcs.FindPlacement(Map.Npcs, Id);
+  const Index := Npcs.IndexOf(Valid.Npcs, Id);
+  if Index < 0 then
+    return Error('NPC meeting record is absent');
   end if;
-  const Text := if Valid.Quest is QuestModel.QuestState.Rewarded(_) then 'Mara recognizes you and thanks you again for returning her compass.'
-    else if Valid.Quest is QuestModel.QuestState.Active(_) then 'Mara recognizes you and remembers that you promised to find her compass.'
-      else if Valid.Npcs[0].HasMetPlayer then 'Mara recognizes you and rests both hands on her worn walking staff.'
-        else 'A weathered adventurer lowers her lantern. She introduces herself as Mara and invites your questions.'
+  var Text := '';
+  if Npc.Id = Npcs.MaraId(View.Metadata) then
+    Text := if Valid.Quest is QuestModel.QuestState.Rewarded(_) then 'Mara recognizes you and thanks you again for returning her compass.'
+      else if Valid.Quest is QuestModel.QuestState.Active(_) then 'Mara recognizes you and remembers that you promised to find her compass.'
+        else if Valid.Npcs[Index].HasMetPlayer then 'Mara recognizes you and rests both hands on her worn walking staff.'
+          else 'A weathered adventurer lowers her lantern. She introduces herself as Mara and invites your questions.'
+          end if
         end if
-      end if
-    end if;
+      end if;
+  else
+    Text := Villages.Greeting(Npc, Map.DisplayName, Valid.Npcs[Index].HasMetPlayer);
+  end if;
   var Changed := Valid;
-  Changed.Npcs[0].HasMetPlayer := true;
+  Changed.Npcs[Index].HasMetPlayer := true;
   return Ok(
-    Outcome.Continued(Changed, CurrentFrame(Changed, Text), not Valid.Npcs[0].HasMetPlayer)
+    Outcome.Continued(Changed, RootFrame(Changed, Npc, Text), not Valid.Npcs[Index].HasMetPlayer)
   );
 end function;
 
 function ValidateConversation(View: GameState.AreaView; State: GameState.GameState; Current: Frame): result of (GameState.GameState, string);
 begin
   const Valid := try GameState.ValidateGameState(View, State);
-  if not MaraInReach(View, Valid) or (Current.NpcId <> Valid.Npcs[0].Id)
-    or
-    not Valid.Npcs[0].HasMetPlayer
-  then
-    return Error('dialogue does not match the current NPC');
+  case NpcInteraction.InReach(View, Valid) of
+    when None:
+      return Error('dialogue NPC is not in reach');
+    when Some(const Id):
+      if Id <> Current.NpcId then
+        return Error('dialogue does not match the current NPC');
+      end if;
+  end case;
+  const Index := Npcs.IndexOf(Valid.Npcs, Current.NpcId);
+  if (Index < 0) or not Valid.Npcs[Index].HasMetPlayer then
+    return Error('dialogue NPC has not been met');
+  end if;
+
+  if not (Current.Node is Node.Root) and (Current.NpcId <> Npcs.MaraId(View.Metadata)) then
+    return Error('only Mara can own a compass quest node');
   end if;
 
   return Ok(Valid);
 end function;
 
-// Ends an active, matching conversation without changing time, items or dice.
+// Read-only eligibility gate for world-layer preflight; generic NPCs can never cause that read.
+public function MayOfferCompass(View: GameState.AreaView; State: GameState.GameState; Current: Frame): boolean;
+begin
+  if ValidateConversation(View, State, Current) is Error(_) then
+    return false;
+  end if;
+
+  return (Current.NpcId = Npcs.MaraId(View.Metadata)) and (Current.Node is Node.Root)
+    and
+    MaraInReach(View, State) and (State.Quest is QuestModel.QuestState.NotAccepted)
+    and
+    Model.Contains(Current.Choices, 'quest');
+end function;
+
+// Ends only the matching conversation, without changing items, time, health or dice.
 public function EndConversation(View: GameState.AreaView; State: GameState.GameState; Current: Frame): result of (Outcome, string);
 begin
   return Ok(Outcome.Ended(try ValidateConversation(View, State, Current)));
 end function;
 
-// Opens an offer only from the matching root frame, retaining the exact server-preflighted target.
+// Retains the exact preflighted objective only for Mara's eligible current root frame.
 public function OfferCompass(View: GameState.AreaView; State: GameState.GameState; Current: Frame; Objective: QuestModel.CompassObjective): result of (Outcome, string);
 begin
   const Valid := try ValidateConversation(View, State, Current);
-  if not (Current.Node is Node.Root) or not (Valid.Quest is QuestModel.QuestState.NotAccepted)
-    or
-    not Model.Contains(Current.Choices, 'quest')
-  then
-    return Error('quest offer requires the current root topic');
+  if not MayOfferCompass(View, Valid, Current) then
+    return Error('quest offer requires Mara''s current root topic');
   end if;
   const Target := try QuestModel.ValidateObjective(View.Metadata, Objective);
   return Ok(
-    Outcome.Continued(Valid, QuestDialogue.QuestFrame(Valid, Node.CompassOffer(Target)), false)
+    Outcome.Continued(
+      Valid,
+      QuestDialogue.QuestFrame(View.Metadata, Valid, Node.CompassOffer(Target)),
+      false
+    )
   );
 end function;
 
-// Applies choices eligible in both the retained authoritative node and the current game state.
-// Every answer keeps the conversation open; healing changes only health and never consumes dice or a turn.
+// Checks both retained and freshly available choices before any effect. Healing and quest effects
+// change only their explicit candidate state; callers retain prepare/send/install reply ordering.
 public function Choose(View: GameState.AreaView; State: GameState.GameState; Current: Frame; ChoiceId: string): result of (Outcome, string);
 begin
   const Valid := try ValidateConversation(View, State, Current);
+  const Map := try GameState.CurrentInterior(View, Valid);
+  const Npc := try Npcs.FindPlacement(Map.Npcs, Current.NpcId);
   if not (Current.Node is Node.Root) then
     if ChoiceId = 'quest_back' then
       if not Model.Contains(Current.Choices, ChoiceId) then
@@ -130,7 +177,11 @@ begin
       end if;
 
       return Ok(
-        Outcome.Continued(Valid, CurrentFrame(Valid, 'Mara waits for your next question.'), false)
+        Outcome.Continued(
+          Valid,
+          RootFrame(Valid, Npc, 'Mara waits for your next question.'),
+          false
+        )
       );
     end if;
 
@@ -139,7 +190,7 @@ begin
 
   if not Model.Contains(Current.Choices, ChoiceId)
     or
-    not Model.Contains(ChoicesFor(Valid), ChoiceId)
+    not Model.Contains(ChoicesFor(Valid, Npc), ChoiceId)
   then
     return Error('dialogue choice is not currently available');
   end if;
@@ -149,6 +200,15 @@ begin
   end if;
   var Changed := Valid;
   var Text := '';
+  if Npc.Kind <> Npcs.NpcKind.Mara then
+    Text := try Villages.Answer(Npc, Map.DisplayName, ChoiceId);
+    if ChoiceId = 'wounds' then
+      Changed.Health := GameState.PlayerMaximumHealth;
+    end if;
+
+    return Ok(Outcome.Continued(Changed, RootFrame(Changed, Npc, Text), ChoiceId = 'wounds'));
+  end if;
+
   case ChoiceId of
     when 'quest':
       if Valid.Quest is QuestModel.QuestState.NotAccepted then
@@ -156,7 +216,11 @@ begin
       end if;
 
       return Ok(
-        Outcome.Continued(Valid, QuestDialogue.QuestFrame(Valid, Node.CompassStatus), false)
+        Outcome.Continued(
+          Valid,
+          QuestDialogue.QuestFrame(View.Metadata, Valid, Node.CompassStatus),
+          false
+        )
       );
     when 'identity':
       Text := 'Mara once mapped the nearby halls. She now lives in Hearthmoor and warns travelers who follow the same path.';
@@ -175,6 +239,6 @@ begin
       return Error('unknown dialogue choice');
   end case;
 
-  return Ok(Outcome.Continued(Changed, CurrentFrame(Changed, Text), ChoiceId = 'wounds'));
+  return Ok(Outcome.Continued(Changed, RootFrame(Changed, Npc, Text), ChoiceId = 'wounds'));
 end function;
 end unit;

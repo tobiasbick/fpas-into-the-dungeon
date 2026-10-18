@@ -507,12 +507,13 @@ conventions and further first-person styling remain later work.
 
 ## Settlement dialogue
 
-Hearthmoor retains the map view with bounded local coordinates and no facing.
+Hearthmoor and generated villages use the map view with bounded local coordinates and no facing.
 WASD or arrows request absolute cardinal steps. Server-projected titles name
-the area; Environment shows gate entry/exit and `Mara — Enter: Talk` hints.
-House blocks use `▩`, gates `⌂`, and Mara `M`; fog applies in both map views.
+the stored area name; Environment shows gate entry/exit and the selected NPC's
+`name — Enter: Talk` hint. House blocks use `▩`, gates `⌂`, and NPCs `M`;
+fog applies in both map views.
 
-Enter beside Mara opens a framed dialogue with the server's text and ordered
+Enter beside an NPC opens a framed dialogue with the server's text and ordered
 choices. W/S and arrows wrap the selection; Enter submits the stable choice ID.
 Answers refresh the same window, including removal of healing after health
 is restored. Escape requests an end and retains the window until the reply.
@@ -520,4 +521,6 @@ Pending requests suppress repeated input, and ordinary movement or other
 overlays are blocked while talking. Alt+X still exits cleanly. Text wraps and
 Page Up/Down scrolls long frames on small terminals. Resize preserves the
 frame and selection; new answers reset selection. No choices or NPC behavior
-are inferred by the client.
+are inferred by the client. Pending text names the server-projected speaker.
+Residents, guards and healers use the same controls; healing and topic
+availability remain server-owned. See the [15c review route](../architecture/generated-settlements.md#reproducible-acceptance).

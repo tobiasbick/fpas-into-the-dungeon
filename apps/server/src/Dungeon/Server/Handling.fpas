@@ -1,7 +1,7 @@
 // Applies one decoded client message to a session after the handshake.
 unit Dungeon.Server.Handling;
 
-uses Dungeon.Server.Dialogue as SessionDialogue, Dungeon.Dialogue as DialogueRules, Dungeon.Settlements as Settlements, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Logging as Logging, Dungeon.Server.Failures as FailuresUnit, Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Std.Net as Net, Std.Tasks as Tasks;
+uses Dungeon.World.Settlements as Villages, Dungeon.Server.Dialogue as SessionDialogue, Dungeon.Npcs.Interaction as NpcInteraction, Dungeon.Settlements as Settlements, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Worlds as Worlds, Dungeon.Server.Logging as Logging, Dungeon.Server.Failures as FailuresUnit, Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.Combat as Combat, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interaction as Interaction, Dungeon.Interior as InteriorUnit, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Std.Net as Net, Std.Tasks as Tasks;
 
 function RejectLogged(
   Config: ConfigUnit.ServerConfig;
@@ -28,8 +28,7 @@ begin
   return RejectLogged(Config, ConnectionValue, Rejection.Code, Rejection.Message, Token);
 end function;
 
-// Opens the target level of an entry or stairs (none when leaving) and applies the pure transition.
-// Opens the target level of an entry (or none for an exit) and applies the pure transition.
+// Opens immutable settlement/dungeon facts for entry (none when leaving) and applies the pure transition.
 // Storage failures are rejected with their class; the session stays unchanged.
 function HandleTransition(
   Session: SessionUnit.ServerSession;
@@ -47,7 +46,15 @@ begin
     (TargetAreaId <> Settlements.HomeAreaId(Session.World.Metadata))
   then
     begin
-      case Interiors.OpenLevelForEntry(Session.World, View, State, TargetAreaId) of
+      const Opened := if TargetAreaId.StartsWith(Session.World.Metadata.Id + ':settlement:') then Villages.OpenMapForEntry(
+        Session.World,
+        View,
+        State,
+        TargetAreaId
+      )
+        else Interiors.OpenLevelForEntry(Session.World, View, State, TargetAreaId)
+        end if;
+      case Opened of
         when Ok(const Map):
           begin
             TargetMap := Some(Map);
@@ -56,8 +63,8 @@ begin
           begin
             const Sent: boolean := try RejectFailure(
               ConnectionValue,
-              FailuresUnit.LevelRejection(Session.World.Metadata.Id, Failure),
-              FailuresUnit.LevelFailureReason(Failure),
+              FailuresUnit.AreaRejection(Session.World.Metadata.Id, Failure),
+              FailuresUnit.AreaFailureReason(Failure),
               Config,
               Token
             );
@@ -372,7 +379,7 @@ begin
       begin
         const State: GameState.GameState := try SessionUnit.RequireActiveState(Session.State);
         const View: GameState.AreaView := try SessionUnit.SessionAreaView(Session, State);
-        if DialogueRules.MaraInReach(View, State) then
+        if NpcInteraction.InReach(View, State) is Some(_) then
           return SessionDialogue.StartConversation(Session, ConnectionValue, Token, Config.Logs);
         end if;
 

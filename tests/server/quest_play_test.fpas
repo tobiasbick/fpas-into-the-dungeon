@@ -1,17 +1,7 @@
 // Plays the complete compass quest with normal TCP intentions and full listener restarts in active, ready and rewarded phases.
 program QuestPlayTest;
 
-uses Dungeon.Terrain.Entrances as Entrances, Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
-
-function FrameOf(Client: Wire.WireClient): Protocol.DialogueFrame;
-begin
-  case Client.Last of
-    when Protocol.ServerMessage.Dialogue(_, const Frame, _):
-      return Frame;
-    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
-      panic('expected Mara dialogue');
-  end case;
-end function;
+uses Dungeon.Test.Villages as Villages, Dungeon.Settlements.Sites as Sites, Dungeon.Settlements.Identities as VillageIds, Dungeon.World.Settlements as Store, Dungeon.Terrain.Entrances as Entrances, Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Test.Routes as Routes, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
 procedure RequireJournal(Client: Wire.WireClient; Line: string);
 begin
@@ -33,22 +23,13 @@ end procedure;
 
 function HasChoice(Client: Wire.WireClient; Id: string): boolean;
 begin
-  for Choice: Protocol.DialogueChoice in FrameOf(Client).Choices do
+  for Choice: Protocol.DialogueChoice in Villages.Frame(Client).Choices do
     if Choice.Id = Id then
       return true;
     end if;
   end for;
 
   return false;
-end function;
-
-function Choose(Client: Wire.WireClient; Id: string; Token: Tasks.CancellationToken): Wire.WireClient;
-begin
-  return Wire.Exchange(
-    Client,
-    Protocol.ClientMessage.DialogueChoice(FrameOf(Client).NpcId, Id),
-    Token
-  );
 end function;
 
 function Walk(Client: Wire.WireClient; Map: InteriorUnit.InteriorMap; Target: Coordinates.InteriorPosition; Token: Tasks.CancellationToken): result of (Wire.WireClient, string);
@@ -81,7 +62,7 @@ begin
     Client, Routes.OutdoorRoute(
       World.Metadata,
       Coordinates.WorldPosition(X := Position.WorldX, Y := Position.WorldY),
-      World.Metadata.SettlementGate, 2
+      World.Metadata.SettlementGate, 24
     ), Token
   );
   Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
@@ -105,14 +86,46 @@ end function;
 function AcceptQuest(Client: Wire.WireClient; World: WorldUnit.WorldSession; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
   var Current := Wire.Exchange(Client, Protocol.ClientMessage.StartNewGame, Token);
+  // Mara must still own her full quest when generated NPC records sort before her identity.
+  for VillageRegion: Coordinates.ChunkCoordinate in [
+    Coordinates.ChunkCoordinate(X := 120, Y := -45),
+    Coordinates.ChunkCoordinate(X := 116, Y := -45)
+  ] do
+    const VillageGate := Sites.Site(World.Metadata, VillageRegion).Unwrap();
+    const Position := Wire.MapOf(Current);
+    const VillageRoute := Routes.OutdoorRoute(
+      World.Metadata,
+      Coordinates.WorldPosition(X := Position.WorldX, Y := Position.WorldY), VillageGate, 24
+    );
+    Test.AssertTrue(VillageRoute.Length() > 0);
+    Current := Wire.WalkOutdoorRoute(Current, VillageRoute, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const Village := Store.ReadMap(
+      World,
+      VillageIds.AreaId(World.Metadata, VillageRegion)
+    ).Unwrap();
+    Current := Villages.Talk(Current, Village, 0, Token);
+    Current := Villages.EndTalk(Current, Token);
+    Current := Villages.Walk(Current, Village, Village.Arrival, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  end for;
+  // Return through the first gate's connected component; arbitrary wilderness boxes may be disconnected.
+  const LastPosition := Wire.MapOf(Current);
+  const Back := Routes.OutdoorRoute(
+    World.Metadata,
+    Coordinates.WorldPosition(X := LastPosition.WorldX, Y := LastPosition.WorldY),
+    Sites.Site(World.Metadata, Coordinates.ChunkCoordinate(X := 120, Y := -45)).Unwrap(), 24
+  );
+  Test.AssertTrue(Back.Length() > 0);
+  Current := Wire.WalkOutdoorRoute(Current, Back, Token);
   RequireJournal(Current, 'No accepted quests.');
   Current := ReachMara(Current, World, Token);
   Test.AssertFalse(HasChoice(Current, 'quest_accept'));
-  Current := Choose(Current, 'quest', Token);
+  Current := Villages.Choose(Current, 'quest', Token);
   Test.AssertTrue(HasChoice(Current, 'quest_accept'));
   Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'dungeons'])));
   RequireJournal(Current, 'No accepted quests.');
-  Current := Choose(Current, 'quest_accept', Token);
+  Current := Villages.Choose(Current, 'quest_accept', Token);
   RequireJournal(Current, 'Status: Active');
   Test.AssertFalse(HasChoice(Current, 'quest_accept'));
   Test.AssertFalse(HasChoice(Current, 'quest_report'));
@@ -128,7 +141,7 @@ begin
   var Current := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
   RequireJournal(Current, 'Status: Active');
   Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
-  Current := Choose(Current, 'quest', Token);
+  Current := Villages.Choose(Current, 'quest', Token);
   Test.AssertFalse(HasChoice(Current, 'quest_accept'));
   Test.AssertFalse(HasChoice(Current, 'quest_report'));
   Current := LeaveMara(Current, Token);
@@ -206,10 +219,10 @@ begin
   end for;
 
   Current := ReachMara(Current, World, Token);
-  Current := Choose(Current, 'quest', Token);
+  Current := Villages.Choose(Current, 'quest', Token);
   Test.AssertTrue(HasChoice(Current, 'quest_report'));
-  const NpcId := FrameOf(Current).NpcId;
-  Current := Choose(Current, 'quest_report', Token);
+  const NpcId := Villages.Frame(Current).NpcId;
+  Current := Villages.Choose(Current, 'quest_report', Token);
   RequireJournal(Current, 'Status: Completed');
   Test.AssertFalse(HasChoice(Current, 'quest_report'));
   Test.AssertFalse(HasChoice(Current, 'quest_accept'));
@@ -247,11 +260,11 @@ begin
   var Current := Wire.Exchange(Client, Protocol.ClientMessage.LoadGame, Token);
   RequireJournal(Current, 'Status: Completed');
   Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
-  Test.AssertTrue('returning her compass' in FrameOf(Current).Text);
-  Current := Choose(Current, 'quest', Token);
+  Test.AssertTrue('returning her compass' in Villages.Frame(Current).Text);
+  Current := Villages.Choose(Current, 'quest', Token);
   Test.AssertFalse(HasChoice(Current, 'quest_accept'));
   Test.AssertFalse(HasChoice(Current, 'quest_report'));
-  const NpcId := FrameOf(Current).NpcId;
+  const NpcId := Villages.Frame(Current).NpcId;
   for Id: string in ['quest_report', 'quest_accept'] do
     Current := Wire.Exchange(Current, Protocol.ClientMessage.DialogueChoice(NpcId, Id), Token);
     Test.AssertTrue(Current.Last is Protocol.ServerMessage.Rejected('dialogue_rejected', _));

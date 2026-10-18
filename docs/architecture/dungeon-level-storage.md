@@ -3,7 +3,8 @@
 This is the level storage contract, extended by 14b checkpoint 02 with stored
 dungeon names and by 14c with one file per dungeon level, supplementing
 [generated dungeons](generated-dungeons.md). It is implemented by
-`Dungeon.World.Interiors` and its `.Encoding` and `.Errors` units, the
+`Dungeon.World.Interiors`, its `.Encoding` and the shared
+`Dungeon.World.Areas.Errors`, the
 three-phase savegame loading in `Dungeon.World.Savegame`, and the transition
 handling in `Dungeon.Server.Handling` and `Dungeon.Server.Replies`. The
 structural rules shared by the generator and stored levels live in
@@ -53,9 +54,10 @@ an independent random stream. Readers validate its shape but never regenerate
 or compare it with a newly generated name. Projections and diagnostics use the
 name of the retained map. Duplicate display names are allowed; area identities
 remain unique; all levels of one dungeon store the same name. Level formats 1/2/3
-and generator-9 or older worlds are incompatible, remain untouched and cannot be
+and generator-10 or older worlds are incompatible, remain untouched and cannot be
 continued with this server; create a new world for the current version. The
-current save format is 12 and protocol is 18.
+current save format is 13 and protocol is 19. Settlement format 1 is separate;
+see [generated settlements](generated-settlements.md).
 
 Each placement is exactly `{ "id": string, "kind": string, "x": integer,
 "y": integer }`. Items occur in ascending original slot order, with IDs `<area>:item:<slot>`.
@@ -148,10 +150,10 @@ eligibility check, requires a map with that target ID on entry or `None` on
 exit, and returns `AreaTransition { State, View }`. An invalid request performs
 no storage operation. Transitions remain free actions and do not advance combat.
 
-`Dungeon.World.Interiors.Errors` defines the typed world-layer failure:
+`Dungeon.World.Areas.Errors` defines the typed world-layer failure:
 
 ```pascal
-public type LevelFailure = enum
+public type AreaFailure = enum
   Missing(AreaId: string);
   Invalid(AreaId: string; Reason: string);
   Io(Reason: string);
@@ -163,19 +165,21 @@ end enum;
 
 ```pascal
 public function ReadLevel(World: WorldSession; AreaId: string):
-  result of (InteriorMap, LevelFailure);
+  result of (InteriorMap, AreaFailure);
 public function OpenLevelForEntry(World: WorldSession; View: AreaView;
-  State: GameState; AreaId: string): result of (InteriorMap, LevelFailure);
-public function ReadVisitedLevels(World: WorldSession; State: GameState):
-  result of (array of InteriorMap, LevelFailure);
+  State: GameState; AreaId: string): result of (InteriorMap, AreaFailure);
 ```
+
+`Dungeon.World.Areas.ReadVisitedAreas(World, State)` resolves all visited
+dungeon and settlement definitions for save validation and returns
+`result of (array of InteriorMap, AreaFailure)`. Hearthmoor resolves from code.
 
 `ReadLevel` never generates or writes. `OpenLevelForEntry` first tries a read;
 only `Missing` combined with an unvisited target permits generation and atomic
 storage. It verifies the target against the player's current transition in View
 (an entrance outdoors, stairs indoors) before creating anything, using
 `TransitionTargetOfValid` on the already validated state. Level 0 takes its
-depth from `DungeonDepth`; a deeper level takes the depth of the current map. A missing already visited level remains an error. `ReadVisitedLevels`
+depth from `DungeonDepth`; a deeper level takes the depth of the current map. A missing already visited level remains an error. `ReadVisitedAreas`
 reads each visited area once in canonical order; it never calls the entry
 operation. It returns maps for the duration of validation, not a permanent
 unbounded cache. The server retains only the current map between intentions.
@@ -184,7 +188,7 @@ unbounded cache. The server retains only the current map between intentions.
 `EncodeLevel(Metadata: WorldMetadata; Map: InteriorMap): string` for validated
 input and `DecodeLevel(Text: string; Metadata: WorldMetadata; AreaId: string):
 result of (InteriorMap, string)` with the schema above. Storage wraps decode
-errors as `LevelFailure.Invalid`; I/O errors are never relabeled as invalid
+errors as `AreaFailure.Invalid`; I/O errors are never relabeled as invalid
 content. The world layer may import game rules; the reverse is forbidden.
 
 ## Save loading and failure classification
@@ -211,7 +215,7 @@ Their error type becomes `PersistenceFailure`, owned by
 ```pascal
 public type PersistenceFailure = enum
   InvalidState(Reason: string);
-  Level(Failure: LevelFailure);
+  Area(Failure: AreaFailure);
   Io(Reason: string);
 end enum;
 ```

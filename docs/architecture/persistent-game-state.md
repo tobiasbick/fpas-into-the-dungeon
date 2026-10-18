@@ -24,8 +24,9 @@ The running rules use `ValidateGameState(View, State)` for local state,
 equipment, identity uniqueness, and geometry checks against the supplied
 current map. Full placement checks belong to
 `Dungeon.Areas.ValidateSavedGame(Metadata, State, Maps)`, which loads no maps.
-The save layer reads the stored level of every visited dungeon, resolves the
-authored settlement from code, and supplies those maps. Both loading and writing use this full check: an unvisited game has no dungeon entities; a visited dungeon has
+The save layer reads every visited dungeon and generated settlement through
+`Dungeon.World.Areas`, resolves Hearthmoor from code and supplies those maps.
+Both loading and writing use this full check: an unvisited game has no dungeon entities; a visited dungeon has
 exactly its original entity identities and kinds, with their mutable state.
 A rewarded quest additionally retains its two unique reward items.
 Missing or unknown entities remain invalid even while the player is outdoors.
@@ -38,7 +39,7 @@ opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
 the supplied current map.
 
-The protocol-18 welcome supplies a bounded catalog with world identities,
+The protocol-19 welcome supplies a bounded catalog with world identities,
 original parameters, compatibility, save classifications and creation defaults.
 Continue loads a valid explicit save or starts at spawn when no save exists.
 An incompatible or unreadable save rejects Continue and remains on disk. Start
@@ -51,7 +52,7 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `12` is an exact JSON object containing the selected world ID,
+Savegame format `13` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
 server-owned item state, NPC meeting records, the accepted quest/objective and
@@ -63,8 +64,8 @@ their return location contains the outdoor area and the exact entrance site of
 the dungeon's region.
 
 `visited_areas` is a strictly sorted array of canonical dungeon level identities
-(`<world>:dungeon:<rx>:<ry>:<level>`) and the optional home settlement
-(`<world>:settlement:home`), with no duplicates. A visited level deeper than 0
+(`<world>:dungeon:<rx>:<ry>:<level>`) and settlement identities
+(`<world>:settlement:home` or `<world>:settlement:<sx>:<sy>`), with no duplicates. A visited level deeper than 0
 requires the level above it in the same dungeon to be visited, and all visited
 levels of one dungeon must store the same depth and name. A new game starts with an empty list, no items, no opponents, and Mara
 with `has_met_player = false`.
@@ -76,10 +77,13 @@ added the giant rat; format 9 (13b) added `progression`; format 10 (14c) uses
 level identities for every area and entity. Format 11 adds settlement-local
 positions and exact NPC meeting records. Format 12 adds the exact quest object,
 returned compass location and quest reward item origins (see [quests](quests.md)).
+Format 13 adds generated-village roles and complete, canonically ordered NPC
+rosters for every visited settlement. Immutable names/positions remain in
+settlement definitions; unknown, missing or unvisited NPC records are invalid.
 The authored settlement map is resolved
 from code, never read or generated as a level file. Active dialogue is absent.
 The version is checked before the
-payload, so an obsolete save reports its version. Format 11 and older saves
+payload, so an obsolete save reports its version. Format 12 and older saves
 remain intact and cannot be continued; recreate progress explicitly
 through Start over.
 
@@ -129,12 +133,12 @@ worlds/<world-id>/saves/default.json
 ```
 
 Loading runs three phases: decode the save's self-contained fields
-(`DecodeSaveGameState`), read every visited level once (`ReadVisitedLevels`),
+(`DecodeSaveGameState`), read every visited area once (`Dungeon.World.Areas.ReadVisitedAreas`),
 and validate the state against those maps (`ValidateSavedGame`). Save and load
-never generate a level. Writes run the same validation, including discovery
+never generate a level or settlement definition. Writes run the same validation, including discovery
 ordering, dimensions, known interior identities, and non-empty masks, then
 atomically replace `default.json`. Failures are typed (`PersistenceFailure`):
-invalid state, a level failure, or I/O. A failed validation or replacement leaves the previous valid
+invalid state, an area-data failure, or I/O. A failed validation or replacement leaves the previous valid
 save intact. No backup slot, migration, legacy reader, or stale fallback is
 kept.
 

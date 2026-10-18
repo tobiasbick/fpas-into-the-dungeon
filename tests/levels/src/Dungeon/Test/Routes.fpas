@@ -120,6 +120,45 @@ begin
   return Protocol.IsHostileCode(View.Rows[Ahead.Y][Ahead.X]);
 end function;
 
+// Samples each touched chunk once: generation resolves its village site once, not per BFS neighbor.
+function WalkableWindow(
+  Metadata: Terrain.WorldMetadata; Left: integer; Top: integer;
+  Width: integer; Height: integer
+): array of boolean;
+begin
+  var Fields := array.Fill(false, Width * Height);
+  for ChunkY: integer := Coordinates.ChunkForCoordinate(Top) to Coordinates.ChunkForCoordinate(
+    Top + Height - 1
+  ) do
+    for ChunkX: integer := Coordinates.ChunkForCoordinate(Left) to Coordinates.ChunkForCoordinate(
+      Left + Width - 1
+    ) do
+      const Chunk := ChunksUnit.GenerateChunk(
+        Metadata,
+        Coordinates.ChunkCoordinate(X := ChunkX, Y := ChunkY)
+      );
+      for Y: integer := Math.Max(Top, ChunkY * Coordinates.WorldChunkSize) to Math.Min(
+        Top + Height - 1,
+        (ChunkY + 1) * Coordinates.WorldChunkSize - 1
+      ) do
+        for X: integer := Math.Max(Left, ChunkX * Coordinates.WorldChunkSize) to Math.Min(
+          Left + Width - 1,
+          (ChunkX + 1) * Coordinates.WorldChunkSize - 1
+        ) do
+          Fields[(Y - Top) * Width + X - Left] := Terrain.IsWalkable(
+            Terrain.ChunkCell(
+              Chunk,
+              Coordinates.LocalForCoordinate(X), Coordinates.LocalForCoordinate(Y)
+            )
+          );
+        end for;
+      end for;
+    end for;
+  end for;
+
+  return Fields;
+end function;
+
 // Returns the walkable outdoor fields from From (exclusive) to Target along a shortest cardinal
 // path inside the bounding box of both fields grown by Margin; empty when none exists there.
 public function OutdoorRoute(
@@ -133,6 +172,7 @@ begin
   const Top: integer := Math.Min(From.Y, Target.Y) - Margin;
   const Width: integer := ((Math.Max(From.X, Target.X) + Margin) - Left) + 1;
   const Height: integer := ((Math.Max(From.Y, Target.Y) + Margin) - Top) + 1;
+  const Walkable := WalkableWindow(Metadata, Left, Top, Width, Height);
   var Previous: array of integer := array.Fill(-1, Width * Height);
   const StartIndex: integer := ((From.Y - Top) * Width) + (From.X - Left);
   Previous[StartIndex] := StartIndex;
@@ -162,7 +202,7 @@ begin
               const Index: integer := ((Next.Y - Top) * Width) + (Next.X - Left);
               if Previous[Index] < 0 then
                 begin
-                  if Terrain.IsWalkable(ChunksUnit.GenerateWorldCell(Metadata, Next.X, Next.Y)) then
+                  if Walkable[Index] then
                     begin
                       Previous[Index] := ((Current.Y - Top) * Width) + (Current.X - Left);
                       Queue.PushInPlace(Next);

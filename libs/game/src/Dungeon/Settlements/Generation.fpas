@@ -1,0 +1,70 @@
+// Constructive village layouts and complete stationary NPC rosters from independent domain seeds.
+unit Dungeon.Settlements.Generation;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Npcs.Model as Npcs,
+  Dungeon.Settlements.Identities as Identities, Dungeon.Settlements.Names as Names,
+  Dungeon.Settlements.Sites as Sites, Dungeon.Settlements.Validation as Validation,
+  Dungeon.Terrain as Terrain, Dungeon.Terrain.Noise as Noise, Std.Conv as Conv;
+
+// Creates a bounded validated definition for an existing generated gate. No files or mutable RNG.
+// Failure preserves the chosen seed/identity; it never drops roles or substitutes another layout.
+public function GenerateMap(Metadata: Terrain.WorldMetadata; Region: Coordinates.ChunkCoordinate): result of (InteriorUnit.InteriorMap, string);
+begin
+  if Sites.Site(Metadata, Region) is None then
+    return Error('cannot generate a village in a region without a gate');
+  end if;
+  const Size := Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 1613) mod 3;
+  const Width := 23 + Size * 4;
+  const Height := if Size = 0 then 15 else if Size = 1 then 19 else 21 end if end if;
+  const CenterX := Width div 2;
+  const CenterY := Height div 2;
+  const Area := Identities.AreaId(Metadata, Region);
+  const LeftWidth := 3 + Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 1624) mod 3;
+  const RightWidth := 3 + Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 1636) mod 3;
+  var Cells: array of InteriorUnit.InteriorCellKind := [];
+  for Y: integer := 0 to Height - 1 do
+    for X: integer := 0 to Width - 1 do
+      const Border := (X = 0) or (Y = 0) or (X = Width - 1) or (Y = Height - 1);
+      const HouseX := ((X >= 3) and (X < 3 + LeftWidth))
+        or
+        ((X >= Width - 3 - RightWidth) and (X < Width - 3));
+      const HouseY := ((Y >= 3) and (Y <= 5)) or ((Y >= Height - 6) and (Y <= Height - 4));
+      Cells.PushInPlace(
+        if (X = CenterX) and (Y = Height - 2) then InteriorUnit.InteriorCellKind.ExitField
+          else if Border or (HouseX and HouseY) then InteriorUnit.InteriorCellKind.Wall
+            else InteriorUnit.InteriorCellKind.Floor
+            end if
+          end if
+      );
+    end for;
+  end for;
+  var Placements: array of Npcs.NpcPlacement := [];
+  for Slot: integer := 0 to 2 do
+    Placements.PushInPlace(
+      Npcs.NpcPlacement(
+        Id := Area + ':npc:' + Conv.IntToStr(Slot),
+        Kind := Npcs.RoleForSlot(Slot),
+        DisplayName := Names.NpcName(Metadata.Seed, Region, Slot),
+        Position := Coordinates.InteriorPosition(
+          X := CenterX + (Slot - 1) * 5,
+          Y := CenterY - 1 +
+          Noise.CoordinateHash(Metadata.Seed, Region.X, Region.Y, 1621 + Slot * 73) mod 3
+        )
+      )
+    );
+  end for;
+
+  return Validation.ValidateMap(
+    Metadata, InteriorUnit.InteriorMap(
+      AreaId := Area,
+      DisplayName := Names.VillageName(Metadata.Seed, Region), Level := 0, Depth := 1,
+      Width := Width, Height := Height, Cells := Cells,
+      Start := Coordinates.InteriorPosition(X := CenterX, Y := Height - 3),
+      StartFacing := Coordinates.FacingDirection.North,
+      Arrival := Coordinates.InteriorPosition(X := CenterX, Y := Height - 2),
+      Items := [], Hostiles := [], Npcs := Placements
+    )
+  );
+end function;
+end unit;

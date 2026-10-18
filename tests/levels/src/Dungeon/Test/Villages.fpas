@@ -1,0 +1,133 @@
+// TCP navigation of finite settlements with NPC fields blocked, plus bounded dialogue reply reading.
+unit Dungeon.Test.Villages;
+
+uses
+  Dungeon.Npcs as Npcs, Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol,
+  Dungeon.Protocol.ServerMessages as Messages, Dungeon.Test.Wire as Wire,
+  Std.Tasks as Tasks, Std.Test as Test;
+
+// Walks ordinary cardinal intentions along a shortest map route, never through a stationary NPC.
+public function Walk(
+  Client: Wire.WireClient; Map: InteriorUnit.InteriorMap;
+  Target: Coordinates.InteriorPosition; Token: Tasks.CancellationToken
+): Wire.WireClient;
+begin
+  const View := Wire.MapOf(Client);
+  const Start := View.WorldY * Map.Width + View.WorldX;
+  const Goal := Target.Y * Map.Width + Target.X;
+  var Blocked := array.Fill(false, Map.Cells.Length());
+  for Npc: Npcs.NpcPlacement in Map.Npcs do
+    Blocked[Npc.Position.Y * Map.Width + Npc.Position.X] := true;
+  end for;
+  var Previous := array.Fill(-1, Map.Cells.Length());
+  var Queue := [Start];
+  Previous[Start] := Start;
+  var Head := 0;
+  while (Head < Queue.Length()) and (Previous[Goal] < 0) do
+    const Current := Queue[Head];
+    Head := Head + 1;
+    for Delta: Coordinates.InteriorPosition in [
+      Coordinates.InteriorPosition(X := 0, Y := -1), Coordinates.InteriorPosition(X := 1, Y := 0),
+      Coordinates.InteriorPosition(X := 0, Y := 1), Coordinates.InteriorPosition(X := -1, Y := 0)
+    ] do
+      const X := Current mod Map.Width + Delta.X;
+      const Y := Current div Map.Width + Delta.Y;
+      if (X >= 0) and (Y >= 0) and (X < Map.Width) and (Y < Map.Height) then
+        const Index := Y * Map.Width + X;
+        if (Previous[Index] < 0) and not Blocked[Index]
+          and
+          (Map.Cells[Index] <> InteriorUnit.InteriorCellKind.Wall)
+        then
+          Previous[Index] := Current;
+          Queue.PushInPlace(Index);
+        end if;
+      end if;
+    end for;
+  end while;
+
+  Test.AssertTrue(Previous[Goal] >= 0);
+  var Backwards: array of integer := [];
+  var Index := Goal;
+  while Index <> Start do
+    Backwards.PushInPlace(Index);
+    Index := Previous[Index];
+  end while;
+  var Current := Client;
+  for Step: integer := Backwards.Length() - 1 downto 0 do
+    const Position := Wire.MapOf(Current);
+    const Next := Backwards[Step];
+    Current := Wire.Exchange(
+      Current, Protocol.ClientMessage.Move(
+        Next mod Map.Width - Position.WorldX, Next div Map.Width - Position.WorldY
+      ), Token
+    );
+    Test.AssertEquals(Next mod Map.Width, Wire.MapOf(Current).WorldX);
+    Test.AssertEquals(Next div Map.Width, Wire.MapOf(Current).WorldY);
+  end for;
+
+  return Current;
+end function;
+
+// Reads the exact authoritative frame from an atomic dialogue reply, reporting any other wire outcome.
+public function Frame(Client: Wire.WireClient): Protocol.DialogueFrame;
+begin
+  case Client.Last of
+    when Protocol.ServerMessage.Dialogue(_, const Value, _):
+      return Value;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected dialogue, got ' + Messages.EncodeServer(Client.Last));
+  end case;
+end function;
+
+// Chooses by the current frame's identity; availability remains entirely server-owned.
+public function Choose(Client: Wire.WireClient; Id: string; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  return Wire.Exchange(
+    Client,
+    Protocol.ClientMessage.DialogueChoice(Frame(Client).NpcId, Id),
+    Token
+  );
+end function;
+
+// Selects an ordinary cardinal talk field and starts its authoritative conversation.
+public function Talk(
+  Client: Wire.WireClient; Map: InteriorUnit.InteriorMap; Slot: integer;
+  Token: Tasks.CancellationToken
+): Wire.WireClient;
+begin
+  const Npc := Map.Npcs[Slot];
+  var Target := Npc.Position;
+  for Offset: Coordinates.InteriorPosition in [
+    Coordinates.InteriorPosition(X := 0, Y := 1),
+    Coordinates.InteriorPosition(X := 1, Y := 0), Coordinates.InteriorPosition(X := -1, Y := 0),
+    Coordinates.InteriorPosition(X := 0, Y := -1)
+  ] do
+    const Field := Coordinates.InteriorPosition(
+      X := Npc.Position.X + Offset.X,
+      Y := Npc.Position.Y + Offset.Y
+    );
+    if (Map.Cells[Field.Y * Map.Width + Field.X] = InteriorUnit.InteriorCellKind.Floor)
+      and
+      (Npcs.At(Map.Npcs, Map.AreaId, Field) < 0)
+    then
+      Target := Field;
+      break;
+    end if;
+  end for;
+
+  Test.AssertTrue(Target <> Npc.Position);
+  var Current := Walk(Client, Map, Target, Token);
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  Test.AssertEquals(Npc.Id, Frame(Current).NpcId);
+  Test.AssertEquals(Npc.DisplayName, Frame(Current).Speaker);
+  return Current;
+end function;
+
+// Closes a conversation explicitly and requests the ordinary state projection for further map movement.
+public function EndTalk(Client: Wire.WireClient; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  const Ended := Wire.Exchange(Client, Protocol.ClientMessage.EndDialogue, Token);
+  Test.AssertTrue(Ended.Last is Protocol.ServerMessage.DialogueEnded(_, _));
+  return Wire.Exchange(Ended, Protocol.ClientMessage.Viewport(20, 10), Token);
+end function;
+end unit;

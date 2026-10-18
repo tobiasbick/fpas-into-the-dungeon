@@ -25,20 +25,28 @@ presentation, including combat, equipment, progression and deterministic quest t
   display label shown to players.
 - **Visited area** is a dungeon level or settlement entered in the current
   game. Dungeon entry materializes its original entities; settlement entry
-  records its authored geometry and discovery. Visits survive leaving and
+  materializes its NPC roster and records discovery. Visits survive leaving and
   save/load. A new game starts with no visited areas.
-- **Materialization** is the one-time creation of mutable items and opponents
-  from a dungeon's original placements on its first entry in a game. Revisits
-  retain their current state.
+- **Materialization** is the one-time creation of mutable items, opponents or
+  NPC meeting records from an area's immutable placements on first entry in a
+  game. Revisits retain their current state.
 - **Outdoor region** is an exterior area such as countryside, wilderness, or
   the land between settlements. Outdoor regions may be practically unbounded.
 - **Settlement** is an exterior built-up area such as a village or town.
 - **Home settlement** is the world's authored settlement near spawn, currently
   Hearthmoor, with stable identity `<world>:settlement:home`.
+- **Generated village** is a settlement with a stored name, layout and three
+  stationary NPC placements. Its identity is `<world>:settlement:<sx>:<sy>`.
+- **Settlement region** is one outdoor chunk used to choose at most one
+  generated village gate. It is independent of dungeon entrance-region size.
+- **Settlement definition** is the immutable generated village file. It is
+  created only on first eligible entry and reused on revisit and Continue.
 - **Settlement gate** is the outdoor location leading to a settlement. The
-  home gate lies six traversable cardinal steps from spawn; its marker is `s`.
+  home gate lies six traversable cardinal steps from spawn; all gates use `s`.
 - **NPC** is a non-hostile server-owned character with stable identity, kind,
-  area and persistent meeting state. Mara is the first NPC and blocks her field.
+  area and persistent meeting state. A stationary NPC blocks its placement field.
+- **Resident**, **guard** and **healer** are the three generated village NPC
+  roles. Their dialogue is fixed; a healer offers free full healing while hurt.
 - **Dialogue** is a deterministic server-owned conversation with an NPC. Each
   frame offers ordered choices with stable IDs. Answers refresh that frame;
   the active conversation belongs to the connection and is never saved.
@@ -81,7 +89,7 @@ presentation, including combat, equipment, progression and deterministic quest t
   area identities remain distinct. Revisit, rendering and load use the stored name.
 - **Return location** is the exact source area identity and coordinate retained
   by the server while the player occupies an entered area. For a dungeon it is
-  the entrance site of its region.
+  the entrance site of its region; for a settlement it is its exact outdoor gate.
 - **Terrain** is the generated ground material, vegetation, or water that gives
   an outdoor location its physical character.
 - **Tree** is an individual vegetation feature on otherwise open terrain.

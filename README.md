@@ -25,6 +25,8 @@ run headless or with a full-terminal dashboard.
 - Visit Hearthmoor, talk to Mara, and receive free healing. Her meeting state
   persists through explicit saves. Recover her lost compass from the deepest
   spawn-dungeon level for two Healing potions, and follow progress in the `J` journal.
+- Find additional named villages with residents, guards and healers. Their maps,
+  NPC placements and independently remembered greetings persist through Save/Continue.
 - Discover the world through Fog of War and open a pannable exploration map.
 - Inspect and collect ancient coins, equip a rusty short sword and leather
   jerkin, find and use healing potions, and drop carried items.
@@ -94,7 +96,7 @@ fpas run apps/server/server.fpasprj
 | --- | --- |
 | WASD / arrows | Move on outdoor and settlement maps; WASD moves relative to facing in dungeons |
 | Q / E | Turn left / right by 90 degrees inside a dungeon |
-| Enter | Interact: inspect, pick up, use a gate/exit, or talk to Mara |
+| Enter | Interact: inspect, pick up, use a gate/exit, or talk to an NPC |
 | Space / Z | Attack ahead / wait one turn inside a dungeon |
 | I | Inventory; Enter uses a consumable or wears/removes gear, D drops the selected item |
 | C | Character sheet with health, equipment, and derived values |
@@ -114,7 +116,12 @@ Hearthmoor's home gate is six steps from spawn. Inside the settlement, walk
 beside Mara and press Enter to talk. W/S or arrows select a topic, Enter submits,
 Escape ends the conversation, and Page Up/Down scrolls long text. Mara offers
 free healing while hurt. End the conversation before saving; her meeting state
-persists only through an explicit save. Houses remain closed in 15a.
+persists only through an explicit save. Houses remain closed.
+
+Generated villages use the same controls. Residents and guards explain their
+village; healers offer free full healing while hurt. Each NPC remembers its
+own meetings. See the [15c review route](docs/architecture/generated-settlements.md#reproducible-acceptance)
+for a new seed-25 world and ordinary routes to two villages.
 
 ## Screenshots
 
@@ -179,9 +186,9 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 gets its own identity, even when another world uses the same seed.
 
 Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 4**,
-**generator 10**, **level format 4**, **protocol 18** and **save format 12**.
-Format-11 and older saves remain intact but cannot be continued with this server.
-Generator-9 and older worlds remain on disk but
+**generator 11**, **level format 4**, **settlement format 1**, **protocol 19** and **save format 13**.
+Format-12 and older saves remain intact but cannot be continued with this server.
+Generator-10 and older worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds
 can still be continued. Incompatible data is rejected without migration or
 automatic deletion. Obsolete runtime configuration also produces an error
@@ -220,7 +227,9 @@ Hearthmoor and Mara are implemented in 15a. The first deterministic compass
 quest (15b), accepted with server world administration on 2026-10-17, includes
 explicit acceptance, remembered hand-in, two potion rewards
 and a read-only journal; see [quests](docs/architecture/quests.md). Generated
-settlements, economy, multiplayer and LLM integration remain later work.
+settlements are implemented in 15c, with immutable definitions, complete saved
+NPC rosters and natural TCP healing/restart coverage. Economy, building interiors,
+multiplayer and LLM integration remain later work.
 
 See the [roadmap](docs/roadmap.md) for the current checkpoints.
 The [architecture overview](docs/architecture/overview.md) explains
@@ -235,8 +244,8 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-Current workspace verification passes: **154/154 test programs**, formatting and all
-21 project checks. Coverage includes game rules, deterministic generation,
+Current workspace verification passes: **159/159 test programs**, formatting
+and all 21 project checks. Coverage includes game rules, deterministic generation,
 storage, protocol validation, TUI rendering and input, and real TCP sessions.
 
 To inspect generated terrain without starting a game server:

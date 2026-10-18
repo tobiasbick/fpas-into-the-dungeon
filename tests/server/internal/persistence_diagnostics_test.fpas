@@ -1,7 +1,7 @@
 // Verifies detailed server-only persistence causes, preserved sessions and non-blocking log delivery.
 program PersistenceDiagnosticsTest;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.GameState as GameState, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as Config, Dungeon.Server.Failures as Failures, Dungeon.Server.Handling as Handling, Dungeon.Server.Logging as Logging, Dungeon.Server.Session as Session, Dungeon.Server.Worlds as Worlds, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.CatalogWorlds as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.World as World, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Errors as LevelErrors, Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as SaveErrors, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+uses Dungeon.Areas.Identities as Identities, Dungeon.GameState as GameState, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as Config, Dungeon.Server.Failures as Failures, Dungeon.Server.Handling as Handling, Dungeon.Server.Logging as Logging, Dungeon.Server.Session as Session, Dungeon.Server.Worlds as Worlds, Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.CatalogWorlds as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.World as World, Dungeon.World.Interiors as Interiors, Dungeon.World.Areas.Errors as LevelErrors, Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as SaveErrors, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
 type SocketPair = record
   Client: Net.Connection;
@@ -107,7 +107,6 @@ begin
     Client := Client, Server := Server,
     Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource())
   );
-
   const Value := World.OpenWorld(Root, Settings.WorldId, 24680, 1, 32).Unwrap();
   const Idle := Worlds.NewServerSession(
     Settings,
@@ -135,7 +134,6 @@ begin
     'Saved game storage of world write-io failed.',
     'load failed for world write-io: savegame storage failed: savegame directory exists but is not a directory'
   );
-
   // Full delivery evicts older diagnostics; one-slot, closed and absent queues remain optional.
   const Full: channel of Logging.ServerLogEvent := Tasks.CreateChannel(2);
   for Index: integer := 1 to 2 do
@@ -213,7 +211,6 @@ begin
   );
   AssertNoErrors(Queue);
   const SavedText := Fs.ReadText(Savegame.SaveGamePath(Value)).Unwrap();
-
   // Guard rejections must never be logged as persistence failures.
   const Overwrite := Request(Saved.Next, Protocol.ClientMessage.SaveGame, Settings, Pair);
   AssertRejected(
@@ -262,7 +259,6 @@ begin
     'load failed for world write-io: savegame storage failed: savegame path exists but is not a file'
   );
   Test.AssertEquals('preserve directory contents', Fs.ReadText(Sentinel).Unwrap());
-
   // Real saved entities and discovery across two visited levels survive each rejection.
   const Visited := Fixtures.CreateVisitedWorld(Root, 'visited', 2);
   const VisitedSettings := Settings with WorldId := 'visited'; end with;
@@ -278,13 +274,13 @@ begin
   const Region := Entrances.RegionOf(Visited.Metadata, Visited.Metadata.Spawn);
   const AreaId := Identities.DungeonAreaId(Visited.Metadata, Region, 0);
   for InvalidContent: boolean in [true, false] do
-    var Detail := 'level missing: ' + AreaId;
+    var Detail := 'area missing: ' + AreaId;
     var SafeText := 'The dungeon level ' + AreaId + ' of world visited is missing.';
     if InvalidContent then
       discard Fs.WriteTextAtomic(Path, '{').Unwrap();
       case Interiors.ReadLevel(Visited, AreaId) of
-        when Error(LevelErrors.LevelFailure.Invalid(_, const Reason)):
-          Detail := 'level invalid: ' + AreaId + ': ' + Reason;
+        when Error(LevelErrors.AreaFailure.Invalid(_, const Reason)):
+          Detail := 'area invalid: ' + AreaId + ': ' + Reason;
         when Error(_), Ok(_):
           panic('fixture needs an invalid level');
       end case;
@@ -318,7 +314,6 @@ begin
     Test.AssertEquals(State.Items.Length(), Retried.Next.State.Unwrap().Items.Length());
     AssertNoErrors(Queue);
   end for;
-
   const InvalidState := BeforeSave with State := Some(State with Health := 0; end with); end with;
 
   AssertFailure(
@@ -370,7 +365,7 @@ begin
   discard Fs.CreateDirAll(Path).Unwrap();
   const LevelSentinel := Path + '/keep';
   discard Fs.WriteTextAtomic(LevelSentinel, 'preserve level directory').Unwrap();
-  const LevelCause := 'level storage failed: level path exists but is not a file for area ' +
+  const LevelCause := 'area storage failed: level path exists but is not a file for area ' +
     AreaId;
   for Loading: boolean in [false, true] do
     AssertFailure(
@@ -378,7 +373,7 @@ begin
       if Loading then Protocol.ClientMessage.LoadGame
         else Protocol.ClientMessage.OverwriteSaveGame
         end if,
-      VisitedSettings, Pair, 'storage_error', 'Dungeon level storage of world visited failed.',
+      VisitedSettings, Pair, 'storage_error', 'Area storage of world visited failed.',
       (if Loading then 'load' else 'save' end if) + ' failed for world visited: ' + LevelCause
     );
   end for;
@@ -386,14 +381,13 @@ begin
   Test.AssertEquals('preserve level directory', Fs.ReadText(LevelSentinel).Unwrap());
   Test.AssertEquals(SaveText, Fs.ReadText(Savegame.SaveGamePath(Visited)).Unwrap());
   Test.AssertEquals(MetadataText, Fs.ReadText(World.WorldMetadataPath(Visited)).Unwrap());
-
   // Deterministic path-bearing infrastructure causes also remain server-only, independent of OS wording.
   const PrivatePath := '/private-storage/path-marker';
   for Failure: SaveErrors.PersistenceFailure in [
     SaveErrors.PersistenceFailure.Io(PrivatePath),
-    SaveErrors.PersistenceFailure.Level(LevelErrors.LevelFailure.Io(PrivatePath)),
-    SaveErrors.PersistenceFailure.Level(LevelErrors.LevelFailure.Invalid(AreaId, PrivatePath)),
-    SaveErrors.PersistenceFailure.Level(LevelErrors.LevelFailure.Generation(AreaId, PrivatePath))
+    SaveErrors.PersistenceFailure.Area(LevelErrors.AreaFailure.Io(PrivatePath)),
+    SaveErrors.PersistenceFailure.Area(LevelErrors.AreaFailure.Invalid(AreaId, PrivatePath)),
+    SaveErrors.PersistenceFailure.Area(LevelErrors.AreaFailure.Generation(AreaId, PrivatePath))
   ] do
     const Rejection := Failures.PersistenceRejection('visited', 'load_failed', Failure);
     Test.AssertTrue(PrivatePath in Failures.PersistenceFailureReason(Failure));

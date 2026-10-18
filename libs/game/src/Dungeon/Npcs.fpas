@@ -1,70 +1,31 @@
-// Persistent NPC identity and meeting state, with fixed placement, collision, and visible map markers.
+// NPC identity and meeting validation, immutable placement lookup and visible map markers.
 unit Dungeon.Npcs;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain;
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain,
+  Dungeon.Npcs.Model as Model, Dungeon.Settlements.Identities as Identities, Dungeon.Exploration.Model as Ordering,
+  Std.Conv as Conv;
 
-// Supported authored NPC roles; positions and names belong to the kind, never to a save file.
-public type NpcKind = enum
-  Mara;
-end enum;
+// Shared role of a server-owned NPC.
+public type NpcKind = Model.NpcKind;
 
-// Mutable meeting state for one stable NPC in the selected world. Placement is derived from Kind.
-public type GameNpc = record
-  public Id: string;
-  public Kind: NpcKind;
-  public AreaId: string;
-  public HasMetPlayer: boolean;
-end record;
+// Mutable meeting record, independent of map geometry.
+public type GameNpc = Model.GameNpc;
 
-// Fixed local position of the stationary NPC; it is distinct from gate and player arrival.
-public function Position(Kind: NpcKind): Coordinates.InteriorPosition;
+// Immutable name and occupied field retained with area geometry.
+public type NpcPlacement = Model.NpcPlacement;
+
+// Stable authored identity, independent of array ordering or other NPC roles.
+public function MaraId(Metadata: Terrain.WorldMetadata): string;
 begin
-  case Kind of
-    when NpcKind.Mara:
-      return Coordinates.InteriorPosition(X := 11, Y := 7);
-  end case;
+  return Settlements.HomeAreaId(Metadata) + ':npc:mara';
 end function;
 
-// Player-facing name of a known NPC kind.
-public function DisplayName(Kind: NpcKind): string;
-begin
-  case Kind of
-    when NpcKind.Mara:
-      return 'Mara';
-  end case;
-end function;
-
-// Creates the world's one NPC, even before the settlement is visited; Start over uses this fresh record.
-public function NewNpcs(Metadata: Terrain.WorldMetadata): array of GameNpc;
-begin
-  return [
-    GameNpc(
-      Id := Settlements.HomeAreaId(Metadata) + ':npc:mara', Kind := NpcKind.Mara,
-      AreaId := Settlements.HomeAreaId(Metadata), HasMetPlayer := false
-    )
-  ];
-end function;
-
-// Rejects missing, duplicate, foreign or extra NPCs; the met flag is the sole mutable property in 15a.
-public function ValidateNpcs(Metadata: Terrain.WorldMetadata; Values: array of GameNpc): result of (array of GameNpc, string);
-begin
-  if Values.Length() <> 1 then
-    return Error('game state requires exactly one Mara NPC record');
-  end if;
-  const Expected := NewNpcs(Metadata)[0];
-  const Npc := Values[0];
-  if (Npc.Id <> Expected.Id) or (Npc.Kind <> Expected.Kind) or (Npc.AreaId <> Expected.AreaId) then
-    return Error('NPC identity, kind and area must match the home settlement');
-  end if;
-
-  return Ok(Values);
-end function;
-
-// Returns the blocking NPC at a local field, or -1. Callers validate records before applying rules.
-public function At(Values: array of GameNpc; AreaId: string; Field: Coordinates.InteriorPosition): integer;
+// Finds one mutable record by exact identity; absence returns -1.
+public function IndexOf(Values: array of GameNpc; Id: string): integer;
 begin
   for Index: integer := 0 to Values.Length() - 1 do
-    if (Values[Index].AreaId = AreaId) and (Position(Values[Index].Kind) = Field) then
+    if Values[Index].Id = Id then
       return Index;
     end if;
   end for;
@@ -72,9 +33,120 @@ begin
   return -1;
 end function;
 
-// Overlays an NPC only on currently visible fields; remembered fields keep their supplied static code.
+// Resolves immutable facts by identity, without deriving a position or name from a role.
+public function FindPlacement(Values: array of NpcPlacement; Id: string): result of (NpcPlacement, string);
+begin
+  for Value: NpcPlacement in Values do
+    if Value.Id = Id then
+      return Ok(Value);
+    end if;
+  end for;
+
+  return Error('NPC placement is absent from the current map');
+end function;
+
+// The authored NPC exists before the first home visit, with no remembered meeting.
+public function NewNpcs(Metadata: Terrain.WorldMetadata): array of GameNpc;
+begin
+  return [
+    GameNpc(
+      Id := MaraId(Metadata), Kind := NpcKind.Mara,
+      AreaId := Settlements.HomeAreaId(Metadata), HasMetPlayer := false
+    )
+  ];
+end function;
+
+// Requires Mara plus the complete, canonically ordered roster of every visited generated village.
+// Unvisited villages cannot contribute records; positions and names are checked against maps separately.
+public function ValidateNpcs(Metadata: Terrain.WorldMetadata; VisitedAreas: array of string; Values: array of GameNpc): result of (array of GameNpc, string);
+begin
+  var ExpectedCount := 1;
+  for AreaId: string in VisitedAreas do
+    if AreaId.StartsWith(Metadata.Id + ':settlement:')
+      and
+      (AreaId <> Settlements.HomeAreaId(Metadata))
+    then
+      const Region := try Identities.ParseAreaId(Metadata, AreaId);
+      ExpectedCount := ExpectedCount + 3;
+    end if;
+  end for;
+
+  if (Values.Length() <> ExpectedCount) or (IndexOf(Values, MaraId(Metadata)) < 0) then
+    return Error('NPC records must include Mara and every visited village roster exactly once');
+  end if;
+
+  for Index: integer := 0 to Values.Length() - 1 do
+    const Npc := Values[Index];
+    if (Index > 0) and not Ordering.StringComesBefore(Values[Index - 1].Id, Npc.Id) then
+      return Error('NPC identities must be canonically sorted without duplicates');
+    end if;
+
+    if Npc.Id = MaraId(Metadata) then
+      if (Npc.Kind <> NpcKind.Mara) or (Npc.AreaId <> Settlements.HomeAreaId(Metadata)) then
+        return Error('Mara identity, kind and area must match the home settlement');
+      end if;
+    else
+      if not (Npc.AreaId in VisitedAreas) then
+        return Error('NPC belongs to an unvisited settlement');
+      end if;
+      const Region := try Identities.ParseAreaId(Metadata, Npc.AreaId);
+      var Slot := -1;
+      case Npc.Kind of
+        when NpcKind.Mara:
+          return Error('generated villages cannot contain Mara');
+        when NpcKind.Resident:
+          Slot := 0;
+        when NpcKind.Guard:
+          Slot := 1;
+        when NpcKind.Healer:
+          Slot := 2;
+      end case;
+
+      if Npc.Id <> Npc.AreaId + ':npc:' + Conv.IntToStr(Slot) then
+        return Error('NPC identity must match its original village role slot');
+      end if;
+    end if;
+
+    if Npc.HasMetPlayer and not (Npc.AreaId in VisitedAreas) then
+      return Error('a met NPC requires its settlement to have been visited');
+    end if;
+  end for;
+
+  return Ok(Values);
+end function;
+
+// Cross-checks immutable placements against the matching retained mutable records of one area.
+public function RequirePlacements(Values: array of GameNpc; AreaId: string; Placements: array of NpcPlacement): result of (boolean, string);
+begin
+  for Placement: NpcPlacement in Placements do
+    const Index := IndexOf(Values, Placement.Id);
+    if Index < 0 then
+      return Error('NPC placement has no matching mutable record');
+    end if;
+
+    if (Values[Index].Kind <> Placement.Kind) or (Values[Index].AreaId <> AreaId) then
+      return Error('NPC role or area differs from the immutable placement');
+    end if;
+  end for;
+
+  return Ok(true);
+end function;
+
+// Returns a blocking placement index in the requested area, or -1.
+public function At(Values: array of NpcPlacement; AreaId: string; Field: Coordinates.InteriorPosition): integer;
+begin
+  for Index: integer := 0 to Values.Length() - 1 do
+    if Values[Index].Id.StartsWith(AreaId + ':npc:') and (Values[Index].Position = Field) then
+      return Index;
+    end if;
+  end for;
+
+  return -1;
+end function;
+
+// Remembered geometry never projects an NPC; only current, matching placements do.
 public function MapCellCode(
-  Values: array of GameNpc; AreaId: string; Field: Coordinates.InteriorPosition;
+  Values: array of NpcPlacement; AreaId: string; Field: Coordinates.InteriorPosition;
   CurrentlyVisible: boolean; StaticCode: string
 ): string;
 begin

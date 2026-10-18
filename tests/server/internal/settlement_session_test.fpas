@@ -2,7 +2,7 @@
 program SettlementSessionTest;
 
 uses
-  Dungeon.Areas as Areas, Dungeon.Quests.Model as QuestModel, Dungeon.Items as Items, Dungeon.World.Interiors as Interiors, Dungeon.Areas.Identities as Identities, Dungeon.Terrain.Entrances as Entrances, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.Exploration as Exploration,
+  Dungeon.Settlements.Generation as Villages, Dungeon.Settlements.Sites as Sites, Dungeon.Areas as Areas, Dungeon.Quests.Model as QuestModel, Dungeon.Items as Items, Dungeon.World.Interiors as Interiors, Dungeon.Areas.Identities as Identities, Dungeon.Terrain.Entrances as Entrances, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.Exploration as Exploration,
   Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol,
   Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport,
   Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection,
@@ -61,7 +61,6 @@ begin
     when Protocol.VisibleState.FirstPersonState(_):
       panic('settlement must stay a map');
   end case;
-
   const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
   const Client := Net.Connect(
     '127.0.0.1',
@@ -205,7 +204,59 @@ begin
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
   Sessions.AssertUnchanged(Rewarded, DuplicateReport);
+  // Generic healing/first meeting obey the same prepare/send/install boundary.
+  const VillageMetadata := Placement.NewWorldMetadata('village-session', 25, 1).Unwrap();
+  const VillageRegion := Coordinates.ChunkCoordinate(X := 85, Y := -83);
+  const Village := Villages.GenerateMap(VillageMetadata, VillageRegion).Unwrap();
+  const Healer := Village.Npcs[2];
+  const VillageState := Areas.MaterializeArea(GameState.NewGame(VillageMetadata), Village) with Area := Coordinates.AreaKind.Settlement; AreaId := Village.AreaId; Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(
+      X := Healer.Position.X, Y := Healer.Position.Y + 1
+    )
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    VillageMetadata.OutdoorAreaId,
+    Sites.Site(VillageMetadata, VillageRegion).Unwrap()
+  ); Health := 3; end with;
+  const VillageSession := Session with World := World with Metadata := VillageMetadata; end with; State := Some(
+    VillageState
+  ); Interior := Some(Village); ActiveDialogue := None; Dirty := false; end with;
+  const BadGreeting := VillageSession with Viewport := Broken.Viewport; end with;
+  const FailedGreeting := Handling.HandleSessionMessage(
+    BadGreeting, Protocol.ClientMessage.Interact,
+    Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Sessions.AssertUnchanged(BadGreeting, FailedGreeting);
+  const Talking := Handling.HandleSessionMessage(
+    VillageSession, Protocol.ClientMessage.Interact,
+    Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertEquals(Healer.Id, Talking.ActiveDialogue.Unwrap().NpcId);
+  const BadHealing := Talking with Dirty := false; Viewport := Broken.Viewport; end with;
+  const FailedHealing := Handling.HandleSessionMessage(
+    BadHealing,
+    Protocol.ClientMessage.DialogueChoice(Healer.Id, 'wounds'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Sessions.AssertUnchanged(BadHealing, FailedHealing);
+  const WrongQuest := Handling.HandleSessionMessage(
+    Talking,
+    Protocol.ClientMessage.DialogueChoice(Healer.Id, 'quest'), Server, Config, Token
+  ).Unwrap();
+  const WrongQuestReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(WrongQuestReply.Line).Unwrap() is Protocol.ServerMessage.Rejected('dialogue_rejected', _)
+  );
+  Sessions.AssertUnchanged(Talking, WrongQuest);
   discard Net.Close(Server).Unwrap();
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(
+      Talking,
+      Protocol.ClientMessage.DialogueChoice(Healer.Id, 'wounds'), Server, Config, Token
+    ) is Error(_)
+  );
+  Test.AssertEquals(3, Talking.State.Unwrap().Health);
   Test.AssertTrue(
     Handling.HandleSessionMessage(
       Resized,

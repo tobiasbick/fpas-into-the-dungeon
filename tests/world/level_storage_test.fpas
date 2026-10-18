@@ -1,7 +1,7 @@
 // Covers immutable dungeon level files: strict format, read-only access, first-visit creation, and failures.
 program LevelStorageTest;
 
-uses Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Interior.Generation as Generation, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Interiors.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
+uses Dungeon.World.Areas as StoredAreas, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Items as Items, Dungeon.Interior.Generation as Generation, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances, Dungeon.World as WorldUnit, Dungeon.World.Interiors as Interiors, Dungeon.World.Interiors.Encoding as Encoding, Dungeon.World.Areas.Errors as Errors, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test, Std.Time as Time;
 
 function EnsureTestRoot(Path: string): result of (boolean, string);
 begin
@@ -56,14 +56,14 @@ begin
   end case;
 end function;
 
-function IsMissing(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): boolean;
+function IsMissing(Value: result of (InteriorUnit.InteriorMap, Errors.AreaFailure)): boolean;
 begin
   case Value of
     when Error(const Failure):
       case Failure of
-        when Errors.LevelFailure.Missing(const AreaId):
+        when Errors.AreaFailure.Missing(const AreaId):
           return true;
-        when Errors.LevelFailure.Invalid(_, _), Errors.LevelFailure.Io(_), Errors.LevelFailure.Generation(_, _):
+        when Errors.AreaFailure.Invalid(_, _), Errors.AreaFailure.Io(_), Errors.AreaFailure.Generation(_, _):
           return false;
       end case;
     when Ok(_):
@@ -71,14 +71,14 @@ begin
   end case;
 end function;
 
-function IsInvalid(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): boolean;
+function IsInvalid(Value: result of (InteriorUnit.InteriorMap, Errors.AreaFailure)): boolean;
 begin
   case Value of
     when Error(const Failure):
       case Failure of
-        when Errors.LevelFailure.Invalid(const AreaId, const Reason):
+        when Errors.AreaFailure.Invalid(const AreaId, const Reason):
           return true;
-        when Errors.LevelFailure.Missing(_), Errors.LevelFailure.Io(_), Errors.LevelFailure.Generation(_, _):
+        when Errors.AreaFailure.Missing(_), Errors.AreaFailure.Io(_), Errors.AreaFailure.Generation(_, _):
           return false;
       end case;
     when Ok(_):
@@ -86,14 +86,14 @@ begin
   end case;
 end function;
 
-function IsIo(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): boolean;
+function IsIo(Value: result of (InteriorUnit.InteriorMap, Errors.AreaFailure)): boolean;
 begin
   case Value of
     when Error(const Failure):
       case Failure of
-        when Errors.LevelFailure.Io(const Reason):
+        when Errors.AreaFailure.Io(const Reason):
           return true;
-        when Errors.LevelFailure.Missing(_), Errors.LevelFailure.Invalid(_, _), Errors.LevelFailure.Generation(_, _):
+        when Errors.AreaFailure.Missing(_), Errors.AreaFailure.Invalid(_, _), Errors.AreaFailure.Generation(_, _):
           return false;
       end case;
     when Ok(_):
@@ -101,7 +101,7 @@ begin
   end case;
 end function;
 
-function Unwrapped(Value: result of (InteriorUnit.InteriorMap, Errors.LevelFailure)): InteriorUnit.InteriorMap;
+function Unwrapped(Value: result of (InteriorUnit.InteriorMap, Errors.AreaFailure)): InteriorUnit.InteriorMap;
 begin
   case Value of
     when Ok(const Map):
@@ -141,7 +141,7 @@ begin
   // Reading never creates a level.
   Test.AssertTrue(IsMissing(Interiors.ReadLevel(World, SpawnAreaId)));
   Test.AssertFalse(Fs.Exists(SpawnPath));
-  Test.AssertTrue(Interiors.ReadVisitedLevels(World, GameState.NewGame(Metadata)) is Ok(_));
+  Test.AssertTrue(StoredAreas.ReadVisitedAreas(World, GameState.NewGame(Metadata)) is Ok(_));
   // Entry verifies the target against the entrance under the player before creating anything.
   Test.AssertTrue(
     IsInvalid(
@@ -190,7 +190,7 @@ begin
   // The writer emits the contract's key order.
   Test.AssertTrue(
     StoredText.StartsWith(
-      '{"format_version":4,"world_id":"levels","generator_version":10,"area_id":'
+      '{"format_version":4,"world_id":"levels","generator_version":11,"area_id":'
     )
   );
   // Revisits and fresh games reuse the existing file without rewriting it.
@@ -214,7 +214,7 @@ begin
   );
   const Visited: GameState.GameState := AtSpawnEntrance with VisitedAreas := [SpawnAreaId]; end with;
 
-  Test.AssertEquals(1, Interiors.ReadVisitedLevels(World, Visited).Unwrap().Length());
+  Test.AssertEquals(1, StoredAreas.ReadVisitedAreas(World, Visited).Unwrap().Length());
   Test.AssertEquals(StoredText, Fs.ReadText(SpawnPath).Unwrap());
   // A missing level of an already visited area is never regenerated.
   const Ordinary: Entrances.RegionCoordinate := OrdinaryRegion(Metadata);
@@ -233,7 +233,7 @@ begin
   Test.AssertFalse(Fs.Exists(LevelFile(World, Ordinary)));
   Test.AssertTrue(
     (
-      Interiors.ReadVisitedLevels(
+      StoredAreas.ReadVisitedAreas(
         World,
         Visited with VisitedAreas := [OrdinaryAreaId, SpawnAreaId]; end with
       ) is Error(_)
@@ -328,7 +328,7 @@ begin
   AssertRejected(StoredText, '"format_version":4', '"format_version":2', Metadata, SpawnAreaId);
   AssertRejected(
     StoredText,
-    '"generator_version":10',
+    '"generator_version":11',
     '"generator_version":7',
     Metadata,
     SpawnAreaId
@@ -462,7 +462,7 @@ begin
       )
     )
   );
-  const ReadMaps := Interiors.ReadVisitedLevels(World, Visited).Unwrap();
+  const ReadMaps := StoredAreas.ReadVisitedAreas(World, Visited).Unwrap();
   Test.AssertEquals(1, ReadMaps.Length());
   Test.AssertEquals(FixtureText, Encoding.EncodeLevel(Metadata, ReadMaps[0]));
   for InvalidText: string in [

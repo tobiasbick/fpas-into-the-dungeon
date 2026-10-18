@@ -1,0 +1,238 @@
+// Plays two generated villages, natural injury/healing and inside/outdoor Continue across listener restarts.
+program VillagePlayTest;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit,
+  Dungeon.Npcs as Npcs, Dungeon.Protocol as Protocol, Dungeon.Server as Server,
+  Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging,
+  Dungeon.Settlements.Identities as Identities, Dungeon.Settlements.Sites as Sites,
+  Dungeon.Terrain.Entrances as Entrances, Dungeon.Test.Routes as Routes,
+  Dungeon.Test.Villages as Villages, Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit,
+  Dungeon.World.Interiors as Interiors, Dungeon.World.Savegame as Savegame, Dungeon.World.Settlements as Store,
+  Dungeon.Areas.Identities as DungeonIds, Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps,
+  Std.Tasks as Tasks, Std.Test as Test;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('expected saved village game');
+  end case;
+end function;
+
+function Travel(
+  Client: Wire.WireClient; World: WorldUnit.WorldSession; Target: Coordinates.WorldPosition;
+  Token: Tasks.CancellationToken
+): Wire.WireClient;
+begin
+  const Position := Wire.MapOf(Client);
+  const From := Coordinates.WorldPosition(X := Position.WorldX, Y := Position.WorldY);
+  const Route := Routes.OutdoorRoute(World.Metadata, From, Target, 24);
+  Test.AssertTrue((From = Target) or (Route.Length() > 0));
+  return Wire.WalkOutdoorRoute(Client, Route, Token);
+end function;
+
+function Leave(
+  Client: Wire.WireClient; Map: InteriorUnit.InteriorMap; Gate: Coordinates.WorldPosition;
+  Token: Tasks.CancellationToken
+): Wire.WireClient;
+begin
+  var Current := Villages.Walk(Client, Map, Map.Arrival, Token);
+  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  Test.AssertEquals(Gate.X, Wire.MapOf(Current).WorldX);
+  Test.AssertEquals(Gate.Y, Wire.MapOf(Current).WorldY);
+  return Current;
+end function;
+
+function Play(
+  Client: Wire.WireClient; World: WorldUnit.WorldSession; Stage: integer;
+  Token: Tasks.CancellationToken
+): result of (boolean, string);
+begin
+  const Region := Coordinates.ChunkCoordinate(X := 85, Y := -83);
+  const SecondRegion := Coordinates.ChunkCoordinate(X := 87, Y := -85);
+  const Gate := Sites.Site(World.Metadata, Region).Unwrap();
+  const SecondGate := Sites.Site(World.Metadata, SecondRegion).Unwrap();
+  const Area := Identities.AreaId(World.Metadata, Region);
+  const SecondArea := Identities.AreaId(World.Metadata, SecondRegion);
+  var Current := Wire.Exchange(
+    Client, if (Stage = 0) or (Stage = 3) then Protocol.ClientMessage.StartNewGame
+      else Protocol.ClientMessage.LoadGame
+      end if, Token
+  );
+  if Stage = 0 then
+    const Entrance := Coordinates.WorldPosition(X := 10955, Y := -10539);
+    Current := Travel(Current, World, Entrance, Token);
+    Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'settlements'])));
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const DungeonRegion := Entrances.RegionOf(World.Metadata, Entrance);
+    const Dungeon := Interiors.ReadLevel(
+      World,
+      DungeonIds.DungeonAreaId(World.Metadata, DungeonRegion, 0)
+    ).Unwrap();
+    for Slot: integer in [1, 2] do
+      Current := try Wire.WalkPastOpponents(Current, Dungeon, Dungeon.Items[Slot].Position, Token);
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+      Current := Wire.Exchange(
+        Current,
+        Protocol.ClientMessage.Equip(Dungeon.Items[Slot].ItemId),
+        Token
+      );
+    end for;
+
+    Current := Wire.FaceOpponent(Current, Dungeon, Dungeon.Hostiles[0].Position, Token);
+    while Wire.FirstPersonOf(Current).Health > 14 do
+      Current := Wire.Exchange(Current, Protocol.ClientMessage.Wait, Token);
+    end while;
+
+    Current := try Wire.FightAhead(Current, Token);
+    Current := try Wire.WalkPastOpponents(Current, Dungeon, Dungeon.Arrival, Token);
+    const Hurt := Wire.FirstPersonOf(Current).Health;
+    Test.AssertTrue((Hurt > 0) and (Hurt < 16));
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    Current := Travel(Current, World, Gate, Token);
+    Test.AssertEquals(Hurt + 4, Wire.MapOf(Current).Health);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const Map := Store.ReadMap(World, Area).Unwrap();
+    Test.AssertEquals(Map.DisplayName, Wire.MapOf(Current).Title);
+    Current := Villages.Talk(Current, Map, 2, Token);
+    Test.AssertFalse('recognizes you' in Villages.Frame(Current).Text);
+    Current := Villages.Choose(Current, 'wounds', Token);
+    Test.AssertTrue(
+      Current.Last is Protocol.ServerMessage.Dialogue(Protocol.VisibleState.MapState(_), _, true)
+    );
+    Current := Villages.EndTalk(Current, Token);
+    Test.AssertEquals(20, Wire.MapOf(Current).Health);
+    for Slot: integer in [0, 1] do
+      Current := Villages.Talk(Current, Map, Slot, Token);
+      Current := Villages.Choose(Current, 'settlement', Token);
+      Current := Villages.EndTalk(Current, Token);
+    end for;
+
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.SaveGame, Token);
+    Wire.RequireSaved(Current);
+  elsif Stage = 1 then
+    const Saved := Loaded(World);
+    Test.AssertEquals(Area, Saved.AreaId);
+    Test.AssertEquals(4, Saved.Npcs.Length());
+    const Map := Store.ReadMap(World, Area).Unwrap();
+    Test.AssertEquals(Map.DisplayName, Wire.MapOf(Current).Title);
+    const Position := GameState.SettlementPlayerPosition(Saved).Unwrap();
+    Test.AssertEquals(Position.X, Wire.MapOf(Current).WorldX);
+    Test.AssertEquals(Position.Y, Wire.MapOf(Current).WorldY);
+    // The saved pose is already next to the guard: no intervening move may dirty this greeting.
+    Current := Villages.Talk(Current, Map, 1, Token);
+    Test.AssertTrue('recognizes you' in Villages.Frame(Current).Text);
+    Test.AssertTrue(Current.Last is Protocol.ServerMessage.Dialogue(_, _, false));
+    Current := Villages.EndTalk(Current, Token);
+    Current := Leave(Current, Map, Gate, Token);
+    Current := Travel(Current, World, SecondGate, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const Second := Store.ReadMap(World, SecondArea).Unwrap();
+    Current := Villages.Talk(Current, Second, 0, Token);
+    Test.AssertFalse('recognizes you' in Villages.Frame(Current).Text);
+    Current := Villages.EndTalk(Current, Token);
+    Current := Leave(Current, Second, SecondGate, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.OverwriteSaveGame, Token);
+    Wire.RequireSaved(Current);
+    const Both := Loaded(World);
+    Test.AssertEquals(7, Both.Npcs.Length());
+    Test.AssertEquals(2, Both.Exploration.InteriorAreas.Length() - 1); // includes the visited dungeon
+    Test.AssertTrue(Both.Npcs[Npcs.IndexOf(Both.Npcs, Area + ':npc:0')].HasMetPlayer);
+    Test.AssertTrue(Both.Npcs[Npcs.IndexOf(Both.Npcs, SecondArea + ':npc:0')].HasMetPlayer);
+    Test.AssertFalse(Both.Npcs[Npcs.IndexOf(Both.Npcs, SecondArea + ':npc:2')].HasMetPlayer);
+  elsif Stage = 2 then
+    Test.AssertEquals(SecondGate.X, Wire.MapOf(Current).WorldX);
+    Test.AssertEquals(SecondGate.Y, Wire.MapOf(Current).WorldY);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const Second := Store.ReadMap(World, SecondArea).Unwrap();
+    Current := Villages.Talk(Current, Second, 0, Token);
+    Test.AssertTrue('recognizes you' in Villages.Frame(Current).Text);
+    Test.AssertTrue(Current.Last is Protocol.ServerMessage.Dialogue(_, _, true)); // entry changed progress
+    Current := Villages.EndTalk(Current, Token);
+    Current := Villages.Talk(Current, Second, 2, Token);
+    Test.AssertFalse('recognizes you' in Villages.Frame(Current).Text);
+    Current := Villages.EndTalk(Current, Token);
+    Current := Leave(Current, Second, SecondGate, Token);
+  // Disconnect drops these new unsaved meetings; Stage 3 starts a fresh game on a new listener.
+  else
+    Test.AssertEquals(World.Metadata.Spawn.X, Wire.MapOf(Current).WorldX);
+    Current := Travel(Current, World, Gate, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+    const Map := Store.ReadMap(World, Area).Unwrap();
+    Current := Villages.Talk(Current, Map, 2, Token);
+    Test.AssertFalse('recognizes you' in Villages.Frame(Current).Text);
+    Current := Villages.EndTalk(Current, Token);
+  end if;
+
+  return Ok(true);
+end function;
+
+begin
+  const Root := Test.ScratchDir();
+  const World := WorldUnit.OpenWorld(Root, 'villages', 25, 1, 32).Unwrap();
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(8192);
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := Some(Logs), WorldsRoot := Root,
+    WorldId := 'villages', WorldSeed := 25, DungeonRegionChunks := 1, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  var Original: array of string := [];
+  var OutsideSave := '';
+  for Stage: integer := 0 to 3 do
+    const Reservation := Net.Listen('127.0.0.1', 0).Unwrap();
+    const Port := Net.ListenerLocalAddress(Reservation).Unwrap().Port;
+    discard Net.CloseListener(Reservation).Unwrap();
+    const Stop := Tasks.CreateCancellationSource();
+    scope
+      const Worker := go Server.RunServerWithCancellation(
+        '127.0.0.1',
+        Port,
+        Config,
+        Tasks.GetCancellationToken(Stop)
+      );
+      while Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap().Kind <> 'status' do
+        null;
+      end while;
+      const Client := Wire.ConnectClient(Port, Token);
+      const Outcome := Play(Client, World, Stage, Token);
+      discard Net.Close(Client.Connection).Unwrap();
+      discard Tasks.Cancel(Stop);
+      Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+      Test.AssertTrue(Outcome.Unwrap());
+    end scope;
+    const Names := ['85_-83.json', '87_-85.json'];
+    if Stage = 0 then
+      Original.PushInPlace(
+        Fs.ReadText(PathOps.Join([World.Directory, 'settlements', Names[0]])).Unwrap()
+      );
+    end if;
+
+    if Stage = 1 then
+      Original.PushInPlace(
+        Fs.ReadText(PathOps.Join([World.Directory, 'settlements', Names[1]])).Unwrap()
+      );
+      OutsideSave := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+    end if;
+
+    if Stage >= 2 then
+      Test.AssertEquals(OutsideSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    end if;
+
+    for Index: integer := 0 to Original.Length() - 1 do
+      Test.AssertEquals(
+        Original[Index],
+        Fs.ReadText(PathOps.Join([World.Directory, 'settlements', Names[Index]])).Unwrap()
+      );
+    end for;
+
+    while Tasks.TryReceive(Logs).Unwrap() is Some(_) do
+      null;
+    end while;
+  end for;
+
+  discard Tasks.CloseChannel(Logs);
+end.

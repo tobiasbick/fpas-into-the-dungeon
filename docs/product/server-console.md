@@ -16,6 +16,11 @@ At 100 columns or more, three summary panels form one row:
 - **World:** original world ID, seed, entrance-region size, generator version,
   and presence of a save file. Presence is not a compatibility guarantee.
 
+The active area uses its retained map name, including generated villages.
+Creating this status snapshot does not open or regenerate a settlement file.
+Complete-world deletion also removes `settlements/` definitions; its existing
+connection exclusion and confirmation rules still apply.
+
 The large **Live log / UTC** panel fills the remaining space. It displays
 timestamp, severity and text, with a scrollbar and All, Info, Warnings and
 Errors filters. Rejected requests are warnings. Filters preserve the shared

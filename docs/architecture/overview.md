@@ -140,8 +140,10 @@ these projects.
   shared admission permit.
   `Session` retains
   the current finite map and builds area views from it. Dungeon entry opens the target
-  level through the world layer; settlement entry resolves authored geometry
-  from `Dungeon.Settlements` without files. Loading
+  level through the world layer; generated village entry opens its immutable
+  definition through `Dungeon.World.Settlements`. Hearthmoor resolves authored
+  geometry from `Dungeon.Settlements` without files. The retained map also carries
+  immutable NPC placements, so resize/map projection reads no area files. Loading
   installs the already validated view returned by the world layer.
   Turn and ordinary state replies prepare discovery, projection and a bounded
   UTF-8 response before installing a replacement session. Preparation failures
@@ -179,11 +181,17 @@ these projects.
     `Dungeon.Npcs.Interaction` shares reach without a dialogue/rules cycle.
     `Dungeon.Dialogue.Model` retains private nodes and display fields, while
     `.Quests` owns quest-specific frames.
+  - `Dungeon.Settlements` retains authored home geometry; `.Sites`, `.Identities`,
+    `.Generation` and `.Validation` own generated villages behind pure interfaces.
+    `Dungeon.Npcs.Model` defines independent roles and immutable placements;
+    `Dungeon.Npcs` validates complete mutable meeting rosters. `.Interaction`
+    resolves the exact adjacent character; `Dungeon.Dialogue.Villages` owns fixed
+    resident, guard and healer topics. See [generated settlements](generated-settlements.md).
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
     read-only queries; the `AreaView` type pairs world metadata with a supplied
     current interior map.
   - `Dungeon.Areas`: pure construction of an area view, requiring no interior
-    outdoors and a matching map in a dungeon; first-visit entity materialization;
+    outdoors and a matching map in a dungeon or settlement; first-visit entity/NPC materialization;
     `.Identities` owns canonical dungeon area identities; `.Validation` owns the
     map-free save shape check and full saved-state checks against all supplied
     visited maps and placements, without loading or generating geometry.
@@ -198,8 +206,11 @@ these projects.
   composition, prefetching, and bounded caching. `Dungeon.World` owns world
   sessions, the chunk cache, and visible windows; `Dungeon.World.Encoding` owns
   the exact JSON formats of world metadata and chunks. `Dungeon.World.Interiors`
-  owns immutable level files (read, transient preview, first-visit creation, visited-level reads)
-  with `.Encoding` (level format) and `.Errors` (`LevelFailure`).
+  owns immutable level files (read, transient preview and first-visit creation)
+  with `.Encoding` (level format). `Dungeon.World.Settlements` owns immutable
+  generated village files, with its own `.Encoding`. `Dungeon.World.Areas`
+  resolves all visited definitions for save validation; `.Areas.Errors` owns
+  the shared typed `AreaFailure`. Neither save/load nor projection creates them.
   `Dungeon.World.Quests` coordinates read-only preflight and retained objective
   validation. `Dungeon.World.Savegame.Quests` owns the exact quest codec.
   `Dungeon.World.Catalog` opens existing worlds without creating them, lists

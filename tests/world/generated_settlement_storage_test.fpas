@@ -1,0 +1,215 @@
+// Verifies immutable village files, complete NPC save rosters and read-only failure preservation.
+program GeneratedSettlementStorageTest;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState,
+  Dungeon.Interior as InteriorUnit, Dungeon.Npcs as Npcs, Dungeon.Settlements.Identities as Identities,
+  Dungeon.Settlements.Sites as Sites, Dungeon.World as WorldUnit, Dungeon.World.Areas.Errors as Errors,
+  Dungeon.World.Settlements as Store, Dungeon.World.Settlements.Encoding as Encoding,
+  Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as SaveErrors,
+  Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps, Std.Test as Test;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('expected complete saved village state');
+  end case;
+end function;
+
+begin
+  const Root := Test.ScratchDir();
+  const World := WorldUnit.OpenWorld(Root, 'villages', 25, 1, 32).Unwrap();
+  const Metadata := World.Metadata;
+  const Region := Coordinates.ChunkCoordinate(X := 85, Y := -83);
+  const Area := Identities.AreaId(Metadata, Region);
+  const Gate := Sites.Site(Metadata, Region).Unwrap();
+  const Path := PathOps.Join([World.Directory, 'settlements', '85_-83.json']);
+  const Initial := GameState.NewGame(Metadata);
+  const Outside := Initial with Player := Coordinates.PlayerPosition.Outdoor(Gate); end with;
+  const View := GameState.AreaView(Metadata := Metadata, Interior := None);
+  Test.AssertTrue(Store.ReadMap(World, Area) is Error(Errors.AreaFailure.Missing(_)));
+  Test.AssertFalse(Fs.Exists(Path));
+  Test.AssertTrue(Store.OpenMapForEntry(World, View, Initial, Area) is Error(_));
+  const Map := Store.OpenMapForEntry(World, View, Outside, Area).Unwrap();
+  const Original := Fs.ReadText(Path).Unwrap();
+  Test.AssertEquals(1, Outside.Npcs.Length());
+  Test.AssertEquals(0, Outside.VisitedAreas.Length());
+  Test.AssertEquals(
+    Map.DisplayName,
+    Store.OpenMapForEntry(World, View, Outside, Area).Unwrap().DisplayName
+  );
+  Test.AssertEquals(Original, Fs.ReadText(Path).Unwrap());
+  Test.AssertFalse(Fs.Exists(Savegame.SaveGamePath(World)));
+  // A valid stored definition is authoritative, including names/placements that differ from fresh generation.
+  var Stored := Map with DisplayName := 'Stored Hollow'; end with;
+
+  Stored.Npcs[0].DisplayName := 'Stored Resident';
+  Stored.Npcs[0].Position.X := Stored.Npcs[0].Position.X + 1;
+  const Bytes := Encoding.EncodeMap(Metadata, Stored);
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Bytes).Unwrap());
+  Test.AssertEquals('Stored Hollow', Store.ReadMap(World, Area).Unwrap().DisplayName);
+  Test.AssertTrue(Store.ReadMap(World, Area).Unwrap().Npcs[0].Position = Stored.Npcs[0].Position);
+  const Entered := Areas.MaterializeArea(Outside, Stored) with Area := Coordinates.AreaKind.Settlement; AreaId := Area; Player := Coordinates.PlayerPosition.Settlement(
+    Stored.Start
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(Metadata.OutdoorAreaId, Gate); end with;
+
+  Test.AssertTrue(
+    GameState.ValidateGameState(
+      Areas.AreaViewFor(Metadata, Entered, Some(Stored)).Unwrap(),
+      Entered
+    ) is Ok(_)
+  );
+  Test.AssertEquals(4, Entered.Npcs.Length());
+  var Remembered := Entered;
+  const ResidentIndex := Npcs.IndexOf(Remembered.Npcs, Area + ':npc:0');
+  Remembered.Npcs[ResidentIndex].HasMetPlayer := true;
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Remembered).Unwrap());
+  const SaveBytes := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  Test.AssertTrue('"format_version":13' in SaveBytes);
+  const Restarted := WorldUnit.OpenWorld(Root, 'villages', 25, 1, 32).Unwrap();
+  const Resumed := Loaded(Restarted);
+  Test.AssertEquals(4, Resumed.Npcs.Length());
+  Test.AssertTrue(Resumed.Npcs[Npcs.IndexOf(Resumed.Npcs, Area + ':npc:0')].HasMetPlayer);
+  Test.AssertFalse(Resumed.Npcs[Npcs.IndexOf(Resumed.Npcs, Area + ':npc:1')].HasMetPlayer);
+  Test.AssertFalse(Resumed.Npcs[Npcs.IndexOf(Resumed.Npcs, Npcs.MaraId(Metadata))].HasMetPlayer);
+  Test.AssertEquals(Bytes, Fs.ReadText(Path).Unwrap());
+  case Savegame.LoadSaveGame(Restarted).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(_, const LoadedView):
+      Test.AssertEquals('Stored Hollow', LoadedView.Interior.Unwrap().DisplayName);
+      Test.AssertEquals('Stored Resident', LoadedView.Interior.Unwrap().Npcs[0].DisplayName);
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('expected loaded definition');
+  end case;
+  var Outdoors := Remembered with Area := Coordinates.AreaKind.OutdoorRegion; AreaId := Metadata.OutdoorAreaId; Player := Coordinates.PlayerPosition.Outdoor(
+    Gate
+  ); ReturnLocation := Coordinates.ReturnLocation.NoReturnLocation; end with;
+  const SecondRegion := Coordinates.ChunkCoordinate(X := 87, Y := -85);
+  const SecondArea := Identities.AreaId(Metadata, SecondRegion);
+  const SecondGate := Sites.Site(Metadata, SecondRegion).Unwrap();
+  const AtSecond := Outdoors with Player := Coordinates.PlayerPosition.Outdoor(SecondGate); end with;
+  const SecondMap := Store.OpenMapForEntry(World, View, AtSecond, SecondArea).Unwrap();
+  Outdoors := Areas.MaterializeArea(AtSecond, SecondMap);
+  Test.AssertEquals(7, Outdoors.Npcs.Length());
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Outdoors).Unwrap());
+  const Both := Loaded(Restarted);
+  Test.AssertEquals(7, Both.Npcs.Length());
+  Test.AssertTrue(Both.Npcs[Npcs.IndexOf(Both.Npcs, Area + ':npc:0')].HasMetPlayer);
+  Test.AssertFalse(Both.Npcs[Npcs.IndexOf(Both.Npcs, SecondArea + ':npc:0')].HasMetPlayer);
+  Test.AssertFalse(Both.Npcs[Npcs.IndexOf(Both.Npcs, Npcs.MaraId(Metadata))].HasMetPlayer);
+  const OutdoorSave := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  for BrokenBytes: string in [
+    Bytes.Replace('"format_version":1', '"format_version":0'),
+    Bytes.Replace('"world_format_version":4', '"world_format_version":3'),
+    Bytes.Replace('"generator_version":11', '"generator_version":10'),
+    Bytes.Replace('"dungeon_region_chunks":1', '"dungeon_region_chunks":4'),
+    Bytes.Replace('"world_seed":25', '"world_seed":26'),
+    Bytes.Replace('"world_id":"villages"', '"world_id":"other"'),
+    Bytes.Replace('"region":{"x":85,"y":-83}', '"region":{"x":85,"y":-82}'),
+    Bytes.Replace('"gate":{"x":10951,"y":-10539}', '"gate":{"x":10952,"y":-10539}'),
+    Bytes.Replace('"area_id":"' + Area + '"', '"area_id":"other:settlement:85:-83"'),
+    Bytes.Replace('"kind":"guard"', '"kind":"healer"'),
+    Bytes.Replace('"kind":"guard"', '"kind":"unknown"'),
+    Bytes.Replace(Area + ':npc:1', Area + ':npc:0'),
+    Bytes.Replace('"width":' + Conv.IntToStr(Stored.Width), '"width":999'),
+    Bytes.Replace('#', 'n'),
+    Bytes.Replace('"name":"Stored Hollow"', '"name":""'),
+    Bytes.Replace('"name":"Stored Resident"', '"name":"' + 'a'.RepeatStr(65) + '"'),
+    Bytes.Replace('"name":"Stored Resident"', '"name":"Stored Resident "'),
+    Bytes.Replace('"name":"Stored Resident"', '"name":"Stored Resident","unknown":1'),
+    Bytes.Replace('"name":"Stored Resident"', '"name":"Stored Resident","name":"duplicate"'),
+    Bytes.Replace('"format_version":1', '"unknown":1,"format_version":1'),
+    ' '.RepeatStr(Encoding.MaximumSettlementTextLength + 1)
+  ] do
+    Test.AssertTrue(BrokenBytes <> Bytes);
+    Test.AssertTrue(Fs.WriteTextAtomic(Path, BrokenBytes).Unwrap());
+    Test.AssertTrue(Store.ReadMap(World, Area) is Error(Errors.AreaFailure.Invalid(_, _)));
+    Test.AssertTrue(
+      Store.OpenMapForEntry(World, View, Outside, Area) is Error(Errors.AreaFailure.Invalid(_, _))
+    );
+    Test.AssertTrue(
+      Savegame.LoadSaveGame(Restarted) is Error(SaveErrors.PersistenceFailure.Area(_))
+    );
+    Test.AssertTrue(Savegame.WriteSaveGame(World, Outdoors) is Error(_));
+    Test.AssertEquals(OutdoorSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    Test.AssertEquals(BrokenBytes, Fs.ReadText(Path).Unwrap());
+  end for;
+
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Bytes).Unwrap());
+  // Complete rosters reject omissions, duplicates, foreign identities, wrong ownership and ordering.
+  for Mutation: integer := 0 to 5 do
+    var Bad := Outdoors;
+    case Mutation of
+      when 0:
+        Bad.Npcs := [];
+        for Index: integer := 1 to Outdoors.Npcs.Length() - 1 do
+          Bad.Npcs.PushInPlace(Outdoors.Npcs[Index]);
+        end for;
+      when 1:
+        Bad.Npcs[1] := Bad.Npcs[0];
+      when 2:
+        Bad.Npcs[0].Id := 'other:settlement:85:-83:npc:0';
+      when 3:
+        Bad.Npcs[0].AreaId := SecondArea;
+      when 4:
+        const Previous := Bad.Npcs[0];
+        Bad.Npcs[0] := Bad.Npcs[1];
+        Bad.Npcs[1] := Previous;
+      when 5:
+        Bad.Npcs[0].Kind := Npcs.NpcKind.Mara;
+      else
+        panic('unknown mutation');
+    end case;
+
+    Test.AssertTrue(
+      Savegame.WriteSaveGame(World, Bad) is Error(SaveErrors.PersistenceFailure.InvalidState(_))
+    );
+    Test.AssertEquals(OutdoorSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  end for;
+  var WrongNpc := Outdoors;
+  WrongNpc.Npcs[ResidentIndex].Kind := Npcs.NpcKind.Healer;
+  Test.AssertTrue(
+    Savegame.WriteSaveGame(World, WrongNpc) is Error(SaveErrors.PersistenceFailure.InvalidState(_))
+  );
+  Test.AssertEquals(OutdoorSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+
+  Test.AssertTrue(Fs.DeleteFile(Path).Unwrap());
+  const AtMissingGate := Outdoors with Player := Coordinates.PlayerPosition.Outdoor(Gate); end with;
+
+  Test.AssertTrue(
+    Store.OpenMapForEntry(World, View, AtMissingGate, Area) is Error(Errors.AreaFailure.Missing(_))
+  );
+  Test.AssertTrue(
+    Savegame.LoadSaveGame(Restarted) is Error(SaveErrors.PersistenceFailure.Area(Errors.AreaFailure.Missing(_)))
+  );
+  Test.AssertEquals(OutdoorSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertFalse(Fs.Exists(Path));
+  Test.AssertTrue(Fs.CreateDir(Path).Unwrap());
+  Test.AssertTrue(
+    Store.OpenMapForEntry(World, View, Outside, Area) is Error(Errors.AreaFailure.Io(_))
+  );
+  Test.AssertTrue(Fs.DeleteDir(Path).Unwrap());
+  Test.AssertTrue(Fs.WriteTextAtomic(Path, Bytes).Unwrap());
+  // Start over retains old saves/definitions and rematerializes an unmet roster in the fresh game.
+  const Fresh := GameState.NewGame(Metadata);
+  Test.AssertEquals(1, Fresh.Npcs.Length());
+  Test.AssertEquals(0, Fresh.VisitedAreas.Length());
+  const FreshOutside := Fresh with Player := Coordinates.PlayerPosition.Outdoor(Gate); end with;
+  const Existing := Store.OpenMapForEntry(World, View, FreshOutside, Area).Unwrap();
+  const FreshVisit := Areas.MaterializeArea(FreshOutside, Existing);
+  for Npc: Npcs.GameNpc in FreshVisit.Npcs do
+    Test.AssertFalse(Npc.HasMetPlayer);
+  end for;
+
+  Test.AssertEquals(OutdoorSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertEquals(Bytes, Fs.ReadText(Path).Unwrap());
+  Test.AssertTrue(
+    GameState.ValidateStateShape(Metadata, Fresh with Npcs := Outdoors.Npcs; end with) is Error(_)
+  );
+  const OldSave := OutdoorSave.Replace('"format_version":13', '"format_version":12');
+  Test.AssertTrue(Fs.WriteTextAtomic(Savegame.SaveGamePath(World), OldSave).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(Restarted).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+  Test.AssertEquals(OldSave, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+end.

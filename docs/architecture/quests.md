@@ -130,9 +130,11 @@ rewinds the whole game. Start over resets quest, NPC and mutable item state
 while retaining immutable level files and the previous save until explicitly
 overwritten.
 
-Current versions are world metadata 4, generator 10, level file 4, savegame 12
-and protocol 18. Obsolete data is rejected and preserved without migration;
-generator-9 worlds require creating a new world.
+Current versions are world metadata 4, generator 11, level file 4, settlement file 1,
+savegame 13 and protocol 19. Obsolete data is rejected and preserved without migration;
+generator-10 worlds require creating a new world. Generated NPCs never own this
+quest or trigger its world preflight; Mara is resolved by stable identity,
+independent of the canonical NPC array position.
 
 ## Ownership and verification
 

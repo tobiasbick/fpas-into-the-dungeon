@@ -1,0 +1,141 @@
+// Immutable generated-village loading and first-entry publication; authored Hearthmoor needs no file.
+unit Dungeon.World.Settlements;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit,
+  Dungeon.Settlements as Home, Dungeon.Settlements.Generation as Generation,
+  Dungeon.Settlements.Identities as Identities, Dungeon.Settlements.Sites as Sites,
+  Dungeon.Terrain as Terrain, Dungeon.World as WorldUnit, Dungeon.World.Areas.Errors as Errors,
+  Dungeon.World.Settlements.Encoding as Encoding, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps;
+
+function SettlementPath(World: WorldUnit.WorldSession; Region: Coordinates.ChunkCoordinate): string;
+begin
+  return PathOps.Join([
+    World.Directory,
+    'settlements',
+    Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y) + '.json'
+  ]);
+end function;
+
+function RegionOf(World: WorldUnit.WorldSession; AreaId: string): result of (Coordinates.ChunkCoordinate, Errors.AreaFailure);
+begin
+  case Identities.ParseAreaId(World.Metadata, AreaId) of
+    when Ok(const Region):
+      return Ok(Region);
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Invalid(AreaId, Reason));
+  end case;
+end function;
+
+// Read-only lookup: a missing visited definition stays Missing; no save or viewport can generate it.
+public function ReadMap(World: WorldUnit.WorldSession; AreaId: string): result of (InteriorUnit.InteriorMap, Errors.AreaFailure);
+begin
+  if AreaId = Home.HomeAreaId(World.Metadata) then
+    return Ok(Home.HomeMap(World.Metadata));
+  end if;
+  const Region := try RegionOf(World, AreaId);
+  const Path := SettlementPath(World, Region);
+  if not Fs.Exists(Path) then
+    return Error(Errors.AreaFailure.Missing(AreaId));
+  end if;
+
+  if not Fs.IsFile(Path) then
+    return Error(
+      Errors.AreaFailure.Io('settlement path exists but is not a file for area ' + AreaId)
+    );
+  end if;
+  var Text := '';
+  case Fs.ReadText(Path) of
+    when Ok(const Value):
+      Text := Value;
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Io('cannot read settlement ' + AreaId + ': ' + Reason));
+  end case;
+
+  case Encoding.DecodeMap(Text, World.Metadata, AreaId) of
+    when Ok(const Map):
+      return Ok(Map);
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Invalid(AreaId, Reason));
+  end case;
+end function;
+
+// Requires the exact generated gate under a validated outdoor player, then reads or creates once.
+// A failed reply may retain a complete immutable file; installed mutable state remains the caller's concern.
+public function OpenMapForEntry(
+  World: WorldUnit.WorldSession; View: GameState.AreaView;
+  State: GameState.GameState; AreaId: string
+): result of (InteriorUnit.InteriorMap, Errors.AreaFailure);
+begin
+  const Region := try RegionOf(World, AreaId);
+  if View.Metadata <> World.Metadata then
+    return Error(Errors.AreaFailure.Invalid(AreaId, 'entry world does not match its view'));
+  end if;
+
+  case GameState.ValidateGameState(View, State) of
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Invalid(AreaId, Reason));
+    when Ok(_):
+      null;
+  end case;
+
+  case State.Player of
+    when Coordinates.PlayerPosition.Outdoor(const Position):
+      if (State.Area <> Coordinates.AreaKind.OutdoorRegion)
+        or
+        (Position <> Sites.Site(World.Metadata, Region).Unwrap())
+      then
+        return Error(
+          Errors.AreaFailure.Invalid(
+            AreaId,
+            'player is not standing on the requested village gate'
+          )
+        );
+      end if;
+    when Coordinates.PlayerPosition.FirstPerson(_), Coordinates.PlayerPosition.Settlement(_):
+      return Error(Errors.AreaFailure.Invalid(AreaId, 'village entry requires the outdoor player'));
+  end case;
+
+  case ReadMap(World, AreaId) of
+    when Ok(const Map):
+      return Ok(Map);
+    when Error(const Failure):
+      case Failure of
+        when Errors.AreaFailure.Missing(_):
+          if GameState.HasVisitedArea(State, AreaId) then
+            return Error(Failure);
+          end if;
+        when Errors.AreaFailure.Invalid(_, _), Errors.AreaFailure.Io(_), Errors.AreaFailure.Generation(_, _):
+          return Error(Failure);
+      end case;
+  end case;
+  var Map: InteriorUnit.InteriorMap := Home.HomeMap(World.Metadata);
+  case Generation.GenerateMap(World.Metadata, Region) of
+    when Ok(const Generated):
+      Map := Generated;
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Generation(AreaId, Reason));
+  end case;
+  const Text := Encoding.EncodeMap(World.Metadata, Map);
+  case Encoding.DecodeMap(Text, World.Metadata, AreaId) of
+    when Ok(_):
+      null;
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Generation(AreaId, Reason));
+  end case;
+
+  case Fs.CreateDirAll(PathOps.Join([World.Directory, 'settlements'])) of
+    when Ok(_):
+      null;
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Io('cannot create settlement directory: ' + Reason));
+  end case;
+
+  case Fs.WriteTextAtomic(SettlementPath(World, Region), Text) of
+    when Ok(_):
+      return Ok(Map);
+    when Error(const Reason):
+      return Error(Errors.AreaFailure.Io('cannot store settlement ' + AreaId + ': ' + Reason));
+  end case;
+end function;
+end unit;

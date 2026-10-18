@@ -1,0 +1,177 @@
+// Pins village identities, seeded definitions and NPC-blocked reachability without world storage.
+program GeneratedSettlementTest;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit,
+  Dungeon.Npcs.Model as Npcs, Dungeon.Settlements.Generation as Generation,
+  Dungeon.Settlements.Identities as Identities, Dungeon.Settlements.Sites as Sites,
+  Dungeon.Settlements.Validation as Validation, Dungeon.Terrain as Terrain,
+  Dungeon.Terrain.Entrances as Entrances, Dungeon.Terrain.Generation as Natural,
+  Dungeon.Terrain.Placement as Placement, Std.Conv as Conv, Std.Math as Math, Std.Test as Test;
+
+type Vector = record
+  Seed: integer;
+  X: integer;
+  Y: integer;
+  GateX: integer;
+  GateY: integer;
+  Name: string;
+  Width: integer;
+  Height: integer;
+  Healer: string;
+  HealerY: integer;
+  LayoutHash: integer;
+end record;
+
+function LayoutHash(Map: InteriorUnit.InteriorMap): integer;
+begin
+  var Hash := 0;
+  for Cell: InteriorUnit.InteriorCellKind in Map.Cells do
+    Hash := (
+      Hash * 131 +
+      (
+        if Cell = InteriorUnit.InteriorCellKind.Wall then 1
+          else if Cell = InteriorUnit.InteriorCellKind.ExitField then 2 else 0 end if
+          end if
+      )
+    ) mod 2147483647;
+  end for;
+
+  return Hash;
+end function;
+
+begin
+  for Expected: Vector in [
+    Vector(
+      Seed := -1, X := -22, Y := 64, GateX := -2785, GateY := 8287,
+      Name := 'Brackenford', Width := 27, Height := 19, Healer := 'Iona', HealerY := 10,
+      LayoutHash := 2015332711
+    ),
+    Vector(
+      Seed := 1, X := 3, Y := 0, GateX := 435, GateY := 105,
+      Name := 'Willowvale', Width := 27, Height := 19, Healer := 'Orin', HealerY := 8,
+      LayoutHash := 1743778032
+    ),
+    Vector(
+      Seed := 12345, X := 119, Y := -44, GateX := 15305, GateY := -5522,
+      Name := 'Brackenford', Width := 23, Height := 15, Healer := 'Iona', HealerY := 7,
+      LayoutHash := 1160182146
+    ),
+    Vector(
+      Seed := -1, X := -18, Y := 68, GateX := -2198, GateY := 8796,
+      Name := 'Ravenstead', Width := 31, Height := 21, Healer := 'Iona', HealerY := 10,
+      LayoutHash := 544399851
+    )
+  ] do
+    const Metadata := Placement.NewWorldMetadata('village', Expected.Seed, 1).Unwrap();
+    const Region := Coordinates.ChunkCoordinate(X := Expected.X, Y := Expected.Y);
+    const Gate := Sites.Site(Metadata, Region).Unwrap();
+    Test.AssertTrue(Gate = Coordinates.WorldPosition(X := Expected.GateX, Y := Expected.GateY));
+    Test.AssertTrue(Sites.RegionOf(Gate) = Region);
+    Test.AssertTrue(Sites.RegionAt(Metadata, Gate).Unwrap() = Region);
+    Test.AssertTrue(Terrain.CellIsWalkable(Natural.NaturalCell(Metadata.Seed, Gate.X, Gate.Y)));
+    Test.AssertTrue(
+      Math.Abs(Gate.X - Metadata.Spawn.X) + Math.Abs(Gate.Y - Metadata.Spawn.Y) >= 32
+    );
+    for Offset: Coordinates.WorldPosition in [
+      Coordinates.WorldPosition(X := 0, Y := 0),
+      Coordinates.WorldPosition(X := 1, Y := 0), Coordinates.WorldPosition(X := -1, Y := 0),
+      Coordinates.WorldPosition(X := 0, Y := 1), Coordinates.WorldPosition(X := 0, Y := -1)
+    ] do
+      Test.AssertTrue(
+        Entrances.EntranceRegionAt(
+          Metadata,
+          Coordinates.WorldPosition(X := Gate.X + Offset.X, Y := Gate.Y + Offset.Y)
+        ) is None
+      );
+    end for;
+    const Map := Generation.GenerateMap(Metadata, Region).Unwrap();
+    const Area := 'village:settlement:' + Conv.IntToStr(Expected.X) + ':' +
+      Conv.IntToStr(Expected.Y);
+    Test.AssertEquals(Area, Map.AreaId);
+    Test.AssertEquals(Expected.Name, Map.DisplayName);
+    Test.AssertEquals(Expected.Width, Map.Width);
+    Test.AssertEquals(Expected.Height, Map.Height);
+    Test.AssertEquals(Expected.LayoutHash, LayoutHash(Map));
+    Test.AssertEquals(3, Map.Npcs.Length());
+    Test.AssertEquals(Expected.Healer, Map.Npcs[2].DisplayName);
+    Test.AssertEquals(Expected.HealerY, Map.Npcs[2].Position.Y);
+    Test.AssertTrue(Map.Npcs[0].Kind = Npcs.NpcKind.Resident);
+    Test.AssertTrue(Map.Npcs[1].Kind = Npcs.NpcKind.Guard);
+    Test.AssertTrue(Map.Npcs[2].Kind = Npcs.NpcKind.Healer);
+    Test.AssertEquals(Area + ':npc:2', Map.Npcs[2].Id);
+    Test.AssertTrue(Validation.ValidateMap(Metadata, Map with Npcs := []; end with) is Error(_));
+    var Wrong := Map;
+    Wrong.Npcs[1].Kind := Npcs.NpcKind.Healer;
+    Test.AssertTrue(Validation.ValidateMap(Metadata, Wrong) is Error(_));
+    Wrong := Map;
+    Wrong.Npcs[0].Position := Map.Start;
+    Test.AssertTrue(Validation.ValidateMap(Metadata, Wrong) is Error(_));
+    const OtherWorld := Metadata with Id := 'another'; end with;
+    const Other := Generation.GenerateMap(OtherWorld, Region).Unwrap();
+    Test.AssertEquals(Expected.Name, Other.DisplayName);
+    Test.AssertEquals(Expected.Width, Other.Width);
+    Test.AssertEquals(Expected.LayoutHash, LayoutHash(Other));
+    Test.AssertEquals(Expected.HealerY, Other.Npcs[2].Position.Y);
+    Test.AssertEquals(
+      'another:settlement:' + Conv.IntToStr(Expected.X) + ':' + Conv.IntToStr(Expected.Y),
+      Other.AreaId
+    );
+    Test.AssertTrue(Identities.ParseAreaId(OtherWorld, Area) is Error(_));
+  end for;
+  const Metadata := Placement.NewWorldMetadata('village', 12345, 1).Unwrap();
+  for Invalid: string in [
+    'village:settlement:home', 'village:settlement:+119:-44',
+    'village:settlement:0119:-44', 'village:settlement:119:-044', 'village:settlement:119:-44:0',
+    'village:settlement:9223372036854775807:0', 'village:settlement:-9223372036854775808:0'
+  ] do
+    Test.AssertTrue(Identities.ParseAreaId(Metadata, Invalid) is Error(_));
+  end for;
+
+  Test.AssertTrue(
+    Sites.RegionOf(Coordinates.WorldPosition(X := -1, Y := -129)) =
+    Coordinates.ChunkCoordinate(X := -1, Y := -2)
+  );
+  Test.AssertTrue(Sites.RegionAt(Metadata, Metadata.Spawn) is None);
+  Test.AssertTrue(Sites.RegionAt(Metadata, Metadata.SettlementGate) is None);
+  var Blocked := Generation.GenerateMap(
+    Metadata,
+    Coordinates.ChunkCoordinate(X := 119, Y := -44)
+  ).Unwrap();
+  Blocked.Cells := array.Fill(InteriorUnit.InteriorCellKind.Wall, 23 * 15);
+  for X: integer := 1 to 21 do
+    Blocked.Cells[7 * 23 + X] := InteriorUnit.InteriorCellKind.Floor;
+  end for;
+
+  for Y: integer := 1 to 13 do
+    Blocked.Cells[Y * 23 + 11] := InteriorUnit.InteriorCellKind.Floor;
+  end for;
+
+  Blocked.Cells[13 * 23 + 11] := InteriorUnit.InteriorCellKind.ExitField;
+  for Slot: integer := 0 to 2 do
+    Blocked.Npcs[Slot].Position := Coordinates.InteriorPosition(X := 6 + Slot * 5, Y := 7);
+  end for;
+
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(Blocked) is Ok(_));
+  case Validation.ValidateMap(Metadata, Blocked) of
+    when Ok(_):
+      panic('NPC-blocked village must be rejected');
+    when Error(const Reason):
+      Test.AssertTrue('with NPCs blocking' in Reason);
+  end case;
+  // Exit has interaction priority: reaching only that adjacent field cannot make an NPC talkable.
+  var ExitOnly := Generation.GenerateMap(
+    Metadata,
+    Coordinates.ChunkCoordinate(X := 119, Y := -44)
+  ).Unwrap();
+  ExitOnly.Npcs[0].Position := Coordinates.InteriorPosition(X := 10, Y := 13);
+  ExitOnly.Cells[12 * 23 + 10] := InteriorUnit.InteriorCellKind.Wall;
+  ExitOnly.Cells[13 * 23 + 9] := InteriorUnit.InteriorCellKind.Wall;
+  Test.AssertTrue(InteriorUnit.ValidateInteriorMap(ExitOnly) is Ok(_));
+  case Validation.ValidateMap(Metadata, ExitOnly) of
+    when Ok(_):
+      panic('exit-only NPC interaction must be rejected');
+    when Error(const Reason):
+      Test.AssertTrue('reachable talk field' in Reason);
+  end case;
+end.

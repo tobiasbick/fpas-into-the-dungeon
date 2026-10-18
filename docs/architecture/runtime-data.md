@@ -13,6 +13,7 @@ default data root is:
 │       ├── world.json
 │       ├── chunks/
 │       ├── dungeons/<rx>_<ry>/<level>.json
+│       ├── settlements/<sx>_<sy>.json
 │       └── saves/
 │           └── default.json
 ├── logs/
@@ -75,9 +76,9 @@ stored default. Neither this option nor `world_id` creates a world. A missing or
 incompatible selection leaves the connected world catalog available. Use `--data-dir PATH` to select a different data root before
 configuration is loaded.
 
-Runtime configuration, world, chunk, level and savegame formats support only
+Runtime configuration, world, chunk, level, settlement and savegame formats support only
 their current schema and generator version. Current versions are world format
-4, generator 9, level format 3 and save format 11; protocol 17 connects the client
+4, generator 11, level format 4, settlement format 1 and save format 13; protocol 19 connects the client
 and server. Obsolete runtime configuration reports an error asking the user to
 delete or recreate that configuration. Invalid or incompatible worlds and saves
 remain visible and are preserved; create a new world for incompatible world
@@ -101,9 +102,12 @@ option, the server stays headless.
   visibility changes are written atomically; command-line host and port
   overrides are not written back.
 - `worlds` contains versioned authoritative world metadata, generated chunk
-  files, immutable dungeon level files, and one atomic `saves/default.json`
+  files, immutable dungeon level and generated settlement files, and one atomic `saves/default.json`
   savegame per world. Level files are never removed with an invalid save. That snapshot
   includes discovery, item ownership, health, and opponents. It is owned by the server.
+  Generated village definitions retain names and NPC placements; the save owns
+  complete visited rosters and independent meeting flags. See
+  [generated settlements](generated-settlements.md).
 - `logs` contains diagnostic output and is not part of a saved world.
 - `cache` contains disposable data that the application can rebuild.
 - Tests use a temporary data root supplied through the same interface and do

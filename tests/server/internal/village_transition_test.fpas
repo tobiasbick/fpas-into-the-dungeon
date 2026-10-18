@@ -1,0 +1,158 @@
+// Proves village entry installs atomically and retained definitions drive maps without storage access.
+program VillageTransitionTest;
+
+uses
+  Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Movement as Movement,
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages,
+  Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as Config,
+  Dungeon.Server.Diagnostics as Diagnostics, Dungeon.Server.Handling as Handling,
+  Dungeon.Server.Session as SessionUnit, Dungeon.Settlements.Identities as Identities,
+  Dungeon.Settlements.Sites as Sites, Dungeon.Test.SessionAssertions as Sessions,
+  Dungeon.World as WorldUnit, Dungeon.World.Settlements as Store, Dungeon.World.Savegame as Savegame,
+  Std.Fs as Fs, Std.Net as Net, Std.Path as PathOps, Std.Tasks as Tasks, Std.Test as Test;
+
+function Receive(Client: Net.Connection; Token: Tasks.CancellationToken): Protocol.ServerMessage;
+begin
+  return Messages.DecodeServer(
+    Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap().Line
+  ).Unwrap();
+end function;
+
+begin
+  const Root := Test.ScratchDir();
+  const World := WorldUnit.OpenWorld(Root, 'gates', 25, 1, 32).Unwrap();
+  const Region := Coordinates.ChunkCoordinate(X := 85, Y := -83);
+  const Gate := Sites.Site(World.Metadata, Region).Unwrap();
+  const Area := Identities.AreaId(World.Metadata, Region);
+  const Path := PathOps.Join([World.Directory, 'settlements', '85_-83.json']);
+  const Outside := GameState.NewGame(World.Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+    Gate
+  ); end with;
+  const View := GameState.AreaView(Metadata := World.Metadata, Interior := None);
+  Test.AssertEquals(Area, Movement.AreaTransitionTarget(View, Outside).Unwrap());
+  Test.AssertTrue(Movement.ActivateAreaTransition(View, Outside, None) is Error(_));
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Outside).Unwrap());
+  const Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  const Settings := Config.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root,
+    WorldId := World.Metadata.Id, WorldSeed := 25, DungeonRegionChunks := 1, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Session := SessionUnit.ServerSession(
+    World := World, WorldSelected := true, State := Some(Outside),
+    Interior := None, Dirty := false, LastSavedAt := 17, Finished := false,
+    Viewport := SessionUnit.ViewportSize(Width := 31, Height := 21)
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  // First publication may survive projection failure, but no mutable/cache/session fact is installed.
+  const Broken := Session with Viewport := SessionUnit.ViewportSize(Width := 0, Height := 1); end with;
+  const Rejected := Handling.HandleSessionMessage(
+    Broken,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  Test.AssertTrue(
+    Receive(Client, Token) is Protocol.ServerMessage.Rejected('interaction_rejected', _)
+  );
+  Sessions.AssertUnchanged(Broken, Rejected);
+  Test.AssertTrue(Fs.IsFile(Path));
+  const Bytes := Fs.ReadText(Path).Unwrap();
+  const Entered := Handling.HandleSessionMessage(
+    Session,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  Test.AssertTrue(
+    Receive(Client, Token) is Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_))
+  );
+  Test.AssertEquals(4, Entered.State.Unwrap().Npcs.Length());
+  Test.AssertEquals(1, Entered.State.Unwrap().Exploration.InteriorAreas.Length());
+  Test.AssertTrue(Entered.Dirty);
+  Test.AssertEquals(0, Entered.World.Cache.Length());
+  Test.AssertEquals(17, Entered.LastSavedAt);
+  const Map := Entered.Interior.Unwrap();
+  Test.AssertEquals(Map.DisplayName, Diagnostics.SessionStatus(Entered).Area);
+  // Corrupt the backing file after entry: viewport/map still use the retained immutable facts.
+  discard Fs.WriteTextAtomic(Path, 'broken on disk').Unwrap();
+  const Resized := Handling.HandleSessionMessage(
+    Entered,
+    Protocol.ClientMessage.Viewport(15, 9),
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  Test.AssertTrue(
+    Receive(Client, Token) is Protocol.ServerMessage.State(Protocol.VisibleState.MapState(_))
+  );
+  Sessions.AssertUnchanged(Entered with Viewport := Resized.Viewport; end with, Resized);
+  const Mapped := Handling.HandleSessionMessage(
+    Resized,
+    Protocol.ClientMessage.ExplorationMap(-1, -1, 33, 23),
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  case Receive(Client, Token) of
+    when Protocol.ServerMessage.ExplorationMap(const Projection):
+      Test.AssertEquals(Map.DisplayName, Projection.LabelText);
+      Test.AssertEquals('?', Projection.Rows[0][0]);
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected retained village exploration map');
+  end case;
+
+  Sessions.AssertUnchanged(Resized, Mapped);
+  discard Fs.WriteTextAtomic(Path, Bytes).Unwrap();
+  const AtExit := Mapped with State := Some(
+    Mapped.State.Unwrap() with Player := Coordinates.PlayerPosition.Settlement(Map.Arrival); end with
+  ); end with;
+  const Left := Handling.HandleSessionMessage(
+    AtExit,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  discard Receive(Client, Token);
+  Test.AssertTrue(GameState.OutdoorPlayerPosition(Left.State.Unwrap()).Unwrap() = Gate);
+  // A missing visited definition is rejected without regeneration or changing installed facts.
+  discard Fs.DeleteFile(Path).Unwrap();
+  const Missing := Handling.HandleSessionMessage(
+    Left,
+    Protocol.ClientMessage.Interact,
+    Server,
+    Settings,
+    Token
+  ).Unwrap();
+  Test.AssertTrue(Receive(Client, Token) is Protocol.ServerMessage.Rejected('world_data_error', _));
+  Sessions.AssertUnchanged(Left, Missing);
+  Test.AssertFalse(Fs.Exists(Path));
+  discard Fs.WriteTextAtomic(Path, Bytes).Unwrap();
+  // A closed socket cannot install a newly prepared visit/roster.
+  discard Net.Close(Server).Unwrap();
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(
+      Session,
+      Protocol.ClientMessage.Interact,
+      Server,
+      Settings,
+      Token
+    ) is Error(_)
+  );
+  Test.AssertEquals(1, Session.State.Unwrap().Npcs.Length());
+  Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  Test.AssertEquals(Bytes, Fs.ReadText(Path).Unwrap());
+  discard Net.Close(Client).Unwrap();
+end.

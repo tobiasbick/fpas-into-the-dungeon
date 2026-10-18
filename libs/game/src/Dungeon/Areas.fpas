@@ -1,72 +1,52 @@
 // Pure area views, first-visit materialization, and full placement validation.
 unit Dungeon.Areas;
 
-uses Dungeon.Settlements as Settlements, Dungeon.Areas.Validation as Validation, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain;
+uses Dungeon.Npcs as NpcRules, Dungeon.Settlements.Validation as SettlementValidation, Dungeon.Settlements as Settlements, Dungeon.Areas.Validation as Validation, Dungeon.Coordinates as Coordinates, Dungeon.Exploration.Model as Model, Dungeon.GameState as GameState, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain;
 
-// Requires no map outdoors, resolves authored settlement geometry from code, and requires a matching dungeon map.
-// Performs no loading or dungeon generation; supplied settlement geometry must equal the authored map.
+// Constructs a checked view from retained geometry. Only authored home geometry may be resolved from code.
+// Generated settlement/dungeon definitions must already be supplied by their world-layer owner.
 public function AreaViewFor(Metadata: Terrain.WorldMetadata; State: GameState.GameState; Map: option of InteriorUnit.InteriorMap): result of (GameState.AreaView, string);
 begin
-  if State.Area = Coordinates.AreaKind.Settlement then
-    if State.AreaId <> Settlements.HomeAreaId(Metadata) then
-      return Error('unknown settlement identity');
+  if State.Area = Coordinates.AreaKind.OutdoorRegion then
+    if State.AreaId <> Metadata.OutdoorAreaId then
+      return Error('outdoor area identity does not match the selected world');
     end if;
 
-    case Map of
-      when Some(const Supplied):
-        const Valid := try Settlements.ValidateHomeMap(Metadata, Supplied);
-      when None:
-        null;
-    end case;
+    if Map is Some(_) then
+      return Error('outdoor area view must not contain an interior map');
+    end if;
 
-    return Ok(
-      GameState.AreaView(Metadata := Metadata, Interior := Some(Settlements.HomeMap(Metadata)))
-    );
+    return Ok(GameState.AreaView(Metadata := Metadata, Interior := None));
   end if;
 
-  if State.Area = Coordinates.AreaKind.OutdoorRegion then
-    begin
-      if State.AreaId <> Metadata.OutdoorAreaId then
-        begin
-          return Error('outdoor area identity does not match the selected world');
-        end;
+  case Map of
+    when Some(const Supplied):
+      if Supplied.AreaId <> State.AreaId then
+        return Error('interior map identity does not match the current area');
       end if;
 
-      case Map of
-        when Some(const Value):
-          begin
-            return Error('outdoor area view must not contain an interior map');
-          end;
-        when None:
-          begin
-            return Ok(GameState.AreaView(Metadata := Metadata, Interior := None));
-          end;
-      end case;
-    end;
-  end if;
+      if State.Area = Coordinates.AreaKind.Settlement then
+        const Valid := try SettlementValidation.ValidateMap(Metadata, Supplied);
+      else
+        if State.Area <> Coordinates.AreaKind.Dungeon then
+          return Error('area view is unavailable for the current area kind');
+        end if;
+        const Valid := try InteriorUnit.ValidateInteriorMap(Supplied);
+      end if;
 
-  if State.Area = Coordinates.AreaKind.Dungeon then
-    begin
-      case Map of
-        when Some(const Value):
-          begin
-            if (State.AreaId = '') or (Value.AreaId <> State.AreaId) then
-              begin
-                return Error('interior map identity does not match the current area');
-              end;
-            end if;
+      return Ok(GameState.AreaView(Metadata := Metadata, Interior := Some(Supplied)));
+    when None:
+      if (State.Area = Coordinates.AreaKind.Settlement)
+        and
+        (State.AreaId = Settlements.HomeAreaId(Metadata))
+      then
+        return Ok(
+          GameState.AreaView(Metadata := Metadata, Interior := Some(Settlements.HomeMap(Metadata)))
+        );
+      end if;
 
-            return Ok(GameState.AreaView(Metadata := Metadata, Interior := Some(Value)));
-          end;
-        when None:
-          begin
-            return Error('dungeon area view requires the current interior map');
-          end;
-      end case;
-    end;
-  end if;
-
-  return Error('area view is unavailable for the current area kind');
+      return Error('finite area view requires its retained immutable definition');
+  end case;
 end function;
 
 // Adds validated placements once per game, preserving all mutable state on revisits.
@@ -120,12 +100,35 @@ begin
       );
     end;
   end for;
+  var NpcValues := State.Npcs;
+  for Placement: NpcRules.NpcPlacement in Map.Npcs do
+    if NpcRules.IndexOf(NpcValues, Placement.Id) < 0 then
+      NpcValues.PushInPlace(
+        NpcRules.GameNpc(
+          Id := Placement.Id, Kind := Placement.Kind,
+          AreaId := Map.AreaId, HasMetPlayer := false
+        )
+      );
+    end if;
+  end for;
 
-  return State with VisitedAreas := Visited; Items := Items; Hostiles := Hostiles; end with;
+  for Index: integer := 1 to NpcValues.Length() - 1 do
+    for Position: integer := Index downto 1 do
+      if Model.StringComesBefore(NpcValues[Position].Id, NpcValues[Position - 1].Id) then
+        const Previous := NpcValues[Position - 1];
+        NpcValues[Position - 1] := NpcValues[Position];
+        NpcValues[Position] := Previous;
+      else
+        break;
+      end if;
+    end for;
+  end for;
+
+  return State with VisitedAreas := Visited; Items := Items; Hostiles := Hostiles; Npcs := NpcValues; end with;
 end function;
 
 // Validates one supplied map per visited area and all entity origins and destinations.
-// Does not load or generate geometry; the current view reuses Dungeon.Settlements as Settlements, its supplied map.
+// Does not load or generate geometry; the current view reuses its supplied map.
 public function ValidateSavedGame(Metadata: Terrain.WorldMetadata; State: GameState.GameState; Maps: array of InteriorUnit.InteriorMap): result of (GameState.GameState, string);
 begin
   return Validation.ValidateSavedAreas(Metadata, State, Maps);
