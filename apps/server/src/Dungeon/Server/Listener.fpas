@@ -3,6 +3,12 @@ unit Dungeon.Server.Listener;
 
 uses Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Server.Replies as Replies, Dungeon.Protocol as Protocol, Std.Conv as Conv, Std.Net as Net, Std.Server as Server, Std.Tasks as Tasks;
 
+// Renders typed library failures at this unit's application-owned text boundary.
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
 // Borrows a connection for one protocol session; Run owns closure on every returned outcome.
 public type ConnectionHandler = function(ConnectionValue: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
 
@@ -23,9 +29,9 @@ begin
           return Ok(true);
         end if;
 
-        return Error('Listener failed: ' + Reason);
+        return Error('Listener failed: ' + Reason.Message());
       when Ok(const Client):
-        case try Tasks.TryReceive(Inbox.Admission) of
+        case try Tasks.TryReceive(Inbox.Admission).MapError(FailureMessage) of
           when None:
             Logging.LogServer(Config.Logs, 'rejected', 'Server admission is busy.');
             discard Replies.SendMessage(
@@ -33,10 +39,10 @@ begin
               Protocol.ServerMessage.Rejected('server_busy', 'Server is busy. Try again shortly.'),
               Token
             );
-            const Closed := try Net.Close(Client);
+            const Closed := try Net.Close(Client).MapError(FailureMessage);
           when Some(_):
             // One admission permit guarantees both empty slots. Retain ownership before delivery.
-            const Retained := try Tasks.Send(Inbox.Lease, Client);
+            const Retained := try Tasks.Send(Inbox.Lease, Client).MapError(FailureMessage);
             case Tasks.SendWithCancellation(Inbox.Pending, Client, Token) of
               when Ok(_):
                 null;
@@ -45,7 +51,7 @@ begin
                   return Ok(true);
                 end if;
 
-                return Error('Session delivery failed: ' + Reason);
+                return Error('Session delivery failed: ' + Reason.Message());
             end case;
         end case;
     end case;
@@ -63,7 +69,7 @@ begin
           return Ok(true);
         end if;
 
-        return Error('Session receive failed: ' + Reason);
+        return Error('Session receive failed: ' + Reason.Message());
       when Ok(const Client):
         Logging.LogServer(Config.Logs, 'connected', 'Player connected');
         const Outcome := HandleConnection(Client, Config, Token);
@@ -78,12 +84,12 @@ begin
 
         case Closed of
           when Error(const Reason):
-            return Error('Session close failed: ' + Reason);
+            return Error('Session close failed: ' + Reason.Message());
           when Ok(_):
-            const Released := try Tasks.TryReceive(Inbox.Lease);
+            const Released := try Tasks.TryReceive(Inbox.Lease).MapError(FailureMessage);
         end case;
         // Publish all old-session completion facts before admitting the next connection.
-        const Admitted := try Tasks.Send(Inbox.Admission, true);
+        const Admitted := try Tasks.Send(Inbox.Admission, true).MapError(FailureMessage);
     end case;
   end while;
 
@@ -92,9 +98,9 @@ end function;
 
 function CloseLease(Inbox: ConnectionInbox): result of (boolean, string);
 begin
-  case try Tasks.TryReceive(Inbox.Lease) of
+  case try Tasks.TryReceive(Inbox.Lease).MapError(FailureMessage) of
     when Some(const Client):
-      return Net.Close(Client);
+      return Net.Close(Client).MapError(FailureMessage);
     when None:
       return Ok(true);
   end case;
@@ -114,13 +120,13 @@ begin
   case Server.CreateLifetime(2000, false) of
     when Error(const Reason):
       discard Net.CloseListener(ListenerValue);
-      return Error(Reason);
+      return Error(Reason.Message());
     when Ok(const Life):
       case Server.OwnListener(Life, ListenerValue) of
         when Error(const Reason):
           discard Net.CloseListener(ListenerValue);
           AbortStartup(Life);
-          return Error(Reason);
+          return Error(Reason.Message());
         when Ok(_):
           null;
       end case;
@@ -129,7 +135,7 @@ begin
         case Server.ObserveSignals(Life) of
           when Error(const Reason):
             AbortStartup(Life);
-            return Error(Reason);
+            return Error(Reason.Message());
           when Ok(_):
             null;
         end case;
@@ -152,7 +158,7 @@ public function Run(
   HandleConnection: ConnectionHandler
 ): result of (boolean, string);
 begin
-  const Address := try Net.ListenerLocalAddress(ListenerValue);
+  const Address := try Net.ListenerLocalAddress(ListenerValue).MapError(FailureMessage);
   const Life := try BeginLifetime(ListenerValue, ProcessSignals);
   const Workers := Server.GetWorkGroup(Life);
   var Admission: channel of boolean := Tasks.CreateChannel(1);
@@ -211,8 +217,8 @@ begin
     when Ok(const Completed):
       Failures := Completed;
     when Error(const Reason):
-      ShutdownFailure := Reason;
-      Logging.LogServer(Config.Logs, 'error', Reason);
+      ShutdownFailure := Reason.Message();
+      Logging.LogServer(Config.Logs, 'error', ShutdownFailure);
       // Timeout retains the cancelled group. Finish ownership before returning its error.
       Failures := Tasks.CloseTaskGroup(Workers);
   end case;
@@ -266,6 +272,6 @@ begin
     return Error(FailureReason);
   end if;
 
-  return Finished;
+  return Finished.MapError(FailureMessage);
 end function;
 end unit;

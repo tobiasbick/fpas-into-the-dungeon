@@ -3,6 +3,12 @@ unit Dungeon.World;
 
 uses Dungeon.World.Encoding as Encoding, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as ChunksUnit, Dungeon.Terrain.Placement as PlacementRules, Std.Conv as Conv, Std.Fs as Fs, Std.Path as PathOps;
 
+// Renders typed library failures at this unit's application-owned text boundary.
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
 // Default deterministic seed used only when creating a selected world for the first time.
 public const DefaultWorldSeed: integer := 12345;
 // Default maximum number of complete chunks retained by one world session.
@@ -102,9 +108,9 @@ begin
       return Error('world chunk cache limit must be positive');
     end;
   end if;
-  const RootReady: boolean := try Fs.CreateDirAll(WorldsRoot);
+  const RootReady: boolean := try Fs.CreateDirAll(WorldsRoot).MapError(FailureMessage);
   const Directory: string := PathOps.Join([WorldsRoot, ValidId]);
-  const DirectoryReady: boolean := try Fs.CreateDirAll(Directory);
+  const DirectoryReady: boolean := try Fs.CreateDirAll(Directory).MapError(FailureMessage);
   var Empty: WorldSession := WorldSession(
     Directory := Directory,
     Metadata := try PlacementRules.NewWorldMetadata(ValidId, Seed, DungeonRegionChunks),
@@ -112,7 +118,9 @@ begin
     Clock := 0,
     CacheLimit := CacheLimit
   );
-  const ChunksReady: boolean := try Fs.CreateDirAll(PathOps.Join([Directory, 'chunks']));
+  const ChunksReady: boolean := try Fs.CreateDirAll(
+    PathOps.Join([Directory, 'chunks'])
+  ).MapError(FailureMessage);
   const MetadataPath: string := WorldMetadataPath(Empty);
   var Metadata: Terrain.WorldMetadata := Empty.Metadata;
   if Fs.Exists(MetadataPath) then
@@ -123,14 +131,17 @@ begin
         end;
       end if;
 
-      Metadata := try Encoding.DecodeMetadata(try Fs.ReadText(MetadataPath), ValidId);
+      Metadata := try Encoding.DecodeMetadata(
+        try Fs.ReadText(MetadataPath).MapError(FailureMessage),
+        ValidId
+      );
     end;
   else
     begin
       const Written: boolean := try Fs.WriteTextAtomic(
         MetadataPath,
         Encoding.EncodeMetadata(Metadata)
-      );
+      ).MapError(FailureMessage);
     end;
   end if;
 
@@ -210,7 +221,9 @@ end function;
 
 function ReadOrCreateChunk(World: WorldSession; Coordinate: Coordinates.ChunkCoordinate): result of (Terrain.WorldChunk, string);
 begin
-  const ColumnReady: boolean := try Fs.CreateDirAll(ChunkColumnDirectory(World, Coordinate));
+  const ColumnReady: boolean := try Fs.CreateDirAll(
+    ChunkColumnDirectory(World, Coordinate)
+  ).MapError(FailureMessage);
   const Path: string := WorldChunkPath(World, Coordinate);
   if Fs.Exists(Path) then
     begin
@@ -220,14 +233,18 @@ begin
         end;
       end if;
 
-      return Encoding.DecodeChunk(try Fs.ReadText(Path), World.Metadata, Coordinate);
+      return Encoding.DecodeChunk(
+        try Fs.ReadText(Path).MapError(FailureMessage),
+        World.Metadata,
+        Coordinate
+      );
     end;
   end if;
   const Generated: Terrain.WorldChunk := ChunksUnit.GenerateChunk(World.Metadata, Coordinate);
   const Written: boolean := try Fs.WriteTextAtomic(
     Path,
     Encoding.EncodeChunk(World.Metadata.Id, Generated)
-  );
+  ).MapError(FailureMessage);
   return Ok(Generated);
 end function;
 

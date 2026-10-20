@@ -47,10 +47,10 @@ at a time**.
 You need a true-color terminal and a release build of
 [Functional Pascal](https://github.com/tobiasbick/functional-pascal), with `fpas`
 available on your command line. Use the compiler and source standard library
-from the same FPAS checkout or installation. **FPAS 1 syntax is stable**;
-further syntax changes are planned for **FPAS2**. The game remains under active
-development. Older FPAS builds from before the completed syntax migration may
-not compile this checkout.
+from the same FPAS checkout or installation. This checkout requires the native
+typed standard-library errors, the `Error` generic constraint, `Result.MapError`
+and `Std.Path.IsAbsolute`. Older builds without these APIs cannot compile it.
+The game remains under active development.
 
 Run the following commands from the repository root, in **two terminals**.
 

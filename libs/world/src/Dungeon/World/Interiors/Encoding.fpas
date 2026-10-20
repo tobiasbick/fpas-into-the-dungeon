@@ -3,6 +3,12 @@ unit Dungeon.World.Interiors.Encoding;
 
 uses Dungeon.Interior.Generation.Levels as Levels, Dungeon.Areas.Identities as Identities, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Interior.Generation.Validation as Validation, Dungeon.Items as ItemRules, Dungeon.Terrain as Terrain, Dungeon.World.Names as NamesUnit, Std.Conv as Conv, Std.Json as Json, Std.Json.Fields as JsonFields;
 
+// Renders typed library failures at this unit's application-owned text boundary.
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
 // Current-only schema version of level files; other versions are rejected, never migrated.
 public const LevelFormatVersion: integer := 4;
 // Longest accepted level text, checked before parsing.
@@ -105,7 +111,7 @@ end function;
 // Requires exactly the named fields; unknown and missing fields are both errors.
 function ExactFields(Fields: dict of string to Json.JsonValue; Names: array of string; Source: string): result of (boolean, string);
 begin
-  const Known: boolean := try JsonFields.RequireOnlyFields(Fields, Names);
+  const Known: boolean := try JsonFields.RequireOnlyFields(Fields, Names).MapError(FailureMessage);
   if Fields.Length() <> Names.Length() then
     begin
       return Error(Source + ' has an unexpected field set');
@@ -119,8 +125,8 @@ function DecodePosition(Fields: dict of string to Json.JsonValue): result of (Co
 begin
   return Ok(
     Coordinates.InteriorPosition(
-      X := try JsonFields.IntegerField(Fields, 'x'),
-      Y := try JsonFields.IntegerField(Fields, 'y')
+      X := try JsonFields.IntegerField(Fields, 'x').MapError(FailureMessage),
+      Y := try JsonFields.IntegerField(Fields, 'y').MapError(FailureMessage)
     )
   );
 end function;
@@ -171,8 +177,10 @@ begin
       const Fields: dict of string to Json.JsonValue := try PlacementFields(Value);
       Items.PushInPlace(
         ItemRules.ItemPlacement(
-          ItemId := try JsonFields.StringField(Fields, 'id'),
-          Kind := try NamesUnit.DecodeItemKind(try JsonFields.StringField(Fields, 'kind')),
+          ItemId := try JsonFields.StringField(Fields, 'id').MapError(FailureMessage),
+          Kind := try NamesUnit.DecodeItemKind(
+            try JsonFields.StringField(Fields, 'kind').MapError(FailureMessage)
+          ),
           Position := try DecodePosition(Fields)
         )
       );
@@ -190,8 +198,10 @@ begin
       const Fields: dict of string to Json.JsonValue := try PlacementFields(Value);
       Hostiles.PushInPlace(
         HostileRules.HostilePlacement(
-          Id := try JsonFields.StringField(Fields, 'id'),
-          Kind := try NamesUnit.DecodeHostileKind(try JsonFields.StringField(Fields, 'kind')),
+          Id := try JsonFields.StringField(Fields, 'id').MapError(FailureMessage),
+          Kind := try NamesUnit.DecodeHostileKind(
+            try JsonFields.StringField(Fields, 'kind').MapError(FailureMessage)
+          ),
           Position := try DecodePosition(Fields)
         )
       );
@@ -208,46 +218,58 @@ begin
       return Error('level text is too long');
     end;
   end if;
-  const Fields: dict of string to Json.JsonValue := try JsonFields.ParseObject(Text);
+  const Fields: dict of string to Json.JsonValue := try JsonFields.ParseObject(
+    Text
+  ).MapError(FailureMessage);
   const Exact: boolean := try ExactFields(Fields, LevelFields, 'level');
-  if try JsonFields.IntegerField(Fields, 'format_version') <> LevelFormatVersion then
+  if try JsonFields.IntegerField(Fields, 'format_version').MapError(FailureMessage) <>
+    LevelFormatVersion
+  then
     begin
       return Error('unsupported level format version');
     end;
   end if;
 
-  if try JsonFields.StringField(Fields, 'world_id') <> Metadata.Id then
+  if try JsonFields.StringField(Fields, 'world_id').MapError(FailureMessage) <> Metadata.Id then
     begin
       return Error('level world id does not match selected world');
     end;
   end if;
 
-  if try JsonFields.IntegerField(Fields, 'generator_version') <> Metadata.GeneratorVersion then
+  if try JsonFields.IntegerField(Fields, 'generator_version').MapError(FailureMessage) <>
+    Metadata.GeneratorVersion
+  then
     begin
       return Error('unsupported level generator version');
     end;
   end if;
 
-  if try JsonFields.StringField(Fields, 'area_id') <> AreaId then
+  if try JsonFields.StringField(Fields, 'area_id').MapError(FailureMessage) <> AreaId then
     begin
       return Error('level area id does not match the requested area');
     end;
   end if;
   const Expected: Identities.DungeonLevelId := try Identities.ParseDungeonLevelId(Metadata, AreaId);
-  const Level: integer := try JsonFields.IntegerField(Fields, 'level');
+  const Level: integer := try JsonFields.IntegerField(Fields, 'level').MapError(FailureMessage);
   if Level <> Expected.Level then
     begin
       return Error('level index does not match the requested area');
     end;
   end if;
-  const Depth: integer := try JsonFields.IntegerField(Fields, 'depth');
+  const Depth: integer := try JsonFields.IntegerField(Fields, 'depth').MapError(FailureMessage);
   if (Depth < 1) or (Depth > InteriorUnit.MaxDungeonDepth) or (Level >= Depth) then
     return Error('level depth must be 1 through 16 and exceed the level index');
   end if;
 
-  if (try JsonFields.IntegerField(Fields, 'width') <> Validation.GeneratedDungeonWidth)
+  if (
+    try JsonFields.IntegerField(Fields, 'width').MapError(FailureMessage) <>
+    Validation.GeneratedDungeonWidth
+  )
     or
-    (try JsonFields.IntegerField(Fields, 'height') <> Validation.GeneratedDungeonHeight)
+    (
+      try JsonFields.IntegerField(Fields, 'height').MapError(FailureMessage) <>
+      Validation.GeneratedDungeonHeight
+    )
   then
     begin
       return Error('level must be 31 by 21 fields');
@@ -256,27 +278,33 @@ begin
   const StartFields: dict of string to Json.JsonValue := try JsonFields.ObjectField(
     Fields,
     'start'
-  );
+  ).MapError(FailureMessage);
   const StartExact: boolean := try ExactFields(StartFields, ['x', 'y', 'facing'], 'level start');
   const Cells: array of InteriorUnit.InteriorCellKind := try DecodeCells(
-    try JsonFields.StringArrayField(Fields, 'rows')
+    try JsonFields.StringArrayField(Fields, 'rows').MapError(FailureMessage)
   );
   // Structural validation reuses the generator's rules without rerunning the generator.
   return Validation.ValidateGeneratedDungeon(
     InteriorUnit.InteriorMap(
       Npcs := [],
       AreaId := AreaId,
-      DisplayName := try JsonFields.StringField(Fields, 'name'),
+      DisplayName := try JsonFields.StringField(Fields, 'name').MapError(FailureMessage),
       Level := Level,
       Depth := Depth,
       Width := Validation.GeneratedDungeonWidth,
       Height := Validation.GeneratedDungeonHeight,
       Cells := Cells,
       Start := try DecodePosition(StartFields),
-      StartFacing := try NamesUnit.DecodeFacing(try JsonFields.StringField(StartFields, 'facing')),
+      StartFacing := try NamesUnit.DecodeFacing(
+        try JsonFields.StringField(StartFields, 'facing').MapError(FailureMessage)
+      ),
       Arrival := try InteriorUnit.ArrivalFromCells(Cells, Validation.GeneratedDungeonWidth, Level),
-      Items := try DecodeItemPlacements(try JsonFields.ArrayField(Fields, 'items')),
-      Hostiles := try DecodeHostilePlacements(try JsonFields.ArrayField(Fields, 'hostiles'))
+      Items := try DecodeItemPlacements(
+        try JsonFields.ArrayField(Fields, 'items').MapError(FailureMessage)
+      ),
+      Hostiles := try DecodeHostilePlacements(
+        try JsonFields.ArrayField(Fields, 'hostiles').MapError(FailureMessage)
+      )
     ), Levels.CompassExpected(Metadata, Expected.Region.X, Expected.Region.Y, Level, Depth)
   );
 end function;

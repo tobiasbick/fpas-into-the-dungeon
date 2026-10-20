@@ -3,6 +3,12 @@ unit Dungeon.World.Savegame;
 
 uses Dungeon.World.Areas as StoredAreas, Dungeon.World.Quests as QuestRules, Dungeon.World.Savegame.Quests as QuestCodec, Dungeon.World.Savegame.Npcs as NpcCodec, Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Terrain as Terrain, Dungeon.World as WorldUnit, Dungeon.World.Areas.Errors as Errors, Dungeon.World.Savegame.Discovery as Discovery, Dungeon.World.Savegame.Errors as SavegameErrors, Dungeon.World.Savegame.Entities as Entities, Dungeon.World.Savegame.Player as Player, Dungeon.World.Savegame.Progression as ProgressionCodec, Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as JsonFields, Std.Path as PathOps;
 
+// Renders typed library failures at this unit's application-owned text boundary.
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
 // Current-only savegame schema written below each selected world.
 public const SaveGameFormatVersion: integer := 13;
 
@@ -41,7 +47,7 @@ begin
     end;
   end if;
 
-  return Fs.DeleteFile(Path);
+  return Fs.DeleteFile(Path).MapError(FailureMessage);
 end function;
 
 // Encodes only authoritative resumable state using the current savegame schema.
@@ -77,9 +83,14 @@ end function;
 
 function DecodeSaveGameFields(Text: string; Metadata: Terrain.WorldMetadata): result of (GameState.GameState, string);
 begin
-  const Fields: dict of string to Json.JsonValue := try JsonFields.ParseObject(Text);
+  const Fields: dict of string to Json.JsonValue := try JsonFields.ParseObject(
+    Text
+  ).MapError(FailureMessage);
   // The version is checked first so an obsolete save reports its version, not its older shape.
-  const Version: integer := try JsonFields.IntegerField(Fields, 'format_version');
+  const Version: integer := try JsonFields.IntegerField(
+    Fields,
+    'format_version'
+  ).MapError(FailureMessage);
   if Version <> SaveGameFormatVersion then
     return Error(
       'unsupported savegame format version ' + Conv.IntToStr(Version) + '; expected ' +
@@ -93,37 +104,52 @@ begin
       'exploration', 'visited_areas', 'items', 'health', 'hostiles', 'npcs', 'random_state',
       'progression', 'quest'
     ]
-  );
+  ).MapError(FailureMessage);
   if Fields.Length() <> 15 then
     begin
       return Error('savegame has an unexpected field set');
     end;
   end if;
 
-  if try JsonFields.StringField(Fields, 'world_id') <> Metadata.Id then
+  if try JsonFields.StringField(Fields, 'world_id').MapError(FailureMessage) <> Metadata.Id then
     begin
       return Error('savegame world id does not match selected world');
     end;
   end if;
   const State: GameState.GameState := GameState.GameState(
-    Npcs := try NpcCodec.DecodeNpcs(try JsonFields.ArrayField(Fields, 'npcs')),
-    Quest := try QuestCodec.DecodeQuest(try JsonFields.ObjectField(Fields, 'quest')),
-    Area := try Player.DecodeAreaKind(try JsonFields.StringField(Fields, 'area_kind')),
-    AreaId := try JsonFields.StringField(Fields, 'area_id'),
-    Player := try Player.DecodePlayer(try JsonFields.ObjectField(Fields, 'player')),
+    Npcs := try NpcCodec.DecodeNpcs(
+      try JsonFields.ArrayField(Fields, 'npcs').MapError(FailureMessage)
+    ),
+    Quest := try QuestCodec.DecodeQuest(
+      try JsonFields.ObjectField(Fields, 'quest').MapError(FailureMessage)
+    ),
+    Area := try Player.DecodeAreaKind(
+      try JsonFields.StringField(Fields, 'area_kind').MapError(FailureMessage)
+    ),
+    AreaId := try JsonFields.StringField(Fields, 'area_id').MapError(FailureMessage),
+    Player := try Player.DecodePlayer(
+      try JsonFields.ObjectField(Fields, 'player').MapError(FailureMessage)
+    ),
     ReturnLocation := try Player.DecodeReturnLocation(
-      try JsonFields.ObjectField(Fields, 'return_location')
+      try JsonFields.ObjectField(Fields, 'return_location').MapError(FailureMessage)
     ),
     Exploration := try Discovery.DecodeExploration(
-      try JsonFields.ObjectField(Fields, 'exploration')
+      try JsonFields.ObjectField(Fields, 'exploration').MapError(FailureMessage)
     ),
-    VisitedAreas := try JsonFields.StringArrayField(Fields, 'visited_areas'),
-    Items := try Entities.DecodeItems(try JsonFields.ArrayField(Fields, 'items')),
-    Health := try JsonFields.IntegerField(Fields, 'health'),
-    Hostiles := try Entities.DecodeHostiles(try JsonFields.ArrayField(Fields, 'hostiles')),
-    RandomState := try JsonFields.IntegerField(Fields, 'random_state'),
+    VisitedAreas := try JsonFields.StringArrayField(
+      Fields,
+      'visited_areas'
+    ).MapError(FailureMessage),
+    Items := try Entities.DecodeItems(
+      try JsonFields.ArrayField(Fields, 'items').MapError(FailureMessage)
+    ),
+    Health := try JsonFields.IntegerField(Fields, 'health').MapError(FailureMessage),
+    Hostiles := try Entities.DecodeHostiles(
+      try JsonFields.ArrayField(Fields, 'hostiles').MapError(FailureMessage)
+    ),
+    RandomState := try JsonFields.IntegerField(Fields, 'random_state').MapError(FailureMessage),
     Progression := try ProgressionCodec.DecodeProgression(
-      try JsonFields.ObjectField(Fields, 'progression')
+      try JsonFields.ObjectField(Fields, 'progression').MapError(FailureMessage)
     )
   );
   return Areas.ValidateSaveShape(Metadata, State);
@@ -197,7 +223,9 @@ begin
       end;
     when Error(const Message):
       begin
-        return Error(SavegameErrors.PersistenceFailure.Io('cannot read savegame: ' + Message));
+        return Error(
+          SavegameErrors.PersistenceFailure.Io('cannot read savegame: ' + Message.Message())
+        );
       end;
   end case;
   var Decoded: GameState.GameState := GameState.NewGame(World.Metadata);
@@ -288,7 +316,9 @@ begin
   case Fs.CreateDirAll(SaveGameDirectory(World)) of
     when Error(const Message):
       return Error(
-        SavegameErrors.PersistenceFailure.Io('cannot create savegame directory: ' + Message)
+        SavegameErrors.PersistenceFailure.Io(
+          'cannot create savegame directory: ' + Message.Message()
+        )
       );
     when Ok(_):
       null;
@@ -301,7 +331,9 @@ begin
       end;
     when Error(const Message):
       begin
-        return Error(SavegameErrors.PersistenceFailure.Io('cannot write savegame: ' + Message));
+        return Error(
+          SavegameErrors.PersistenceFailure.Io('cannot write savegame: ' + Message.Message())
+        );
       end;
   end case;
 end function;

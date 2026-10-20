@@ -3,6 +3,12 @@ unit Dungeon.RuntimeData;
 
 uses Std.Env as Env, Std.Fs as Fs, Std.Path as PathOps, Std.Toml as Toml, Std.Toml.Fields as TomlFields;
 
+// Renders typed library failures at this unit's application-owned text boundary.
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
 // Complete current key sets; any other key marks an obsolete configuration file.
 const ClientConfigFields: array of string := [
   'host',
@@ -214,7 +220,10 @@ begin
     end;
   end if;
 
-  return Fs.WriteTextAtomic(Path, EncodeClientConfig(Network, Preferences));
+  return Fs.WriteTextAtomic(
+    Path,
+    EncodeClientConfig(Network, Preferences)
+  ).MapError(FailureMessage);
 end function;
 
 function EnsureServerConfigFile(Path: string; Network: NetworkConfig; World: ServerWorldConfig): result of (boolean, string);
@@ -231,15 +240,15 @@ begin
     end;
   end if;
 
-  return Fs.WriteTextAtomic(Path, EncodeServerConfig(Network, World));
+  return Fs.WriteTextAtomic(Path, EncodeServerConfig(Network, World)).MapError(FailureMessage);
 end function;
 
 function PrepareShared(Paths: RuntimePaths): result of (boolean, string);
 begin
-  const RootReady: boolean := try Fs.CreateDirAll(Paths.Root);
-  const ConfigReady: boolean := try Fs.CreateDirAll(Paths.Config);
-  const LogsReady: boolean := try Fs.CreateDirAll(Paths.Logs);
-  const CacheReady: boolean := try Fs.CreateDirAll(Paths.Cache);
+  const RootReady: boolean := try Fs.CreateDirAll(Paths.Root).MapError(FailureMessage);
+  const ConfigReady: boolean := try Fs.CreateDirAll(Paths.Config).MapError(FailureMessage);
+  const LogsReady: boolean := try Fs.CreateDirAll(Paths.Logs).MapError(FailureMessage);
+  const CacheReady: boolean := try Fs.CreateDirAll(Paths.Cache).MapError(FailureMessage);
   return Ok(true);
 end function;
 
@@ -265,15 +274,18 @@ end function;
 function ReadConfigTable(Path: string; Allowed: array of string): result of (dict of string to Toml.TomlValue, string);
 begin
   const Fields: dict of string to Toml.TomlValue := try TomlFields.ParseTable(
-    try Fs.ReadText(Path)
-  );
-  const Known: boolean := try TomlFields.RequireOnlyFields(Fields, Allowed);
+    try Fs.ReadText(Path).MapError(FailureMessage)
+  ).MapError(FailureMessage);
+  const Known: boolean := try TomlFields.RequireOnlyFields(
+    Fields,
+    Allowed
+  ).MapError(FailureMessage);
   return Ok(Fields);
 end function;
 
 function NonEmptyString(Fields: dict of string to Toml.TomlValue; Name: string): result of (string, string);
 begin
-  const Value: string := try TomlFields.StringField(Fields, Name);
+  const Value: string := try TomlFields.StringField(Fields, Name).MapError(FailureMessage);
   if Value.Trim().Length() = 0 then
     begin
       return Error(('field ' + Name) + ' must not be empty');
@@ -286,7 +298,7 @@ end function;
 function ReadNetworkConfig(Fields: dict of string to Toml.TomlValue): result of (NetworkConfig, string);
 begin
   const Host: string := try NonEmptyString(Fields, 'host');
-  const Port: integer := try TomlFields.IntegerField(Fields, 'port');
+  const Port: integer := try TomlFields.IntegerField(Fields, 'port').MapError(FailureMessage);
   if (Port < 1) or (Port > 65535) then
     begin
       return Error('field port must be between 1 and 65535');
@@ -303,8 +315,14 @@ begin
     ClientFileConfig(
       Network := try ReadNetworkConfig(Fields),
       Preferences := ClientPreferences(
-        ContextPanelVisible := try TomlFields.BooleanField(Fields, 'context_panel_visible'),
-        MessagePanelVisible := try TomlFields.BooleanField(Fields, 'message_panel_visible')
+        ContextPanelVisible := try TomlFields.BooleanField(
+          Fields,
+          'context_panel_visible'
+        ).MapError(FailureMessage),
+        MessagePanelVisible := try TomlFields.BooleanField(
+          Fields,
+          'message_panel_visible'
+        ).MapError(FailureMessage)
       )
     )
   );
@@ -344,11 +362,23 @@ begin
   const Fields: dict of string to Toml.TomlValue := try ReadConfigTable(Path, ServerConfigFields);
   const World: ServerWorldConfig := ServerWorldConfig(
     Id := try NonEmptyString(Fields, 'world_id'),
-    Seed := try TomlFields.IntegerField(Fields, 'world_seed'),
-    DungeonRegionChunks := try TomlFields.IntegerField(Fields, 'dungeon_region_chunks'),
-    ChunkCacheLimit := try TomlFields.IntegerField(Fields, 'chunk_cache_limit'),
-    MaximumViewWidth := try TomlFields.IntegerField(Fields, 'max_view_width'),
-    MaximumViewHeight := try TomlFields.IntegerField(Fields, 'max_view_height')
+    Seed := try TomlFields.IntegerField(Fields, 'world_seed').MapError(FailureMessage),
+    DungeonRegionChunks := try TomlFields.IntegerField(
+      Fields,
+      'dungeon_region_chunks'
+    ).MapError(FailureMessage),
+    ChunkCacheLimit := try TomlFields.IntegerField(
+      Fields,
+      'chunk_cache_limit'
+    ).MapError(FailureMessage),
+    MaximumViewWidth := try TomlFields.IntegerField(
+      Fields,
+      'max_view_width'
+    ).MapError(FailureMessage),
+    MaximumViewHeight := try TomlFields.IntegerField(
+      Fields,
+      'max_view_height'
+    ).MapError(FailureMessage)
   );
   const ValidDefaults: boolean := try ValidateServerDefaults(World.Seed, World.DungeonRegionChunks);
   if World.ChunkCacheLimit < 9 then
@@ -419,14 +449,17 @@ begin
       Current.Network,
       Current.World with Seed := Seed; DungeonRegionChunks := RegionChunks; end with
     )
-  );
+  ).MapError(FailureMessage);
 end function;
 
 // Atomically updates client presentation preferences while preserving the configured endpoint.
 public function SaveClientPreferences(Path: string; Preferences: ClientPreferences): result of (boolean, string);
 begin
   const Current: ClientFileConfig := try ReadClientConfig(Path);
-  return Fs.WriteTextAtomic(Path, EncodeClientConfig(Current.Network, Preferences));
+  return Fs.WriteTextAtomic(
+    Path,
+    EncodeClientConfig(Current.Network, Preferences)
+  ).MapError(FailureMessage);
 end function;
 
 // Prepares server directories, including worlds, and loads or creates server.toml.
@@ -434,7 +467,7 @@ public function LoadServerRuntime(DataRootOverride: option of string): result of
 begin
   const Paths: RuntimePaths := RuntimePathsForRoot(try ResolveDataRoot(DataRootOverride));
   const SharedReady: boolean := try PrepareShared(Paths);
-  const WorldsReady: boolean := try Fs.CreateDirAll(Paths.Worlds);
+  const WorldsReady: boolean := try Fs.CreateDirAll(Paths.Worlds).MapError(FailureMessage);
   const ConfigReady: boolean := try EnsureServerConfigFile(
     Paths.ServerConfig,
     DefaultNetworkConfig(),

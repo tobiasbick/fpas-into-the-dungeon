@@ -3,6 +3,12 @@ program ListenerLifetimeTest;
 
 uses Dungeon.Server as ServerUnit, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Listener as ListenerUnit, Dungeon.Server.Logging as Logging, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Server as Server, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
+// Renders typed library failures at this unit's application-owned text boundary.
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
 procedure WaitKind(Logs: channel of Logging.ServerLogEvent; Kind: string);
 begin
   while Tasks.ReceiveWithTimeout(Logs, 30000).Unwrap().Kind <> Kind do
@@ -12,7 +18,7 @@ end procedure;
 
 function FailSession(Client: Net.Connection; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  const Sent := try Net.SendBytesWithCancellation(Client, [42], Token);
+  const Sent := try Net.SendBytesWithCancellation(Client, [42], Token).MapError(FailureMessage);
   return Error('controlled client failure');
 end function;
 
@@ -82,7 +88,7 @@ begin
   ): result of (boolean, string) begin
     Logging.LogServer(HandlerConfig.Logs, 'world', 'Handler waiting for release');
     // Deliberately ignore cancellation for this barrier, bounded to avoid a hung failed test.
-    return Tasks.ReceiveWithTimeout(Release, 10000);
+    return Tasks.ReceiveWithTimeout(Release, 10000).MapError(FailureMessage);
   end function;
 
   scope
@@ -96,10 +102,15 @@ begin
     // Always release the barrier before asserting, including on a failed timeout observation.
     Test.AssertTrue(Tasks.Send(Release, true).Unwrap());
     Test.AssertEquals('error', Notice.Unwrap().Kind);
-    Test.AssertEquals('Task group close timed out', Notice.Unwrap().Text);
+    Test.AssertEquals(
+      Tasks.TaskError.Timeout('Std.Tasks.CloseTaskGroupWithTimeout').Message(),
+      Notice.Unwrap().Text
+    );
     case Tasks.Wait(Worker) of
       when Error(const Reason):
-        Test.AssertEquals('Task group close timed out', Reason);
+        Test.AssertEquals(
+          Tasks.TaskError.Timeout('Std.Tasks.CloseTaskGroupWithTimeout').Message(), Reason
+        );
       when Ok(_):
         panic('a shutdown timeout must remain an error after cleanup');
     end case;
@@ -116,7 +127,7 @@ begin
   for Index: integer := 1 to 256 do
     case Server.CreateLifetime(0, false) of
       when Error(const Reason):
-        Test.AssertEquals('At most 256 server lifetime identities may be created per VM', Reason);
+        Test.AssertTrue(Reason is Server.ServerError.InvalidState('Std.Server.CreateLifetime'));
         Exhausted := true;
         break;
       when Ok(const Life):
@@ -131,7 +142,9 @@ begin
   const UnstartedPort := Net.ListenerLocalAddress(Unstarted).Unwrap().Port;
   case ListenerUnit.Run(Unstarted, Config, Token, false, FailSession) of
     when Error(const Reason):
-      Test.AssertEquals('At most 256 server lifetime identities may be created per VM', Reason);
+      Test.AssertEquals(
+        Server.ServerError.InvalidState('Std.Server.CreateLifetime').Message(), Reason
+      );
     when Ok(_):
       panic('exhausted lifetime identities must reject startup');
   end case;
