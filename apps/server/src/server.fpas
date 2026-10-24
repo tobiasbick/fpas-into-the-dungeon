@@ -1,140 +1,39 @@
 // Starts the authoritative dungeon server.
 program DungeonServer;
 
-uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console as ConsoleUnit, Std.Args as Args, Std.Parse as Parse;
+uses Dungeon.RuntimeData as RuntimeData, Dungeon.RuntimeData.Startup as Startup, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console as ConsoleUnit, Std.Args as Args, Std.Console as Console;
 
 begin
-  var Console: boolean := false;
-  var DataRootOverride: option of string := None;
-  var HostOverride: option of string := None;
-  var PortOverride: option of integer := None;
-  var WorldOverride: option of string := None;
-  var Index: integer := 0;
-  var Positional: integer := 0;
-  while Index < Args.ParamCount() do
-    begin
-      const Argument: string := Args.ParamStr(Index);
-      if Argument = '--console' then
-        Console := true;
-        Index := Index + 1;
-      elsif Argument = '--data-dir' then
-        begin
-          if (Index + 1) >= Args.ParamCount() then
-            begin
-              panic(
-                'usage: dungeon-server -- [--console] [--data-dir PATH] [--world ID] [HOST [PORT]]'
-              );
-            end;
-          end if;
+  var Arguments: array of string := [];
+  for Index: integer := 0 to Args.ParamCount() - 1 do
+    Arguments.PushInPlace(Args.ParamStr(Index));
+  end for;
 
-          DataRootOverride := Some(Args.ParamStr(Index + 1));
-          Index := Index + 2;
-        end;
+  case Startup.ParseArguments(Arguments := Arguments, ServerMode := true).Unwrap() of
+    when Startup.StartupArguments.Help(const Text):
+      Console.WriteText(Text);
+    when Startup.StartupArguments.Ready(const Options):
+      const Runtime := RuntimeData.LoadServerRuntime(Options.DataRoot).Unwrap();
+      const Network := Startup.NetworkWithOverrides(Runtime.Network, Options);
+      const WorldId := case Options.WorldId of
+        when Some(const Id): Id;
+        when None: Runtime.World.Id;
+      end case;
+      const Config := ConfigUnit.ServerConfig(
+        ConfigPath := Runtime.Paths.ServerConfig,
+        Logs := None,
+        WorldsRoot := Runtime.Paths.Worlds,
+        WorldId := WorldId,
+        WorldSeed := Runtime.World.Seed,
+        DungeonRegionChunks := Runtime.World.DungeonRegionChunks,
+        ChunkCacheLimit := Runtime.World.ChunkCacheLimit,
+        MaximumViewWidth := Runtime.World.MaximumViewWidth,
+        MaximumViewHeight := Runtime.World.MaximumViewHeight
+      );
+      if Options.Console then
+        discard ConsoleUnit.RunServerConsole(Network.Host, Network.Port, Config);
       else
-        if Argument = '--world' then
-          begin
-            if (Index + 1) >= Args.ParamCount() then
-              begin
-                panic(
-                  'usage: dungeon-server -- [--console] [--data-dir PATH] [--world ID] [HOST [PORT]]'
-                );
-              end;
-            end if;
-
-            WorldOverride := Some(Args.ParamStr(Index + 1));
-            Index := Index + 2;
-          end;
-        else
-          begin
-            case Positional of
-              when 0:
-                begin
-                  HostOverride := Some(Argument);
-                end;
-              when 1:
-                begin
-                  case Parse.Int(Argument) of
-                    when Ok(const Port):
-                      PortOverride := Some(Port);
-                    when Error(_):
-                      panic(
-                        'usage: dungeon-server -- [--console] [--data-dir PATH] [--world ID] [HOST [PORT]]'
-                      );
-                  end case;
-                end;
-              else
-                begin
-                  panic(
-                    'usage: dungeon-server -- [--console] [--data-dir PATH] [--world ID] [HOST [PORT]]'
-                  );
-                end;
-            end case;
-
-            Positional := Positional + 1;
-            Index := Index + 1;
-          end;
-        end if;
+        discard Server.RunServer(Network.Host, Network.Port, Config).Unwrap();
       end if;
-    end;
-  end while;
-  const Runtime: RuntimeData.RuntimeSettings := RuntimeData.LoadServerRuntime(
-    DataRootOverride
-  ).Unwrap();
-  var Host: string := Runtime.Network.Host;
-  var Port: integer := Runtime.Network.Port;
-  var WorldId: string := Runtime.World.Id;
-  case HostOverride of
-    when Some(const Value):
-      begin
-        Host := Value;
-      end;
-    when None:
-      begin
-        null;
-      end;
   end case;
-
-  case PortOverride of
-    when Some(const Value):
-      begin
-        Port := Value;
-      end;
-    when None:
-      begin
-        null;
-      end;
-  end case;
-
-  case WorldOverride of
-    when Some(const Value):
-      begin
-        WorldId := Value;
-      end;
-    when None:
-      begin
-        null;
-      end;
-  end case;
-
-  if (Port < 1) or (Port > 65535) then
-    begin
-      panic('port must be between 1 and 65535');
-    end;
-  end if;
-  const Config: ConfigUnit.ServerConfig := ConfigUnit.ServerConfig(
-    ConfigPath := Runtime.Paths.ServerConfig,
-    Logs := None,
-    WorldsRoot := Runtime.Paths.Worlds,
-    WorldId := WorldId,
-    WorldSeed := Runtime.World.Seed,
-    DungeonRegionChunks := Runtime.World.DungeonRegionChunks,
-    ChunkCacheLimit := Runtime.World.ChunkCacheLimit,
-    MaximumViewWidth := Runtime.World.MaximumViewWidth,
-    MaximumViewHeight := Runtime.World.MaximumViewHeight
-  );
-  if Console then
-    discard ConsoleUnit.RunServerConsole(Host, Port, Config);
-  else
-    discard Server.RunServer(Host, Port, Config).Unwrap();
-  end if;
 end.

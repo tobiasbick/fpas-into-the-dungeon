@@ -1,8 +1,8 @@
 // Covers the outdoor exploration-map window: cells come from stored chunks, equal the generated
-// terrain, leave undiscovered chunks untouched, and refresh the session's chunk cache.
+// terrain, leave undiscovered chunks untouched, and reject corrupt remembered chunks without ending play.
 program OutdoorExplorationMapTest;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Protocol as Protocol, Dungeon.Server.Projection as Projection, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as ChunksUnit, Dungeon.World as WorldUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test, Std.Time as Time;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection, Dungeon.Server.Session as SessionUnit, Dungeon.Test.SessionAssertions as Sessions, Dungeon.Terrain as Terrain, Dungeon.Terrain.Chunks as ChunksUnit, Dungeon.World as WorldUnit, Std.Conv as Conv, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
 // Reveals the outdoor sight circle at every field of a straight walk east from the spawn.
 function Explored(Metadata: Terrain.WorldMetadata; Steps: integer): GameState.GameState;
@@ -126,6 +126,65 @@ begin
 
   Test.AssertFalse(Fs.Exists(WorldUnit.WorldChunkPath(World, FarChunk)));
   Test.AssertEquals(WorldUnit.CachedChunkCount(World), WorldUnit.CachedChunkCount(Far.World));
+  // A malformed remembered chunk rejects the read-only request and preserves all installed facts.
+  const RememberedChunk := Coordinates.ChunkCoordinate(
+    X := Coordinates.ChunkForCoordinate(Metadata.Spawn.X + 256),
+    Y := Coordinates.ChunkForCoordinate(Metadata.Spawn.Y)
+  );
+  discard WorldUnit.LoadWorldChunk(World, RememberedChunk).Unwrap();
+  const ChunkPath := WorldUnit.WorldChunkPath(World, RememberedChunk);
+  const ChunkBytes := Fs.ReadText(ChunkPath).Unwrap();
+  discard Fs.WriteTextAtomic(ChunkPath, '{').Unwrap();
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1', Net.ListenerLocalAddress(Listener).Unwrap().Port, 5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Config := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root, WorldId := Metadata.Id,
+    WorldSeed := 12345, DungeonRegionChunks := 4, ChunkCacheLimit := 32,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Session := SessionUnit.ServerSession(
+    World := World, WorldSelected := true, State := Some(State), Interior := None,
+    Dirty := true, LastSavedAt := 42, Finished := false,
+    Viewport := SessionUnit.ViewportSize(Width := 80, Height := 24)
+  );
+  const Request := Protocol.ClientMessage.ExplorationMap(
+    Metadata.Spawn.X + 128, Metadata.Spawn.Y, 240, 1
+  );
+  const Rejected := Handling.HandleSessionMessage(Session, Request, Server, Config, Token).Unwrap();
+  const Rejection := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(Rejection.Line).Unwrap() is Protocol.ServerMessage.Rejected('map_rejected', _)
+  );
+  Sessions.AssertUnchanged(Session, Rejected);
+  Test.AssertEquals('{', Fs.ReadText(ChunkPath).Unwrap());
+  // Repair only the stored chunk, then retry over the same connection.
+  discard Fs.WriteTextAtomic(ChunkPath, ChunkBytes).Unwrap();
+  const Retried := Handling.HandleSessionMessage(Rejected, Request, Server, Config, Token).Unwrap();
+  const Reply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  case Servers.DecodeServer(Reply.Line).Unwrap() of
+    when Protocol.ServerMessage.ExplorationMap(const Map):
+      Test.AssertEquals(
+        ReferenceRows(Metadata, State, Metadata.Spawn.X + 128, Metadata.Spawn.Y, 240, 1)[0],
+        Map.Rows[0]
+      );
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected the repaired remembered map');
+  end case;
+
+  Test.AssertTrue(Retried.World.Clock > Session.World.Clock);
+  Sessions.AssertUnchanged(Session with World := Retried.World; end with, Retried);
+  Test.AssertEquals(ChunkBytes, Fs.ReadText(ChunkPath).Unwrap());
+  discard Net.Close(Server).Unwrap();
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(Retried, Request, Server, Config, Token) is Error(_)
+  );
+  discard Net.Close(Client).Unwrap();
 
   // Interior projection refuses outdoor windows; the outdoor projection refuses invalid windows.
   Test.AssertTrue(

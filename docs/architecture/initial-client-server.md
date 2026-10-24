@@ -100,6 +100,15 @@ game state and dirty/save facts. Actual response or rejection write errors end
 the connection as before. Preparation may leave valid generated chunk files for
 a retry, but never writes an explicit save or repairs a corrupt file silently.
 
+Small runtime contracts protect server-owned lifecycle facts at decoded-message
+dispatch and viewport/game installation. Dispatch requires an unfinished session;
+the connection loop stops after a handler marks it finished. Viewport and map
+requests preserve dirty and last-save facts, while game installation preserves
+the transport viewport and finish flag. These clauses inspect scalar flags,
+timestamps and viewport fields. Invalid intentions and candidate preparation
+failures keep their ordinary `Result` rejection paths; a contract violation
+identifies an internal programming error.
+
 Each `state` message identifies its view family. A map state contains its world
 origin, dimensions, compact server-produced terrain rows, and the player's
 local and authoritative world coordinates. A first-person state contains

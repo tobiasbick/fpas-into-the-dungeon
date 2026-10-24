@@ -76,6 +76,16 @@ stored default. Neither this option nor `world_id` creates a world. A missing or
 incompatible selection leaves the connected world catalog available. Use `--data-dir PATH` to select a different data root before
 configuration is loaded.
 
+Both applications use the shared `Dungeon.RuntimeData.Startup` parser and endpoint
+overrides from the runtime-data library. Options may appear before or between the
+optional positional `HOST` and `PORT`; `PORT` must be between 1 and 65535. The
+`--data-dir PATH` and `--data-dir=PATH` forms are equivalent. The server additionally
+accepts `--world ID` and `--console`. Unknown options, repeated options, missing
+values, excess positional arguments and invalid ports are rejected before runtime
+directories or configuration files are created. `--help` or `-h` prints generated
+usage and exits successfully before loading configuration or starting the client,
+listener or dashboard. Command-line overrides apply only to that run.
+
 Runtime configuration, world, chunk, level, settlement and savegame formats support only
 their current schema and generator version. Current versions are world format
 4, generator 11, level format 4, settlement format 1 and save format 13; protocol 19 connects the client

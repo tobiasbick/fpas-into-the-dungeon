@@ -1,0 +1,253 @@
+// Presents the world catalog, creation editor and progress-discard confirmation.
+unit Dungeon.Client.Ui.Worlds.View;
+
+uses Dungeon.Client.Model as Model, Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.Worlds as Worlds, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Std.Conv as Conv, Std.Tui as Tui;
+
+// Widest catalog content in terminal cells; rows clip and the selected reason wraps within it.
+const MaximumCatalogWidth: integer := 76;
+
+// Content width of the catalog: the terminal minus frame and margin, at most MaximumCatalogWidth.
+function CatalogWidth(State: Model.ClientModel): integer;
+begin
+  var Width := State.ViewportWidth - 8;
+  if Width > MaximumCatalogWidth then
+    Width := MaximumCatalogWidth;
+  end if;
+
+  if Width < 1 then
+    Width := 1;
+  end if;
+
+  return Width;
+end function;
+
+// Left-aligns Text in a column of Width characters, keeping at least one separating space.
+function Column(Text: string; Width: integer): string;
+begin
+  var Padded := Text;
+  while Padded.Length() < Width do
+    Padded := Padded + ' ';
+  end while;
+
+  return Padded + ' ';
+end function;
+
+// Player-facing label of a server status code; unknown codes are shown unchanged.
+function StatusLabel(Code: string): string;
+begin
+  case Code of
+    when 'ready':
+      return 'ready';
+    when 'incompatible':
+      return 'incompatible';
+    when 'storage_error':
+      return 'storage error';
+    when 'world_data_error':
+      return 'level error';
+    when 'available':
+      return 'saved';
+    when 'missing':
+      return 'none';
+    when 'unknown':
+      return '-';
+    else
+      return Code.Replace('_', ' ');
+  end case;
+end function;
+
+// One fixed-column table row: world, status, seed, region and save; clipped to the catalog width.
+function WorldRow(World: Protocol.WorldSummary; Width: integer): string;
+begin
+  var Seed := '-';
+  var Region := '-';
+  if World.Status = 'ready' then
+    Seed := Conv.IntToStr(World.Seed);
+    Region := Conv.IntToStr(World.RegionChunks);
+  end if;
+
+  return Layout.FitLine(
+    Column(World.Id, 12) + Column(StatusLabel(World.Status), 13) + Column(Seed, 10) +
+    Column(Region, 7) + StatusLabel(World.SaveStatus),
+    Width
+  );
+end function;
+
+// Shows a fixed-column world table, then the selected world's reason wrapped within the catalog width.
+public function ViewWorldChoices(State: Model.ClientModel): array of Tui.TuiElement;
+begin
+  var Items: array of Tui.TuiElement := [];
+  var Labels: array of string := [];
+  const Width := CatalogWidth(State);
+  const Selected := Worlds.ReconcileWorldCursor(State).WorldCursor;
+  for Index: integer := 0 to State.Catalog.Worlds.Length() - 1 do
+    if Index < Worlds.PageSize(State) then
+      Labels.PushInPlace(WorldRow(State.Catalog.Worlds[Index], Width));
+    end if;
+  end for;
+
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(
+      Layout.FitLine(
+        '  ' + Column('World', 12) + Column('Status', 13) + Column('Seed', 10) +
+        Column('Region', 7) +
+        'Save', Width
+      )
+    )
+  );
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeList(
+      Tui.TuiControlId.Create(Controls.WorldListControlId),
+      Labels,
+      Selected,
+      Tui.TuiAction.Create(Controls.SelectWorldAction)
+    )
+  );
+  if State.Catalog.Offset > 0 then
+    Items.PushInPlace(
+      Tui.TuiElementBuilders.MakeButton(
+        Tui.TuiControlId.Create(Controls.PreviousWorldsControlId),
+        'Previous worlds',
+        Tui.TuiAction.Create(Controls.PreviousWorldsAction)
+      )
+    );
+  end if;
+
+  if State.Catalog.Offset + Worlds.PageSize(State) < State.Catalog.Total then
+    Items.PushInPlace(
+      Tui.TuiElementBuilders.MakeButton(
+        Tui.TuiControlId.Create(Controls.NextWorldsControlId),
+        'Next worlds',
+        Tui.TuiAction.Create(Controls.NextWorldsAction)
+      )
+    );
+  end if;
+
+  case WorldsUnit.SelectedWorld(State.Catalog) of
+    when Some(const World):
+      begin
+        // The reason appears once, for the selected world only, wrapped instead of clipped.
+        var Detail := 'Selected: ' + World.Id;
+        if World.Reason <> '' then
+          Detail := Detail + ' - ' + World.Reason;
+        end if;
+
+        for Line: string in Layout.WrappedLines(Detail, Width) do
+          Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
+        end for;
+
+        if World.Status = 'ready' then
+          Items.PushInPlace(
+            Tui.TuiElementBuilders.MakeButton(
+              Tui.TuiControlId.Create(Controls.NewGameControlId),
+              'Start over',
+              Tui.TuiAction.Create(Controls.NewGameAction)
+            )
+          );
+        end if;
+      end;
+    when None:
+      // A configured world outside the list still explains why it is unavailable.
+      if State.Catalog.SelectionReason <> '' then
+        for Line: string in Layout.WrappedLines(State.Catalog.SelectionReason, Width) do
+          Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
+        end for;
+      end if;
+  end case;
+
+  if WorldsUnit.CanContinueWorld(State.Catalog) then
+    Items.PushInPlace(
+      Tui.TuiElementBuilders.MakeButton(
+        Tui.TuiControlId.Create(Controls.LoadGameControlId),
+        'Continue',
+        Tui.TuiAction.Create(Controls.LoadGameAction)
+      )
+    );
+  end if;
+
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeButton(
+      Tui.TuiControlId.Create(Controls.RefreshWorldsControlId),
+      'Refresh worlds',
+      Tui.TuiAction.Create(Controls.RefreshWorldsAction)
+    )
+  );
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeButton(
+      Tui.TuiControlId.Create(Controls.CreateWorldControlId),
+      'Create world',
+      Tui.TuiAction.Create(Controls.CreateWorldAction)
+    )
+  );
+  return Items;
+end function;
+
+// Displays server-supplied defaults/ranges and the model-owned creation editor.
+public function ViewNewWorld(State: Model.ClientModel): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeOverlay(
+    'Create world', [
+      Tui.TuiElementBuilders.MakeColumn([
+        Tui.TuiElementBuilders.MakeLabel(
+          (('Seed: ' + Conv.IntToStr(State.Catalog.MinimumSeed)) + ' through ') +
+          Conv.IntToStr(State.Catalog.MaximumSeed)
+        ),
+        Tui.TuiElementBuilders.MakeInput(
+          Tui.TuiControlId.Create(Controls.SeedControlId),
+          State.SeedText,
+          State.SeedCaret,
+          Tui.TuiAction.Create(Controls.SeedChangedAction)
+        ),
+        Tui.TuiElementBuilders.MakeLabel(
+          (
+            (
+              ('Entrance region: ' + Conv.IntToStr(State.Catalog.MinimumRegionChunks)) +
+              ' through '
+            ) + Conv.IntToStr(State.Catalog.MaximumRegionChunks)
+          ) +
+          ' chunks'
+        ),
+        Tui.TuiElementBuilders.MakeInput(
+          Tui.TuiControlId.Create(Controls.RegionControlId),
+          State.RegionText,
+          State.RegionCaret,
+          Tui.TuiAction.Create(Controls.RegionChangedAction)
+        ),
+        Tui.TuiElementBuilders.MakeLabel(State.Status),
+        Tui.TuiElementBuilders.MakeButton(
+          Tui.TuiControlId.Create(Controls.SubmitWorldControlId),
+          'Create',
+          Tui.TuiAction.Create(Controls.SubmitWorldAction)
+        ),
+        Tui.TuiElementBuilders.MakeButton(
+          Tui.TuiControlId.Create(Controls.OverlayBackControlId),
+          'Cancel',
+          Tui.TuiAction.Create(Controls.BackAction)
+        )
+      ])
+    ]
+  );
+end function;
+
+// Discard is explicit; cancellation returns to the still-installed game session.
+public function ViewDiscardConfirmation(): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeOverlay(
+    'Discard unsaved progress?', [
+      Tui.TuiElementBuilders.MakeColumn([
+        Tui.TuiElementBuilders.MakeLabel('Unsaved progress will be lost. The last save is kept.'),
+        Tui.TuiElementBuilders.MakeButton(
+          Tui.TuiControlId.Create(Controls.DiscardControlId),
+          'Discard and choose world',
+          Tui.TuiAction.Create(Controls.ConfirmDiscardAction)
+        ),
+        Tui.TuiElementBuilders.MakeDefaultButton(
+          Tui.TuiControlId.Create(Controls.OverlayBackControlId),
+          'Cancel',
+          '',
+          Tui.TuiAction.Create(Controls.BackAction)
+        )
+      ])
+    ]
+  );
+end function;
+end unit;

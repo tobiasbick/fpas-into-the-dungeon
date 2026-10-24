@@ -1,7 +1,7 @@
 // Verifies recoverable candidate failures and atomic state/cache/viewport installation over TCP.
 program CandidatePreparationTest;
 
-uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Session as SessionUnit, Dungeon.Terrain as Terrain, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Path as Paths, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+uses Dungeon.Coordinates as Coordinates, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients, Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Worlds.Replies as Lifecycle, Dungeon.Terrain as Terrain, Dungeon.Test.Fixtures as Fixtures, Dungeon.Test.SessionAssertions as Sessions, Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame, Std.Conv as Conv, Std.Fs as Fs, Std.Path as Paths, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
 
 type ExchangeResult = record
   Session: SessionUnit.ServerSession;
@@ -170,6 +170,53 @@ begin
       Width := 240,
       Height := 120
     ); end with;
+
+    if StartX = 127 then
+      // Leaving a dungeon must reject an oversized outdoor reply before changing the session.
+      const Map := Fixtures.FixtureDungeonMapFor(Fixtures.SpawnDungeonAreaId(Metadata));
+      const Entered := Movement.ActivateAreaTransition(
+        GameState.AreaView(Metadata := Metadata, Interior := None),
+        Packed with Player := Coordinates.PlayerPosition.Outdoor(Metadata.SpawnEntrance); end with,
+        Some(Map)
+      ).Unwrap();
+      const AtExit := Huge with Interior := Some(Map); State := Some(
+        Entered.State with Player := Coordinates.PlayerPosition.FirstPerson(
+          Coordinates.FirstPersonPose(Position := Map.Arrival, Facing := Map.StartFacing)
+        ); end with
+      ); end with;
+      const FailedExit := Request(
+        AtExit, Protocol.ClientMessage.Interact, Client, Server, Config, Token
+      );
+      Rejected(FailedExit.Reply, 'interaction_rejected');
+      Sessions.AssertUnchanged(AtExit, FailedExit.Session);
+      const SmallExit := Request(
+        AtExit with Viewport := SessionUnit.ViewportSize(Width := 1, Height := 1); end with,
+        Protocol.ClientMessage.Interact, Client, Server, Config, Token
+      );
+      Test.AssertEquals(64, MapState(SmallExit.Reply).Inventory.Length());
+      Test.AssertTrue(SmallExit.Session.Interior is None);
+      // Starting or loading installs a candidate only after its complete response can be sent.
+      const Idle := Huge with State := None; Dirty := false; end with;
+      const FailedInstall := Lifecycle.InstallGame(
+        Idle, World, Packed, None, false, Server, Config, Token
+      ).Unwrap();
+      const InstallReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+      Rejected(Servers.DecodeServer(InstallReply.Line).Unwrap(), 'storage_error');
+      Sessions.AssertUnchanged(Idle, FailedInstall);
+      Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+      const Installed := Lifecycle.InstallGame(
+        Idle with Viewport := SessionUnit.ViewportSize(Width := 1, Height := 1); end with,
+        World, Packed, None, false, Server, Config, Token
+      ).Unwrap();
+      const InstalledReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+      Test.AssertEquals(
+        64,
+        MapState(Servers.DecodeServer(InstalledReply.Line).Unwrap()).Inventory.Length()
+      );
+      Test.AssertFalse(Installed.Dirty);
+      Test.AssertEquals(Idle.LastSavedAt, Installed.LastSavedAt);
+      Test.AssertEquals(SaveBytes, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    end if;
 
     for Message: Protocol.ClientMessage in [
       Protocol.ClientMessage.Move(1, 0),

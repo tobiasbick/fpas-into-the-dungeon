@@ -94,6 +94,13 @@ keeps overlay panning, viewport changes, and terminal resizing outside the
 discovery lifecycle and prevents exploring the world by requesting distant
 windows.
 
+Projection failures, including an invalid or unreadable remembered chunk, return
+`map_rejected` without changing the installed state, discovery, cache, dirty flag
+or last-save timestamp. Detailed causes stay in the server log. After the cause
+is repaired, the same connection can retry. A successful map response installs
+only its refreshed chunk cache; response or rejection write failures still end
+the connection. Requests beyond configured dimensions retain `invalid_map_window`.
+
 ## Client overlay
 
 The client derives the requested overlay size using the responsive layout in

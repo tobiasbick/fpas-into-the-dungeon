@@ -1,0 +1,111 @@
+// Shared client and server command-line parsing and transient endpoint overrides.
+unit Dungeon.RuntimeData.Startup;
+
+uses Dungeon.RuntimeData as RuntimeData, Std.Cli as Cli;
+
+// Overrides for one run; omitted values retain persisted settings. Server flags are absent on clients.
+public type StartupOptions = record
+  public DataRoot: option of string := None;
+  public Host: option of string := None;
+  public Port: option of integer := None;
+  public WorldId: option of string := None;
+  public Console: boolean := false;
+end record;
+
+// Help is a successful parse and must be handled before loading configuration or starting the app.
+public type StartupArguments = enum
+  Ready(Options: StartupOptions);
+  Help(Text: string);
+end enum;
+
+function Schema(ServerMode: boolean): Cli.Schema;
+begin
+  var Options := [Cli.OptionSpec(Name := 'data-dir', Help := 'Runtime data directory')];
+  if ServerMode then
+    Options.PushInPlace(Cli.OptionSpec(Name := 'world', Help := 'Preselect an existing world'));
+    Options.PushInPlace(
+      Cli.OptionSpec(Name := 'console', Kind := Cli.Kind.Bool, Help := 'Open the server dashboard')
+    );
+  end if;
+
+  return Cli.Schema(
+    ProgramName := if ServerMode then 'dungeon-server' else 'dungeon-client' end if,
+    Options := Options,
+    Positionals := [
+      Cli.PositionalSpec(Name := 'host', Required := false, Help := 'Override the configured host'),
+      Cli.PositionalSpec(
+        Name := 'port', Kind := Cli.Kind.Int, Required := false,
+        Help := 'Override the configured port (1 through 65535)'
+      )
+    ]
+  );
+end function;
+
+function TextOption(Values: dict of string to Cli.Value; Name: string): option of string;
+begin
+  case Values.Get(Name) of
+    when Some(Cli.Value.Text(const Text)):
+      return Some(Text);
+    when None:
+      return None;
+    when Some(_):
+      panic('startup schema requires a text value for ' + Name);
+  end case;
+end function;
+
+// Parses explicit tokens and validates the port before any runtime-directory or network side effect.
+// ServerMode enables only the server's --world and --console options; CLI errors remain recoverable.
+public function ParseArguments(Arguments: array of string; ServerMode: boolean): result of (StartupArguments, string);
+begin
+  case Cli.Parse(Arguments, Schema(ServerMode)) of
+    when Error(const Cause):
+      return Error(Cause.Message());
+    when Ok(Cli.Outcome.Help(const Text)):
+      return Ok(StartupArguments.Help(Text));
+    when Ok(Cli.Outcome.Parsed(const Values)):
+      var Options := StartupOptions(
+        DataRoot := TextOption(Values, 'data-dir'),
+        Host := TextOption(Values, 'host'),
+        WorldId := TextOption(Values, 'world')
+      );
+      case Values.Get('port') of
+        when Some(Cli.Value.Int(const Port)):
+          if (Port < 1) or (Port > 65535) then
+            return Error('port must be between 1 and 65535');
+          end if;
+
+          Options.Port := Some(Port);
+        when None:
+          null;
+        when Some(_):
+          panic('startup schema requires an integer port');
+      end case;
+
+      case Values.Get('console') of
+        when Some(Cli.Value.Bool(const Enabled)):
+          Options.Console := Enabled;
+        when None:
+          null;
+        when Some(_):
+          panic('startup schema requires a Boolean console flag');
+      end case;
+
+      return Ok(StartupArguments.Ready(Options));
+  end case;
+end function;
+
+// Applies already parsed overrides to validated persisted defaults without writing configuration.
+public function NetworkWithOverrides(Defaults: RuntimeData.NetworkConfig; Options: StartupOptions): RuntimeData.NetworkConfig;
+begin
+  return RuntimeData.NetworkConfig(
+    Host := case Options.Host of
+      when Some(const Host): Host;
+      when None: Defaults.Host;
+    end case,
+    Port := case Options.Port of
+      when Some(const Port): Port;
+      when None: Defaults.Port;
+    end case
+  );
+end function;
+end unit;

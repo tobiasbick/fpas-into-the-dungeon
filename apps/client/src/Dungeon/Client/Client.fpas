@@ -45,12 +45,22 @@ public function NewClientModel(
   Requests: channel of Protocol.ClientMessage;
   Events: channel of ConnectionEvent
 ): ClientModel;
+ensures (Created): (Created.ConnectionGeneration = 0)
+  and
+  (Created.ConnectionPhase = ClientConnectionPhase.Offline)
+  and
+  not Created.HasVisibleState;
 begin
   return Model.NewClientModel(Host, Port, ClientConfigPath, Preferences, Requests, Events);
 end function;
 
 // Applies a framework message and prepares size-dependent start artwork before rendering.
+// Caller-owned state keeps a valid generation and requested viewport; checks stay scalar per event.
 public function UpdateClient(State: ClientModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ClientModel;
+requires State.ConnectionGeneration >= 0;
+requires (State.RequestedWorldWidth > 0) and (State.RequestedWorldHeight > 0);
+ensures (Updated): Updated.ConnectionGeneration >= State.ConnectionGeneration;
+ensures (Updated): (Updated.RequestedWorldWidth > 0) and (Updated.RequestedWorldHeight > 0);
 begin
   return BackdropUnit.PrepareStartBackdrop(Ui.UpdateClient(State, Msg, Cmd));
 end function;
@@ -58,12 +68,32 @@ end function;
 // Applies an already scoped raw event and prepares size-dependent start artwork.
 // The production host uses UpdateConnectionEvent, which rejects stale attempt events.
 public function UpdateClientEvent(State: ClientModel; Value: ClientEvent; Cmd: Tui.TuiCmdOutput): ClientModel;
+requires State.ConnectionGeneration >= 0;
+ensures (Updated): Updated.ConnectionGeneration = State.ConnectionGeneration;
+ensures (Updated): if Value is ClientEvent.SaveCompleted then not Updated.Dirty
+  and
+  not Updated.Pending
+  else true
+  end if;
 begin
   return BackdropUnit.PrepareStartBackdrop(EventsUnit.UpdateClientEvent(State, Value, Cmd));
 end function;
 
 // Applies only events belonging to the current attempt, including after cancellation/reconnect.
 public function UpdateConnectionEvent(State: ClientModel; Value: ConnectionEvent; Cmd: Tui.TuiCmdOutput): ClientModel;
+requires State.ConnectionGeneration >= 0;
+ensures (Updated): Updated.ConnectionGeneration = State.ConnectionGeneration;
+ensures (Updated): if (State.ConnectionGeneration = 0)
+  or
+  (Value.Generation <> State.ConnectionGeneration) then (
+    Updated.ConnectionPhase = State.ConnectionPhase
+  )
+    and
+    (Updated.Pending = State.Pending)
+    and
+    (Updated.HasVisibleState = State.HasVisibleState)
+  else true
+  end if;
 begin
   Cmd.Set(Tui.TuiCmd.NoCommand);
   if (State.ConnectionGeneration = 0) or (Value.Generation <> State.ConnectionGeneration) then

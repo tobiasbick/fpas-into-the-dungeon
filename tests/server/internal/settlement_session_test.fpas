@@ -1,9 +1,9 @@
-// Proves finite settlement projection and atomic dialogue failure/retry behavior on a live socket.
+// Proves bounded settlement requests, finite projection and atomic dialogue retries on a live socket.
 program SettlementSessionTest;
 
 uses
   Dungeon.Settlements.Generation as Villages, Dungeon.Settlements.Sites as Sites, Dungeon.Areas as Areas, Dungeon.Quests.Model as QuestModel, Dungeon.Items as Items, Dungeon.World.Interiors as Interiors, Dungeon.Areas.Identities as Identities, Dungeon.Terrain.Entrances as Entrances, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue, Dungeon.Exploration as Exploration,
-  Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol,
+  Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients,
   Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport,
   Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection,
   Dungeon.Server.Session as SessionUnit, Dungeon.Test.SessionAssertions as Sessions,
@@ -83,6 +83,26 @@ begin
     LastSavedAt := 42, Finished := false,
     Viewport := SessionUnit.ViewportSize(Width := 23, Height := 15)
   );
+  // Untrusted deltas must reject before arithmetic, including values valid in JSON's integer range.
+  for Message: Protocol.ClientMessage in [
+    Protocol.ClientMessage.Move(-9223372036854775808, 0),
+    Protocol.ClientMessage.Move(0, -9223372036854775808),
+    Protocol.ClientMessage.Move(8000000000000000000, 8000000000000000000),
+    Protocol.ClientMessage.Move(2, 0)
+  ] do
+    discard Transport.WriteLine(Client, Clients.EncodeClient(Message), Token).Unwrap();
+    const Request := Transport.ReadLine(Transport.NewLineReader(Server), Token).Unwrap();
+    const Rejected := Handling.HandleSessionMessage(
+      Session, Clients.DecodeClient(Request.Line).Unwrap(), Server, Config, Token
+    ).Unwrap();
+    const Reply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+    Test.AssertTrue(
+      Servers.DecodeServer(Reply.Line).Unwrap() is Protocol.ServerMessage.Rejected('movement_rejected', 'movement must be one cardinal step')
+    );
+    Sessions.AssertUnchanged(Session, Rejected);
+  end for;
+
+  // A valid interaction on the same socket must still start the conversation after these rejections.
   Session := Handling.HandleSessionMessage(
     Session,
     Protocol.ClientMessage.Interact,

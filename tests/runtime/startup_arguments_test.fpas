@@ -1,0 +1,91 @@
+// Verifies shared startup overrides and real entrypoint help/errors before runtime side effects.
+program StartupArgumentsTest;
+
+uses Dungeon.RuntimeData as RuntimeData, Dungeon.RuntimeData.Startup as Startup, Std.Conv as Conv, Std.Fs as Fs, Std.Path as Paths, Std.Proc as Proc, Std.Test as Test, Std.Time as Time;
+
+function Options(Arguments: array of string; ServerMode: boolean): Startup.StartupOptions;
+begin
+  case Startup.ParseArguments(Arguments, ServerMode).Unwrap() of
+    when Startup.StartupArguments.Ready(const Value):
+      return Value;
+    when Startup.StartupArguments.Help(_):
+      panic('expected startup options');
+  end case;
+end function;
+
+begin
+  const Defaults := RuntimeData.NetworkConfig(Host := 'configured.example', Port := 4040);
+  for ServerMode: boolean in [false, true] do
+    const Empty := Options([], ServerMode);
+    Test.AssertTrue(Empty.DataRoot is None);
+    Test.AssertTrue(Empty.WorldId is None);
+    Test.AssertFalse(Empty.Console);
+    Test.AssertTrue(Startup.NetworkWithOverrides(Defaults, Empty) = Defaults);
+    const HostOnly := Options(['game.example'], ServerMode);
+    const HostNetwork := Startup.NetworkWithOverrides(Defaults, HostOnly);
+    Test.AssertEquals('game.example', HostNetwork.Host);
+    Test.AssertEquals(4040, HostNetwork.Port);
+    for Port: integer in [1, 65535] do
+      const Parsed := Options(
+        ['--data-dir', 'chosen-data', 'game.example', Conv.IntToStr(Port)],
+        ServerMode
+      );
+      Test.AssertTrue(Parsed.DataRoot = Some('chosen-data'));
+      const Network := Startup.NetworkWithOverrides(Defaults, Parsed);
+      Test.AssertEquals('game.example', Network.Host);
+      Test.AssertEquals(Port, Network.Port);
+    end for;
+
+    for Arguments: array of string in [
+      ['--data-dir'], ['--unknown'], ['--data-dir', 'one', '--data-dir', 'two'],
+      ['game.example', 'bad-port'], ['game.example', '0'], ['game.example', '65536'],
+      ['game.example', '4040', 'extra']
+    ] do
+      Test.AssertTrue(Startup.ParseArguments(Arguments, ServerMode) is Error(_));
+    end for;
+  end for;
+  const Server := Options(
+    ['game.example', '--world', 'chosen-world', '--console', '5050', '--data-dir=chosen-data'],
+    true
+  );
+  Test.AssertTrue(Server.WorldId = Some('chosen-world'));
+  Test.AssertTrue(Server.DataRoot = Some('chosen-data'));
+  Test.AssertTrue(Server.Console);
+  Test.AssertEquals(5050, Startup.NetworkWithOverrides(Defaults, Server).Port);
+  Test.AssertTrue(Startup.ParseArguments(['--world', 'chosen-world'], false) is Error(_));
+  Test.AssertTrue(Startup.ParseArguments(['--console'], false) is Error(_));
+  Test.AssertTrue(Startup.ParseArguments(['--console', '--console'], true) is Error(_));
+  // Locate the workspace from any test-runner working directory without embedding host paths.
+  var Workspace := Fs.CurrentDir().Unwrap();
+  while not Fs.IsFile(Paths.Join([Workspace, 'dungeon.fpasworkspace'])) do
+    const Parent := Paths.DirName(Workspace);
+    if Parent = Workspace then
+      panic('cannot find the game workspace');
+    end if;
+
+    Workspace := Parent;
+  end while;
+  const Root := Paths.Join([
+    Workspace, '.temp-data', 'startup-entrypoints-' + Conv.IntToStr(Time.TimestampMillis())
+  ]);
+  const Process := Proc.DefaultOptions() with WorkingDirectory := Some(Workspace); TimeoutMillis := Some(
+    30000
+  ); end with;
+
+  for Application: string in ['client', 'server'] do
+    const Project := Paths.Join(['apps', Application, Application + '.fpasprj']);
+    const Help := Proc.RunCaptureWithOptions(
+      'fpas', ['run', Project, '--', '--data-dir', Root, '--help'], Process
+    ).Unwrap();
+    Test.AssertEquals(0, Help.ExitCode);
+    Test.AssertTrue('Usage: dungeon-' + Application in Help.Stdout);
+    Test.AssertTrue('--data-dir' in Help.Stdout);
+    Test.AssertFalse(Fs.Exists(Root));
+    const Invalid := Proc.RunCaptureWithOptions(
+      'fpas', ['run', Project, '--', '--data-dir', Root, 'game.example', '65536'], Process
+    ).Unwrap();
+    Test.AssertTrue(Invalid.ExitCode <> 0);
+    Test.AssertTrue('port must be between 1 and 65535' in Invalid.Stderr);
+    Test.AssertFalse(Fs.Exists(Root));
+  end for;
+end.

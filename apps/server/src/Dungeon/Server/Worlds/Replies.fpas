@@ -1,7 +1,31 @@
 // Lifecycle rejections and installation of fully prepared game sessions after successful replies.
 unit Dungeon.Server.Worlds.Replies;
 
-uses Dungeon.Areas as Areas, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks;
+uses Dungeon.Areas as Areas, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit, Dungeon.Protocol as Protocol, Dungeon.Protocol.Transport as Transport, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks;
+
+// Candidate cache and complete bounded response; no session facts have been installed yet.
+type PreparedProjection = record
+  World: WorldUnit.WorldSession;
+  Line: string;
+end record;
+
+function PrepareProjection(
+  World: WorldUnit.WorldSession;
+  View: GameState.AreaView;
+  State: GameState.GameState;
+  Viewport: SessionUnit.ViewportSize
+): result of (PreparedProjection, string);
+begin
+  const Projection := try ProjectionUnit.ProjectSession(
+    World, View, State, Viewport, ProjectionUnit.NoTurnReport()
+  );
+  return Ok(
+    PreparedProjection(
+      World := Projection.World,
+      Line := try Replies.EncodeMessage(Protocol.ServerMessage.State(Projection.State))
+    )
+  );
+end function;
 
 // Rejects a lifecycle intention without changing installed facts; reply write errors propagate.
 public function RejectWorld(
@@ -18,7 +42,8 @@ begin
   return Ok(Session);
 end function;
 
-// Reveals, validates and projects a candidate before replacing the installed session.
+// Reveals, validates and prepares a bounded response before replacing the installed session.
+// Preparation rejects recoverably; an actual response or rejection write failure is fatal.
 public function InstallGame(
   Session: SessionUnit.ServerSession;
   World: WorldUnit.WorldSession;
@@ -29,6 +54,12 @@ public function InstallGame(
   Config: ConfigUnit.ServerConfig;
   Token: Tasks.CancellationToken
 ): result of (SessionUnit.ServerSession, string);
+ensures (Returned): case Returned of
+  when Ok(const Next): (Next.Viewport = Session.Viewport) and (Next.Finished = Session.Finished)
+    and
+    ((Next.LastSavedAt = Session.LastSavedAt) or (Next.LastSavedAt = 0));
+  when Error(_): true;
+end case;
 begin
   var Prepared: result of (GameState.GameState, string) := Error('Cannot prepare world');
   var View: GameState.AreaView := GameState.AreaView(Metadata := World.Metadata, Interior := None);
@@ -87,29 +118,29 @@ begin
       end;
   end case;
 
-  case ProjectionUnit.ProjectSession(
+  case PrepareProjection(
     World,
     View,
     Valid,
-    Session.Viewport,
-    ProjectionUnit.NoTurnReport()
+    Session.Viewport
   ) of
     when Error(const Reason):
       begin
+        Logging.LogServer(Config.Logs, 'error', Reason);
         return RejectWorld(
           Session,
           Config,
           ConnectionValue,
           'storage_error',
-          'Cannot prepare the selected world. Check storage access.',
+          'Cannot prepare the selected world.',
           Token
         );
       end;
     when Ok(const Projection):
       begin
-        const Sent: boolean := try Replies.SendMessage(
+        const Sent: boolean := try Transport.WriteLine(
           ConnectionValue,
-          Protocol.ServerMessage.State(Projection.State),
+          Projection.Line,
           Token
         );
         Logging.LogServer(Config.Logs, 'world', 'Playing world ' + World.Metadata.Id);

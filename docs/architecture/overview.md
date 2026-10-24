@@ -52,7 +52,8 @@ these projects.
   `Dungeon.Client.Ui` holds the TUI update and view entry points; its subunits
   own one concern each: `Backdrop` (responsive pre-game ASCII scenery),
   `Controls` (control and action identities), `Layout` (docking and viewports),
-  `Session` (connection and session lifecycle), `Worlds` (catalog, creation
+  `Session` (connection and session lifecycle), `Worlds` (catalog requests,
+  selection and creation updates) with `Worlds.View` (catalog, creation
   editor and discard confirmation),
   `Intentions` (queued player requests), `Dialogue` (modal frame and input),
   `Input` (keys and actions), `Events`
@@ -92,6 +93,12 @@ these projects.
   has a fixed maximum row count and reduces to the remaining panel height, with
   an explicit count of omitted carried names. Neither view mutates inventory
   to fit the terminal; identity and item rules remain authoritative.
+  The public client facade has contracts on caller-owned state: generations
+  are non-negative, UI updates never move them backwards, and network events
+  retain the current generation. Requested view sizes stay positive even before
+  the terminal size is known. Stale events preserve connection status and pending
+  intent; save acknowledgements clear dirty and pending flags. These checks read
+  scalar fields and do not traverse projections, inventory or map data.
 - `apps/server` owns the server program entry point and server lifetime.
   `Dungeon.Server` runs the handshake/message loop and validates listener
   configuration. `Listener` owns the bound listener and two persistent workers:
@@ -234,8 +241,10 @@ these projects.
   `ClientMessages` and `ServerMessages` encode and strictly decode whole
   messages; `Worlds` validates bounded world catalogs and selection predicates;
   `Transport` frames them as bounded lines.
-- `libs/persistence` currently owns the shared runtime path and configuration
-  interface. Authoritative world files are owned by `libs/world`.
+- `libs/persistence` owns the shared runtime path and configuration interface.
+  `Dungeon.RuntimeData.Startup` parses client/server arguments and applies transient
+  endpoint overrides before either entrypoint starts the application. Authoritative
+  world files are owned by `libs/world`.
 - `tools/world-preview` samples final terrain or one normalized generator field
   without loading a persistent world. `tools/persistence-bench` measures
   first-entry level creation and complete save and load for a chosen number of

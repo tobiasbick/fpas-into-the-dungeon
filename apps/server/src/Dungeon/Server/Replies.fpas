@@ -3,10 +3,21 @@ unit Dungeon.Server.Replies;
 
 uses Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
 
-// Encodes and sends one server message.
+// Encodes a complete response and checks its UTF-8 wire size before attempting any write.
+public function EncodeMessage(Message: Protocol.ServerMessage): result of (string, string);
+begin
+  const Line := ServerMessages.EncodeServer(Message);
+  if Utf8.Encode(Line).Length() > Protocol.MaximumLineBytes then
+    return Error(Transport.LineTooLongError);
+  end if;
+
+  return Ok(Line);
+end function;
+
+// Encodes and sends one bounded server message; write failures remain fatal to its caller.
 public function SendMessage(ConnectionValue: Net.Connection; Message: Protocol.ServerMessage; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  return Transport.WriteLine(ConnectionValue, ServerMessages.EncodeServer(Message), Token);
+  return Transport.WriteLine(ConnectionValue, try EncodeMessage(Message), Token);
 end function;
 
 // Sends a rejection with a stable code and a player-facing message.
@@ -49,14 +60,11 @@ begin
         Message := Protocol.ServerMessage.DialogueEnded(Projection.State, Candidate.Dirty);
     end case;
   end if;
-  const Line := ServerMessages.EncodeServer(Message);
-  if Utf8.Encode(Line).Length() > Protocol.MaximumLineBytes then
-    return Error(Transport.LineTooLongError);
-  end if;
 
   return Ok(
     PreparedReply(
-      Session := Candidate with World := Projection.World; end with, Line := Line
+      Session := Candidate with World := Projection.World; end with,
+      Line := try EncodeMessage(Message)
     )
   );
 end function;
@@ -136,6 +144,12 @@ public function ChangeViewport(
   Token: Tasks.CancellationToken;
   Logs: option of channel of Logging.ServerLogEvent
 ): result of (SessionUnit.ServerSession, string);
+ensures (Returned): case Returned of
+  when Ok(const Next): (Next.Dirty = Session.Dirty) and (Next.LastSavedAt = Session.LastSavedAt)
+    and
+    ((Next.Viewport = Viewport) or (Next.Viewport = Session.Viewport));
+  when Error(_): true;
+end case;
 begin
   return CommitPreparedReply(
     Session,
@@ -148,30 +162,16 @@ begin
   );
 end function;
 
-// Revealed candidate state and its projection, both built before anything is sent.
-type PreparedTransition = record
-  State: GameState.GameState;
-  Projection: ProjectionUnit.SessionProjection;
-end record;
-
-function PrepareTransition(Session: SessionUnit.ServerSession; Transition: Movement.AreaTransition): result of (PreparedTransition, string);
+function PrepareTransition(Session: SessionUnit.ServerSession; Transition: Movement.AreaTransition): result of (PreparedReply, string);
 begin
   const Revealed: GameState.GameState := try Exploration.RevealCurrentArea(
     Transition.View,
     Transition.State
   );
   const Valid: GameState.GameState := try GameState.ValidateGameState(Transition.View, Revealed);
-  return Ok(
-    PreparedTransition(
-      State := Valid,
-      Projection := try ProjectionUnit.ProjectSession(
-        Session.World,
-        Transition.View,
-        Valid,
-        Session.Viewport,
-        ProjectionUnit.NoTurnReport()
-      )
-    )
+  return PrepareProjection(
+    Session with State := Some(Valid); Interior := Transition.View.Interior; Dirty := true; end with,
+    ProjectionUnit.NoTurnReport(), false
   );
 end function;
 
@@ -182,30 +182,14 @@ public function CommitTransition(
   Session: SessionUnit.ServerSession;
   Transition: Movement.AreaTransition;
   ConnectionValue: Net.Connection;
-  Token: Tasks.CancellationToken
+  Token: Tasks.CancellationToken;
+  Logs: option of channel of Logging.ServerLogEvent
 ): result of (SessionUnit.ServerSession, string);
 begin
-  case PrepareTransition(Session, Transition) of
-    when Ok(const Prepared):
-      begin
-        const Sent: boolean := try SendMessage(
-          ConnectionValue,
-          Protocol.ServerMessage.State(Prepared.Projection.State),
-          Token
-        );
-        var Next: SessionUnit.ServerSession := Session;
-        Next.State := Some(Prepared.State);
-        Next.Dirty := true;
-        Next.Interior := Transition.View.Interior;
-        Next.World := Prepared.Projection.World;
-        return Ok(Next);
-      end;
-    when Error(const Reason):
-      begin
-        const Sent: boolean := try Reject(ConnectionValue, 'interaction_rejected', Reason, Token);
-        return Ok(Session);
-      end;
-  end case;
+  return CommitPreparedReply(
+    Session, PrepareTransition(Session, Transition), 'interaction_rejected',
+    ConnectionValue, Token, Logs
+  );
 end function;
 
 // Joins one turn's messages into the bounded defeat summary.

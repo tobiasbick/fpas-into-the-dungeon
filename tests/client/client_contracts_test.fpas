@@ -1,0 +1,43 @@
+// Verifies the actual client boundary rejects corrupt caller state from source and compiled consumers.
+program ClientContractsTest;
+
+uses Std.Fs as Fs, Std.Path as Paths, Std.Proc as Proc, Std.Test as Test;
+
+begin
+  var Workspace := Fs.CurrentDir().Unwrap();
+  while not Fs.IsFile(Paths.Join([Workspace, 'dungeon.fpasworkspace'])) do
+    const Parent := Paths.DirName(Workspace);
+    if Parent = Workspace then
+      panic('cannot find the game workspace');
+    end if;
+
+    Workspace := Parent;
+  end while;
+  const Compiler := Proc.CurrentExecutable().Unwrap();
+  const Options := Proc.DefaultOptions() with WorkingDirectory := Some(Workspace); TimeoutMillis := Some(
+    30000
+  ); end with;
+  const Directory := Paths.Join(['tests', 'client', 'contracts']);
+  const Project := Paths.Join([Directory, 'client-contracts.fpasprj']);
+  const Build := Proc.RunCaptureWithOptions(Compiler, ['build', Project], Options).Unwrap();
+  if Build.ExitCode <> 0 then
+    Test.Fail(Build.Stderr);
+  end if;
+
+  for Target: string in [Project, Paths.Join([Directory, 'dungeon-client-contract-caller.fpascp'])] do
+    for Scenario: string in ['valid', 'invalid-generation', 'invalid-viewport'] do
+      const Outcome := Proc.RunCaptureWithOptions(
+        Compiler, ['run', Target, '--', Scenario], Options
+      ).Unwrap();
+      if Scenario = 'valid' then
+        Test.AssertEquals(0, Outcome.ExitCode);
+        Test.AssertEquals('completed', Outcome.Stdout.Trim());
+      else
+        Test.AssertTrue(Outcome.ExitCode <> 0);
+        Test.AssertTrue('FP5010' in Outcome.Stderr);
+        Test.AssertTrue('Dungeon.Client.UpdateClient' in Outcome.Stderr);
+        Test.AssertFalse('completed' in Outcome.Stdout);
+      end if;
+    end for;
+  end for;
+end.
