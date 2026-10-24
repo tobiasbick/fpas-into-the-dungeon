@@ -58,10 +58,13 @@ to frequently called helpers.
 
 ### Motivation
 
-`requires` and `ensures` currently execute in every build mode. Their cost in
-real client/server workloads has not been measured. We need to compare the same
-program with and without contract execution and choose whether to include that
-work in a deployed build.
+`requires` and `ensures` currently execute in every build mode. Initial
+[application-boundary measurements](bench/contracts.md) found small absolute
+client costs and server differences within timing noise. They required separate
+source copies because the CLI cannot disable contracts. We need to compare the
+same program with and without contract execution and choose whether to include
+that work in a deployed build. Full interactive workloads and deeper contracts
+still need measurement.
 
 ### Goal
 
