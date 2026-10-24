@@ -1,7 +1,7 @@
 # Generated settlements: DAP acceptance
 
-Status: DAP gameplay checks passed on 2026-10-24. User acceptance and merge
-remain pending.
+Status: **accepted by the user on 2026-10-24**, including the server-console
+presentation. DAP gameplay checks passed on the same date.
 
 The [FPAS controller](../../tools/dap-acceptance/README.md) owns a normal server
 and the real client launched through DAP. It uses terminal keyboard events and
@@ -86,8 +86,8 @@ Local raw evidence is retained under `.temp-data/dap-acceptance-25-1/`: complete
 commands, accepted travel coordinates, client snapshots and terminal output.
 It also includes the completed save, reward entries and fresh-meeting snapshots.
 The server console's presentation is covered by automated tests; this controller
-runs the server without its console UI, so this run does not sign off its visual
-presentation.
+runs the server without its console UI. Its visual presentation is covered by
+the user's final acceptance on 2026-10-24, separately from this headless run.
 
 ## DAP runtime follow-up
 

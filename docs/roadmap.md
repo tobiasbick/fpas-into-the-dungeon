@@ -693,9 +693,8 @@ Settlements, NPCs, deterministic quests, an economy, time, and weather follow
 the vertical slice in `DUNGEON_RPG_IDEAS.md`: enter a settlement, talk to an
 NPC, take a solvable quest into a dungeon, and return to a character that
 remembers the outcome. Every substage is deterministic and server-owned and does
-not depend on LLM integration (stage 16). Stages 15a and 15b are accepted;
-15c is implemented, verified and awaiting user acceptance. Later substages give an ordering direction and are planned when
-they become next.
+not depend on LLM integration (stage 16). Stages 15a, 15b and 15c are accepted.
+Later substages give an ordering direction and are planned when they become next.
 
 ### 15a. Home settlement and Mara — DONE
 
@@ -754,23 +753,23 @@ programs, passes **154/154 tests** and all 21 project checks. Stored formats and
 the client world-selection flow are unchanged. See the
 [console guide](product/server-console.md#deleting-worlds).
 
-### 15c. Generated settlements — READY FOR ACCEPTANCE
+### 15c. Generated settlements — DONE
 
-The [implementation plan](plans/15c-generated-settlements.md) was prepared on
-2026-10-18. The user confirmed occasional small villages (about 23 by 15 through
-31 by 21 fields), residents/guards/healers with deterministic dialogue and free
-healing, and closed houses until building interiors are planned separately.
-All nine implementation checkpoints are complete. Verification on 2026-10-18
-passes formatting, all 21 project checks and **159/159 test programs**.
-User acceptance remains pending.
+The user accepted 15c on 2026-10-24, including the server-console presentation.
+All nine implementation checkpoints are complete, and the complete workspace
+suite passes **161/161 test programs**. The accepted implementation plan is
+removed; the [acceptance report](acceptance/generated-settlements-dap.md) records
+the real-client play and final verification.
+
+Occasional small villages, about 23 by 15 through 31 by 21 fields, contain
+residents, guards and healers with deterministic dialogue and free healing.
+Houses stay closed until building interiors are planned separately.
 
 Hearthmoor, Mara and the compass quest remain the authored starting point.
 Additional villages spread across the outdoor world with stable gate/area/NPC
 identities and immutable stored names, layouts and placements. NPC meeting
 state and discovery belong to explicit saves; revisits and Continue reuse the
-same definitions. The plan separates generation, storage, generic NPC dialogue
-and entry, with nine ordered implementation checkpoints and a real TCP route
-through two villages and a listener restart.
+same definitions.
 
 Current versions are generator 11, settlement format 1, savegame 13 and protocol
 19; world format 4, dungeon level format 4 and runtime configuration remain.
