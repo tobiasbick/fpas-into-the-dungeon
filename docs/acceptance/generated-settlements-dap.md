@@ -87,5 +87,25 @@ commands, accepted travel coordinates, client snapshots and terminal output.
 It also includes the completed save, reward entries and fresh-meeting snapshots.
 The server console's presentation is covered by automated tests; this controller
 runs the server without its console UI, so this run does not sign off its visual
-presentation. Sustained DAP execution remains slow; the FPAS dogfooding gap
-records that observation separately from the passing gameplay checks.
+presentation.
+
+## DAP runtime follow-up
+
+On 2026-10-24, FPAS root publication was grouped across bounded debugger execution
+without changing single-instruction scheduling or breakpoint checks. Against the
+same compiled client and fresh copies of the seed-25, region-1 spawn save, three
+alternating runs reduce the median for eight confirmed westward steps from
+17905 ms to 1521 ms. A separate 64-step packet completes in 9219 ms and reaches
+`(10848,-10144)` with health 20. The virtual terminal is 4 by 4; startup is excluded
+and protocol/inspection overhead is included.
+
+FPAS was rebuilt with `dist.ps1`, and each comparison restarted the owned server
+and client. These checks confirm the runtime improvement; the complete village
+and quest route above was not repeated for this follow-up. Raw timing, command
+and state evidence remains under `.temp-data/dap-performance-before-*` and
+`.temp-data/dap-performance-after-*`. The FPAS benchmark report documents the
+fixed image, samples, reproduction procedure and remaining debug-target profiling
+gap in `docs/bench/debugger-runtime.md` of the Functional Pascal repository.
+The final PATH distribution matches the release binary by SHA-256, passes all
+161 game test programs and completes another eight-step DAP smoke check with
+normal shutdown of both owned processes.
