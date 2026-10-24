@@ -1,0 +1,466 @@
+// Drives the real client through DAP keys; command files allow supervised acceptance play.
+program DungeonDapAcceptance;
+
+uses Acceptance.Dap as Dap, Std.Args as Args, Std.Console as Console, Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as Fields, Std.Net.Utf8 as Utf8, Std.Proc as Proc, Std.Time as Time;
+
+procedure DrainServer(Server: Proc.Process; Directory: string);
+begin
+  for Stderr: boolean in [false, true] do
+    const Chunk := if Stderr then Proc.ReadStderr(Server, 65536)
+      else Proc.ReadStdout(Server, 65536)
+      end if;
+    case Chunk.Unwrap() of
+      when Some(const Bytes):
+        if not Bytes.IsEmpty() then
+          const Suffix := if Stderr then '.stderr' else '.stdout' end if;
+          discard Fs.WriteBytes(
+            Directory + '/server-' + Conv.IntToStr(Time.TimestampMillis()) + Suffix,
+            Bytes
+          ).Unwrap();
+        end if;
+      when None:
+        null;
+    end case;
+  end for;
+end procedure;
+
+function StartServer(Root: string; Directory: string): Proc.Process;
+begin
+  const Child := Proc.Start(
+    'fpas',
+    ['run', 'apps/server/server.fpasprj', '--', '--data-dir', Root, '127.0.0.1', '44661'],
+    Proc.DefaultStartOptions()
+  ).Unwrap();
+  var Output: array of integer := [];
+  const Deadline := Time.MonotonicMillis() + 60000;
+  while Time.MonotonicMillis() < Deadline do
+    case Proc.ReadStdout(Child, 65536).Unwrap() of
+      when Some(const Bytes):
+        Output := Output.Concat(Bytes);
+        discard Fs.WriteBytes(Directory + '/server-start.stdout', Output).Unwrap();
+        case Utf8.Decode(Output) of
+          when Ok(const Text):
+            if 'Listening on port 44661' in Text then
+              return Child;
+            end if;
+          when Error(_):
+            null;
+        end case;
+      when None:
+        null;
+    end case;
+
+    case Proc.ReadStderr(Child, 65536).Unwrap() of
+      when Some(const Bytes):
+        if not Bytes.IsEmpty() then
+          discard Fs.WriteBytes(
+            Directory + '/server-start-' + Conv.IntToStr(Time.TimestampMillis()) + '.stderr', Bytes
+          ).Unwrap();
+        end if;
+      when None:
+        null;
+    end case;
+
+    if Proc.TryWait(Child).Unwrap() is Some(_) then
+      panic('server exited before listening; inspect server startup logs');
+    end if;
+
+    if Output.Length() > 1048576 then
+      panic('server startup log exceeded 1 MiB');
+    end if;
+
+    Time.Sleep(10);
+  end while;
+
+  panic('server did not begin listening within sixty seconds');
+end function;
+
+function StartClient(Root: string; Log: string): Dap.Session;
+begin
+  var State := Dap.Session(
+    Child := Proc.Start(
+      'fpas',
+      [
+        'debug',
+        'apps/client/client.fpasprj',
+        '--protocol',
+        'dap',
+        '--output-limit', '16777216', '--instruction-limit', '1000000000000',
+        '--',
+        '--data-dir',
+        Root,
+        '127.0.0.1',
+        '44661'
+      ],
+      Proc.DefaultStartOptions()
+    ).Unwrap(),
+    TerminalPath := Log, Buffer := []
+  );
+  discard Dap.Request(var State, 'initialize', [:]);
+  discard Dap.Request(var State, 'launch', ['stopOnEntry': Json.JsonValue.Bool(false)]);
+  discard Dap.Request(
+    var State,
+    'fpas/terminalInput',
+    [
+      'events': Json.JsonValue.ArrayValue([
+        Json.JsonValue.Object([
+          'kind': Json.JsonValue.String('resize'),
+          'width': Dap.Number(4),
+          'height': Dap.Number(4)
+        ])
+      ])
+    ]
+  );
+  const Breakpoints := Dap.Request(
+    var State,
+    'setFunctionBreakpoints',
+    [
+      'breakpoints': Json.JsonValue.ArrayValue([
+        Json.JsonValue.Object(['name': Json.JsonValue.String('Dungeon.Client.ViewClient')])
+      ])
+    ]
+  );
+  discard Fs.WriteText(
+    Log + '.breakpoints.json',
+    Json.Stringify(Json.JsonValue.Object(Breakpoints))
+  ).Unwrap();
+  discard Dap.Request(var State, 'configurationDone', [:]);
+  Dap.WaitStop(var State);
+  var Initial := Dap.Snapshot(var State);
+  while Dap.Value(Initial, 'ViewportWidth') <> '4' do
+    Dap.Resume(var State);
+    Initial := Dap.Snapshot(var State);
+  end while;
+
+  return State;
+end function;
+
+function Settle(var State: Dap.Session): dict of string to Json.JsonValue;
+begin
+  var View := Dap.Snapshot(var State);
+  const Deadline := Time.MonotonicMillis() + 15000;
+  while (Dap.Value(View, 'Pending') = 'true')
+    or
+    (Dap.Value(View, 'ConnectionPhase') = '1') or (Dap.Value(View, 'ViewportWidth') = '0') do
+    if Time.MonotonicMillis() >= Deadline then
+      panic('client did not settle');
+    end if;
+
+    Dap.Resume(var State);
+    View := Dap.Snapshot(var State);
+  end while;
+
+  return View;
+end function;
+
+function Input(var State: Dap.Session; Event: Json.JsonValue): dict of string to Json.JsonValue;
+begin
+  // Ctrl+G is unbound in this game and its editors. Routing it proves that earlier
+  // framework messages were consumed; its no-op update supplies the observed view.
+  const Bound := Dap.Request(
+    var State, 'setFunctionBreakpoints', [
+      'breakpoints': Json.JsonValue.ArrayValue([
+        Json.JsonValue.Object([
+          'name': Json.JsonValue.String('Std.Tui.Runtime.Routing.Key.TuiRouteKey'),
+          'condition': Json.JsonValue.String('Key.ctrl and (Key.ch = ''g'')')
+        ])
+      ])
+    ]
+  );
+  if not Fields.BooleanField(
+    Dap.Object(Fields.ArrayField(Bound, 'breakpoints').Unwrap()[0]),
+    'verified'
+  ).Unwrap()
+  then
+    panic('terminal input marker breakpoint was not verified');
+  end if;
+  const Marker := Json.JsonValue.Object([
+    'kind': Json.JsonValue.String('key'), 'key': Json.JsonValue.String('Character'),
+    'text': Json.JsonValue.String('g'), 'ctrl': Json.JsonValue.Bool(true)
+  ]);
+  discard Dap.Request(
+    var State,
+    'fpas/terminalInput',
+    ['events': Json.JsonValue.ArrayValue([Event, Marker])]
+  );
+  Dap.Resume(var State);
+  discard Dap.Request(
+    var State, 'setFunctionBreakpoints', [
+      'breakpoints': Json.JsonValue.ArrayValue([
+        Json.JsonValue.Object(['name': Json.JsonValue.String('Dungeon.Client.ViewClient')])
+      ])
+    ]
+  );
+  Dap.Resume(var State);
+  return Settle(var State);
+end function;
+
+function Key(var State: Dap.Session; Kind: string; Text: string; Ctrl: boolean): dict of string to Json.JsonValue;
+begin
+  return Input(
+    var State, Json.JsonValue.Object([
+      'kind': Json.JsonValue.String('key'), 'key': Json.JsonValue.String(Kind),
+      'text': Json.JsonValue.String(Text), 'ctrl': Json.JsonValue.Bool(Ctrl)
+    ])
+  );
+end function;
+
+function Focus(var State: Dap.Session; Current: dict of string to Json.JsonValue; Control: string): dict of string to Json.JsonValue;
+begin
+  var View := Current;
+  for I: integer := 0 to 25 do
+    if Dap.Value(View, 'FocusedControl') = Control then
+      return View;
+    end if;
+
+    View := Key(var State, 'Tab', '', false);
+  end for;
+
+  discard Fs.WriteText(
+    State.TerminalPath + '.focus.json', Json.Stringify(Json.JsonValue.Object(View))
+  ).Unwrap();
+  panic('control is not available: ' + Control + '; status=' + Dap.Value(View, 'Status'));
+end function;
+
+function Batch(var State: Dap.Session; Text: string; Count: integer): dict of string to Json.JsonValue;
+requires Count > 0;
+requires Count <= 64;
+begin
+  const Lines := Fs.ReadText('apps/client/src/Dungeon/Client/Ui/Input.fpas').Unwrap().Split(#10);
+  var MarkerLine := 0;
+  for I: integer := 0 to Lines.Length() - 1 do
+    if Lines[I].Trim() = 'Next.FocusedControl := Controls.ResumeControlId;' then
+      if MarkerLine <> 0 then
+        panic('menu marker source point is ambiguous');
+      end if;
+
+      MarkerLine := I + 1;
+    end if;
+  end for;
+
+  if MarkerLine = 0 then
+    panic('menu marker source point is missing');
+  end if;
+  const MarkerSource := Json.JsonValue.Object([
+    'path': Json.JsonValue.String(State.ClientSourceDirectory + 'Ui/Input.fpas')
+  ]);
+  discard Dap.Request(
+    var State,
+    'setFunctionBreakpoints',
+    ['breakpoints': Json.JsonValue.ArrayValue([])]
+  );
+  const Bound := Dap.Request(
+    var State, 'setBreakpoints', [
+      'source': MarkerSource,
+      'breakpoints': Json.JsonValue.ArrayValue([
+        Json.JsonValue.Object(['line': Dap.Number(MarkerLine)])
+      ])
+    ]
+  );
+  if not Fields.BooleanField(
+    Dap.Object(Fields.ArrayField(Bound, 'breakpoints').Unwrap()[0]),
+    'verified'
+  ).Unwrap()
+  then
+    panic('menu marker source breakpoint was not verified');
+  end if;
+  const Event := Json.JsonValue.Object([
+    'kind': Json.JsonValue.String('key'),
+    'key': Json.JsonValue.String('Character'),
+    'text': Json.JsonValue.String(Text)
+  ]);
+  const Marker := Json.JsonValue.Object([
+    'kind': Json.JsonValue.String('key'),
+    'key': Json.JsonValue.String('Character'),
+    'text': Json.JsonValue.String('p'),
+    'ctrl': Json.JsonValue.Bool(true)
+  ]);
+  discard Dap.Request(
+    var State,
+    'fpas/terminalInput',
+    ['events': Json.JsonValue.ArrayValue(array.Fill(Event, Count).Concat([Marker]))]
+  );
+  Dap.Resume(var State);
+  discard Dap.Request(
+    var State,
+    'setBreakpoints',
+    ['source': MarkerSource, 'breakpoints': Json.JsonValue.ArrayValue([])]
+  );
+  discard Dap.Request(
+    var State,
+    'setFunctionBreakpoints',
+    [
+      'breakpoints': Json.JsonValue.ArrayValue([
+        Json.JsonValue.Object(['name': Json.JsonValue.String('Dungeon.Client.ViewClient')])
+      ])
+    ]
+  );
+  Dap.Resume(var State);
+  var View := Settle(var State);
+  if Dap.Value(View, 'Overlay') = '3' then
+    View := Key(var State, 'Character', 'p', true);
+  end if;
+
+  return View;
+end function;
+
+begin
+  const Directory := Args.ParamStr(0);
+  const Root := Directory + '/game';
+  discard Fs.CreateDirAll(Directory).Unwrap();
+  var Server := StartServer(Root, Directory);
+  var Client := StartClient(Root, Directory + '/terminal.ansi');
+  var View := Settle(var Client);
+  discard Fs.WriteText(
+    Directory + '/state.json',
+    Json.Stringify(Json.JsonValue.Object(View))
+  ).Unwrap();
+  var LastId := 0;
+  if Fs.Exists(Directory + '/command.json') then
+    LastId := Fields.IntegerField(
+      Fields.ParseObject(Fs.ReadText(Directory + '/command.json').Unwrap()).Unwrap(),
+      'id'
+    ).Unwrap();
+  end if;
+
+  Console.WriteLn('DAP controller ready');
+  var Running := true;
+  while Running do
+    if Fs.Exists(Directory + '/command.json') then
+      const Command := Fields.ParseObject(
+        Fs.ReadText(Directory + '/command.json').Unwrap()
+      ).Unwrap();
+      const Id := Fields.IntegerField(Command, 'id').Unwrap();
+      if Id > LastId then
+        const Operation := Fields.StringField(Command, 'op').Unwrap();
+        case Operation of
+          when 'continue':
+            View := Key(var Client, 'Enter', '', false);
+            View := Focus(var Client, View, '40');
+            View := Key(var Client, 'Enter', '', false);
+            View := Focus(var Client, View, '5');
+            View := Key(var Client, 'Enter', '', false);
+          when 'save':
+            View := Key(var Client, 'Character', 'p', true);
+            View := Focus(var Client, View, '14');
+            View := Key(var Client, 'Enter', '', false);
+            if Dap.Value(View, 'Overlay') = '4' then
+              View := Key(var Client, 'Enter', '', false);
+            end if;
+          when 'new-world':
+            View := Key(var Client, 'Enter', '', false);
+            View := Focus(var Client, View, '41');
+            View := Key(var Client, 'Enter', '', false);
+            View := Focus(var Client, View, '42');
+            View := Key(var Client, 'Backspace', '', true);
+            View := Key(var Client, 'Character', '2', false);
+            View := Key(var Client, 'Character', '5', false);
+            View := Focus(var Client, View, '43');
+            View := Key(var Client, 'Backspace', '', true);
+            View := Key(var Client, 'Character', '1', false);
+            if (Dap.Value(View, 'SeedText') <> '''25''')
+              or
+              (Dap.Value(View, 'RegionText') <> '''1''')
+            then
+              panic('world editor did not accept seed 25 and region size 1');
+            end if;
+
+            View := Focus(var Client, View, '44');
+            View := Key(var Client, 'Enter', '', false);
+          when 'key':
+            View := Key(
+              var Client,
+              Fields.StringField(Command, 'key').Unwrap(),
+              Fields.StringField(Command, 'text').Unwrap(),
+              Fields.BooleanField(Command, 'ctrl').Unwrap()
+            );
+          when 'batch':
+            const Count := Fields.IntegerField(Command, 'count').Unwrap();
+            if (Count < 1) or (Count > 64) then
+              panic('batch count must be in 1..64');
+            end if;
+
+            if (Dap.Value(View, 'ActiveDialogue') <> 'None') or (Dap.Value(View, 'Screen') <> '1')
+              or
+              (Dap.Value(View, 'Overlay') <> '0') or (Dap.Value(View, 'View') <> '0')
+            then
+              panic('movement packets require an unobstructed map view');
+            end if;
+
+            View := Batch(var Client, Fields.StringField(Command, 'text').Unwrap(), Count);
+          when 'focus':
+            View := Focus(var Client, View, Fields.StringField(Command, 'control').Unwrap());
+          when 'resize':
+            View := Input(
+              var Client, Json.JsonValue.Object([
+                'kind': Json.JsonValue.String('resize'),
+                'width': Fields.Field(Command, 'width').Unwrap(),
+                'height': Fields.Field(Command, 'height').Unwrap()
+              ])
+            );
+          when 'variables':
+            const Expanded := Dap.Request(
+              var Client,
+              'variables',
+              ['variablesReference': Fields.Field(Command, 'reference').Unwrap()]
+            );
+            discard Fs.WriteText(
+              Directory + '/variables.json',
+              Json.Stringify(Json.JsonValue.Object(Expanded))
+            ).Unwrap();
+          when 'restart':
+            discard Proc.Close(Client.Child).Unwrap();
+            discard Proc.Close(Server).Unwrap();
+            Server := StartServer(Root, Directory);
+            Client := StartClient(Root, Directory + '/terminal.ansi');
+            View := Settle(var Client);
+          when 'stop':
+            Running := false;
+          else
+            panic('unknown controller command');
+        end case;
+
+        LastId := Id;
+        discard Fs.WriteText(
+          Directory + '/state.json',
+          Json.Stringify(Json.JsonValue.Object(View))
+        ).Unwrap();
+        discard Fs.AppendText(
+          Directory + '/commands.jsonl',
+          Json.Stringify(Json.JsonValue.Object(Command)) + #10
+        ).Unwrap();
+        Console.WriteLn('command ', Id, ' complete');
+        Console.WriteLn(
+          'screen=',
+          Dap.Value(View, 'Screen'),
+          ' phase=',
+          Dap.Value(View, 'ConnectionPhase'),
+          ' focus=',
+          Dap.Value(View, 'FocusedControl'),
+          ' overlay=',
+          Dap.Value(View, 'Overlay'),
+          ' position=',
+          Dap.Value(View, 'WorldX'),
+          ',',
+          Dap.Value(View, 'WorldY'),
+          ' hp=',
+          Dap.Value(View, 'Health'),
+          ' title=',
+          Dap.Value(View, 'PrimaryTitle'),
+          ' status=',
+          Dap.Value(View, 'Status'),
+          ' seed=',
+          Dap.Value(View, 'SeedText'),
+          ' region=',
+          Dap.Value(View, 'RegionText')
+        );
+      end if;
+    end if;
+
+    DrainServer(Server, Directory);
+    Time.Sleep(20);
+  end while;
+
+  discard Proc.Close(Client.Child).Unwrap();
+  discard Proc.Close(Server).Unwrap();
+end.

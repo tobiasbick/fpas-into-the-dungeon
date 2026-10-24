@@ -1,0 +1,109 @@
+// Publishes atomic command files and waits for the controller's completed-command journal.
+unit Acceptance.Commands;
+
+uses Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as Fields, Std.Conv as Conv, Std.Time as Time;
+
+// Reads the latest completed view-model snapshot without changing the game.
+public function Snapshot(Directory: string): dict of string to Json.JsonValue;
+begin
+  return Fields.ParseObject(Fs.ReadText(Directory + '/state.json').Unwrap()).Unwrap();
+end function;
+
+function CompletedId(Directory: string): integer;
+begin
+  const Path := Directory + '/commands.jsonl';
+  if not Fs.Exists(Path) then
+    return 0;
+  end if;
+  const Text := Fs.ReadText(Path).Unwrap();
+  if Text.IsEmpty() or not Text.EndsWith(#10) then
+    return 0;
+  end if;
+  const Lines := Text.Trim().Split(#10);
+  return Fields.IntegerField(Fields.ParseObject(Lines[Lines.Length() - 1]).Unwrap(), 'id').Unwrap();
+end function;
+
+// Reads the highest completed or abandoned command ID; an unused directory starts at zero.
+public function LastId(Directory: string): integer;
+begin
+  var Known := CompletedId(Directory);
+  if Fs.Exists(Directory + '/command.json') then
+    const Published := Fields.IntegerField(
+      Fields.ParseObject(Fs.ReadText(Directory + '/command.json').Unwrap()).Unwrap(), 'id'
+    ).Unwrap();
+    if Published > Known then
+      Known := Published;
+    end if;
+  end if;
+
+  return Known;
+end function;
+
+// Reads a debugger-rendered scalar from a captured view model.
+public function Value(View: dict of string to Json.JsonValue; Name: string): string;
+begin
+  return Fields.StringField(Fields.ObjectField(View, Name).Unwrap(), 'value').Unwrap();
+end function;
+
+// Publishes one command and returns the view model after its acknowledgement.
+public function Send(Directory: string; var Id: integer; Body: dict of string to Json.JsonValue): dict of string to Json.JsonValue;
+begin
+  Id := Id + 1;
+  var Members := Body;
+  Members['id'] := Json.JsonValue.Number(Conv.IntToReal(Id));
+  const Command := Json.JsonValue.Object(Members);
+  discard Fs.WriteText(Directory + '/next.json', Json.Stringify(Command)).Unwrap();
+  discard Fs.Rename(Directory + '/next.json', Directory + '/command.json').Unwrap();
+  const Deadline := Time.MonotonicMillis() + 300000;
+  while Time.MonotonicMillis() < Deadline do
+    if CompletedId(Directory) = Id then
+      return Snapshot(Directory);
+    end if;
+
+    Time.Sleep(10);
+  end while;
+
+  panic('controller command timed out');
+end function;
+
+// Expands one current-stop aggregate without evaluating or assigning game state.
+public function Expand(Directory: string; var Id: integer; Reference: Json.JsonValue): array of Json.JsonValue;
+begin
+  discard Send(
+    Directory,
+    var Id,
+    ['op': Json.JsonValue.String('variables'), 'reference': Reference]
+  );
+  const Reply := Fields.ParseObject(Fs.ReadText(Directory + '/variables.json').Unwrap()).Unwrap();
+  return Fields.ArrayField(Reply, 'variables').Unwrap();
+end function;
+
+// Sends one key through the real client and waits for its completed view.
+public function Key(Directory: string; var Id: integer; Kind: string; Text: string): dict of string to Json.JsonValue;
+begin
+  return Send(
+    Directory,
+    var Id,
+    [
+      'op': Json.JsonValue.String('key'),
+      'key': Json.JsonValue.String(Kind),
+      'text': Json.JsonValue.String(Text),
+      'ctrl': Json.JsonValue.Bool(false)
+    ]
+  );
+end function;
+
+// Sends a small cardinal movement packet, whose accepted distance must be checked by the caller.
+public function Batch(Directory: string; var Id: integer; Text: string; Count: integer): dict of string to Json.JsonValue;
+begin
+  return Send(
+    Directory,
+    var Id,
+    [
+      'op': Json.JsonValue.String('batch'),
+      'text': Json.JsonValue.String(Text),
+      'count': Json.JsonValue.Number(Conv.IntToReal(Count))
+    ]
+  );
+end function;
+end unit;

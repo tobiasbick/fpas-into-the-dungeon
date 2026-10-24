@@ -1,0 +1,193 @@
+// Sends one supervised command through the FPAS controller and prints the acknowledged state.
+program AcceptanceCommand;
+
+uses
+  Acceptance.Commands as Commands, Std.Args as Args, Std.Console as Console,
+  Std.Json as Json, Std.Json.Fields as Fields, Std.Conv as Conv, Std.Parse as Parse, Std.Fs as Fs;
+
+function ReadField(Values: array of Json.JsonValue; Name: string): dict of string to Json.JsonValue;
+begin
+  for Value: Json.JsonValue in Values do
+    case Value of
+      when Json.JsonValue.Object(const Item):
+        if Fields.StringField(Item, 'name').Unwrap() = Name then
+          return Item;
+        end if;
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+        panic('expected debugger field');
+    end case;
+  end for;
+
+  panic('missing debugger field: ' + Name);
+end function;
+
+function ReadDialogue(Directory: string; var Id: integer): array of Json.JsonValue;
+begin
+  const Last := Commands.Snapshot(Directory);
+  if Commands.Value(Last, 'ActiveDialogue') = 'None' then
+    panic('no active dialogue');
+  end if;
+  const OptionFields := Commands.Expand(
+    Directory, var Id,
+    Fields.ObjectField(Last, 'ActiveDialogue').Unwrap()['variablesReference']
+  );
+  case OptionFields[0] of
+    when Json.JsonValue.Object(const Payload):
+      const Frame := Commands.Expand(Directory, var Id, Payload['variablesReference']);
+      discard Fs.AppendText(
+        Directory + '/dialogues.jsonl',
+        Json.Stringify(Json.JsonValue.ArrayValue(Frame)) + #10
+      ).Unwrap();
+      return Frame;
+    when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+      panic('expected dialogue payload');
+  end case;
+end function;
+
+procedure Describe(View: dict of string to Json.JsonValue);
+begin
+  for Name: string in [
+    'View', 'WorldX', 'WorldY', 'PlayerX', 'PlayerY', 'FirstPersonFacing',
+    'Health', 'PrimaryTitle', 'PrimaryStatus', 'Status', 'Dirty', 'ActiveDialogue', 'Inventory',
+    'Character', 'Rows', 'InventorySelection', 'Journal'
+  ] do
+    const Field := Fields.ObjectField(View, Name).Unwrap();
+    Console.WriteLn(
+      Name,
+      ': ',
+      Commands.Value(View, Name),
+      ' ref=',
+      Fields.IntegerField(Field, 'variablesReference').Unwrap()
+    );
+  end for;
+end procedure;
+
+begin
+  const Directory := Args.ParamStr(0);
+  const Operation := Args.ParamStr(1);
+  var Id := Commands.LastId(Directory);
+  if Operation = 'state' then
+    Describe(Commands.Snapshot(Directory));
+  elsif Operation = 'dialogue' then
+    const Frame := ReadDialogue(Directory, var Id);
+    const Text := Fields.StringField(ReadField(Frame, 'Text'), 'value').Unwrap();
+    if Args.ParamCount() > 2 then
+      const Expected := case Args.ParamStr(2) of
+        when 'fresh': 'greets you';
+        when 'repeat': 'recognizes you';
+        when 'healed': 'feel whole again';
+        else Args.ParamStr(2);
+      end case;
+      if not (Expected in Text) then
+        panic('unexpected dialogue: ' + Text);
+      end if;
+    end if;
+
+    Console.WriteLn(Json.Stringify(Json.JsonValue.ArrayValue(Frame)));
+  elsif Operation = 'choice' then
+    const Frame := ReadDialogue(Directory, var Id);
+    const Choices := Commands.Expand(
+      Directory,
+      var Id,
+      ReadField(Frame, 'Choices')['variablesReference']
+    );
+    var Target := -1;
+    for I: integer := 0 to Choices.Length() - 1 do
+      case Choices[I] of
+        when Json.JsonValue.Object(const Entry):
+          const Details := Commands.Expand(Directory, var Id, Entry['variablesReference']);
+          const Display := Fields.StringField(ReadField(Details, 'Id'), 'value').Unwrap();
+          if Display.Slice(1, Display.Length() - 2) = Args.ParamStr(2) then
+            Target := I;
+            break;
+          end if;
+        when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+          panic('expected dialogue choice');
+      end case;
+    end for;
+
+    if Target < 0 then
+      panic('dialogue choice is not offered: ' + Args.ParamStr(2));
+    end if;
+    var Last := Commands.Snapshot(Directory);
+    for I: integer := 0 to Choices.Length() do
+      if Parse.Int(Commands.Value(Last, 'DialogueSelection')).Unwrap() = Target then
+        break;
+      end if;
+
+      Last := Commands.Key(Directory, var Id, 'Down', '');
+    end for;
+
+    if Parse.Int(Commands.Value(Last, 'DialogueSelection')).Unwrap() <> Target then
+      panic('dialogue selection did not settle');
+    end if;
+
+    Last := Commands.Key(Directory, var Id, 'Enter', '');
+    Describe(Last);
+  elsif Operation = 'hurt' then
+    var Last := Commands.Snapshot(Directory);
+    for Turn: integer := 1 to 40 do
+      const Health := Parse.Int(Commands.Value(Last, 'Health')).Unwrap();
+      if Health <= 0 then
+        panic('the player fell');
+      end if;
+
+      if Health <= 14 then
+        break;
+      end if;
+
+      Last := Commands.Key(Directory, var Id, 'Character', 'z');
+      Console.WriteLn('wait ', Turn, '; health=', Commands.Value(Last, 'Health'), '; command ', Id);
+    end for;
+
+    if (Parse.Int(Commands.Value(Last, 'Health')).Unwrap() <= 0)
+      or
+      (Parse.Int(Commands.Value(Last, 'Health')).Unwrap() > 14)
+    then
+      panic('no sufficient ordinary combat damage within forty waits');
+    end if;
+
+    Describe(Last);
+  elsif Operation = 'keys' then
+    var Last := Commands.Snapshot(Directory);
+    for Token: string in Args.ParamStr(2).Split(' ') do
+      if Token = '' then
+        continue;
+      end if;
+
+      Last := Commands.Key(
+        Directory, var Id,
+        if Token.Length() = 1 then 'Character' else Token end if,
+        if Token.Length() = 1 then Token else '' end if
+      );
+    end for;
+
+    Console.WriteLn(
+      'keys completed through command ', Id, '; health=', Commands.Value(Last, 'Health'),
+      ' status=', Commands.Value(Last, 'Status'), ' dialogue=',
+      Commands.Value(Last, 'ActiveDialogue')
+    );
+    Describe(Last);
+  else
+    var Body := ['op': Json.JsonValue.String(Operation)];
+    if Operation = 'key' then
+      Body['key'] := Json.JsonValue.String(Args.ParamStr(2));
+      Body['text'] := Json.JsonValue.String(
+        if Args.ParamCount() > 3 then Args.ParamStr(3) else '' end if
+      );
+      Body['ctrl'] := Json.JsonValue.Bool((Args.ParamCount() > 4) and (Args.ParamStr(4) = 'ctrl'));
+    elsif Operation = 'focus' then
+      Body['control'] := Json.JsonValue.String(Args.ParamStr(2));
+    elsif Operation = 'resize' then
+      Body['width'] := Json.JsonValue.Number(Conv.IntToReal(Parse.Int(Args.ParamStr(2)).Unwrap()));
+      Body['height'] := Json.JsonValue.Number(Conv.IntToReal(Parse.Int(Args.ParamStr(3)).Unwrap()));
+    elsif Operation = 'variables' then
+      Body['reference'] := Json.JsonValue.Number(
+        Conv.IntToReal(Parse.Int(Args.ParamStr(2)).Unwrap())
+      );
+    end if;
+    const View := Commands.Send(Directory, var Id, Body);
+    Console.WriteLn('command ', Id, ' completed');
+    Describe(View);
+  end if;
+end.

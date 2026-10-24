@@ -379,3 +379,10 @@ their shared model changes. Ask before changing this order.
   architecture/product documentation and the seed-25 running-client review
   route are ready. The user authorized commit and push before acceptance;
   this plan stays on the feature branch until user acceptance. Merging remains pending.
+- 2026-10-24: The [DAP gameplay acceptance](../acceptance/generated-settlements-dap.md)
+  passes with seed 25 and one-chunk regions through real client key events:
+  two villages, injury/healing, inside/outdoor Continue, fresh meetings after
+  Start over without replacing the save, and Mara's complete compass quest
+  across active, ready and completed restarts. The full suite passes 161/161.
+  Server-console presentation has automated coverage but was not visually
+  reviewed in this headless server run. User acceptance and merging remain pending.

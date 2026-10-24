@@ -1,0 +1,115 @@
+// Follows cardinal routes by counting server-acknowledged client positions after small key packets.
+program AcceptanceTravel;
+
+uses Acceptance.Commands as Commands, Std.Args as Args, Std.Console as Console, Std.Fs as Fs, Std.Json as Json, Std.Conv as Conv, Std.Math as Math, Std.Parse as Parse;
+
+begin
+  const Directory := Args.ParamStr(0);
+  var SaveCheckpoints := true;
+  var Reverse := false;
+  for I: integer := 3 to Args.ParamCount() - 1 do
+    case Args.ParamStr(I) of
+      when 'no-save':
+        SaveCheckpoints := false;
+      when 'reverse':
+        Reverse := true;
+      else
+        panic('unknown travel option');
+    end case;
+  end for;
+  var Parts := Args.ParamStr(1).Split(' ');
+  if Reverse then
+    var Reversed: array of string := [];
+    for I: integer := Parts.Length() - 1 downto 0 do
+      if Parts[I] = '' then
+        continue;
+      end if;
+      const Direction := case Parts[I][0] of
+        when 'N': 'S';
+        when 'S': 'N';
+        when 'E': 'W';
+        when 'W': 'E';
+        else '';
+      end case;
+      if Direction = '' then
+        panic('invalid cardinal route');
+      end if;
+
+      Reversed.PushInPlace(Direction + Parts[I].Slice(1, Parts[I].Length() - 1));
+    end for;
+
+    Parts := Reversed;
+  end if;
+  var Id := Parse.Int(Args.ParamStr(2)).Unwrap();
+  var View := Commands.Snapshot(Directory);
+  var UnsavedSteps := 0;
+  const RouteParts := Parts;
+  for Part: string in RouteParts do
+    if Part = '' then
+      continue;
+    end if;
+    const Text := case Part[0] of
+      when 'N': 'w';
+      when 'S': 's';
+      when 'E': 'd';
+      when 'W': 'a';
+      else '';
+    end case;
+    if Text = '' then
+      panic('invalid cardinal route');
+    end if;
+    var Remaining := Parse.Int(Part.Slice(1, Part.Length() - 1)).Unwrap();
+    if Remaining <= 0 then
+      panic('route distances must be positive');
+    end if;
+
+    while Remaining > 0 do
+      const BeforeX := Parse.Int(Commands.Value(View, 'WorldX')).Unwrap();
+      const BeforeY := Parse.Int(Commands.Value(View, 'WorldY')).Unwrap();
+      const Count := Math.Min(64, Remaining);
+      View := Commands.Batch(Directory, var Id, Text, Count);
+      const X := Parse.Int(Commands.Value(View, 'WorldX')).Unwrap();
+      const Y := Parse.Int(Commands.Value(View, 'WorldY')).Unwrap();
+      const Accepted := Math.Abs(X - BeforeX) + Math.Abs(Y - BeforeY);
+      if (Accepted = 0) or (Accepted > Count) then
+        panic('route blocked or unexpected movement');
+      end if;
+      const CorrectDirection := case Part[0] of
+        when 'N': (X = BeforeX) and (Y < BeforeY);
+        when 'S': (X = BeforeX) and (Y > BeforeY);
+        when 'E': (Y = BeforeY) and (X > BeforeX);
+        when 'W': (Y = BeforeY) and (X < BeforeX);
+        else false;
+      end case;
+      if not CorrectDirection then
+        panic('client moved in an unexpected direction');
+      end if;
+
+      Remaining := Remaining - Accepted;
+      Console.WriteLn(Part, ' remaining=', Remaining, ' at ', X, ',', Y, ' command=', Id);
+      discard Fs.AppendText(
+        Directory + '/travel.jsonl',
+        Json.Stringify(
+          Json.JsonValue.Object([
+            'id': Json.JsonValue.Number(Conv.IntToReal(Id)),
+            'requested': Json.JsonValue.Number(Conv.IntToReal(Count)),
+            'accepted': Json.JsonValue.Number(Conv.IntToReal(Accepted)),
+            'x': Json.JsonValue.Number(Conv.IntToReal(X)),
+            'y': Json.JsonValue.Number(Conv.IntToReal(Y))
+          ])
+        ) + #10
+      ).Unwrap();
+      UnsavedSteps := UnsavedSteps + Accepted;
+      if SaveCheckpoints and (UnsavedSteps >= 64) then
+        View := Commands.Send(Directory, var Id, ['op': Json.JsonValue.String('save')]);
+        UnsavedSteps := 0;
+      end if;
+    end while;
+  end for;
+
+  if SaveCheckpoints and (UnsavedSteps > 0) then
+    View := Commands.Send(Directory, var Id, ['op': Json.JsonValue.String('save')]);
+  end if;
+
+  Console.WriteLn('route completed; last command ', Id);
+end.

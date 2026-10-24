@@ -1,0 +1,212 @@
+// Plans finite-area paths from stored geometry and executes them only through client key events.
+program AcceptancePlanner;
+
+uses Acceptance.Commands as Commands, Dungeon.Coordinates as Coordinates, Dungeon.Interior as InteriorUnit, Dungeon.Test.Fixtures as Fixtures, Std.Args as Args, Std.Console as Console, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as Fields, Std.Parse as Parse;
+
+function Object(Value: Json.JsonValue): dict of string to Json.JsonValue;
+begin
+  case Value of
+    when Json.JsonValue.Object(const Members):
+      return Members;
+    when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+      panic('expected geometry object');
+  end case;
+end function;
+
+begin
+  const Directory := Args.ParamStr(0);
+  const Geometry := Fields.ParseObject(Fs.ReadText(Args.ParamStr(1)).Unwrap()).Unwrap();
+  var View := Commands.Snapshot(Directory);
+  const FirstPerson := Commands.Value(View, 'View') = '1';
+  const XField := if FirstPerson then 'PlayerX' else 'WorldX' end if;
+  const YField := if FirstPerson then 'PlayerY' else 'WorldY' end if;
+  const Position := Coordinates.InteriorPosition(
+    X := Parse.Int(Commands.Value(View, XField)).Unwrap(),
+    Y := Parse.Int(Commands.Value(View, YField)).Unwrap()
+  );
+  const Mode := Args.ParamStr(2);
+  var Target := Coordinates.InteriorPosition(X := 0, Y := 0);
+  if (Mode = 'npc') or (Mode = 'item') then
+    const Placement := Object(
+      Fields.ArrayField(
+        Geometry,
+        if Mode = 'npc' then 'npcs' else 'items' end if
+      ).Unwrap()[Parse.Int(Args.ParamStr(3)).Unwrap()]
+    );
+    const Point := if Mode = 'npc' then Object(Placement['position']) else Placement end if;
+    Target := Coordinates.InteriorPosition(
+      X := Fields.IntegerField(Point, 'x').Unwrap(), Y := Fields.IntegerField(Point, 'y').Unwrap()
+    );
+    if Mode = 'npc' then
+      for Offset: Coordinates.InteriorPosition in [
+        Coordinates.InteriorPosition(X := 0, Y := 1), Coordinates.InteriorPosition(X := 1, Y := 0),
+        Coordinates.InteriorPosition(X := -1, Y := 0),
+        Coordinates.InteriorPosition(X := 0, Y := -1)
+      ] do
+        const X := Target.X + Offset.X;
+        const Y := Target.Y + Offset.Y;
+        if (X < 0) or (Y < 0) or (X >= Fields.IntegerField(Geometry, 'width').Unwrap())
+          or
+          (Y >= Fields.IntegerField(Geometry, 'height').Unwrap())
+        then
+          continue;
+        end if;
+
+        case Fields.ArrayField(Geometry, 'rows').Unwrap()[Y] of
+          when Json.JsonValue.String(const Row):
+            if Row[X] = '.' then
+              Target := Coordinates.InteriorPosition(X := X, Y := Y);
+              break;
+            end if;
+          when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.ArrayValue(_), Json.JsonValue.Object(_):
+            panic('expected geometry row');
+        end case;
+      end for;
+    end if;
+  elsif (Mode = 'down') or (Mode = 'arrival') then
+    Target := Position;
+  else
+    Target := Coordinates.InteriorPosition(
+      X := Parse.Int(Mode).Unwrap(), Y := Parse.Int(Args.ParamStr(3)).Unwrap()
+    );
+  end if;
+  var FacingIndex := if FirstPerson then Parse.Int(
+    Commands.Value(View, 'FirstPersonFacing')
+  ).Unwrap()
+    else 0
+    end if;
+  const Facing := case FacingIndex of
+    when 0: Coordinates.FacingDirection.North;
+    when 1: Coordinates.FacingDirection.East;
+    when 2: Coordinates.FacingDirection.South;
+    else Coordinates.FacingDirection.West;
+  end case;
+  var Cells: array of InteriorUnit.InteriorCellKind := [];
+  for Value: Json.JsonValue in Fields.ArrayField(Geometry, 'rows').Unwrap() do
+    case Value of
+      when Json.JsonValue.String(const Row):
+        for I: integer := 0 to Row.Length() - 1 do
+          Cells.PushInPlace(InteriorUnit.InteriorCellFromCode(Row[I]).Unwrap());
+        end for;
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.ArrayValue(_), Json.JsonValue.Object(_):
+        panic('expected geometry row');
+    end case;
+  end for;
+  var Avoid: array of Coordinates.InteriorPosition := [];
+  if 'npcs' in Geometry then
+    for Value: Json.JsonValue in Fields.ArrayField(Geometry, 'npcs').Unwrap() do
+      const Point := Object(Object(Value)['position']);
+      Avoid.PushInPlace(
+        Coordinates.InteriorPosition(
+          X := Fields.IntegerField(Point, 'x').Unwrap(),
+          Y := Fields.IntegerField(Point, 'y').Unwrap()
+        )
+      );
+    end for;
+  end if;
+  const Map := InteriorUnit.InteriorMap(
+    AreaId := 'acceptance-plan',
+    DisplayName := 'Acceptance geometry',
+    Level := 0,
+    Depth := 1,
+    Width := Fields.IntegerField(Geometry, 'width').Unwrap(),
+    Height := Fields.IntegerField(Geometry, 'height').Unwrap(),
+    Cells := Cells,
+    Start := Position,
+    StartFacing := Facing,
+    Arrival := Position,
+    Items := [],
+    Hostiles := [],
+    Npcs := []
+  );
+  if Mode = 'down' then
+    Target := InteriorUnit.StairsDownPosition(Map).Unwrap();
+  elsif Mode = 'arrival' then
+    const Level := if 'level' in Geometry then Fields.IntegerField(Geometry, 'level').Unwrap()
+      else 0
+      end if;
+    Target := InteriorUnit.ArrivalFromCells(Cells, Map.Width, Level).Unwrap();
+  end if;
+  const Moves := Fixtures.TryRouteTo(
+    Map,
+    Coordinates.FirstPersonPose(Position := Position, Facing := Facing),
+    Target,
+    Avoid
+  ).Unwrap();
+  var Id := Parse.Int(Args.ParamStr(4)).Unwrap();
+  for Move: Fixtures.RouteMove in Moves do
+    case Move of
+      when Fixtures.RouteMove.RouteTurnLeft:
+        FacingIndex := (FacingIndex + 3) mod 4;
+        if FirstPerson then
+          View := Commands.Key(Directory, var Id, 'Character', 'q');
+        end if;
+      when Fixtures.RouteMove.RouteTurnRight:
+        FacingIndex := (FacingIndex + 1) mod 4;
+        if FirstPerson then
+          View := Commands.Key(Directory, var Id, 'Character', 'e');
+        end if;
+      when Fixtures.RouteMove.RouteForward:
+        const Text := if FirstPerson then 'w' else ['w', 'd', 's', 'a'][FacingIndex] end if;
+        const BeforeX := Commands.Value(View, XField);
+        const BeforeY := Commands.Value(View, YField);
+        View := Commands.Key(Directory, var Id, 'Character', Text);
+        if FirstPerson then
+          for Blow: integer := 1 to 80 do
+            if (Commands.Value(View, XField) <> BeforeX)
+              or
+              (Commands.Value(View, YField) <> BeforeY)
+            then
+              break;
+            end if;
+
+            if Parse.Int(Commands.Value(View, 'Health')).Unwrap() <= 10 then
+              panic('healing is needed before further automatic combat');
+            end if;
+
+            View := Commands.Key(Directory, var Id, 'Space', '');
+            Console.WriteLn('fight; health=', Commands.Value(View, 'Health'), '; command ', Id);
+            if Parse.Int(Commands.Value(View, 'Health')).Unwrap() <= 0 then
+              panic('the player fell while following the route');
+            end if;
+
+            View := Commands.Key(Directory, var Id, 'Character', Text);
+          end for;
+        end if;
+
+        if (Commands.Value(View, XField) = BeforeX) and (Commands.Value(View, YField) = BeforeY) then
+          panic('client movement stayed blocked');
+        end if;
+    end case;
+  end for;
+
+  if (Parse.Int(Commands.Value(View, XField)).Unwrap() <> Target.X)
+    or
+    (Parse.Int(Commands.Value(View, YField)).Unwrap() <> Target.Y)
+  then
+    panic('client did not reach the planned destination');
+  end if;
+
+  Console.WriteLn(
+    'arrived ',
+    Commands.Value(View, XField),
+    ',',
+    Commands.Value(View, YField),
+    '; last command ',
+    Id
+  );
+  if (Mode = 'npc') or (Mode = 'item') then
+    View := Commands.Key(Directory, var Id, 'Enter', '');
+    Console.WriteLn(
+      'interacted; health=', Commands.Value(View, 'Health'),
+      ' dialogue=', Commands.Value(View, 'ActiveDialogue'), ' inventory=',
+      Commands.Value(View, 'Inventory'),
+      '; last command ', Id
+    );
+    if Mode = 'npc' then
+      const Dialogue := Fields.ObjectField(View, 'ActiveDialogue').Unwrap();
+      const Expanded := Commands.Expand(Directory, var Id, Dialogue['variablesReference']);
+      Console.WriteLn(Json.Stringify(Json.JsonValue.ArrayValue(Expanded)));
+    end if;
+  end if;
+end.

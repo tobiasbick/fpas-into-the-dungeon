@@ -1,0 +1,236 @@
+// Exchanges byte-framed DAP messages with an owned debugger process.
+unit Acceptance.Dap;
+
+uses Std.Conv as Conv, Std.Fs as Fs, Std.Json as Json, Std.Json.Fields as Fields, Std.Net.Utf8 as Utf8, Std.Parse as Parse, Std.Proc as Proc, Std.Time as Time;
+
+// Owns the debugger, incomplete framing bytes and the last stop's thread identity.
+public type Session = record
+  public Child: Proc.Process;
+  public Buffer: array of integer;
+  public Sequence: integer := 0;
+  public Stopped: boolean := false;
+  public Thread: integer := 1;
+  public Ended: boolean := false;
+  public TerminalPath: string;
+  public ClientSourceDirectory: string := '';
+end record;
+
+// Requires a JSON object at a trusted protocol boundary.
+public function Object(Value: Json.JsonValue): dict of string to Json.JsonValue;
+begin
+  case Value of
+    when Json.JsonValue.Object(const Members):
+      return Members;
+    when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+      panic('expected JSON object');
+  end case;
+end function;
+
+// Encodes an integer field without implicit numeric conversions.
+public function Number(Value: integer): Json.JsonValue;
+begin
+  return Json.JsonValue.Number(Conv.IntToReal(Value));
+end function;
+
+procedure Write(Child: Proc.Process; Bytes: array of integer);
+begin
+  var Offset := 0;
+  const Deadline := Time.MonotonicMillis() + 300000;
+  while Offset < Bytes.Length() do
+    if Time.MonotonicMillis() >= Deadline then
+      panic('DAP write timed out');
+    end if;
+    const Count := Proc.WriteStdin(Child, Bytes.Slice(Offset, Bytes.Length() - Offset)).Unwrap();
+    Offset := Offset + Count;
+    if Count = 0 then
+      Time.Sleep(1);
+    end if;
+  end while;
+end procedure;
+
+function Receive(var State: Session): dict of string to Json.JsonValue;
+begin
+  const Deadline := Time.MonotonicMillis() + 300000;
+  while Time.MonotonicMillis() < Deadline do
+    var HeaderEnd := -1;
+    for I: integer := 0 to State.Buffer.Length() - 4 do
+      if (State.Buffer[I] = 13) and (State.Buffer[I + 1] = 10) and (State.Buffer[I + 2] = 13)
+        and
+        (State.Buffer[I + 3] = 10)
+      then
+        HeaderEnd := I;
+        break;
+      end if;
+    end for;
+
+    if HeaderEnd >= 0 then
+      const Header := Utf8.Decode(State.Buffer.Slice(0, HeaderEnd)).Unwrap();
+      const Length := Parse.Int(Header.Split(':')[1].Trim()).Unwrap();
+      if (Length < 0) or (Length > 16777216) then
+        panic('invalid DAP length');
+      end if;
+
+      if State.Buffer.Length() >= HeaderEnd + 4 + Length then
+        const Body := Utf8.Decode(State.Buffer.Slice(HeaderEnd + 4, Length)).Unwrap();
+        State.Buffer := State.Buffer.Slice(
+          HeaderEnd + 4 + Length,
+          State.Buffer.Length() - HeaderEnd - 4 - Length
+        );
+        const Message := Fields.ParseObject(Body).Unwrap();
+        if 'event' in Message then
+          discard Fs.AppendText(State.TerminalPath + '.events.jsonl', Body + #10).Unwrap();
+          const Event := Fields.StringField(Message, 'event').Unwrap();
+          if Event = 'stopped' then
+            discard Fs.WriteText(State.TerminalPath + '.stop.json', Body).Unwrap();
+            State.Stopped := true;
+            State.Thread := Fields.IntegerField(Object(Message['body']), 'threadId').Unwrap();
+          elsif Event = 'terminated' then
+            State.Ended := true;
+          elsif Event = 'fpas/terminalOutput' then
+            discard Fs.AppendText(
+              State.TerminalPath,
+              Fields.StringField(Object(Message['body']), 'output').Unwrap()
+            ).Unwrap();
+          elsif Event = 'output' then
+            discard Fs.AppendText(
+              State.TerminalPath + '.diagnostics.txt',
+              Fields.StringField(Object(Message['body']), 'output').Unwrap()
+            ).Unwrap();
+          end if;
+        end if;
+
+        return Message;
+      end if;
+    end if;
+
+    case Proc.ReadStderr(State.Child, 65536).Unwrap() of
+      when Some(const Bytes):
+        if not Bytes.IsEmpty() then
+          discard Fs.AppendText(
+            State.TerminalPath + '.stderr',
+            Utf8.Decode(Bytes).Unwrap()
+          ).Unwrap();
+        end if;
+      when None:
+        null;
+    end case;
+
+    case Proc.ReadStdout(State.Child, 65536).Unwrap() of
+      when Some(const Bytes):
+        if Bytes.IsEmpty() then
+          panic('DAP EOF');
+        end if;
+
+        State.Buffer := State.Buffer.Concat(Bytes);
+      when None:
+        Time.Sleep(1);
+    end case;
+  end while;
+
+  panic('DAP response timed out');
+end function;
+
+// Sends one request and consumes interleaved events through its matching response.
+public function Request(var State: Session; Command: string; Arguments: dict of string to Json.JsonValue): dict of string to Json.JsonValue;
+begin
+  State.Sequence := State.Sequence + 1;
+  discard Fs.WriteText(State.TerminalPath + '.request.txt', Command).Unwrap();
+  const Body := Json.Stringify(
+    Json.JsonValue.Object([
+      'seq': Number(State.Sequence),
+      'type': Json.JsonValue.String('request'),
+      'command': Json.JsonValue.String(Command),
+      'arguments': Json.JsonValue.Object(Arguments)
+    ])
+  );
+  Write(
+    State.Child,
+    Utf8.Encode(
+      'Content-Length: ' + Conv.IntToStr(Utf8.Encode(Body).Length()) + #13#10#13#10 + Body
+    )
+  );
+  while true do
+    const Message := Receive(var State);
+    if ('request_seq' in Message)
+      and
+      (Fields.IntegerField(Message, 'request_seq').Unwrap() = State.Sequence)
+    then
+      if not Fields.BooleanField(Message, 'success').Unwrap() then
+        panic(Json.Stringify(Json.JsonValue.Object(Message)));
+      end if;
+
+      if 'body' in Message then
+        return Object(Message['body']);
+      end if;
+
+      return [:];
+    end if;
+  end while;
+
+  panic('unreachable DAP request');
+end function;
+
+// Waits for the next stop without changing program state.
+public procedure WaitStop(var State: Session);
+begin
+  while not State.Stopped and not State.Ended do
+    discard Receive(var State);
+  end while;
+
+  if State.Ended then
+    panic('DAP target ended');
+  end if;
+end procedure;
+
+// Resumes all client tasks to the next view breakpoint.
+public procedure Resume(var State: Session);
+begin
+  State.Stopped := false;
+  discard Request(var State, 'continue', ['threadId': Number(State.Thread)]);
+  WaitStop(var State);
+end procedure;
+
+// Reads the view model's immediate fields and debugger references at the current stop.
+public function Snapshot(var State: Session): dict of string to Json.JsonValue;
+begin
+  const Stack := Request(
+    var State,
+    'stackTrace',
+    ['threadId': Number(State.Thread), 'levels': Number(16)]
+  );
+  discard Fs.WriteText(
+    State.TerminalPath + '.stack.json',
+    Json.Stringify(Json.JsonValue.Object(Stack))
+  ).Unwrap();
+  const Frame := Object(Fields.ArrayField(Stack, 'stackFrames').Unwrap()[0]);
+  const Source := Fields.StringField(Object(Frame['source']), 'path').Unwrap();
+  State.ClientSourceDirectory := Source.Slice(0, Source.Length() - 'Client.fpas'.Length());
+  const Evaluated := Request(
+    var State,
+    'evaluate',
+    [
+      'frameId': Frame['id'],
+      'expression': Json.JsonValue.String('State'),
+      'context': Json.JsonValue.String('watch')
+    ]
+  );
+  const Variables := Request(
+    var State,
+    'variables',
+    ['variablesReference': Evaluated['variablesReference']]
+  );
+  var Values: dict of string to Json.JsonValue := [:];
+  for Variable: Json.JsonValue in Fields.ArrayField(Variables, 'variables').Unwrap() do
+    const Item := Object(Variable);
+    Values[Fields.StringField(Item, 'name').Unwrap()] := Json.JsonValue.Object(Item);
+  end for;
+
+  return Values;
+end function;
+
+// Returns one debugger-rendered scalar; aggregate references remain in Snapshot.
+public function Value(Snapshot: dict of string to Json.JsonValue; Name: string): string;
+begin
+  return Fields.StringField(Object(Snapshot[Name]), 'value').Unwrap();
+end function;
+end unit;
