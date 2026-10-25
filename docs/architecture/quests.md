@@ -72,9 +72,17 @@ wrong-kind reward records reject the save. Only this quest's compass may use
 the returned terminal location.
 
 Talking, accepting and reporting consume no turn or random draw. They award no
-skill experience; combat damage remains the only training source. Mara's free
-healing and existing information topics remain available through the root
-dialogue. Her later greeting and quest status remember the returned compass.
+skill experience; combat damage remains the only training source. Mara's
+information topics remain available through the root dialogue; recovery uses
+potions or paid inn rest. Her later greeting and quest status remember the
+returned compass.
+
+The rewarded phase also changes Nora's and Elias' home greetings and `news`
+answers. This derives from the quest rather than a saved reputation flag.
+An accepted quest or carried compass does not enable recognition. The completed
+journal has five lines, including `Hearthmoor remembers your help.`. Generated
+villagers keep their own dialogue; rewards and prices remain unchanged. See
+[world response](weather-and-world-response.md).
 
 ## Dialogue, projection and journal
 
@@ -85,7 +93,7 @@ within the existing six-choice limit. Quest frames use `quest_accept`,
 both the retained frame and current state, including a repeated or stale
 choice. Back returns to other questions; explicit end works from every node.
 
-Protocol 21 carries dialogue envelopes and the required `journal`
+Protocol 22 carries dialogue envelopes and the required `journal`
 string array to map and first-person state objects, including embedded dialogue
 states. It admits at most eight lines of 1..160 printable ASCII characters;
 an empty array is valid. Missing/mistyped fields, oversized entries, control
@@ -135,7 +143,7 @@ quest-owned records. The compass has no trade price and cannot be merchant-owned
 Trade does not change quest phase or grant another reward; see [economy](economy.md).
 
 Current versions are world metadata 4, generator 13, level file 4, settlement file 3,
-savegame 15 and protocol 21. Obsolete data is rejected and preserved without migration;
+savegame 15 and protocol 22. Obsolete data is rejected and preserved without migration;
 older-generator worlds require creating a new world. Generated NPCs never own this
 quest or trigger its world preflight; Mara is resolved by stable identity,
 independent of the canonical NPC array position.

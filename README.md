@@ -35,8 +35,9 @@ run headless or with a full-terminal dashboard.
   ownership survive explicit saves. See [trade and economy](docs/architecture/economy.md).
 - Fight restless skeletons and giant rats in turn-based combat, with health, armor, combat
   messages, and animations. Heal with potions or pay an innkeeper 5 coins for
-  eight hours of rest and full health. Travel advances a persistent clock;
-  nights darken outdoor and village views. See [time and rest](docs/architecture/time-and-rest.md).
+  eight hours of rest and full health. Travel advances a persistent clock.
+  Clear skies and rain follow that clock, with weather labels and map colors.
+  Nights darken outdoor and village views. See [time and rest](docs/architecture/time-and-rest.md).
 - Create separate worlds, continue a saved game, or start over in an existing
   world. Saves retain discovery, inventory, equipment, and visited dungeon state.
 - Monitor the server through status panels, a live log, filters, and settings
@@ -191,7 +192,7 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 gets its own identity, even when another world uses the same seed.
 
 Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 4**,
-**generator 13**, **level format 4**, **settlement format 3**, **protocol 21** and **save format 15**.
+**generator 13**, **level format 4**, **settlement format 3**, **protocol 22** and **save format 15**.
 Format-12 and older saves remain intact but cannot be continued with this server.
 Generator-10 and older worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds
@@ -236,6 +237,8 @@ settlements are implemented in 15c, with immutable definitions, complete saved
 NPC rosters and natural TCP rest/restart coverage. Trade and economy (15d) are
 accepted. Time and rest (15e) add the persistent clock, night colors and paid
 inn recovery; see [time and rest](docs/architecture/time-and-rest.md).
+Weather and Hearthmoor's quest recognition (15f) are implemented and verified
+through delegated self-acceptance; see the [weather contract](docs/architecture/weather-and-world-response.md).
 Building interiors, weather, multiplayer and LLM integration remain later work.
 
 See the [roadmap](docs/roadmap.md) for the current checkpoints.
@@ -251,7 +254,7 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-Current workspace verification passes: **159/159 test programs**, formatting
+Current workspace verification passes: **177/177 test programs**, formatting
 and all 21 project checks. Coverage includes game rules, deterministic generation,
 storage, protocol validation, TUI rendering and input, and real TCP sessions.
 

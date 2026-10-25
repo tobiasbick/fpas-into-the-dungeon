@@ -75,6 +75,13 @@ reach and active node. Generic NPCs never trigger world quest preflight. Quest
 hand-in still returns the compass and grants two potions atomically; see
 [quests](quests.md).
 
+Nora and Elias additionally offer `news` at their exact home root. They give
+ordinary local news before hand-in; the rewarded quest adds acknowledgement
+to greetings and news. Independent first/repeat meeting memory is preserved.
+Generated NPCs do not offer this home topic. News changes no resources, time,
+dirty state or save, and grants no extra reward or discount. See
+[weather and world response](weather-and-world-response.md).
+
 ## Connection and protocol
 
 `Dungeon.Server.Dialogue` owns conversation dispatch; `ServerSession.ActiveInteraction`
@@ -86,7 +93,7 @@ The four trade intentions receive `trade_not_active` until an offered merchant
 root choice opens trade. `Dungeon.Server.Trade` then owns its intents; see
 [trade and economy](economy.md) for revision, page and refusal rules.
 
-Protocol 21 includes `settlement`, `trade`, `rest`, `rest_confirm` and `rest_back`
+Protocol 22 includes `settlement`, `trade`, `news`, `rest`, `rest_confirm` and `rest_back`
 in the bounded topic vocabulary. The removed `wounds` ID is invalid.
 `dialogue_choice` contains exactly `type`, `npc_id`, `choice_id`; `end_dialogue`
 contains only `type`. Replies contain the complete resulting visible state and

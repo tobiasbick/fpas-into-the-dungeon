@@ -2,6 +2,7 @@
 program VillagePlayTest;
 
 uses
+  Dungeon.Weather as Weather,
   Dungeon.Test.Trades as Trades, Dungeon.Trade.Items as Stock,
   Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit,
   Dungeon.Npcs as Npcs, Dungeon.Protocol as Protocol, Dungeon.Server as Server,
@@ -23,6 +24,16 @@ begin
   end case;
 end function;
 
+procedure RequireWeather(Client: Wire.WireClient; World: WorldUnit.WorldSession; Minutes: integer);
+begin
+  const View := Wire.MapOf(Client);
+  Test.AssertEquals(Minutes, (View.Time.Day - 1) * 1440 + View.Time.MinuteOfDay);
+  Test.AssertTrue(
+    (View.Weather = Some(Protocol.WeatherKind.Rain)) =
+    (Weather.At(World.Metadata.Seed, Minutes) = Weather.WeatherKind.Rain)
+  );
+end procedure;
+
 function Travel(
   Client: Wire.WireClient; World: WorldUnit.WorldSession; Target: Coordinates.WorldPosition;
   Token: Tasks.CancellationToken
@@ -32,7 +43,10 @@ begin
   const From := Coordinates.WorldPosition(X := Position.WorldX, Y := Position.WorldY);
   const Route := Routes.OutdoorRoute(World.Metadata, From, Target, 24);
   Test.AssertTrue((From = Target) or (Route.Length() > 0));
-  return Wire.WalkOutdoorRoute(Client, Route, Token);
+  const Before := Wire.MapOf(Client).Time;
+  const Current := Wire.WalkOutdoorRoute(Client, Route, Token);
+  RequireWeather(Current, World, (Before.Day - 1) * 1440 + Before.MinuteOfDay + Route.Length() * 5);
+  return Current;
 end function;
 
 function Leave(
@@ -64,11 +78,13 @@ begin
       end if, Token
   );
   if Stage = 0 then
+    RequireWeather(Current, World, 480);
     const Entrance := Coordinates.WorldPosition(X := 10955, Y := -10539);
     Current := Travel(Current, World, Entrance, Token);
     Test.AssertFalse(Fs.Exists(PathOps.Join([World.Directory, 'settlements'])));
     Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
     const DungeonRegion := Entrances.RegionOf(World.Metadata, Entrance);
+    Test.AssertTrue(Wire.FirstPersonOf(Current).Weather is None);
     const Dungeon := Interiors.ReadLevel(
       World,
       DungeonIds.DungeonAreaId(World.Metadata, DungeonRegion, 0)
@@ -117,6 +133,7 @@ begin
     Current := Villages.Choose(Current, 'rest', Token);
     Test.AssertTrue(Wire.MapOf(Current).Time = BeforeRest);
     Current := Villages.Choose(Current, 'rest_confirm', Token);
+    RequireWeather(Current, World, (BeforeRest.Day - 1) * 1440 + BeforeRest.MinuteOfDay + 480);
     Test.AssertTrue(
       Current.Last is Protocol.ServerMessage.Dialogue(Protocol.VisibleState.MapState(_), _, true)
     );
@@ -143,6 +160,7 @@ begin
     Wire.RequireSaved(Current);
   elsif Stage = 1 then
     const Saved := Loaded(World);
+    RequireWeather(Current, World, Saved.WorldMinutes);
     Test.AssertEquals(Area, Saved.AreaId);
     Test.AssertEquals(5, Saved.Npcs.Length());
     const Map := Store.ReadMap(World, Area).Unwrap();
@@ -186,6 +204,7 @@ begin
     Test.AssertTrue(Both.Npcs[Npcs.IndexOf(Both.Npcs, SecondArea + ':npc:2')].HasMetPlayer);
     Test.AssertFalse(Both.Npcs[Npcs.IndexOf(Both.Npcs, SecondArea + ':npc:1')].HasMetPlayer);
   elsif Stage = 2 then
+    RequireWeather(Current, World, Loaded(World).WorldMinutes);
     Test.AssertEquals(SecondGate.X, Wire.MapOf(Current).WorldX);
     Test.AssertEquals(SecondGate.Y, Wire.MapOf(Current).WorldY);
     Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
@@ -204,6 +223,7 @@ begin
     Current := Leave(Current, Second, SecondGate, Token);
   // Disconnect drops these new unsaved meetings; Stage 3 starts a fresh game on a new listener.
   else
+    RequireWeather(Current, World, 480);
     Test.AssertEquals(World.Metadata.Spawn.X, Wire.MapOf(Current).WorldX);
     Current := Travel(Current, World, Gate, Token);
     Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);

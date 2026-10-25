@@ -1,13 +1,74 @@
-// Verifies required bounded time objects in both state families and strict rejection of malformed clock fields.
+// Verifies exact time/weather fields and state-family rules in ordinary and atomic reply envelopes.
 program TimeProtocolTest;
 
 uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Std.Test as Test;
+
+function WeatherOf(Message: Protocol.ServerMessage): option of Protocol.WeatherKind;
+begin
+  case Message of
+    when Protocol.ServerMessage.State(const State), Protocol.ServerMessage.Dialogue(const State, _, _), Protocol.ServerMessage.DialogueEnded(const State, _), Protocol.ServerMessage.Trade(const State, _, _):
+      case State of
+        when Protocol.VisibleState.MapState(const Value):
+          return Value.Weather;
+        when Protocol.VisibleState.FirstPersonState(const Value):
+          return Value.Weather;
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected an authoritative state');
+  end case;
+end function;
+
+procedure CheckWeather(View: Protocol.VisibleState; Expected: option of Protocol.WeatherKind);
+begin
+  const Token := if Expected is None then '"weather":null' else '"weather":"clear"' end if;
+  const Frame := Protocol.DialogueFrame(
+    NpcId := 'w:settlement:home:npc:innkeeper', Speaker := 'Nora', Text := 'News.',
+    Choices := [Protocol.DialogueChoice(Id := 'news', Text := 'Any news?')]
+  );
+  const Quote := Protocol.TradeQuote(
+    NpcId := 'w:settlement:home:npc:merchant', Speaker := 'Elias', Revision := 1,
+    MerchantCapacity := 64, BuyPage := 0, SellPage := 0, BuyTotal := 0, SellTotal := 0,
+    BuyItems := [], SellItems := []
+  );
+  for Message: Protocol.ServerMessage in [
+    Protocol.ServerMessage.State(View), Protocol.ServerMessage.Dialogue(View, Frame, false),
+    Protocol.ServerMessage.DialogueEnded(View, false),
+    Protocol.ServerMessage.Trade(View, Quote, false)
+  ] do
+    const Wire := Servers.EncodeServer(Message);
+    Test.AssertTrue(Token in Wire);
+    Test.AssertTrue(WeatherOf(Servers.DecodeServer(Wire).Unwrap()) = Expected);
+    for Bad: string in ['true', '42', '{}', '[]', '"snow"', '"Rain"'] do
+      Test.AssertTrue(Servers.DecodeServer(Wire.Replace(Token, '"weather":' + Bad)) is Error(_));
+    end for;
+
+    Test.AssertTrue(Servers.DecodeServer(Wire.Replace(Token + ',', '')) is Error(_));
+    Test.AssertTrue(Servers.DecodeServer(Wire.Replace(Token, Token + ',' + Token)) is Error(_));
+    Test.AssertTrue(
+      Servers.DecodeServer(Wire.Replace(Token, Token + ',"extra_weather":0')) is Error(_)
+    );
+    if Expected is None then
+      for Condition: string in ['clear', 'rain'] do
+        Test.AssertTrue(
+          Servers.DecodeServer(Wire.Replace(Token, '"weather":"' + Condition + '"')) is Error(_)
+        );
+      end for;
+    else
+      Test.AssertTrue(Servers.DecodeServer(Wire.Replace(Token, '"weather":null')) is Error(_));
+      Test.AssertTrue(
+        WeatherOf(Servers.DecodeServer(Wire.Replace(Token, '"weather":"rain"')).Unwrap()) =
+        Some(Protocol.WeatherKind.Rain)
+      );
+    end if;
+  end for;
+end procedure;
 
 begin
   const Time := Protocol.VisibleTime(Day := 2, MinuteOfDay := 0, Phase := Protocol.DayPhase.Night);
   const Views := [
     Protocol.VisibleState.MapState(
       Protocol.MapVisibleState(
+        Weather := Some(Protocol.WeatherKind.Clear),
         Time := Time,
         Coins := 0, Title := 'Outside', Status := '', OriginX := 0, OriginY := 0,
         Width := 1, Height := 1, Rows := ['.'], KnowledgeRows := ['v'],
@@ -17,6 +78,7 @@ begin
     ),
     Protocol.VisibleState.FirstPersonState(
       Protocol.FirstPersonVisibleState(
+        Weather := None,
         Time := Time,
         Coins := 0, Title := 'Dungeon', Status := 'Nothing in reach', Level := 0, Depth := 3,
         Width := 3, Height := 3, Rows := ['###', '#.#', '###'],
@@ -28,6 +90,12 @@ begin
     )
   ];
   for View: Protocol.VisibleState in Views do
+    CheckWeather(
+      View, case View of
+        when Protocol.VisibleState.MapState(_): Some(Protocol.WeatherKind.Clear);
+        when Protocol.VisibleState.FirstPersonState(_): None;
+      end case
+    );
     const Wire := Servers.EncodeServer(Protocol.ServerMessage.State(View));
     const ClockJson := '"time":{"day":2,"minute_of_day":0,"phase":"night"}';
     Test.AssertTrue(ClockJson in Wire);

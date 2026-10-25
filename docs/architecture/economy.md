@@ -91,10 +91,10 @@ game, interaction, revision, cache, dirty flag and save timestamp. A failed
 write terminates the connection without installing its candidate. Accepted
 transfers mark progress dirty; quotes, pages and closing do not save it.
 
-## Protocol 21
+## Protocol 22
 
 Both visible state families require bounded integer `coins` and the common
-validated `time` projection. A trade reply is
+validated `time` and required `weather` projections. A trade reply is
 one atomic envelope with exactly `type`, `dirty`, `state` and `trade`.
 
 | Intention | Fields besides `type` |
@@ -118,7 +118,7 @@ the compass has no price. IDs cannot repeat within or across the two sides.
 The LF-delimited UTF-8 limit remains **65,536 bytes**. Preparation checks the
 complete encoded line without discarding fields. The largest tested reply,
 including a largest village and both full pages with maximum identities and
-escaped text and the widest valid clock, is **59,211 bytes**.
+escaped text, widest valid clock and longest weather name, is **59,229 bytes**.
 
 During trade, only its four intentions, viewport updates and disconnect are
 allowed. Other valid gameplay/lifecycle intentions receive `trade_active`.

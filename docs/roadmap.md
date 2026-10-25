@@ -813,10 +813,21 @@ after unsaved Start over. See the [time/rest contract](architecture/time-and-res
 and [running-game report](architecture/time-and-rest-acceptance.md).
 The user accepted 15e on 2026-10-25. Its temporary implementation plan is removed.
 
-### 15f. Weather and changing world state — LATER
+### 15f. Weather and changing world state — DONE
 
-Weather and world changes caused by quest outcomes, such as cleared dungeons or
-altered settlement dialogue, once a concrete gameplay requirement is known.
+Clear weather and rain derive from seed and world time, with static map colors
+and an explicit condition. Nora and Elias remember the returned compass in
+their greetings and local news. These use the saved clock and rewarded quest;
+protocol 22 adds weather while save and immutable generation formats retain
+their 15e versions.
+
+All nine checkpoints are complete. Formatting, workspace checks and all
+**177/177 test programs** pass. The user delegated self-acceptance: the real
+seed-25/region-1 DAP route completes the compass quest, observes both weather
+conditions and shelter, restarts both processes and preserves all 24 world
+files after unsaved Start over. The original 15e save also loads unchanged.
+The temporary plan is removed. See the [contract](architecture/weather-and-world-response.md)
+and [running-game report](architecture/weather-and-world-response-acceptance.md).
 
 ## 16. LLM integration — LATER
 

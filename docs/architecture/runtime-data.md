@@ -88,7 +88,7 @@ listener or dashboard. Command-line overrides apply only to that run.
 
 Runtime configuration, world, chunk, level, settlement and savegame formats support only
 their current schema and generator version. Current versions are world format
-4, generator 13, level format 4, settlement format 3 and save format 15; protocol 21 connects the client
+4, generator 13, level format 4, settlement format 3 and save format 15; protocol 22 connects the client
 and server. Obsolete runtime configuration reports an error asking the user to
 delete or recreate that configuration. Invalid or incompatible worlds and saves
 remain visible and are preserved; create a new world for incompatible world

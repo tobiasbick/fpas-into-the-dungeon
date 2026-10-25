@@ -30,6 +30,10 @@ does not change game resources; rejected confirmations use the existing
 `dialogue_rejected` warning. The dashboard's uptime, UTC log timestamps and
 save timestamp are real time, separate from the action-based game clock shown
 by the client. See [time and rest](../architecture/time-and-rest.md).
+Weather and home recognition are derived projections. They add no background
+worker or per-render log traffic. Read-only news preserves dirty/save facts;
+an unavailable topic uses the existing dialogue rejection path. The dashboard
+shows protocol 22 and retains its existing administration controls.
 Complete-world deletion also removes `settlements/` definitions; its existing
 connection exclusion and confirmation rules still apply.
 

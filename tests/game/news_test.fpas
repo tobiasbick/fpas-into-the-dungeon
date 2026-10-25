@@ -1,0 +1,120 @@
+// Protects exact-home quest recognition, independent greetings and read-only root news through legal quest states.
+program NewsTest;
+
+uses
+  Dungeon.Test.Trade as Fixtures, Dungeon.Test.StateComparison as States,
+  Dungeon.Dialogue as Dialogue, Dungeon.GameState as GameState,
+  Dungeon.Coordinates as Coordinates, Dungeon.Npcs as Npcs, Dungeon.Quests.Journal as Journal,
+  Std.Test as Test;
+
+type Conversation = record
+  State: GameState.GameState;
+  Frame: Dialogue.Frame;
+  Changed: boolean;
+end record;
+
+function Continued(Value: Dialogue.Outcome): Conversation;
+begin
+  case Value of
+    when Dialogue.Outcome.Continued(const State, const Frame, const Changed):
+      return Conversation(State := State, Frame := Frame, Changed := Changed);
+    when Dialogue.Outcome.Ended(_):
+      panic('expected a conversation');
+  end case;
+end function;
+
+function HasNews(Frame: Dialogue.Frame): boolean;
+begin
+  for Choice: Dialogue.Choice in Frame.Choices do
+    if Choice.Id = 'news' then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+procedure Home(Value: Fixtures.Scenario; Completed: boolean);
+begin
+  for X: integer in [6, 16] do
+    const Ready := Value.State with Player := Coordinates.PlayerPosition.Settlement(
+      Coordinates.InteriorPosition(X := X, Y := 8)
+    ); end with;
+    const Root := Continued(Dialogue.Start(Value.View, Ready).Unwrap());
+    const Index := Npcs.IndexOf(Ready.Npcs, Root.Frame.NpcId);
+    var Met := Ready;
+    Met.Npcs[Index].HasMetPlayer := true;
+    Test.AssertTrue(States.SameState(Met, Root.State));
+    Test.AssertTrue(Root.Changed = (not Ready.Npcs[Index].HasMetPlayer));
+    Test.AssertTrue(('greets you' in Root.Frame.Text) = (not Ready.Npcs[Index].HasMetPlayer));
+    Test.AssertTrue(('Hearthmoor remembers your help.' in Root.Frame.Text) = Completed);
+    Test.AssertTrue(HasNews(Root.Frame));
+    Test.AssertEquals(5, Root.Frame.Choices.Length());
+    const News := Continued(Dialogue.Choose(Value.View, Root.State, Root.Frame, 'news').Unwrap());
+    Test.AssertFalse(News.Changed);
+    Test.AssertTrue(States.SameState(Root.State, News.State));
+    Test.AssertTrue(('Hearthmoor remembers your help.' in News.Frame.Text) = Completed);
+    const Again := Continued(Dialogue.Choose(Value.View, News.State, News.Frame, 'news').Unwrap());
+    Test.AssertFalse(Again.Changed);
+    Test.AssertTrue(States.SameState(Root.State, Again.State));
+    Test.AssertEquals(News.Frame.Text, Again.Frame.Text);
+    if X = 16 then
+      const Offer := Continued(
+        Dialogue.Choose(Value.View, Root.State, Root.Frame, 'rest').Unwrap()
+      );
+      Test.AssertFalse(HasNews(Offer.Frame));
+      Test.AssertTrue(
+        Dialogue.Choose(
+          Value.View, Offer.State,
+          Offer.Frame with Choices := Root.Frame.Choices; end with, 'news'
+        ) is Error(_)
+      );
+    end if;
+    const Foreign := Root.Frame with NpcId := Root.Frame.NpcId + ':foreign'; end with;
+
+    Test.AssertTrue(Dialogue.Choose(Value.View, Root.State, Foreign, 'news') is Error(_));
+  end for;
+end procedure;
+
+begin
+  const Initial := Fixtures.Home();
+  const Active := Fixtures.ActiveCompass(Initial);
+  const Rewarded := Fixtures.RewardedCompass(Initial);
+  Home(Initial, false);
+  Home(Active, false);
+  Home(Rewarded, true);
+  Test.AssertEquals(5, Journal.Lines(Rewarded.State).Length());
+  Test.AssertTrue('Hearthmoor remembers your help.' in Journal.Lines(Rewarded.State));
+  const Village := Fixtures.Village(Rewarded);
+  for Slot: integer in [2, 3] do
+    const Npc := Village.View.Interior.Unwrap().Npcs[Slot];
+    const Ready := Village.State with Player := Coordinates.PlayerPosition.Settlement(
+      Coordinates.InteriorPosition(X := Npc.Position.X, Y := Npc.Position.Y + 1)
+    ); end with;
+    const Root := Continued(Dialogue.Start(Village.View, Ready).Unwrap());
+    Test.AssertFalse(HasNews(Root.Frame));
+    Test.AssertFalse('Hearthmoor remembers your help.' in Root.Frame.Text);
+    Test.AssertTrue(
+      Dialogue.Choose(
+        Village.View, Root.State,
+        Root.Frame with Choices := [Dialogue.Choice(Id := 'news', Text := 'Forged')]; end with,
+        'news'
+      ) is Error(_)
+    );
+  end for;
+  const AtMara := Rewarded.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); end with;
+  const Mara := Continued(Dialogue.Start(Rewarded.View, AtMara).Unwrap());
+  Test.AssertFalse(HasNews(Mara.Frame));
+  const Quest := Continued(
+    Dialogue.Choose(Rewarded.View, Mara.State, Mara.Frame, 'quest').Unwrap()
+  );
+  Test.AssertTrue(
+    Dialogue.Choose(
+      Rewarded.View, Quest.State,
+      Quest.Frame with Choices := [Dialogue.Choice(Id := 'news', Text := 'Forged')]; end with,
+      'news'
+    ) is Error(_)
+  );
+end.

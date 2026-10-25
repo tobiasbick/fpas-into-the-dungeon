@@ -2,6 +2,7 @@
 unit Dungeon.Dialogue;
 
 uses
+  Dungeon.Settlements as Settlements, Dungeon.Terrain as Terrain,
   Dungeon.Dialogue.Model as Model, Dungeon.Dialogue.Quests as QuestDialogue, Dungeon.Dialogue.Rest as Rest,
   Dungeon.Dialogue.Villages as Villages, Dungeon.Quests.Model as QuestModel,
   Dungeon.Npcs.Interaction as NpcInteraction, Dungeon.GameState as GameState,
@@ -26,10 +27,39 @@ begin
   return NpcInteraction.MaraInReach(View, State);
 end function;
 
-function ChoicesFor(State: GameState.GameState; Npc: Npcs.NpcPlacement): array of Choice;
+function HasHomeNews(Metadata: Terrain.WorldMetadata; Npc: Npcs.NpcPlacement): boolean;
+begin
+  const Home := Settlements.HomeAreaId(Metadata);
+  return ((Npc.Kind = Npcs.NpcKind.Innkeeper) and (Npc.Id = Home + ':npc:innkeeper'))
+    or
+    ((Npc.Kind = Npcs.NpcKind.Merchant) and (Npc.Id = Home + ':npc:merchant'));
+end function;
+
+function HomeNews(State: GameState.GameState; Npc: Npcs.NpcPlacement): string;
+begin
+  if State.Quest is QuestModel.QuestState.Rewarded(_) then
+    return 'Mara has her compass back, thanks to you. Hearthmoor remembers your help. ' +
+      if Npc.Kind = Npcs.NpcKind.Innkeeper then 'Travelers at my inn have heard the story.'
+      else 'The people who trade here speak well of you.'
+      end if;
+  end if;
+
+  return if Npc.Kind = Npcs.NpcKind.Innkeeper then 'Travelers are exchanging stories at the inn. Ask me if you need a room.'
+    else 'Travelers bring their finds to my stall. I buy and sell at the usual prices.'
+    end if;
+end function;
+
+function ChoicesFor(Metadata: Terrain.WorldMetadata; State: GameState.GameState; Npc: Npcs.NpcPlacement): array of Choice;
 begin
   if Npc.Kind <> Npcs.NpcKind.Mara then
-    return Villages.Choices(Npc.Kind);
+    var Choices := Villages.Choices(Npc.Kind);
+    if HasHomeNews(Metadata, Npc) then
+      const Goodbye := Choices.PopInPlace();
+      Choices.PushInPlace(Choice(Id := 'news', Text := 'Any news around here?'));
+      Choices.PushInPlace(Goodbye);
+    end if;
+
+    return Choices;
   end if;
   var Choices := [
     Choice(Id := 'identity', Text := 'Who are you?'),
@@ -54,11 +84,11 @@ begin
   return Choices;
 end function;
 
-function RootFrame(State: GameState.GameState; Npc: Npcs.NpcPlacement; Text: string): Frame;
+function RootFrame(Metadata: Terrain.WorldMetadata; State: GameState.GameState; Npc: Npcs.NpcPlacement; Text: string): Frame;
 begin
   return Frame(
     Node := Node.Root, NpcId := Npc.Id, Speaker := Npc.DisplayName,
-    Text := Text, Choices := ChoicesFor(State, Npc)
+    Text := Text, Choices := ChoicesFor(Metadata, State, Npc)
   );
 end function;
 
@@ -91,11 +121,18 @@ begin
       end if;
   else
     Text := Villages.Greeting(Npc, Map.DisplayName, Valid.Npcs[Index].HasMetPlayer);
+    if HasHomeNews(View.Metadata, Npc) and (Valid.Quest is QuestModel.QuestState.Rewarded(_)) then
+      Text := Text + ' Mara has her compass back, thanks to you. Hearthmoor remembers your help.';
+    end if;
   end if;
   var Changed := Valid;
   Changed.Npcs[Index].HasMetPlayer := true;
   return Ok(
-    Outcome.Continued(Changed, RootFrame(Changed, Npc, Text), not Valid.Npcs[Index].HasMetPlayer)
+    Outcome.Continued(
+      Changed,
+      RootFrame(View.Metadata, Changed, Npc, Text),
+      not Valid.Npcs[Index].HasMetPlayer
+    )
   );
 end function;
 
@@ -199,7 +236,11 @@ begin
 
     if ChoiceId = 'rest_back' then
       return Ok(
-        Outcome.Continued(Valid, RootFrame(Valid, Npc, 'Ask me if you need a room.'), false)
+        Outcome.Continued(
+          Valid,
+          RootFrame(View.Metadata, Valid, Npc, 'Ask me if you need a room.'),
+          false
+        )
       );
     end if;
 
@@ -211,6 +252,7 @@ begin
       Outcome.Continued(
         Rested,
         RootFrame(
+          View.Metadata,
           Rested,
           Npc,
           'You rest for eight hours and wake fully healed. Your room is paid for.'
@@ -229,7 +271,7 @@ begin
       return Ok(
         Outcome.Continued(
           Valid,
-          RootFrame(Valid, Npc, 'Mara waits for your next question.'),
+          RootFrame(View.Metadata, Valid, Npc, 'Mara waits for your next question.'),
           false
         )
       );
@@ -240,7 +282,7 @@ begin
 
   if not Model.Contains(Current.Choices, ChoiceId)
     or
-    not Model.Contains(ChoicesFor(Valid, Npc), ChoiceId)
+    not Model.Contains(ChoicesFor(View.Metadata, Valid, Npc), ChoiceId)
   then
     return Error('dialogue choice is not currently available');
   end if;
@@ -252,10 +294,16 @@ begin
   if ChoiceId = 'rest' then
     return Ok(Outcome.Continued(Valid, Rest.Offer(Valid, Npc), false));
   end if;
+
+  if ChoiceId = 'news' then
+    return Ok(
+      Outcome.Continued(Valid, RootFrame(View.Metadata, Valid, Npc, HomeNews(Valid, Npc)), false)
+    );
+  end if;
   var Text := '';
   if Npc.Kind <> Npcs.NpcKind.Mara then
     Text := try Villages.Answer(Npc, Map.DisplayName, ChoiceId);
-    return Ok(Outcome.Continued(Valid, RootFrame(Valid, Npc, Text), false));
+    return Ok(Outcome.Continued(Valid, RootFrame(View.Metadata, Valid, Npc, Text), false));
   end if;
 
   case ChoiceId of
@@ -285,6 +333,6 @@ begin
       return Error('unknown dialogue choice');
   end case;
 
-  return Ok(Outcome.Continued(Valid, RootFrame(Valid, Npc, Text), false));
+  return Ok(Outcome.Continued(Valid, RootFrame(View.Metadata, Valid, Npc, Text), false));
 end function;
 end unit;

@@ -93,7 +93,7 @@ Continue restores the exact clock, health, purse and NPC state. Start over
 resets them through normal new-game creation and preserves the prior explicit
 save until confirmed overwrite.
 
-Protocol **21** requires one nested `time` object in both visible-state families:
+Protocol **22** requires one nested `time` object in both visible-state families:
 
 ```json
 {"time":{"day":2,"minute_of_day":0,"phase":"night"}}
@@ -107,13 +107,18 @@ the supplied phase rather than reproducing daylight or action-duration rules.
 The common `Dungeon.Protocol.Clock` and `States` codecs also cover state inside
 dialogue and trade envelopes. Unknown, missing, duplicate and extra fields are
 rejected. All replies retain the 65,536-byte UTF-8 transport limit; the largest
-tested trade response with maximum clock text is **59,211 bytes**.
+tested trade response with maximum clock text is **59,229 bytes**.
 
 Current versions are world/chunks 4, generator **13**, dungeon levels 4,
-settlement definition **3**, savegame **15** and protocol **21**. The changed
+settlement definition **3**, savegame **15** and protocol **22**. The changed
 settlement role/roster is immutable world content. Obsolete worlds and saves
 are rejected and preserved without migration or regeneration. Runtime
 configuration has no new balance settings.
+
+Protocol 22 also requires the [weather projection](weather-and-world-response.md).
+It derives from the same canonical clock. Rest queries its final condition
+directly; it does not simulate intermediate weather windows. Existing 15e
+worlds and saves remain usable because no stored structure or generation changed.
 
 ## Ownership and verification
 

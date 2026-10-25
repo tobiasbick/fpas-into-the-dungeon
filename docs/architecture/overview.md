@@ -174,6 +174,9 @@ these projects.
   - `Dungeon.Coordinates`: positions, facing, relative steps, chunk arithmetic.
   - `Dungeon.Time`: pure bounded world-minute arithmetic, action durations and
     day/night derivation; independent of state, storage and system time.
+  - `Dungeon.Weather`: seed/day-derived clear skies and rain, with no mutable
+    weather, random draws or file access. `Server.Mapping` supplies the wire
+    condition or shelter; client map palettes and labels consume the projection.
   - `Dungeon.Terrain` with `.Noise`, `.Generation`, `.Entrances`, `.Chunks`, and
     `.Placement`: cells, chunks, and world metadata; noise; natural terrain;
     entrance regions and sites; complete chunks with entrances; spawn and spawn
@@ -195,7 +198,9 @@ these projects.
     proves a route over supplied maps and `.Journal` formats the projection.
     `Dungeon.Npcs.Interaction` shares reach without a dialogue/rules cycle.
     `Dungeon.Dialogue.Model` retains private nodes and display fields, while
-    `.Quests` owns quest-specific frames.
+    `.Quests` owns quest-specific frames. Private home-news helpers in the
+    dialogue facade derive Nora/Elias recognition from the rewarded quest;
+    generic village prose needs no game-state dependency.
   - `Dungeon.Settlements` retains authored home geometry; `.Sites`, `.Identities`,
     `.Generation` and `.Validation` own generated villages behind pure interfaces.
     `Dungeon.Npcs.Model` defines independent roles and immutable placements;

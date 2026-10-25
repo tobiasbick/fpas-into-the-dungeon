@@ -528,11 +528,16 @@ Residents, guards, innkeepers and merchants use the same controls; rest and topi
 availability remain server-owned. See the [running-game route](../architecture/time-and-rest-acceptance.md).
 
 The Context panel shows `Day N HH:MM` from the server projection. It reserves
-eleven fixed rows before inventory and appears when at least sixteen panel rows
-fit. When hidden, the primary title includes the clock. Night darkens outdoor
+twelve fixed rows before inventory and appears when at least seventeen panel rows
+fit. Weather appears below the clock as Clear, Rain or Sheltered. When hidden,
+the primary title includes the clock and condition before the area name. Night darkens outdoor
 and settlement background colors; markers and Fog of War retain their meaning.
 Dungeon lighting stays unchanged. Menus, rendering and real elapsed time never
 advance the clock. See [time and rest](../architecture/time-and-rest.md).
+Rain tints map backgrounds before night shading and Fog of War; underground
+lighting stays unchanged. Nora and Elias offer local news and acknowledge the
+completed compass quest. These changes are authoritative projections; see
+[weather and world response](../architecture/weather-and-world-response.md).
 
 ## Trade
 

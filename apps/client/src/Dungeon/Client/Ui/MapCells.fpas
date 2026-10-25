@@ -1,7 +1,7 @@
 // Colored terminal cells for map rows, Fog of War, and the player marker.
 unit Dungeon.Client.Ui.MapCells;
 
-uses Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Std.Tui as Tui;
+uses Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Std.Math as Math, Std.Tui as Tui;
 
 // Builds one terminal cell from a glyph and foreground and background RGB colors.
 public function ColoredCell(
@@ -237,24 +237,34 @@ begin
   end case;
 end function;
 
-// Darkens map backgrounds at night; glyphs and marker foregrounds remain readable.
-function NightCell(Cell: Tui.TuiCell; Phase: Protocol.DayPhase): Tui.TuiCell;
+// Applies rain then night to backgrounds; the caller applies Fog of War afterwards.
+function AtmosphereCell(Cell: Tui.TuiCell; Phase: Protocol.DayPhase; Weather: option of Protocol.WeatherKind): Tui.TuiCell;
 begin
-  if Phase = Protocol.DayPhase.Night then
-    case Cell.ConcreteStyle of
-      when Some(const Style):
-        var Night := Style;
-        Night.Background := Tui.TuiColor.FromRgb(
-          Style.Background.Red div 2,
-          Style.Background.Green div 2, Style.Background.Blue div 2
-        );
-        return Tui.TuiCell.Styled(Cell.Glyph, Night);
-      when None:
-        return Cell;
-    end case;
+  if (Phase = Protocol.DayPhase.Day) and (Weather <> Some(Protocol.WeatherKind.Rain)) then
+    return Cell;
   end if;
 
-  return Cell;
+  case Cell.ConcreteStyle of
+    when None:
+      return Cell;
+    when Some(const Style):
+      var Shaded := Style;
+      if Weather = Some(Protocol.WeatherKind.Rain) then
+        Shaded.Background := Tui.TuiColor.FromRgb(
+          Style.Background.Red * 3 div 4, Style.Background.Green * 3 div 4,
+          Math.Min(255, Style.Background.Blue * 3 div 4 + 12)
+        );
+      end if;
+
+      if Phase = Protocol.DayPhase.Night then
+        Shaded.Background := Tui.TuiColor.FromRgb(
+          Shaded.Background.Red div 2, Shaded.Background.Green div 2,
+          Shaded.Background.Blue div 2
+        );
+      end if;
+
+      return Tui.TuiCell.Styled(Cell.Glyph, Shaded);
+  end case;
 end function;
 
 // Renders the primary map view from the projected rows with Fog of War and server-authored phase.
@@ -276,10 +286,16 @@ begin
           else
             begin
               Cells.PushInPlace(
-                KnowledgeCell(NightCell(TerrainCell(Code, false), State.DayPhase), Knowledge)
+                KnowledgeCell(
+                  AtmosphereCell(TerrainCell(Code, false), State.DayPhase, State.Weather),
+                  Knowledge
+                )
               );
               Cells.PushInPlace(
-                KnowledgeCell(NightCell(TerrainCell(Code, true), State.DayPhase), Knowledge)
+                KnowledgeCell(
+                  AtmosphereCell(TerrainCell(Code, true), State.DayPhase, State.Weather),
+                  Knowledge
+                )
               );
             end;
           end if;
@@ -314,7 +330,10 @@ begin
             if State.MapView = Protocol.ViewKind.Map then
               begin
                 Cells.PushInPlace(
-                  KnowledgeCell(NightCell(TerrainCell(Code, false), State.DayPhase), Knowledge)
+                  KnowledgeCell(
+                    AtmosphereCell(TerrainCell(Code, false), State.DayPhase, State.Weather),
+                    Knowledge
+                  )
                 );
               end;
             else

@@ -42,7 +42,7 @@ opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
 the supplied current map.
 
-The protocol-21 welcome supplies a bounded catalog with world identities,
+The protocol-22 welcome supplies a bounded catalog with world identities,
 original parameters, compatibility, save classifications and creation defaults.
 Continue loads a valid explicit save or starts at spawn when no save exists.
 An incompatible or unreadable save rejects Continue and remains on disk. Start
@@ -66,6 +66,10 @@ skill experience counters (see [progression](progression.md)). Outdoor positions
 The clock is bounded from 0 through 1,000,000,000 minutes and starts at 480.
 Continue restores it exactly; disconnected time does not advance it. See
 [time and rest](time-and-rest.md).
+Weather derives from seed and saved clock; Hearthmoor's recognition derives
+from the rewarded quest. Neither adds a field or changes format 15. Continue
+restores them together, and Start over resets them without rewriting the prior
+save. See [weather and world response](weather-and-world-response.md).
 First-person positions contain the local field coordinate and cardinal facing;
 their return location contains the outdoor area and the exact entrance site of
 the dungeon's region.

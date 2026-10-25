@@ -199,6 +199,14 @@ presentation, including combat, equipment, progression, quests and trade.
   an outdoor step takes five. Movement never heals.
 - **World clock** is the saved server-owned minute count, beginning on day 1
   at 08:00. Day runs from 06:00 through 19:59; night changes map colors only.
+- **Weather** is clear skies or rain shared by the world's outdoor regions
+  and settlements at the same minute. Seed and day choose one six-hour rain
+  window; dungeons are sheltered. Labels and map colors change, while sight,
+  movement and combat keep their rules.
+- **Local news** is Nora's and Elias' read-only home topic. Successful compass
+  hand-in changes their greetings and news, derived from the completed quest.
+  It grants no extra reward and changes no prices. See
+  [weather and world response](../architecture/weather-and-world-response.md).
 - **Innkeeper** is a stationary settlement NPC who offers paid rest through
   dialogue. Nora owns the inn in Hearthmoor; generated village slot 2 is its
   innkeeper.

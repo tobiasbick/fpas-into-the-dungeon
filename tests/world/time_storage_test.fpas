@@ -4,7 +4,7 @@ program TimeStorageTest;
 uses
   Dungeon.GameState as GameState, Dungeon.World as WorldUnit,
   Dungeon.World.Savegame as Savegame, Dungeon.Test.StateComparison as States,
-  Std.Fs as Fs, Std.Test as Test;
+  Dungeon.Weather as Weather, Std.Json.Fields as Fields, Std.Fs as Fs, Std.Test as Test;
 
 begin
   const Root := Test.ScratchDir();
@@ -19,16 +19,33 @@ begin
   );
   Test.AssertEquals(0, Fs.ReadDir(World.Directory + '/chunks').Unwrap().Length());
   Test.AssertEquals(480, Initial.WorldMinutes);
-  for Minutes: integer in [0, 1439, 1440, 1000000000] do
+  for Minutes: integer in [0, 1439, 1440, 2160, 2520, 1000000000] do
     const State := Initial with WorldMinutes := Minutes; end with;
 
     Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+    const Before := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+    const SavedFields := Fields.ParseObject(Before).Unwrap();
+    Test.AssertEquals(15, Fields.IntegerField(SavedFields, 'format_version').Unwrap());
+    Test.AssertEquals(17, SavedFields.Length());
+    Test.AssertFalse('weather' in SavedFields);
     case Savegame.LoadSaveGame(World).Unwrap() of
       when Savegame.SaveGameLoad.Loaded(const Loaded, _):
         Test.AssertTrue(States.SameState(State, Loaded));
+        if Minutes = 2160 then
+          Test.AssertTrue(
+            Weather.At(World.Metadata.Seed, Loaded.WorldMinutes) = Weather.WeatherKind.Clear
+          );
+        elsif Minutes = 2520 then
+          Test.AssertTrue(
+            Weather.At(World.Metadata.Seed, Loaded.WorldMinutes) = Weather.WeatherKind.Rain
+          );
+        end if;
       when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
         Test.AssertTrue(false);
     end case;
+
+    Test.AssertEquals(Before, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    Test.AssertEquals(0, Fs.ReadDir(World.Directory + '/chunks').Unwrap().Length());
   end for;
   const Saved := Savegame.EncodeSaveGame(World.Metadata.Id, Initial);
   for Bad: string in ['-1', '1000000001', '0.5', 'null', '"480"', 'true'] do

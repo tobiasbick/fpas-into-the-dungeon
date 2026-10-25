@@ -86,7 +86,7 @@ Innkeepers additionally offer `rest`: confirmation costs 5 coins, advances eight
 hours and fully heals, even at full health. First greeting changes only that
 NPC's meeting flag; repeat greetings and information are read-only. Movement
 still marks progress unsaved. Merchants additionally offer the root `trade`
-topic under protocol 21. The client renders the projected speaker, including pending text.
+topic under protocol 22. The client renders the projected speaker, including pending text.
 Quest choices and world preflight require Mara's exact identity and current
 quest node. See [NPCs and dialogue](npcs-and-dialogue.md).
 
@@ -95,7 +95,7 @@ quest node. See [NPCs and dialogue](npcs-and-dialogue.md).
 Create a **new** world with seed **25**, dungeon region size **1**. Existing
 older worlds and saves are preserved and rejected. Current
 versions are world/chunks 4, generator 13, settlement 3, dungeon level 4,
-savegame 15 and protocol 21. Runtime configuration is unchanged. The current
+savegame 15 and protocol 22. Runtime configuration is unchanged. The current
 paid-rest route is recorded in [15e verification](time-and-rest-acceptance.md).
 
 Start the server with `--console`, connect the client and create the world in

@@ -7,7 +7,21 @@ uses
   Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport,
   Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection,
   Dungeon.Server.Session as SessionUnit, Dungeon.Test.SessionAssertions as Sessions,
-  Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+  Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Std.Json.Fields as JsonFields, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+
+function Recognition(View: GameState.AreaView; State: GameState.GameState): boolean;
+begin
+  case Dialogue.Start(
+    View, State with Player := Coordinates.PlayerPosition.Settlement(
+      Coordinates.InteriorPosition(X := 16, Y := 8)
+    ); end with
+  ).Unwrap() of
+    when Dialogue.Outcome.Continued(_, const Frame, _):
+      return 'Hearthmoor remembers your help.' in Frame.Text;
+    when Dialogue.Outcome.Ended(_):
+      panic('expected home recognition dialogue');
+  end case;
+end function;
 
 function CurrentDialogue(Session: SessionUnit.ServerSession): Dialogue.Frame;
 begin
@@ -221,6 +235,7 @@ begin
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
   Sessions.AssertUnchanged(BrokenReport, FailedReport);
+  Test.AssertFalse(Recognition(Entry.View, FailedReport.State.Unwrap()));
   const Rewarded := Handling.HandleSessionMessage(
     ReadySession,
     Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_report'), Server, Config, Token
@@ -228,6 +243,7 @@ begin
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
   Test.AssertTrue(Rewarded.State.Unwrap().Quest is QuestModel.QuestState.Rewarded(_));
   Test.AssertTrue(Rewarded.Dirty);
+  Test.AssertTrue(Recognition(Entry.View, Rewarded.State.Unwrap()));
   const DuplicateReport := Handling.HandleSessionMessage(
     Rewarded,
     Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest_report'), Server, Config, Token
@@ -246,7 +262,7 @@ begin
   ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
     VillageMetadata.OutdoorAreaId,
     Sites.Site(VillageMetadata, VillageRegion).Unwrap()
-  ); Health := 3; Coins := 5; WorldMinutes := 1200; end with;
+  ); Health := 3; Coins := 5; WorldMinutes := 2160; end with;
   const VillageSession := Session with World := World with Metadata := VillageMetadata; end with; State := Some(
     VillageState
   ); Interior := Some(Village); ActiveInteraction := None; Dirty := false; end with;
@@ -286,7 +302,13 @@ begin
   );
   Test.AssertEquals(0, Rested.State.Unwrap().Coins);
   Test.AssertEquals(20, Rested.State.Unwrap().Health);
-  Test.AssertEquals(1680, Rested.State.Unwrap().WorldMinutes);
+  Test.AssertEquals(2640, Rested.State.Unwrap().WorldMinutes);
+  Test.AssertEquals(
+    'rain', JsonFields.StringField(
+      JsonFields.ObjectField(JsonFields.ParseObject(RestReply.Line).Unwrap(), 'state').Unwrap(),
+      'weather'
+    ).Unwrap()
+  );
   Test.AssertEquals(42, Rested.LastSavedAt);
   const Replay := Handling.HandleSessionMessage(
     Rested,

@@ -59,6 +59,10 @@ fpas run tools/dap-acceptance/command.fpasprj -- <directory> save
 current dialogue text. `choice <id>` reads the offered choices and selects the
 matching one through arrow keys and Enter. It never submits a dialogue intention
 directly. Inspected dialogue frames are also appended to `dialogues.jsonl`.
+State descriptions include the clock, day phase and optional weather. Expand
+the weather reference to inspect Clear/Rain; None denotes shelter. The
+[15f report](../../docs/architecture/weather-and-world-response-acceptance.md)
+records the complete compass, weather and reset route.
 
 The finite-area planner reuses the existing test pathfinder. It reads stored
 geometry, avoids stationary NPCs and executes its path through acknowledged
