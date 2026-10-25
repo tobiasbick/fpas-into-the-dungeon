@@ -1,0 +1,231 @@
+// Pure merchant offers and atomic single-item transfers over the shared item ledger.
+unit Dungeon.Trade;
+
+uses
+  Dungeon.Trade.Model as Model, Dungeon.Items as Items, Dungeon.Npcs as Npcs,
+  Dungeon.Npcs.Interaction as Reach, Dungeon.GameState as GameState, Dungeon.Coordinates as Coordinates;
+
+// Offer generation and transfers use the same typed refusals and catalogue.
+public type Failure = Model.Failure;
+
+// A complete quote contains at most 64 entries per side; the server owns wire pages.
+public type Quote = Model.Quote;
+
+type StockFacts = record
+  Stock: array of Items.GameItem;
+  Inventory: array of Items.GameItem;
+end record;
+
+function InvalidContext(Reason: string): Failure;
+begin
+  return Failure.InvalidContext(Reason);
+end function;
+
+function RequireMerchant(View: GameState.AreaView; State: GameState.GameState; MerchantId: string): result of (Npcs.NpcPlacement, Failure);
+begin
+  const Valid := try GameState.ValidateGameState(View, State).MapError(InvalidContext);
+  if Valid.Area <> Coordinates.AreaKind.Settlement then
+    return Error(Failure.InvalidContext('Trading requires a settlement.'));
+  end if;
+
+  if Reach.InReach(View, Valid) <> Some(MerchantId) then
+    return Error(Failure.InvalidContext('The selected merchant is not in reach.'));
+  end if;
+  const Map := try GameState.CurrentInterior(View, Valid).MapError(InvalidContext);
+  const Npc := try Npcs.FindPlacement(Map.Npcs, MerchantId).MapError(InvalidContext);
+  const Index := Npcs.IndexOf(Valid.Npcs, MerchantId);
+  if (Npc.Kind <> Npcs.NpcKind.Merchant) or (Index < 0) then
+    return Error(Failure.InvalidContext('This NPC is not a merchant.'));
+  end if;
+
+  if not Valid.Npcs[Index].HasMetPlayer then
+    return Error(Failure.InvalidContext('Speak to the merchant first.'));
+  end if;
+
+  return Ok(Npc);
+end function;
+
+function Gather(State: GameState.GameState; MerchantId: string): StockFacts;
+begin
+  var Facts := StockFacts(Stock := [], Inventory := []);
+  for Item: Items.GameItem in State.Items do
+    case Item.Location of
+      when Items.ItemLocation.HeldByMerchant(const Id):
+        if Id = MerchantId then
+          Facts.Stock.PushInPlace(Item);
+        end if;
+      when Items.ItemLocation.CarriedByPlayer, Items.ItemLocation.EquippedByPlayer(_):
+        Facts.Inventory.PushInPlace(Item);
+      when Items.ItemLocation.InInterior(_, _), Items.ItemLocation.Consumed, Items.ItemLocation.ReturnedToMara(_):
+        null;
+    end case;
+  end for;
+
+  return Facts;
+end function;
+
+function Refusal(Item: Items.GameItem; Side: Model.Side; Facts: StockFacts; Coins: integer): option of Failure;
+begin
+  if (Side = Model.Side.Sell) and (Item.Location is Items.ItemLocation.EquippedByPlayer(_)) then
+    return Some(Failure.Worn);
+  end if;
+  const Prices := Model.Price(Item.Kind);
+  if Prices is None then
+    return Some(Failure.NotTradable);
+  end if;
+
+  if Side = Model.Side.Buy then
+    if Facts.Inventory.Length() >= GameState.MaximumInventoryItems then
+      return Some(Failure.InventoryFull);
+    end if;
+
+    if Coins < Prices.Unwrap().Buy then
+      return Some(Failure.InsufficientFunds);
+    end if;
+  else
+    if Facts.Stock.Length() >= Model.MerchantCapacity then
+      return Some(Failure.StockFull);
+    end if;
+
+    if Coins > Model.MaximumCoins - Prices.Unwrap().Sell then
+      return Some(Failure.WalletFull);
+    end if;
+  end if;
+
+  return None;
+end function;
+
+function OfferFor(Item: Items.GameItem; Side: Model.Side; Facts: StockFacts; Coins: integer): Model.Offer;
+begin
+  var Price: option of integer := None;
+  case Model.Price(Item.Kind) of
+    when Some(const Prices):
+      Price := Some(if Side = Model.Side.Buy then Prices.Buy else Prices.Sell end if);
+    when None:
+      null;
+  end case;
+  const Denied := Refusal(Item, Side, Facts, Coins);
+  var Reason := '';
+  case Denied of
+    when Some(const Cause):
+      Reason := Model.FailureMessage(Cause);
+    when None:
+      null;
+  end case;
+
+  return Model.Offer(
+    Id := Item.Id, Name := Items.ItemDisplayName(Item.Kind),
+    Price := Price, Enabled := Denied is None, Reason := Reason
+  );
+end function;
+
+// Validates reach once, gathers ownership once and sorts only the two bounded lists.
+public function QuoteFor(View: GameState.AreaView; State: GameState.GameState; MerchantId: string): result of (Quote, Failure);
+ensures (Returned): case Returned of
+  when Ok(const Value): (Value.NpcId = MerchantId)
+    and
+    (Value.BuyItems.Length() <= Model.MerchantCapacity)
+    and
+    (Value.SellItems.Length() <= GameState.MaximumInventoryItems);
+  when Error(_): true;
+end case;
+begin
+  const Merchant := try RequireMerchant(View, State, MerchantId);
+  const Facts := Gather(State, MerchantId);
+  var Value := Quote(
+    NpcId := MerchantId,
+    Speaker := Merchant.DisplayName,
+    BuyItems := [],
+    SellItems := []
+  );
+  for Item: Items.GameItem in Facts.Stock do
+    Value.BuyItems.PushInPlace(OfferFor(Item, Model.Side.Buy, Facts, State.Coins));
+  end for;
+
+  for Item: Items.GameItem in Facts.Inventory do
+    Value.SellItems.PushInPlace(OfferFor(Item, Model.Side.Sell, Facts, State.Coins));
+  end for;
+
+  Value.BuyItems.SortByInPlace(
+    function(Item: Model.Offer): string begin
+      return Item.Id;
+    end function
+  );
+  Value.SellItems.SortByInPlace(
+    function(Item: Model.Offer): string begin
+      return Item.Id;
+    end function
+  );
+  return Ok(Value);
+end function;
+
+function Transfer(View: GameState.AreaView; State: GameState.GameState; MerchantId: string; ItemId: string; Side: Model.Side): result of (GameState.GameState, Failure);
+begin
+  const Merchant := try RequireMerchant(View, State, MerchantId);
+  var Index := -1;
+  for Position: integer := 0 to State.Items.Length() - 1 do
+    if State.Items[Position].Id = ItemId then
+      Index := Position;
+    end if;
+  end for;
+
+  if Index < 0 then
+    return Error(Failure.UnknownItem);
+  end if;
+  const Item := State.Items[Index];
+  if Side = Model.Side.Buy then
+    if Item.Location <> Items.ItemLocation.HeldByMerchant(MerchantId) then
+      return Error(Failure.WrongOwner);
+    end if;
+  else
+    if not (Item.Location is Items.ItemLocation.CarriedByPlayer)
+      and
+      not (Item.Location is Items.ItemLocation.EquippedByPlayer(_))
+    then
+      return Error(Failure.WrongOwner);
+    end if;
+  end if;
+  const Facts := Gather(State, MerchantId);
+  case Refusal(Item, Side, Facts, State.Coins) of
+    when Some(const Cause):
+      return Error(Cause);
+    when None:
+      null;
+  end case;
+  const Prices := Model.Price(Item.Kind).Unwrap();
+  var Candidate := State;
+  if Side = Model.Side.Buy then
+    Candidate.Items[Index].Location := Items.ItemLocation.CarriedByPlayer;
+    Candidate.Coins := State.Coins - Prices.Buy;
+  else
+    Candidate.Items[Index].Location := Items.ItemLocation.HeldByMerchant(MerchantId);
+    Candidate.Coins := State.Coins + Prices.Sell;
+  end if;
+
+  return Ok(Candidate);
+end function;
+
+// Buys the exact held item; refusal cannot change either caller-owned value or another item.
+public function Buy(View: GameState.AreaView; State: GameState.GameState; MerchantId: string; ItemId: string): result of (GameState.GameState, Failure);
+ensures (Returned): case Returned of
+  when Ok(const Next): (Next.Coins >= 0) and (Next.Coins < State.Coins)
+    and
+    (Next.RandomState = State.RandomState) and (Next.Health = State.Health);
+  when Error(_): true;
+end case;
+begin
+  return Transfer(View, State, MerchantId, ItemId, Model.Side.Buy);
+end function;
+
+// Sells one carried item; worn gear requires manual removal and quest items have no price.
+public function Sell(View: GameState.AreaView; State: GameState.GameState; MerchantId: string; ItemId: string): result of (GameState.GameState, Failure);
+ensures (Returned): case Returned of
+  when Ok(const Next): (Next.Coins > State.Coins) and (Next.Coins <= Model.MaximumCoins)
+    and
+    (Next.RandomState = State.RandomState) and (Next.Health = State.Health);
+  when Error(_): true;
+end case;
+begin
+  return Transfer(View, State, MerchantId, ItemId, Model.Side.Sell);
+end function;
+end unit;

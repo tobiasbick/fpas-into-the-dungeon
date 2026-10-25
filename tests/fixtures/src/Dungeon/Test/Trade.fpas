@@ -1,0 +1,130 @@
+// Legal prepared ownership and geometry for rule and transport tests, independent of natural-play routes.
+unit Dungeon.Test.Trade;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue,
+  Dungeon.Quests as Quests, Dungeon.Quests.Model as QuestModel,
+  Dungeon.Terrain as Terrain,
+  Dungeon.GameState as GameState, Dungeon.Interior as Interior, Dungeon.Items as Items,
+  Dungeon.Movement as Movement, Dungeon.Settlements.Generation as Generation,
+  Dungeon.Settlements.Sites as Sites, Dungeon.Terrain.Placement as Placement,
+  Dungeon.Test.Fixtures as Fixtures;
+
+// Current merchant and complete retained maps; the first map supplies the four ordinary loot origins.
+public type Scenario = record
+  public View: GameState.AreaView;
+  public State: GameState.GameState;
+  public MerchantId: string;
+  public Maps: array of Interior.InteriorMap;
+end record;
+
+function Greet(View: GameState.AreaView; State: GameState.GameState): GameState.GameState;
+begin
+  case Dialogue.Start(View, State).Unwrap() of
+    when Dialogue.Outcome.Continued(const Met, _, _):
+      return Met;
+    when Dialogue.Outcome.Ended(_):
+      panic('fixture greeting must continue');
+  end case;
+end function;
+
+// Four carried dungeon items, five home goods, zero coins and a met Elias in reach.
+public function HomeFor(Metadata: Terrain.WorldMetadata): Scenario;
+begin
+  const Dungeon := Fixtures.WithPotion(
+    Fixtures.FixtureDungeonMapFor(Fixtures.SpawnDungeonAreaId(Metadata))
+  );
+  var State := Areas.MaterializeArea(GameState.NewGame(Metadata), Dungeon);
+  for Index: integer := 0 to State.Items.Length() - 1 do
+    State.Items[Index].Location := Items.ItemLocation.CarriedByPlayer;
+  end for;
+
+  State.Player := Coordinates.PlayerPosition.Outdoor(Metadata.SettlementGate);
+  const Entry := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := Metadata, Interior := None), State, None
+  ).Unwrap();
+  const Map := Entry.View.Interior.Unwrap();
+  const Ready := Entry.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 6, Y := 8)
+  ); end with;
+  const Met := Greet(Entry.View, Ready);
+  const Maps := [Dungeon, Map];
+  return Scenario(
+    View := Entry.View,
+    State := Areas.ValidateSavedGame(Metadata, Met, Maps).Unwrap(),
+    MerchantId := Map.Npcs[1].Id, Maps := Maps
+  );
+end function;
+
+// Fixed seed-25 fixture used by pure rules; transport tests can supply a selected world's metadata.
+public function Home(): Scenario;
+begin
+  return HomeFor(Placement.NewWorldMetadata('trade-fixture', 25, 1).Unwrap());
+end function;
+
+// Adds a separate real generated merchant while retaining all original owners, origins and wallet facts.
+public function Village(Value: Scenario): Scenario;
+begin
+  const Metadata := Value.View.Metadata;
+  const Region := Coordinates.ChunkCoordinate(X := 85, Y := -83);
+  const Map := Generation.GenerateMap(Metadata, Region).Unwrap();
+  const Merchant := Map.Npcs[3];
+  const View := GameState.AreaView(Metadata := Metadata, Interior := Some(Map));
+  const Ready := Areas.MaterializeArea(Value.State, Map) with Area := Coordinates.AreaKind.Settlement; AreaId := Map.AreaId; Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(
+      X := Merchant.Position.X, Y := Merchant.Position.Y + 1
+    )
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    Metadata.OutdoorAreaId,
+    Sites.Site(Metadata, Region).Unwrap()
+  ); end with;
+  const Maps := Value.Maps.Push(Map);
+  return Scenario(
+    View := View, State := Areas.ValidateSavedGame(Metadata, Greet(View, Ready), Maps).Unwrap(),
+    MerchantId := Merchant.Id, Maps := Maps
+  );
+end function;
+
+// Adds a reserved compass origin, meets Mara and accepts its one-level fixture objective.
+public function ActiveCompass(Value: Scenario): Scenario;
+begin
+  const Metadata := Value.View.Metadata;
+  const Objective := QuestModel.CompassTarget(Metadata, 1);
+  var Maps := Value.Maps;
+  Maps[0].Items.PushInPlace(
+    Items.ItemPlacement(
+      ItemId := Objective.ItemId, Kind := Items.ItemKind.MarasCompass,
+      Position := Coordinates.InteriorPosition(X := 4, Y := 1)
+    )
+  );
+  var Ready := Value.State;
+  Ready.Items.PushInPlace(
+    Items.GameItem(
+      Id := Objective.ItemId, Kind := Items.ItemKind.MarasCompass,
+      Location := Items.ItemLocation.CarriedByPlayer
+    )
+  );
+  Ready.Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  );
+  const Accepted := Quests.Accept(Value.View, Greet(Value.View, Ready), Objective).Unwrap() with Player := Value.State.Player; end with;
+
+  return Value with State := Areas.ValidateSavedGame(Metadata, Accepted, Maps).Unwrap(); Maps := Maps; end with;
+end function;
+
+// Claims the two reward potions through the real quest rule without duplicating a long quest route.
+public function RewardedCompass(Value: Scenario): Scenario;
+begin
+  const Active := ActiveCompass(Value);
+  const Ready := Active.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); end with;
+  const Rewarded := Quests.Report(Active.View, Ready).Unwrap() with Player := Value.State.Player; end with;
+
+  return Active with State := Areas.ValidateSavedGame(
+    Active.View.Metadata,
+    Rewarded,
+    Active.Maps
+  ).Unwrap(); end with;
+end function;
+end unit;

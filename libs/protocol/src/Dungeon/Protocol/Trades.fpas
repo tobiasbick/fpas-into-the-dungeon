@@ -1,0 +1,358 @@
+// Exact bounded trading requests and quote DTOs, independent of catalogue and game rules.
+unit Dungeon.Protocol.Trades;
+
+uses
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.Dialogues as Dialogues,
+  Dungeon.Protocol.Fields as ProtocolFields, Std.Json as Json, Std.Json.Fields as Fields,
+  Std.Conv as Conv;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+function ValidText(Value: string; Maximum: integer; Empty: boolean): boolean;
+begin
+  if (Value.Length() > Maximum) or ((Value.Length() = 0) and not Empty) then
+    return false;
+  end if;
+
+  for Index: integer := 0 to Value.Length() - 1 do
+    if (Value[Index].Ord() < 32) or (Value[Index].Ord() > 126) then
+      return false;
+    end if;
+  end for;
+
+  return true;
+end function;
+
+// Empty lists have page zero; all other pages hold exactly the remaining bounded slice.
+public function LastPage(Total: integer): integer;
+begin
+  return if Total = 0 then 0 else (Total - 1) div Protocol.TradePageSize end if;
+end function;
+
+// Stable wire spelling of the independently paged player-side list.
+public function SideName(Side: Protocol.TradeSide): string;
+begin
+  return if Side = Protocol.TradeSide.Buy then 'buy' else 'sell' end if;
+end function;
+
+function DecodeSide(Value: string): result of (Protocol.TradeSide, string);
+begin
+  case Value of
+    when 'buy':
+      return Ok(Protocol.TradeSide.Buy);
+    when 'sell':
+      return Ok(Protocol.TradeSide.Sell);
+    else
+      return Error('unknown trade side');
+  end case;
+end function;
+
+function Revision(Value: integer): result of (integer, string);
+begin
+  if (Value < 1) or (Value > Protocol.MaximumTradeRevision) then
+    return Error('trade revision is outside its range');
+  end if;
+
+  return Ok(Value);
+end function;
+
+// Encodes one transfer; no quantity, price or replacement balance can be supplied.
+public function EncodeTransfer(Side: Protocol.TradeSide; NpcId: string; ItemId: string; Value: integer): string;
+begin
+  return Json.Stringify(
+    Json.JsonValue.Object([
+      'type': Json.JsonValue.String(
+        if Side = Protocol.TradeSide.Buy then 'trade_buy' else 'trade_sell' end if
+      ),
+      'npc_id': Json.JsonValue.String(NpcId), 'item_id': Json.JsonValue.String(ItemId),
+      'revision': Json.JsonValue.Number(Conv.IntToReal(Value))
+    ])
+  );
+end function;
+
+// Read-only page refresh identifies the active merchant but deliberately carries no old revision.
+public function EncodePage(NpcId: string; Side: Protocol.TradeSide; Page: integer): string;
+begin
+  return Json.Stringify(
+    Json.JsonValue.Object([
+      'type': Json.JsonValue.String('trade_page'), 'npc_id': Json.JsonValue.String(NpcId),
+      'side': Json.JsonValue.String(SideName(Side)),
+      'page': Json.JsonValue.Number(Conv.IntToReal(Page))
+    ])
+  );
+end function;
+
+// Closes this merchant quote and resumes the existing conversation.
+public function EncodeEnd(NpcId: string): string;
+begin
+  return Json.Stringify(
+    Json.JsonValue.Object([
+      'type': Json.JsonValue.String('end_trade'),
+      'npc_id': Json.JsonValue.String(NpcId)
+    ])
+  );
+end function;
+
+// Requires exact typed fields before any authoritative game/session checks run.
+public function DecodeRequest(ObjectFields: dict of string to Json.JsonValue): result of (Protocol.ClientMessage, string);
+begin
+  const Name := try Fields.StringField(ObjectFields, 'type').MapError(FailureMessage);
+  const NpcId := try Dialogues.ValidateNpcId(
+    try Fields.StringField(ObjectFields, 'npc_id').MapError(FailureMessage)
+  );
+  case Name of
+    when 'trade_buy', 'trade_sell':
+      const Known := try Fields.RequireOnlyFields(
+        ObjectFields,
+        ['type', 'npc_id', 'item_id', 'revision']
+      ).MapError(FailureMessage);
+      if ObjectFields.Length() <> 4 then
+        return Error('trade transfer requires type, npc_id, item_id and revision');
+      end if;
+      const ItemId := try ProtocolFields.ItemIdField(ObjectFields);
+      const Value := try Revision(
+        try Fields.IntegerField(ObjectFields, 'revision').MapError(FailureMessage)
+      );
+      return Ok(
+        if Name = 'trade_buy' then Protocol.ClientMessage.TradeBuy(NpcId, ItemId, Value)
+          else Protocol.ClientMessage.TradeSell(NpcId, ItemId, Value)
+          end if
+      );
+    when 'trade_page':
+      const Known := try Fields.RequireOnlyFields(
+        ObjectFields,
+        ['type', 'npc_id', 'side', 'page']
+      ).MapError(FailureMessage);
+      if ObjectFields.Length() <> 4 then
+        return Error('trade_page requires type, npc_id, side and page');
+      end if;
+      const Side := try DecodeSide(
+        try Fields.StringField(ObjectFields, 'side').MapError(FailureMessage)
+      );
+      const Page := try Fields.IntegerField(ObjectFields, 'page').MapError(FailureMessage);
+      if (Page < 0) or (Page > LastPage(Protocol.MaximumTradeItems)) then
+        return Error('trade page is outside its range');
+      end if;
+
+      return Ok(Protocol.ClientMessage.TradePage(NpcId, Side, Page));
+    when 'end_trade':
+      const Known := try Fields.RequireOnlyFields(
+        ObjectFields,
+        ['type', 'npc_id']
+      ).MapError(FailureMessage);
+      if ObjectFields.Length() <> 2 then
+        return Error('end_trade requires type and npc_id');
+      end if;
+
+      return Ok(Protocol.ClientMessage.EndTrade(NpcId));
+    else
+      return Error('unknown trade request');
+  end case;
+end function;
+
+function ValidatePage(Values: array of Protocol.TradeItem; Page: integer; Total: integer): result of (boolean, string);
+begin
+  if (Total < 0) or (Total > Protocol.MaximumTradeItems) or (Page < 0) or (Page > LastPage(Total)) then
+    return Error('trade page and total are inconsistent');
+  end if;
+  const Remaining := Total - Page * Protocol.TradePageSize;
+  const Count := if Remaining < Protocol.TradePageSize then Remaining
+    else Protocol.TradePageSize
+    end if;
+  if Values.Length() <> Count then
+    return Error('trade page must contain its exact bounded row slice');
+  end if;
+
+  for Index: integer := 0 to Values.Length() - 1 do
+    const Item := Values[Index];
+    if (Item.Id.Length() = 0) or (Item.Id.Length() > Protocol.MaximumVisibleInventoryTextLength) then
+      return Error('trade item id has an invalid length');
+    end if;
+
+    if not ValidText(Item.Name, Protocol.MaximumVisibleInventoryTextLength, false)
+      or
+      not ValidText(Item.Reason, Protocol.MaximumTradeReasonLength, true)
+    then
+      return Error('trade item text is invalid');
+    end if;
+
+    if Item.Enabled <> (Item.Reason = '') then
+      return Error('trade capability and reason disagree');
+    end if;
+
+    case Item.Price of
+      when None:
+        if Item.Enabled then
+          return Error('enabled trade item requires a price');
+        end if;
+      when Some(const Price):
+        if (Price < 1) or (Price > Protocol.MaximumTradePrice) then
+          return Error('trade price is outside its range');
+        end if;
+    end case;
+
+    for Previous: integer := 0 to Index - 1 do
+      if Values[Previous].Id = Item.Id then
+        return Error('trade page contains duplicate item ids');
+      end if;
+    end for;
+  end for;
+
+  return Ok(true);
+end function;
+
+// Validates both the decoded response and a prepared server quote before any write/install.
+public function ValidateQuote(Value: Protocol.TradeQuote): result of (Protocol.TradeQuote, string);
+begin
+  const Npc := try Dialogues.ValidateNpcId(Value.NpcId);
+  const Rev := try Revision(Value.Revision);
+  if not ValidText(Value.Speaker, Protocol.MaximumDialogueSpeakerLength, false) then
+    return Error('trade speaker is invalid');
+  end if;
+
+  if Value.MerchantCapacity <> Protocol.MaximumTradeItems then
+    return Error('trade capacity is invalid');
+  end if;
+  const Buy := try ValidatePage(Value.BuyItems, Value.BuyPage, Value.BuyTotal);
+  const Sell := try ValidatePage(Value.SellItems, Value.SellPage, Value.SellTotal);
+  for Item: Protocol.TradeItem in Value.BuyItems do
+    for Other: Protocol.TradeItem in Value.SellItems do
+      if Item.Id = Other.Id then
+        return Error('trade item cannot appear on both sides');
+      end if;
+    end for;
+  end for;
+
+  return Ok(Value);
+end function;
+
+function EncodeRows(Values: array of Protocol.TradeItem): Json.JsonValue;
+begin
+  var Rows: array of Json.JsonValue := [];
+  for Item: Protocol.TradeItem in Values do
+    var Price := Json.JsonValue.NullValue;
+    case Item.Price of
+      when Some(const Value):
+        Price := Json.JsonValue.Number(Conv.IntToReal(Value));
+      when None:
+        null;
+    end case;
+
+    Rows.PushInPlace(
+      Json.JsonValue.Object([
+        'id': Json.JsonValue.String(Item.Id), 'name': Json.JsonValue.String(Item.Name),
+        'price': Price, 'enabled': Json.JsonValue.Bool(Item.Enabled),
+        'reason': Json.JsonValue.String(Item.Reason)
+      ])
+    );
+  end for;
+
+  return Json.JsonValue.ArrayValue(Rows);
+end function;
+
+// Encodes a quote validated at its trust boundary; no wallet or mutable game objects are duplicated.
+public function EncodeQuote(Value: Protocol.TradeQuote): Json.JsonValue;
+begin
+  return Json.JsonValue.Object([
+    'npc_id': Json.JsonValue.String(Value.NpcId), 'speaker': Json.JsonValue.String(Value.Speaker),
+    'revision': Json.JsonValue.Number(Conv.IntToReal(Value.Revision)),
+    'merchant_capacity': Json.JsonValue.Number(Conv.IntToReal(Value.MerchantCapacity)),
+    'buy_page': Json.JsonValue.Number(Conv.IntToReal(Value.BuyPage)),
+    'sell_page': Json.JsonValue.Number(Conv.IntToReal(Value.SellPage)),
+    'buy_total': Json.JsonValue.Number(Conv.IntToReal(Value.BuyTotal)),
+    'sell_total': Json.JsonValue.Number(Conv.IntToReal(Value.SellTotal)),
+    'buy_items': EncodeRows(Value.BuyItems), 'sell_items': EncodeRows(Value.SellItems)
+  ]);
+end function;
+
+function DecodeRows(Values: array of Json.JsonValue): result of (array of Protocol.TradeItem, string);
+begin
+  if Values.Length() > Protocol.TradePageSize then
+    return Error('trade page exceeds its row limit');
+  end if;
+  var Rows: array of Protocol.TradeItem := [];
+  for Value: Json.JsonValue in Values do
+    case Value of
+      when Json.JsonValue.Object(const ObjectFields):
+        const Known := try Fields.RequireOnlyFields(
+          ObjectFields,
+          ['id', 'name', 'price', 'enabled', 'reason']
+        ).MapError(FailureMessage);
+        if ObjectFields.Length() <> 5 then
+          return Error('trade row requires id, name, price, enabled and reason');
+        end if;
+        var Price: option of integer := None;
+        case try Fields.Field(ObjectFields, 'price').MapError(FailureMessage) of
+          when Json.JsonValue.NullValue:
+            null;
+          when Json.JsonValue.Number(_):
+            Price := Some(try Fields.IntegerField(ObjectFields, 'price').MapError(FailureMessage));
+          when Json.JsonValue.Bool(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_), Json.JsonValue.Object(_):
+            return Error('trade price must be an integer or null');
+        end case;
+
+        Rows.PushInPlace(
+          Protocol.TradeItem(
+            Id := try Fields.StringField(ObjectFields, 'id').MapError(FailureMessage),
+            Name := try Fields.StringField(ObjectFields, 'name').MapError(FailureMessage),
+            Price := Price,
+            Enabled := try Fields.BooleanField(ObjectFields, 'enabled').MapError(FailureMessage),
+            Reason := try Fields.StringField(ObjectFields, 'reason').MapError(FailureMessage)
+          )
+        );
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+        return Error('trade row must be an object');
+    end case;
+  end for;
+
+  return Ok(Rows);
+end function;
+
+// Requires every field and capability/page invariant before client presentation can consume a quote.
+public function DecodeQuote(ObjectFields: dict of string to Json.JsonValue): result of (Protocol.TradeQuote, string);
+begin
+  const Known := try Fields.RequireOnlyFields(
+    ObjectFields,
+    [
+      'npc_id',
+      'speaker',
+      'revision',
+      'merchant_capacity',
+      'buy_page',
+      'sell_page',
+      'buy_total',
+      'sell_total',
+      'buy_items',
+      'sell_items'
+    ]
+  ).MapError(FailureMessage);
+  if ObjectFields.Length() <> 10 then
+    return Error('trade quote has an unexpected field set');
+  end if;
+
+  return ValidateQuote(
+    Protocol.TradeQuote(
+      NpcId := try Fields.StringField(ObjectFields, 'npc_id').MapError(FailureMessage),
+      Speaker := try Fields.StringField(ObjectFields, 'speaker').MapError(FailureMessage),
+      Revision := try Fields.IntegerField(ObjectFields, 'revision').MapError(FailureMessage),
+      MerchantCapacity := try Fields.IntegerField(
+        ObjectFields,
+        'merchant_capacity'
+      ).MapError(FailureMessage),
+      BuyPage := try Fields.IntegerField(ObjectFields, 'buy_page').MapError(FailureMessage),
+      SellPage := try Fields.IntegerField(ObjectFields, 'sell_page').MapError(FailureMessage),
+      BuyTotal := try Fields.IntegerField(ObjectFields, 'buy_total').MapError(FailureMessage),
+      SellTotal := try Fields.IntegerField(ObjectFields, 'sell_total').MapError(FailureMessage),
+      BuyItems := try DecodeRows(
+        try Fields.ArrayField(ObjectFields, 'buy_items').MapError(FailureMessage)
+      ),
+      SellItems := try DecodeRows(
+        try Fields.ArrayField(ObjectFields, 'sell_items').MapError(FailureMessage)
+      )
+    )
+  );
+end function;
+end unit;

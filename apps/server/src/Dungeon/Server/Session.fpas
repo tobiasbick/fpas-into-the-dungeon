@@ -9,6 +9,20 @@ public type ViewportSize = record
   public Height: integer;
 end record;
 
+// Only the selected pages and revision are retained; owned items remain in GameState.
+public type TradeFrame = record
+  public NpcId: string;
+  public Revision: integer;
+  public BuyPage: integer;
+  public SellPage: integer;
+end record;
+
+// Mutually exclusive connection-local authority, never saved with game progress.
+public type ActiveInteraction = enum
+  Dialogue(Frame: DialogueRules.Frame);
+  Trade(Frame: TradeFrame);
+end enum;
+
 // Per-connection state carried between client messages after the handshake.
 public type ServerSession = record
   public World: WorldUnit.WorldSession;
@@ -25,7 +39,9 @@ public type ServerSession = record
   // Set when the connection must close after the current message.
   public Finished: boolean;
   // Connection-local authoritative frame; disconnect and game persistence never retain it.
-  public ActiveDialogue: option of DialogueRules.Frame := None;
+  public ActiveInteraction: option of ActiveInteraction := None;
+  // Last issued quote revision survives closing, new games and world changes in this connection.
+  public LastTradeRevision: integer := 0;
 end record;
 
 // Bounds a requested viewport by the server policy; non-positive sizes are an error.
@@ -83,6 +99,7 @@ end function;
 public function RequiresActiveSession(Message: Protocol.ClientMessage): boolean;
 begin
   return case Message of
+    when Protocol.ClientMessage.TradeBuy(_, _, _), Protocol.ClientMessage.TradeSell(_, _, _), Protocol.ClientMessage.TradePage(_, _, _), Protocol.ClientMessage.EndTrade(_): true;
     when Protocol.ClientMessage.DialogueChoice(_, _), Protocol.ClientMessage.EndDialogue, Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_): true;
     when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Disconnect: false;
   end case;
@@ -94,6 +111,55 @@ begin
   return case State of
     when Some(const Value): Ok(Value);
     when None: Error('server session has no active game state');
+  end case;
+end function;
+
+// Blocks lifecycle and gameplay before dispatch; viewport and disconnect remain read-only exits.
+public function InteractionRejection(Session: ServerSession; Message: Protocol.ClientMessage): string;
+begin
+  if (Message is Protocol.ClientMessage.Viewport(_, _))
+    or
+    (Message is Protocol.ClientMessage.Disconnect)
+  then
+    return '';
+  end if;
+
+  case Session.ActiveInteraction of
+    when None:
+      return '';
+    when Some(ActiveInteraction.Dialogue(_)):
+      if (Message is Protocol.ClientMessage.TradeBuy(_, _, _))
+        or
+        (Message is Protocol.ClientMessage.TradeSell(_, _, _))
+        or
+        (Message is Protocol.ClientMessage.TradePage(_, _, _))
+        or
+        (Message is Protocol.ClientMessage.EndTrade(_))
+      then
+        return '';
+      end if;
+
+      if (Message is Protocol.ClientMessage.DialogueChoice(_, _))
+        or
+        (Message is Protocol.ClientMessage.EndDialogue)
+      then
+        return '';
+      end if;
+
+      return 'dialogue_active';
+    when Some(ActiveInteraction.Trade(_)):
+      if (Message is Protocol.ClientMessage.TradeBuy(_, _, _))
+        or
+        (Message is Protocol.ClientMessage.TradeSell(_, _, _))
+        or
+        (Message is Protocol.ClientMessage.TradePage(_, _, _))
+        or
+        (Message is Protocol.ClientMessage.EndTrade(_))
+      then
+        return '';
+      end if;
+
+      return 'trade_active';
   end case;
 end function;
 end unit;

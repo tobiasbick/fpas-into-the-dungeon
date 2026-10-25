@@ -1,0 +1,69 @@
+// Reuses ordinary village navigation and wire intentions for natural trade play tests.
+unit Dungeon.Test.Trades;
+
+uses
+  Dungeon.Test.Wire as Wire, Dungeon.Test.Villages as Villages,
+  Dungeon.Interior as Interior, Dungeon.Npcs as Npcs, Dungeon.Protocol as Protocol, Std.Tasks as Tasks;
+
+// Requires the last response to be an authoritative trade quote.
+public function Quote(Client: Wire.WireClient): Protocol.TradeQuote;
+begin
+  case Client.Last of
+    when Protocol.ServerMessage.Trade(_, const Quote, _):
+      return Quote;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected trade response');
+  end case;
+end function;
+
+// Reads only the balance in that same atomic trade response.
+public function Coins(Client: Wire.WireClient): integer;
+begin
+  case Client.Last of
+    when Protocol.ServerMessage.Trade(const View, _, _):
+      case View of
+        when Protocol.VisibleState.MapState(const State):
+          return State.Coins;
+        when Protocol.VisibleState.FirstPersonState(const State):
+          return State.Coins;
+      end case;
+    when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected trade response');
+  end case;
+end function;
+
+// Walks beside this map's merchant, greets them and chooses the actually offered trade topic.
+public function Open(Client: Wire.WireClient; Map: Interior.InteriorMap; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  const Current := Wire.Exchange(Client, Protocol.ClientMessage.Viewport(20, 10), Token);
+  for Slot: integer := 0 to Map.Npcs.Length() - 1 do
+    if Map.Npcs[Slot].Kind = Npcs.NpcKind.Merchant then
+      return Villages.Choose(Villages.Talk(Current, Map, Slot, Token), 'trade', Token);
+    end if;
+  end for;
+
+  panic('this map needs a merchant');
+end function;
+
+// Transfers one exact quoted identity through the normal wire path.
+public function Transfer(Client: Wire.WireClient; Buy: boolean; ItemId: string; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  const Frame := Quote(Client);
+  return Wire.Exchange(
+    Client,
+    if Buy then Protocol.ClientMessage.TradeBuy(Frame.NpcId, ItemId, Frame.Revision)
+      else Protocol.ClientMessage.TradeSell(Frame.NpcId, ItemId, Frame.Revision)
+      end if, Token
+  );
+end function;
+
+// Acknowledges the return to dialogue before ending the conversation.
+public function Close(Client: Wire.WireClient; Token: Tasks.CancellationToken): Wire.WireClient;
+begin
+  const Frame := Quote(Client);
+  return Villages.EndTalk(
+    Wire.Exchange(Client, Protocol.ClientMessage.EndTrade(Frame.NpcId), Token),
+    Token
+  );
+end function;
+end unit;

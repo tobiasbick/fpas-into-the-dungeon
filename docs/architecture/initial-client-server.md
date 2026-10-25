@@ -1,7 +1,7 @@
-# Initial client-server slice
+# Client-server protocol
 
-The first executable slice proves the process, protocol, authority, TUI, and
-test seams without defining the wider game.
+The client and authoritative server exchange bounded intentions and projections
+over TCP. The protocol covers exploration, combat, inventory, dialogue and trade.
 
 ## Behavior
 
@@ -33,9 +33,8 @@ error wins if cleanup also fails; cleanup errors after success are returned.
 Ordinary connection errors are delivered to the UI through the tagged inbox,
 because the TUI host does not present a subscription's ordinary Result.Error.
 
-No game time passes without a player intention. The slice has no combat,
-general mutable-world simulation, authentication, TLS, multiplayer state, or
-LLM integration.
+No game time passes without a player intention. Dialogue and trade consume no
+turn. Authentication, TLS, multiplayer state and LLM integration remain future work.
 
 ## Protocol
 
@@ -60,12 +59,13 @@ Client: hello, list_worlds, select_world, create_world, new_game, load_game,
          save_game, overwrite_save, viewport, move,
          first_person_step, first_person_turn, interact, exploration_map,
          attack, wait, equip, unequip, drop_item, use_item,
-         dialogue_choice, end_dialogue, disconnect
+         dialogue_choice, end_dialogue, trade_buy, trade_sell, trade_page,
+         end_trade, disconnect
 Server: welcome, worlds, state, interaction, exploration_map,
-        dialogue, dialogue_ended, save_completed, defeated, rejected, error
+        dialogue, dialogue_ended, trade, save_completed, defeated, rejected, error
 ```
 
-The current protocol version `19` is included in the handshake. `hello` includes the initial
+The current protocol version `20` is included in the handshake. `hello` includes the initial
 world-cell viewport, and later `viewport` messages report terminal or panel
 layout changes. Unknown, malformed, or
 oversized messages produce a structured error and close only that connection.
@@ -78,6 +78,12 @@ Inventory entries in either state family require `id`, `name`, `slot`,
 `equipped` and boolean `usable`. `use_item` carries only `type` and a bounded
 `item_id`; capability and healing remain server-owned. See
 [items and inventory](items-and-inventory.md) for rejection and commit behavior.
+
+Both state families also require integer `coins` in 0..1,000,000,000. Trade
+replies contain a complete state, quote and dirty flag in one envelope. The
+quote has 16 entries per side/page; buying and selling carry only exact item
+identity and current revision. See [trade and economy](economy.md) for exact
+fields, capability checks, session precedence and the unchanged 64-KiB budget.
 
 Session selection and save intentions are also request-response operations.
 The server acknowledges a save only after the atomic replacement succeeds.

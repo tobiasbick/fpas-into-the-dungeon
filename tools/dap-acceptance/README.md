@@ -99,3 +99,32 @@ Append `no-save` to the travel arguments when checking Start over's preservation
 of the previous explicit save. That mode performs movement without checkpoint
 or final saves.
 Append `reverse` to walk a route back in the opposite order and direction.
+
+Planner and travel accept `last` in place of the numeric command ID. This reads
+the last acknowledged ID; run only one command/route helper at a time.
+
+## Trade and inventory
+
+Use an actionable window of at least 40 columns by 12 rows before trading:
+
+```text
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> resize 40 12
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> choice trade
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> trade inspect
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> trade buy <item-id>
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> trade sell <item-id>
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> keys "Escape Escape"
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> inventory <item-id>
+fpas run tools/dap-acceptance/command.fpasprj -- <directory> inventory <item-id> drop
+```
+
+The trade helper expands the projected quote, navigates by exact item ID and
+presses Enter once. It searches up to four pages through ordinary Page Up/Down
+keys; it does not manufacture a quote, price or intention. A disabled row stays
+disabled when selected. `inventory` opens the normal inventory, selects an ID
+and presses Enter to use/wear/remove it, or D to drop it, then closes the window.
+Close dialogue/trade first. Debugger expansion is read-only throughout.
+
+Inspected quote frames are appended to `trades.jsonl`. The completed seed-25/
+chunk-1 route and observed balances/identities are in
+[15d verification](../../docs/architecture/economy-acceptance.md).

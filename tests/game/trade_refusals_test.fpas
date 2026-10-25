@@ -1,0 +1,227 @@
+// Verifies typed refusals at the pure trade boundary, capabilities, quest goods and complete state preservation.
+program TradeRefusalsTest;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Equipment as Equipment,
+  Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Npcs as Npcs,
+  Dungeon.Quests.Items as Rewards, Dungeon.Quests.Model as Quests,
+  Dungeon.Trade as Trade, Dungeon.Trade.Model as Model, Dungeon.Trade.Items as Stock,
+  Dungeon.Test.Trade as Fixtures, Dungeon.Test.StateComparison as States,
+  Std.Conv as Conv, Std.Test as Test;
+
+type Attempt = record
+  State: GameState.GameState;
+  ItemId: string;
+  Cause: Trade.Failure;
+end record;
+
+procedure FailureIs<T>(Value: result of (T, Trade.Failure); Expected: Trade.Failure);
+begin
+  case Value of
+    when Error(const Cause):
+      Test.AssertTrue(Cause = Expected);
+    when Ok(_):
+      panic('trade must refuse this attempt');
+  end case;
+end procedure;
+
+function Offer(Values: array of Model.Offer; Id: string): Model.Offer;
+begin
+  for Value: Model.Offer in Values do
+    if Value.Id = Id then
+      return Value;
+    end if;
+  end for;
+
+  panic('expected the selected offer');
+end function;
+
+begin
+  const Fixture := Fixtures.Home();
+  const State := Fixture.State;
+  const Id := Fixture.MerchantId;
+  const Potion := Stock.InitialId(Id, 0);
+  const Coin := State.Items[0].Id;
+  const Sword := State.Items[1].Id;
+  const LootPotion := State.Items[3].Id;
+  const Worn := Equipment.EquipItem(State, Sword).Unwrap().State;
+  var Floor := State;
+  Floor.Items[0].Location := Items.ItemLocation.InInterior(
+    Fixture.Maps[0].AreaId,
+    Fixture.Maps[0].Items[0].Position
+  );
+  var Consumed := State;
+  Consumed.Items[3].Location := Items.ItemLocation.Consumed;
+  const Bought := Trade.Buy(Fixture.View, State with Coins := 8; end with, Id, Potion).Unwrap();
+  for Attempt: Attempt in [
+    Attempt(State := State, ItemId := Potion, Cause := Trade.Failure.InsufficientFunds),
+    Attempt(State := State, ItemId := Coin, Cause := Trade.Failure.WrongOwner),
+    Attempt(State := State, ItemId := 'missing', Cause := Trade.Failure.UnknownItem),
+    Attempt(State := Bought, ItemId := Potion, Cause := Trade.Failure.WrongOwner),
+    Attempt(State := Consumed, ItemId := LootPotion, Cause := Trade.Failure.WrongOwner),
+    Attempt(State := Floor, ItemId := Coin, Cause := Trade.Failure.WrongOwner)
+  ] do
+    const Input := Attempt.State;
+    FailureIs(Trade.Buy(Fixture.View, Input, Id, Attempt.ItemId), Attempt.Cause);
+    Test.AssertTrue(States.SameState(Attempt.State, Input));
+  end for;
+
+  for Attempt: Attempt in [
+    Attempt(State := State, ItemId := Potion, Cause := Trade.Failure.WrongOwner),
+    Attempt(State := State, ItemId := 'missing', Cause := Trade.Failure.UnknownItem),
+    Attempt(State := Worn, ItemId := Sword, Cause := Trade.Failure.Worn),
+    Attempt(State := Consumed, ItemId := LootPotion, Cause := Trade.Failure.WrongOwner),
+    Attempt(State := Floor, ItemId := Coin, Cause := Trade.Failure.WrongOwner),
+    Attempt(
+      State := State with Coins := Model.MaximumCoins - 9; end with,
+      ItemId := Coin, Cause := Trade.Failure.WalletFull
+    )
+  ] do
+    const Input := Attempt.State;
+    FailureIs(Trade.Sell(Fixture.View, Input, Id, Attempt.ItemId), Attempt.Cause);
+    Test.AssertTrue(States.SameState(Attempt.State, Input));
+  end for;
+  const AtLimit := State with Coins := Model.MaximumCoins - 10; end with;
+  const Sold := Trade.Sell(Fixture.View, AtLimit, Id, Coin).Unwrap();
+  var Expected := AtLimit with Coins := Model.MaximumCoins; end with;
+
+  Expected.Items[0].Location := Items.ItemLocation.HeldByMerchant(Id);
+  Test.AssertTrue(States.SameState(Expected, Sold));
+  // Shape-valid capacity fixtures target this rule boundary; storage tests prove actual origins separately.
+  var FullInventory := State with Coins := 20; end with;
+
+  for Index: integer := 0 to 58 do
+    FullInventory.Items.PushInPlace(
+      Items.GameItem(
+        Id := Fixture.Maps[0].AreaId + ':item:' + Conv.IntToStr(100 + Index),
+        Kind := Items.ItemKind.AncientCoin, Location := Items.ItemLocation.CarriedByPlayer
+      )
+    );
+  end for;
+  const BoughtLast := Trade.Buy(Fixture.View, FullInventory, Id, Potion).Unwrap();
+  var LastExpected := FullInventory with Coins := 12; end with;
+
+  LastExpected.Items[4].Location := Items.ItemLocation.CarriedByPlayer;
+  Test.AssertTrue(States.SameState(LastExpected, BoughtLast));
+  FullInventory.Items.PushInPlace(
+    Items.GameItem(
+      Id := Fixture.Maps[0].AreaId + ':item:159',
+      Kind := Items.ItemKind.AncientCoin, Location := Items.ItemLocation.CarriedByPlayer
+    )
+  );
+  Test.AssertTrue(GameState.ValidateGameState(Fixture.View, FullInventory) is Ok(_));
+  const InventoryBefore := FullInventory;
+  FailureIs(Trade.Buy(Fixture.View, FullInventory, Id, Potion), Trade.Failure.InventoryFull);
+  Test.AssertTrue(States.SameState(InventoryBefore, FullInventory));
+  const DisabledBuy := Offer(
+    Trade.QuoteFor(Fixture.View, FullInventory, Id).Unwrap().BuyItems,
+    Potion
+  );
+  Test.AssertFalse(DisabledBuy.Enabled);
+  Test.AssertEquals('Your inventory is full.', DisabledBuy.Reason);
+  var FullStock := State;
+  for Index: integer := 0 to 57 do
+    FullStock.Items.PushInPlace(
+      Items.GameItem(
+        Id := Fixture.Maps[0].AreaId + ':item:' + Conv.IntToStr(100 + Index),
+        Kind := Items.ItemKind.AncientCoin, Location := Items.ItemLocation.HeldByMerchant(Id)
+      )
+    );
+  end for;
+  const SoldLast := Trade.Sell(Fixture.View, FullStock, Id, Coin).Unwrap();
+  var StockExpected := FullStock with Coins := 10; end with;
+
+  StockExpected.Items[0].Location := Items.ItemLocation.HeldByMerchant(Id);
+  Test.AssertTrue(States.SameState(StockExpected, SoldLast));
+  FullStock.Items.PushInPlace(
+    Items.GameItem(
+      Id := Fixture.Maps[0].AreaId + ':item:158',
+      Kind := Items.ItemKind.AncientCoin, Location := Items.ItemLocation.HeldByMerchant(Id)
+    )
+  );
+  Test.AssertTrue(GameState.ValidateGameState(Fixture.View, FullStock) is Ok(_));
+  const StockBefore := FullStock;
+  FailureIs(Trade.Sell(Fixture.View, FullStock, Id, Coin), Trade.Failure.StockFull);
+  Test.AssertTrue(States.SameState(StockBefore, FullStock));
+  const DisabledSell := Offer(Trade.QuoteFor(Fixture.View, FullStock, Id).Unwrap().SellItems, Coin);
+  Test.AssertFalse(DisabledSell.Enabled);
+  Test.AssertEquals('The merchant stock is full.', DisabledSell.Reason);
+  var Unmet := State;
+  Unmet.Npcs[Npcs.IndexOf(Unmet.Npcs, Id)].HasMetPlayer := false;
+  FailureIs(
+    Trade.QuoteFor(Fixture.View, Unmet, Id),
+    Trade.Failure.InvalidContext('Speak to the merchant first.')
+  );
+  const Far := State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 12)
+  ); end with;
+
+  FailureIs(
+    Trade.Buy(Fixture.View, Far, Id, Potion),
+    Trade.Failure.InvalidContext('The selected merchant is not in reach.')
+  );
+  const AtMara := State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); end with;
+
+  FailureIs(
+    Trade.Sell(Fixture.View, AtMara, Npcs.MaraId(Fixture.View.Metadata), Coin),
+    Trade.Failure.InvalidContext('This NPC is not a merchant.')
+  );
+  for Invalid: GameState.GameState in [
+    State with Health := 0; end with,
+    State with Coins := -1; end with
+  ] do
+    case Trade.QuoteFor(Fixture.View, Invalid, Id) of
+      when Error(Trade.Failure.InvalidContext(_)):
+        null;
+      when Error(_), Ok(_):
+        panic('invalid state must fail context validation');
+    end case;
+
+    Test.AssertTrue(States.SameState(State, Fixture.State));
+  end for;
+
+  case Trade.QuoteFor(
+    Fixture.View with Metadata := Fixture.View.Metadata with Id := 'foreign'; end with; end with,
+    State,
+    Id
+  ) of
+    when Error(Trade.Failure.InvalidContext(_)):
+      null;
+    when Error(_), Ok(_):
+      panic('foreign view must fail context validation');
+  end case;
+  const Active := Fixtures.ActiveCompass(Fixture);
+  const Objective := Quests.ObjectiveOf(Active.State.Quest).Unwrap();
+  const Compass := Offer(
+    Trade.QuoteFor(Active.View, Active.State, Id).Unwrap().SellItems,
+    Objective.ItemId
+  );
+  Test.AssertTrue(Compass.Price is None);
+  Test.AssertFalse(Compass.Enabled);
+  Test.AssertEquals('Quest items cannot be traded.', Compass.Reason);
+  FailureIs(Trade.Sell(Active.View, Active.State, Id, Objective.ItemId), Trade.Failure.NotTradable);
+  const Rewarded := Fixtures.RewardedCompass(Fixture);
+  FailureIs(
+    Trade.Sell(Rewarded.View, Rewarded.State, Id, Objective.ItemId),
+    Trade.Failure.WrongOwner
+  );
+  const RewardId := Rewards.RewardId(Rewarded.View.Metadata, 0);
+  const RewardBefore := Rewarded.State with Coins := 5; end with;
+  const RewardSold := Trade.Sell(Rewarded.View, RewardBefore, Id, RewardId).Unwrap();
+  var RewardExpected := RewardBefore with Coins := 8; end with;
+
+  for Index: integer := 0 to RewardExpected.Items.Length() - 1 do
+    if RewardExpected.Items[Index].Id = RewardId then
+      RewardExpected.Items[Index].Location := Items.ItemLocation.HeldByMerchant(Id);
+    end if;
+  end for;
+
+  Test.AssertTrue(States.SameState(RewardExpected, RewardSold));
+  const RewardBought := Trade.Buy(Rewarded.View, RewardSold, Id, RewardId).Unwrap();
+  Test.AssertTrue(States.SameState(Rewarded.State, RewardBought));
+  Test.AssertTrue(
+    Areas.ValidateSavedGame(Rewarded.View.Metadata, RewardSold, Rewarded.Maps) is Ok(_)
+  );
+end.

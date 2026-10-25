@@ -2,7 +2,19 @@
 unit Dungeon.Protocol;
 
 // Wire compatibility version required during the hello/welcome handshake.
-public const ProtocolVersion: integer := 19;
+public const ProtocolVersion: integer := 20;
+// Economy wire bounds; arithmetic and catalogue ownership remain game rules.
+public const MaximumCoins: integer := 1000000000;
+// Quote identities increase within one connection and never wrap.
+public const MaximumTradeRevision: integer := 1000000000;
+// Total individual rows permitted on either side, including worn inventory entries.
+public const MaximumTradeItems: integer := 64;
+// A quote carries only this many rows per side; the server retains page indexes.
+public const TradePageSize: integer := 16;
+// Wire prices are positive catalogue amounts; null represents an unpriced item.
+public const MaximumTradePrice: integer := 20;
+// Printable single-line refusal text remains bounded independently of names.
+public const MaximumTradeReasonLength: integer := 160;
 // Catalog pages and text are bounded to fit one transport line.
 public const MaximumWorldsPerPage: integer := 64;
 public const MaximumWorldReasonLength: integer := 256;
@@ -171,6 +183,8 @@ public type MapVisibleState = record
   // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
   public Health: integer;
   public MaxHealth: integer;
+  // Separate currency; no inventory entry duplicates this balance.
+  public Coins: integer;
   // Character sheet lines in display order.
   public Character: array of VisibleCharacterValue;
   // Complete read-only journal, formatted by the server without hidden map coordinates.
@@ -197,6 +211,8 @@ public type FirstPersonVisibleState = record
   // Current and full character health; 1 <= Health <= MaxHealth <= MaximumVisibleHealth.
   public Health: integer;
   public MaxHealth: integer;
+  // Separate currency; no inventory entry duplicates this balance.
+  public Coins: integer;
   // Character sheet lines in display order.
   public Character: array of VisibleCharacterValue;
   // Complete read-only journal, formatted by the server without hidden map coordinates.
@@ -225,6 +241,35 @@ public type DialogueFrame = record
   public Speaker: string;
   public Text: string;
   public Choices: array of DialogueChoice;
+end record;
+
+// One independently paged list in a trade window.
+public type TradeSide = enum
+  Buy;
+  Sell;
+end enum;
+
+// Bounded exact item capability; absent prices are allowed only on disabled rows.
+public type TradeItem = record
+  public Id: string;
+  public Name: string;
+  public Price: option of integer;
+  public Enabled: boolean;
+  public Reason: string;
+end record;
+
+// One authoritative quote revision; wallet is supplied only by the accompanying visible state.
+public type TradeQuote = record
+  public NpcId: string;
+  public Speaker: string;
+  public Revision: integer;
+  public MerchantCapacity: integer;
+  public BuyPage: integer;
+  public SellPage: integer;
+  public BuyTotal: integer;
+  public SellTotal: integer;
+  public BuyItems: array of TradeItem;
+  public SellItems: array of TradeItem;
 end record;
 
 // Client-safe current-area map window; u fields must contain ? and dimensions match both row planes.
@@ -293,6 +338,13 @@ public type ClientMessage = enum
   DialogueChoice(NpcId: string; ChoiceId: string);
   // Explicitly closes the active conversation without saving it.
   EndDialogue;
+  // Exact one-item intentions bound to the current merchant, page and quote revision.
+  TradeBuy(NpcId: string; ItemId: string; Revision: integer);
+  TradeSell(NpcId: string; ItemId: string; Revision: integer);
+  // Read-only page/refresh; the response issues a fresh revision.
+  TradePage(NpcId: string; Side: TradeSide; Page: integer);
+  // Returns to the merchant's root conversation.
+  EndTrade(NpcId: string);
   // Attacks the field directly ahead; consumes one combat turn.
   Attack;
   // Passes one combat turn without acting.
@@ -320,6 +372,8 @@ public type ServerMessage = enum
   Dialogue(State: VisibleState; Frame: DialogueFrame; Dirty: boolean);
   // Atomic end acknowledgement with the current state, including any completed healing.
   DialogueEnded(State: VisibleState; Dirty: boolean);
+  // Complete state, current quote and actual unsaved-progress status are installed atomically.
+  Trade(State: VisibleState; Quote: TradeQuote; Dirty: boolean);
   SaveCompleted;
   // Replaces the state response of the turn in which the character fell; the session has ended.
   Defeated(Message: string);

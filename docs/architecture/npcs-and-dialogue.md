@@ -1,7 +1,7 @@
 # NPCs and dialogue
 
 Hearthmoor is the authored home settlement; generated villages add residents,
-guards and healers. All use a bounded map view. Houses stay closed; entered
+guards, healers and merchants. All use a bounded map view. Houses stay closed; entered
 building interiors need a separate plan. See [generated settlements](generated-settlements.md)
 for site rules, identities, immutable files and the reproducible review route.
 
@@ -11,18 +11,21 @@ for site rules, identities, immutable files and the reproducible review route.
 `<world>:settlement:home` identity. Its gate is six traversable cardinal steps
 from spawn. Entry starts at (11,12), beside the exit at (11,13). Mara occupies
 (11,7), with ID `<world>:settlement:home:npc:mara`. Home geometry and her
-placement resolve from code without a settlement file.
+placement resolve from code without a settlement file. Elias, the merchant,
+stands at (6,7), with ID `<world>:settlement:home:npc:merchant`. Neither his
+addition nor the generated merchant changes gates or existing role placements.
 
 Generated maps have 23 by 15, 27 by 19 or 31 by 21 fields. Immutable geometry
 and `NpcPlacement` records travel together in `InteriorMap`; the server retains
 this checked map for the active area. A placement supplies stable ID, kind,
 display name and local position. Generated IDs are `<area>:npc:0` (resident),
-`:npc:1` (guard) and `:npc:2` (healer). Names may repeat across villages, but
+`:npc:1` (guard), `:npc:2` (healer) and `:npc:3` (merchant). Names may repeat across villages, but
 identity never depends on a name. NPCs block movement, stay away from start
 and exit, and leave connected routes to every talk position.
 
 A new game has one unmet Mara record before its first visit. First entry into
-a generated village adds exactly its three initially unmet records. Every
+a generated village adds exactly its four initially unmet records. First home
+entry adds Elias; every visited merchant materializes five stock items once. Every
 mutable record stores ID, kind, area and `HasMetPlayer`; records are sorted
 canonically. Rules find Mara by exact ID, even when generated NPCs sort before
 her. Validation rejects missing, duplicate, foreign, wrong-role and unvisited
@@ -72,13 +75,16 @@ hand-in still returns the compass and grants two potions atomically; see
 
 ## Connection and protocol
 
-`Dungeon.Server.Dialogue` owns dispatch; `ServerSession.ActiveDialogue` retains
-the authoritative frame. While active, only `dialogue_choice`, `end_dialogue`,
-`viewport` and disconnect are accepted. Other intentions, including Save,
+`Dungeon.Server.Dialogue` owns conversation dispatch; `ServerSession.ActiveInteraction`
+retains either the authoritative dialogue frame or a trade frame. While talking,
+`dialogue_choice`, `end_dialogue`, `viewport` and disconnect are accepted. Other intentions, including Save,
 receive `dialogue_active`. Foreign/stale NPC IDs and unavailable topics receive
 `dialogue_rejected`; absent conversations receive `dialogue_not_active`.
+The four trade intentions receive `trade_not_active` until an offered merchant
+root choice opens trade. `Dungeon.Server.Trade` then owns its intents; see
+[trade and economy](economy.md) for revision, page and refusal rules.
 
-Protocol 19 adds `settlement` to the existing bounded topic vocabulary.
+Protocol 20 includes `settlement` and the merchant root topic `trade` in the bounded topic vocabulary.
 `dialogue_choice` contains exactly `type`, `npc_id`, `choice_id`; `end_dialogue`
 contains only `type`. Replies contain the complete resulting visible state and
 dirty flag, plus the projected frame for `dialogue`. A frame has `npc_id`,
@@ -98,7 +104,7 @@ Alt+X keeps normal cancellation. New answers reset selection; resize preserves i
 
 ## Persistence and verification
 
-Savegame 13 stores local positions as `{kind:"settlement",x,y}` and exact NPC
+Savegame 14 stores local positions as `{kind:"settlement",x,y}` and exact NPC
 records as `{id,kind,area_id,has_met_player}`. It validates every visited
 settlement's complete roster against authored or immutable stored definitions,
 including while the player is elsewhere. Positions/names belong to those

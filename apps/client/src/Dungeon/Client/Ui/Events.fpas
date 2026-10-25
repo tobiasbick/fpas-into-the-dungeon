@@ -1,7 +1,7 @@
 // Applies authoritative network events to the client model.
 unit Dungeon.Client.Ui.Events;
 
-uses Dungeon.Client.Journal as Journal, Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Intentions as Intentions, Dungeon.Client.Ui.Playback as Playback, Dungeon.Client.Ui.Session as Session, Dungeon.Client.Character as Character, Dungeon.Client.CharacterSheet as CharacterSheet, Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Dungeon.Client.Ui.Worlds as UiWorlds, Std.Tui as Tui;
+uses Dungeon.Client.Ui.Trade as Trade, Dungeon.Client.Journal as Journal, Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Intentions as Intentions, Dungeon.Client.Ui.Playback as Playback, Dungeon.Client.Ui.Session as Session, Dungeon.Client.Character as Character, Dungeon.Client.CharacterSheet as CharacterSheet, Dungeon.Client.Model as Model, Dungeon.Protocol as Protocol, Dungeon.Client.Ui.Worlds as UiWorlds, Std.Tui as Tui;
 
 // Applies authoritative messages emitted by the network task.
 public function UpdateClientEvent(State: Model.ClientModel; Value: Model.ClientEvent; Cmd: Tui.TuiCmdOutput): Model.ClientModel;
@@ -16,11 +16,25 @@ begin
     (Value is Model.ClientEvent.Defeated(_))
   then
     Next.ActiveDialogue := None;
+    Next.ActiveTrade := None;
     Next.DialogueSelection := 0;
     Next.DialogueOffset := 0;
   end if;
 
   case Value of
+    when Model.ClientEvent.Trade(const Projection, const Quote, const Dirty):
+      var Trading := UpdateClientEvent(
+        State with PendingChangesProgress := false; Overlay := Model.ClientOverlay.NoOverlay; end with,
+        Model.ClientEvent.State(Projection), Cmd
+      );
+      Trading := Trade.Install(
+        Trading with ActiveTrade := State.ActiveTrade; TradePagePending := State.TradePagePending; end with,
+        Quote
+      );
+      Trading.ActiveDialogue := None;
+      Trading.Dirty := Dirty;
+      Trading.Status := 'Trading with ' + Quote.Speaker + '.';
+      return Trading;
     when Model.ClientEvent.Dialogue(const Projection, const Frame, const Dirty):
       var DialogState := UpdateClientEvent(
         State with PendingChangesProgress := false; Overlay := Model.ClientOverlay.NoOverlay; end with,
@@ -56,6 +70,7 @@ begin
         Next.Screen := Model.ClientScreen.GameScreen;
         if not ViewportResponse then
           Next.ActiveDialogue := None;
+          Next.ActiveTrade := None;
         end if;
 
         Next.Overlay := if ViewportResponse then State.Overlay
@@ -106,6 +121,7 @@ begin
               Next.WorldX := MapValue.WorldX;
               Next.WorldY := MapValue.WorldY;
               Next.Inventory := MapValue.Inventory;
+              Next.Coins := MapValue.Coins;
               Next.Character := MapValue.Character;
               Next.Journal := MapValue.Journal;
               Next.PrimaryTitle := MapValue.Title;
@@ -127,6 +143,7 @@ begin
               Next.WorldY := 0;
               Next.FirstPersonFacing := FirstPersonValue.Facing;
               Next.Inventory := FirstPersonValue.Inventory;
+              Next.Coins := FirstPersonValue.Coins;
               Next.Character := FirstPersonValue.Character;
               Next.Journal := FirstPersonValue.Journal;
               Next.PrimaryTitle := FirstPersonValue.Title;
@@ -336,6 +353,12 @@ begin
             Next.Overlay := Model.ClientOverlay.NoOverlay;
             Next.FocusedControl := Controls.NewGameControlId;
           end;
+        end if;
+
+        if Next.ActiveTrade is Some(_) then
+          Next.TradeNotice := Message;
+          Next.TradePagePending := false;
+          Next.TradeTextOffset := 0;
         end if;
 
         Next.Status := Message;

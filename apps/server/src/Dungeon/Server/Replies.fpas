@@ -1,7 +1,7 @@
 // Sends projections and rejections and commits accepted states and turns.
 unit Dungeon.Server.Replies;
 
-uses Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
+uses Dungeon.Server.Trade.Quotes as TradeQuotes, Dungeon.Server.Mapping as Mapping, Dungeon.Server.Projection as ProjectionUnit, Dungeon.Server.Session as SessionUnit, Dungeon.Server.Logging as Logging, Dungeon.Combat as Combat, Dungeon.Exploration as Exploration, Dungeon.GameState as GameState, Dungeon.Movement as Movement, Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as ServerMessages, Dungeon.Protocol.Transport as Transport, Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks;
 
 // Encodes a complete response and checks its UTF-8 wire size before attempting any write.
 public function EncodeMessage(Message: Protocol.ServerMessage): result of (string, string);
@@ -37,10 +37,15 @@ type PreparedReply = record
   Line: string;
 end record;
 
+type ResponseKind = enum
+  State;
+  Interaction;
+end enum;
+
 function PrepareProjection(
   Candidate: SessionUnit.ServerSession;
   Report: ProjectionUnit.TurnReport;
-  DialogueResponse: boolean
+  Kind: ResponseKind
 ): result of (PreparedReply, string);
 begin
   const State := try SessionUnit.RequireActiveState(Candidate.State);
@@ -49,12 +54,17 @@ begin
     Candidate.World, View, State, Candidate.Viewport, Report
   );
   var Message := Protocol.ServerMessage.State(Projection.State);
-  if DialogueResponse then
-    case Candidate.ActiveDialogue of
-      when Some(const Frame):
+  if Kind = ResponseKind.Interaction then
+    case Candidate.ActiveInteraction of
+      when Some(SessionUnit.ActiveInteraction.Dialogue(const Frame)):
         Message := Protocol.ServerMessage.Dialogue(
           Projection.State,
           Mapping.ProtocolDialogue(Frame), Candidate.Dirty
+        );
+      when Some(SessionUnit.ActiveInteraction.Trade(const Frame)):
+        Message := Protocol.ServerMessage.Trade(
+          Projection.State,
+          try TradeQuotes.ForSession(Candidate, Frame), Candidate.Dirty
         );
       when None:
         Message := Protocol.ServerMessage.DialogueEnded(Projection.State, Candidate.Dirty);
@@ -78,7 +88,7 @@ begin
   const View := try SessionUnit.SessionAreaView(Candidate, State);
   const Revealed := try Exploration.RevealCurrentArea(View, State);
   return PrepareProjection(
-    Candidate with State := Some(Revealed); Dirty := true; end with, Report, false
+    Candidate with State := Some(Revealed); Dirty := true; end with, Report, ResponseKind.State
   );
 end function;
 
@@ -121,16 +131,16 @@ begin
   );
 end function;
 
-// Sends an atomic dialogue projection before installing state/frame/dirty changes.
+// Sends a complete dialogue or trade response before installing state/frame/dirty changes.
 // Speaking does not move or reveal new fields; preparation failure preserves the complete original session.
-public function CommitDialogue(
-  Session: SessionUnit.ServerSession; Candidate: SessionUnit.ServerSession;
+public function CommitInteraction(
+  Session: SessionUnit.ServerSession; Candidate: SessionUnit.ServerSession; RejectionCode: string;
   ConnectionValue: Net.Connection; Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
 ): result of (SessionUnit.ServerSession, string);
 begin
   return CommitPreparedReply(
-    Session, PrepareProjection(Candidate, ProjectionUnit.NoTurnReport(), true),
-    'dialogue_rejected', ConnectionValue, Token, Logs
+    Session, PrepareProjection(Candidate, ProjectionUnit.NoTurnReport(), ResponseKind.Interaction),
+    RejectionCode, ConnectionValue, Token, Logs
   );
 end function;
 
@@ -156,7 +166,7 @@ begin
     PrepareProjection(
       Session with Viewport := Viewport; end with,
       ProjectionUnit.NoTurnReport(),
-      false
+      ResponseKind.State
     ),
     'viewport_rejected', ConnectionValue, Token, Logs
   );
@@ -171,7 +181,7 @@ begin
   const Valid: GameState.GameState := try GameState.ValidateGameState(Transition.View, Revealed);
   return PrepareProjection(
     Session with State := Some(Valid); Interior := Transition.View.Interior; Dirty := true; end with,
-    ProjectionUnit.NoTurnReport(), false
+    ProjectionUnit.NoTurnReport(), ResponseKind.State
   );
 end function;
 

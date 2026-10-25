@@ -9,6 +9,16 @@ uses
   Dungeon.Server.Session as SessionUnit, Dungeon.Test.SessionAssertions as Sessions,
   Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
 
+function CurrentDialogue(Session: SessionUnit.ServerSession): Dialogue.Frame;
+begin
+  case Session.ActiveInteraction of
+    when Some(SessionUnit.ActiveInteraction.Dialogue(const Frame)):
+      return Frame;
+    when None, Some(SessionUnit.ActiveInteraction.Trade(_)):
+      panic('expected a conversation');
+  end case;
+end function;
+
 begin
   const Metadata := Placement.NewWorldMetadata('settlement-session', 12345, 4).Unwrap();
   const Entry := Movement.ActivateAreaTransition(
@@ -115,7 +125,7 @@ begin
     Servers.DecodeServer(Started.Line).Unwrap() is Protocol.ServerMessage.Dialogue(_, _, true)
   );
   Session.Dirty := false;
-  const Frame := Session.ActiveDialogue.Unwrap();
+  const Frame := CurrentDialogue(Session);
   const Broken := Session with Viewport := SessionUnit.ViewportSize(Width := 0, Height := 1); end with;
   const Failed := Handling.HandleSessionMessage(
     Broken,
@@ -148,14 +158,14 @@ begin
   );
   Test.AssertEquals(20, Healed.State.Unwrap().Health);
   Test.AssertEquals(42, Healed.LastSavedAt);
-  Test.AssertEquals(Frame.Choices.Length() - 1, Healed.ActiveDialogue.Unwrap().Choices.Length());
+  Test.AssertEquals(Frame.Choices.Length() - 1, CurrentDialogue(Healed).Choices.Length());
   // The offered objective is retained across failed acceptance preparation.
   const Offered := Handling.HandleSessionMessage(
     Healed with Dirty := false; end with,
     Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest'), Server, Config, Token
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
-  Test.AssertTrue(Offered.ActiveDialogue.Unwrap().Node is Dialogue.Node.CompassOffer(_));
+  Test.AssertTrue(CurrentDialogue(Offered).Node is Dialogue.Node.CompassOffer(_));
   Test.AssertFalse(Offered.Dirty);
   const BrokenOffer := Offered with Viewport := SessionUnit.ViewportSize(Width := 0, Height := 1); end with;
   const FailedAccept := Handling.HandleSessionMessage(
@@ -239,7 +249,7 @@ begin
   ); Health := 3; end with;
   const VillageSession := Session with World := World with Metadata := VillageMetadata; end with; State := Some(
     VillageState
-  ); Interior := Some(Village); ActiveDialogue := None; Dirty := false; end with;
+  ); Interior := Some(Village); ActiveInteraction := None; Dirty := false; end with;
   const BadGreeting := VillageSession with Viewport := Broken.Viewport; end with;
   const FailedGreeting := Handling.HandleSessionMessage(
     BadGreeting, Protocol.ClientMessage.Interact,
@@ -252,7 +262,7 @@ begin
     Server, Config, Token
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
-  Test.AssertEquals(Healer.Id, Talking.ActiveDialogue.Unwrap().NpcId);
+  Test.AssertEquals(Healer.Id, CurrentDialogue(Talking).NpcId);
   const BadHealing := Talking with Dirty := false; Viewport := Broken.Viewport; end with;
   const FailedHealing := Handling.HandleSessionMessage(
     BadHealing,
@@ -285,6 +295,6 @@ begin
   );
   Test.AssertEquals(3, Resized.State.Unwrap().Health);
   Test.AssertFalse(Resized.Dirty);
-  Test.AssertEquals(Frame.Text, Resized.ActiveDialogue.Unwrap().Text);
+  Test.AssertEquals(Frame.Text, CurrentDialogue(Resized).Text);
   discard Net.Close(Client).Unwrap();
 end.

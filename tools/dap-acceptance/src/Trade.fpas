@@ -1,0 +1,187 @@
+// Selects projected trade and inventory identities through real keys; debugger expansion is read-only.
+unit Acceptance.Trade;
+
+uses
+  Acceptance.Commands as Commands, Std.Json as Json, Std.Json.Fields as Fields,
+  Std.Fs as Fs, Std.Parse as Parse;
+
+function Field(Values: array of Json.JsonValue; Name: string): dict of string to Json.JsonValue;
+begin
+  for Value: Json.JsonValue in Values do
+    case Value of
+      when Json.JsonValue.Object(const Item):
+        if Fields.StringField(Item, 'name').Unwrap() = Name then
+          return Item;
+        end if;
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+        panic('expected debugger field');
+    end case;
+  end for;
+
+  panic('missing debugger field: ' + Name);
+end function;
+
+function Text(Values: array of Json.JsonValue; Name: string): string;
+begin
+  return Fields.StringField(Field(Values, Name), 'value').Unwrap();
+end function;
+
+function Unquote(Value: string): string;
+begin
+  return Value.Slice(1, Value.Length() - 2);
+end function;
+
+// Captures the current quoted frame for the acceptance journal without evaluating game code.
+public function Frame(Directory: string; var Id: integer): array of Json.JsonValue;
+begin
+  const View := Commands.Snapshot(Directory);
+  if Commands.Value(View, 'ActiveTrade') = 'None' then
+    panic('no active trade');
+  end if;
+  const PayloadFields := Commands.Expand(
+    Directory, var Id,
+    Fields.ObjectField(View, 'ActiveTrade').Unwrap()['variablesReference']
+  );
+  case PayloadFields[0] of
+    when Json.JsonValue.Object(const Payload):
+      const Quote := Commands.Expand(Directory, var Id, Payload['variablesReference']);
+      discard Fs.AppendText(
+        Directory + '/trades.jsonl',
+        Json.Stringify(Json.JsonValue.ArrayValue(Quote)) + #10
+      ).Unwrap();
+      return Quote;
+    when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+      panic('expected trade payload');
+  end case;
+end function;
+
+function Find(Directory: string; var Id: integer; Entries: array of Json.JsonValue; ItemId: string): integer;
+begin
+  for Index: integer := 0 to Entries.Length() - 1 do
+    case Entries[Index] of
+      when Json.JsonValue.Object(const Entry):
+        const Item := Commands.Expand(Directory, var Id, Entry['variablesReference']);
+        if Unquote(Text(Item, 'Id')) = ItemId then
+          return Index;
+        end if;
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+        panic('expected item');
+    end case;
+  end for;
+
+  return -1;
+end function;
+
+function Select(Directory: string; var Id: integer; Selection: string; Target: integer): dict of string to Json.JsonValue;
+begin
+  var View := Commands.Snapshot(Directory);
+  for Step: integer := 0 to 64 do
+    const Current := Parse.Int(Commands.Value(View, Selection)).Unwrap();
+    if Current = Target then
+      return View;
+    end if;
+
+    View := Commands.Key(Directory, var Id, if Current < Target then 'Down' else 'Up' end if, '');
+  end for;
+
+  panic('selection did not reach the exact item');
+end function;
+
+// Searches at most four quoted pages, selects the exact ID and presses Enter once.
+public function Apply(Directory: string; var Id: integer; Side: string; ItemId: string): dict of string to Json.JsonValue;
+begin
+  if (Side <> 'buy') and (Side <> 'sell') then
+    panic('trade side must be buy or sell');
+  end if;
+  const ExpectedSide := if Side = 'buy' then '0' else '1' end if;
+  var View := Commands.Snapshot(Directory);
+  if Commands.Value(View, 'TradeSide') <> ExpectedSide then
+    View := Commands.Key(Directory, var Id, 'Tab', '');
+  end if;
+  const First := Frame(Directory, var Id);
+  const Page := Parse.Int(
+    Text(First, if Side = 'buy' then 'BuyPage' else 'SellPage' end if)
+  ).Unwrap();
+  for Step: integer := 1 to Page do
+    View := Commands.Key(Directory, var Id, 'PageUp', '');
+  end for;
+
+  for Page: integer := 0 to 3 do
+    const Quote := Frame(Directory, var Id);
+    const Rows := Field(Quote, if Side = 'buy' then 'BuyItems' else 'SellItems' end if);
+    var Entries: array of Json.JsonValue := [];
+    if Fields.IntegerField(Rows, 'indexedVariables').Unwrap() > 0 then
+      Entries := Commands.Expand(Directory, var Id, Rows['variablesReference']);
+    end if;
+    const Target := Find(Directory, var Id, Entries, ItemId);
+    if Target >= 0 then
+      View := Select(Directory, var Id, 'TradeSelection', Target);
+      return Commands.Key(Directory, var Id, 'Enter', '');
+    end if;
+
+    View := Commands.Key(Directory, var Id, 'PageDown', '');
+  end for;
+
+  panic('item not found on the available trade pages: ' + ItemId);
+end function;
+
+// Returns the first inventory identity with the server-projected consumable capability.
+public function UsableItem(Directory: string; var Id: integer): option of string;
+begin
+  const View := Commands.Snapshot(Directory);
+  const Inventory := Fields.ObjectField(View, 'Inventory').Unwrap();
+  if Fields.IntegerField(Inventory, 'indexedVariables').Unwrap() = 0 then
+    return None;
+  end if;
+  const Entries := Commands.Expand(Directory, var Id, Inventory['variablesReference']);
+  for Entry: Json.JsonValue in Entries do
+    case Entry of
+      when Json.JsonValue.Object(const Value):
+        const Item := Commands.Expand(Directory, var Id, Value['variablesReference']);
+        if Text(Item, 'Usable') = 'true' then
+          return Some(Unquote(Text(Item, 'Id')));
+        end if;
+      when Json.JsonValue.NullValue, Json.JsonValue.Bool(_), Json.JsonValue.Number(_), Json.JsonValue.String(_), Json.JsonValue.ArrayValue(_):
+        panic('expected inventory entry');
+    end case;
+  end for;
+
+  return None;
+end function;
+
+// Opens inventory, selects an exact carried/worn identity and uses the normal Enter or D action.
+public function Inventory(Directory: string; var Id: integer; ItemId: string; Drop: boolean): dict of string to Json.JsonValue;
+begin
+  var View := Commands.Snapshot(Directory);
+  if (Commands.Value(View, 'ActiveTrade') <> 'None')
+    or
+    (Commands.Value(View, 'ActiveDialogue') <> 'None')
+  then
+    panic('close the interaction before opening inventory');
+  end if;
+
+  View := Commands.Key(Directory, var Id, 'Character', 'i');
+  if Fields.IntegerField(
+    Fields.ObjectField(View, 'Inventory').Unwrap(),
+    'indexedVariables'
+  ).Unwrap() = 0
+  then
+    panic('inventory item not found: ' + ItemId);
+  end if;
+  const Entries := Commands.Expand(
+    Directory, var Id,
+    Fields.ObjectField(View, 'Inventory').Unwrap()['variablesReference']
+  );
+  const Target := Find(Directory, var Id, Entries, ItemId);
+  if Target < 0 then
+    panic('inventory item not found: ' + ItemId);
+  end if;
+
+  View := Select(Directory, var Id, 'InventorySelection', Target);
+  View := Commands.Key(
+    Directory, var Id, if Drop then 'Character' else 'Enter' end if,
+    if Drop then 'd' else '' end if
+  );
+  return Commands.Key(Directory, var Id, 'Escape', '');
+end function;
+end unit;

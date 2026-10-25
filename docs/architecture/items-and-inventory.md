@@ -2,7 +2,7 @@
 
 Phase 10 introduced the inspection/pickup/persistence loop. The current game
 extends it with equipment, dropping, fixed optional floor finds and healing
-potions; item ownership and use remain authoritative server rules.
+potions and [trade](economy.md); item ownership and use remain authoritative server rules.
 
 ## Authoritative model
 
@@ -18,10 +18,14 @@ at reserved slot 6. It uses the generic visible item marker and its own name and
 description; it can be picked up or dropped but cannot be worn or consumed.
 Full validation permits an item's current location on an ordinary floor field
 of any visited dungeon or in the player's inventory, while requiring its
-original placement identity and kind. The interaction loop supports pickup; the
+original placement identity and kind. Merchants own items through
+`HeldByMerchant(merchant_id)` in this same ledger. Each visited merchant adds
+five retained initial stock origins; a change of owner never changes the ID.
+The interaction loop supports pickup; the
 drop intention lays a carried item back on the floor (see below). Validation
 requires exactly one item per placement of every visited dungeon, plus the
-two retained quest reward records after hand-in, and rejects
+five original goods per visited merchant and two retained quest reward records
+after hand-in, and rejects
 missing, duplicate, unknown, or invalid floor-item state. A floor item must lie on an
 ordinary floor field, never on a wall or the exit.
 
@@ -30,14 +34,14 @@ the original ID and kind, with no area, position, owner or equipment slot.
 It occupies no inventory capacity or field, cannot be inspected, picked up,
 dropped or worn, and is absent from all visible projections. Full validation
 still requires it to match exactly one original placement in a visited level
-or one validated quest reward origin;
+or one validated quest reward or merchant stock origin;
 missing, duplicate or foreign consumed records reject the save. Revisit/load
 never rematerializes it.
 
 `ReturnedToMara(quest_id)` is a separate terminal location for the unique
 compass after its rewarded hand-in. It retains its ID and kind and occupies no
 field or inventory capacity. The reward consists of two carried Healing
-potions with stable quest-owned IDs; used and dropped rewards retain those
+potions with stable quest-owned IDs; used, sold and dropped rewards retain those
 records. There are no reward floor items in Hearthmoor. See
 [quests](quests.md) for exact origin, capacity and atomicity rules.
 
@@ -62,6 +66,10 @@ interactions may introduce a more general mechanism only when their concrete
 requirements justify it.
 
 ## Capacity and dropping
+
+Coins are a separate projected balance and occupy no inventory slot. Merchants
+have finite, independent stock with a 64-item cap. Price, transfer, refusal and
+shop-origin persistence rules are defined in [trade and economy](economy.md).
 
 Carried and worn items together fill at most `MaximumInventoryItems` (64)
 entries, the same bound as the protocol's visible inventory. A full inventory

@@ -18,6 +18,12 @@ At 100 columns or more, three summary panels form one row:
 
 The active area uses its retained map name, including generated villages.
 Creating this status snapshot does not open or regenerate a settlement file.
+An accepted trade marks unsaved progress. Opening, paging and closing trade
+leave the save timestamp unchanged; only an explicit successful save updates it.
+Trade refusals appear as warnings, including `trade_active`, `trade_not_active`
+and `trade_rejected`. Preparing the dashboard does not inspect or refill stock.
+The [trade contract](../architecture/economy.md) describes the authoritative
+wallet, stock and complete save validation.
 Complete-world deletion also removes `settlements/` definitions; its existing
 connection exclusion and confirmation rules still apply.
 

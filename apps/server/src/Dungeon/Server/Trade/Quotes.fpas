@@ -1,0 +1,52 @@
+// Projects bounded trade pages from retained facts without loading maps or changing revisions.
+unit Dungeon.Server.Trade.Quotes;
+
+uses
+  Dungeon.Trade as Rules, Dungeon.Trade.Model as Model, Dungeon.GameState as GameState,
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.Trades as Codec, Dungeon.Server.Session as SessionUnit;
+
+function Page(Items: array of Model.Offer; Index: integer): array of Protocol.TradeItem;
+begin
+  var Rows: array of Protocol.TradeItem := [];
+  const Start := Index * Protocol.TradePageSize;
+  for Offset: integer := 0 to Protocol.TradePageSize - 1 do
+    const Position := Start + Offset;
+    if Position < Items.Length() then
+      const Item := Items[Position];
+      Rows.PushInPlace(
+        Protocol.TradeItem(
+          Id := Item.Id, Name := Item.Name, Price := Item.Price,
+          Enabled := Item.Enabled, Reason := Item.Reason
+        )
+      );
+    end if;
+  end for;
+
+  return Rows;
+end function;
+
+// Checks page bounds and all capabilities before the reply path encodes or installs a candidate.
+public function ForSession(Session: SessionUnit.ServerSession; Frame: SessionUnit.TradeFrame): result of (Protocol.TradeQuote, string);
+begin
+  const State := try SessionUnit.RequireActiveState(Session.State);
+  const View := try SessionUnit.SessionAreaView(Session, State);
+  const Quote := try Rules.QuoteFor(View, State, Frame.NpcId).MapError(Model.FailureMessage);
+  if (Frame.BuyPage < 0) or (Frame.BuyPage > Codec.LastPage(Quote.BuyItems.Length()))
+    or
+    (Frame.SellPage < 0) or (Frame.SellPage > Codec.LastPage(Quote.SellItems.Length()))
+  then
+    return Error('Trade page is no longer available.');
+  end if;
+
+  return Codec.ValidateQuote(
+    Protocol.TradeQuote(
+      NpcId := Quote.NpcId, Speaker := Quote.Speaker,
+      Revision := Frame.Revision, MerchantCapacity := Model.MerchantCapacity,
+      BuyPage := Frame.BuyPage, SellPage := Frame.SellPage,
+      BuyTotal := Quote.BuyItems.Length(), SellTotal := Quote.SellItems.Length(),
+      BuyItems := Page(Quote.BuyItems, Frame.BuyPage),
+      SellItems := Page(Quote.SellItems, Frame.SellPage)
+    )
+  );
+end function;
+end unit;

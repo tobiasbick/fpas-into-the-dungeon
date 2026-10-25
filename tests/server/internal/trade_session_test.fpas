@@ -1,0 +1,437 @@
+// Exercises quote authority, revisions, interaction gating and atomic reply failures over a real loopback reply.
+program TradeSessionTest;
+
+uses
+  Dungeon.Dialogue as Dialogue, Dungeon.Items as Items, Dungeon.Trade.Items as Stock,
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.ClientMessages as Clients,
+  Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport,
+  Dungeon.Server.Session as SessionUnit, Dungeon.Server.Handling as Handling,
+  Dungeon.Server.Config as Config, Dungeon.Test.Trade as Fixtures,
+  Dungeon.Test.SessionAssertions as Sessions, Dungeon.Test.StateComparison as States,
+  Dungeon.World as World, Dungeon.World.Savegame as Savegame,
+  Std.Net as Net, Std.Tasks as Tasks, Std.Fs as Fs, Std.Conv as Conv, Std.Time as Time, Std.Test as Test;
+
+type Exchange = record
+  Session: SessionUnit.ServerSession;
+  Message: Protocol.ServerMessage;
+end record;
+
+function Request(
+  Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage;
+  Client: Net.Connection; Server: Net.Connection; Settings: Config.ServerConfig; Token: Tasks.CancellationToken
+): Exchange;
+begin
+  const Decoded := Clients.DecodeClient(Clients.EncodeClient(Message)).Unwrap();
+  const Next := Handling.HandleSessionMessage(Session, Decoded, Server, Settings, Token).Unwrap();
+  const Read := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  return Exchange(Session := Next, Message := Servers.DecodeServer(Read.Line).Unwrap());
+end function;
+
+function Quote(Value: Protocol.ServerMessage): Protocol.TradeQuote;
+begin
+  case Value of
+    when Protocol.ServerMessage.Trade(_, const Value, _):
+      return Value;
+    when Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected trade response');
+  end case;
+end function;
+
+procedure Rejected(Message: Protocol.ServerMessage; Expected: string);
+begin
+  case Message of
+    when Protocol.ServerMessage.Rejected(const Code, const Reason):
+      Test.AssertEquals(Expected, Code);
+      Test.AssertTrue(Reason.Length() > 0);
+    when Protocol.ServerMessage.Trade(_, _, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected a recoverable rejection');
+  end case;
+end procedure;
+
+// Retains the real merchant root offered by the dialogue rules.
+function Offered(Session: SessionUnit.ServerSession): SessionUnit.ServerSession;
+begin
+  const State := Session.State.Unwrap();
+  const View := SessionUnit.SessionAreaView(Session, State).Unwrap();
+  case Dialogue.Start(View, State).Unwrap() of
+    when Dialogue.Outcome.Continued(const Met, const Frame, _):
+      return Session with State := Some(Met); ActiveInteraction := Some(
+        SessionUnit.ActiveInteraction.Dialogue(Frame)
+      ); end with;
+    when Dialogue.Outcome.Ended(_):
+      panic('expected a merchant root');
+  end case;
+end function;
+
+function WithFrame(Session: SessionUnit.ServerSession; Revision: integer; BuyPage: integer; SellPage: integer): SessionUnit.ServerSession;
+begin
+  return Session with LastTradeRevision := Revision; ActiveInteraction := Some(
+    SessionUnit.ActiveInteraction.Trade(
+      SessionUnit.TradeFrame(
+        NpcId := Fixtures.HomeFor(Session.World.Metadata).MerchantId,
+        Revision := Revision, BuyPage := BuyPage, SellPage := SellPage
+      )
+    )
+  ); end with;
+end function;
+
+begin
+  const Root := '.temp-data/trade-session-' + Conv.IntToStr(Time.TimestampMillis());
+  const First := World.OpenWorld(Root, 'trade-fixture', 25, 1, 32).Unwrap();
+  const Other := World.OpenWorld(Root, 'other-trade', 25, 1, 32).Unwrap();
+  const Fixture := Fixtures.HomeFor(First.Metadata);
+  const Id := Fixture.MerchantId;
+  const Coin := Fixture.State.Items[0].Id;
+  const Sword := Fixture.State.Items[1].Id;
+  const Potion := Stock.InitialId(Id, 0);
+  const Settings := Config.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root,
+    WorldId := First.Metadata.Id, WorldSeed := 25, DungeonRegionChunks := 1, ChunkCacheLimit := 32,
+    MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Client := Net.Connect(
+    '127.0.0.1',
+    Net.ListenerLocalAddress(Listener).Unwrap().Port,
+    5000
+  ).Unwrap();
+  const Server := Net.Accept(Listener).Unwrap();
+  discard Net.CloseListener(Listener).Unwrap();
+  discard Net.SetTimeout(Client, 5000).Unwrap();
+  discard Net.SetTimeout(Server, 5000).Unwrap();
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Initial := SessionUnit.ServerSession(
+    World := First, WorldSelected := true, Dirty := false, LastSavedAt := 123,
+    State := Some(Fixture.State), Interior := Fixture.View.Interior, Finished := false,
+    Viewport := SessionUnit.ViewportSize(Width := 23, Height := 15)
+  );
+  const NoGame := Initial with State := None; Interior := None; end with;
+  const NotStarted := Request(
+    NoGame,
+    Protocol.ClientMessage.TradeBuy(Id, Potion, 1),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(NotStarted.Message, 'session_not_started');
+  Sessions.AssertUnchanged(NoGame, NotStarted.Session);
+  const Inactive := Request(
+    Initial,
+    Protocol.ClientMessage.EndTrade(Id),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(Inactive.Message, 'trade_not_active');
+  Sessions.AssertUnchanged(Initial, Inactive.Session);
+  const Ready := Offered(Initial);
+  const Opened := Request(
+    Ready,
+    Protocol.ClientMessage.DialogueChoice(Id, 'trade'),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(1, Quote(Opened.Message).Revision);
+  Test.AssertEquals(5, Quote(Opened.Message).BuyTotal);
+  Sessions.AssertUnchanged(WithFrame(Ready, 1, 0, 0), Opened.Session);
+  var Session := Opened.Session;
+  for Message: Protocol.ClientMessage in [
+    Protocol.ClientMessage.Move(1, 0),
+    Protocol.ClientMessage.StepFirstPerson(Protocol.FirstPersonStepDirection.Forward),
+    Protocol.ClientMessage.TurnFirstPerson(Protocol.FirstPersonTurnDirection.Left),
+    Protocol.ClientMessage.Interact,
+    Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(Sword),
+    Protocol.ClientMessage.Unequip(Sword), Protocol.ClientMessage.DropItem(Coin),
+    Protocol.ClientMessage.UseItem(Potion),
+    Protocol.ClientMessage.ExplorationMap(0, 0, 1, 1), Protocol.ClientMessage.SaveGame,
+    Protocol.ClientMessage.OverwriteSaveGame,
+    Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame,
+    Protocol.ClientMessage.ListWorlds(0, true),
+    Protocol.ClientMessage.SelectWorld(Other.Metadata.Id),
+    Protocol.ClientMessage.CreateWorld(25, 1),
+    Protocol.ClientMessage.DialogueChoice(Id, 'identity'), Protocol.ClientMessage.EndDialogue
+  ] do
+    const Failed := Request(Session, Message, Client, Server, Settings, Token);
+    Rejected(Failed.Message, 'trade_active');
+    Sessions.AssertUnchanged(Session, Failed.Session);
+  end for;
+  const WrongPage := Request(
+    Session,
+    Protocol.ClientMessage.TradePage(Id, Protocol.TradeSide.Buy, 1),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(WrongPage.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(Session, WrongPage.Session);
+  const Refreshed := Request(
+    Session,
+    Protocol.ClientMessage.TradePage(Id, Protocol.TradeSide.Sell, 0),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(2, Quote(Refreshed.Message).Revision);
+  Sessions.AssertUnchanged(WithFrame(Session, 2, 0, 0), Refreshed.Session);
+  Session := Refreshed.Session;
+  const Stale := Request(
+    Session,
+    Protocol.ClientMessage.TradeSell(Id, Coin, 1),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(Stale.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(Session, Stale.Session);
+  const Sold := Request(
+    Session,
+    Protocol.ClientMessage.TradeSell(Id, Coin, 2),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(3, Quote(Sold.Message).Revision);
+  var Expected := WithFrame(Session, 3, 0, 0) with Dirty := true; end with;
+  var SoldState := Fixture.State with Coins := 10; end with;
+
+  SoldState.Items[0].Location := Items.ItemLocation.HeldByMerchant(Id);
+  Expected.State := Some(SoldState);
+  Sessions.AssertUnchanged(Expected, Sold.Session);
+  Session := Sold.Session;
+  const Bought := Request(
+    Session,
+    Protocol.ClientMessage.TradeBuy(Id, Potion, 3),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(4, Quote(Bought.Message).Revision);
+  var BoughtState := SoldState with Coins := 2; end with;
+
+  BoughtState.Items[4].Location := Items.ItemLocation.CarriedByPlayer;
+  Expected := WithFrame(Session, 4, 0, 0) with State := Some(BoughtState); end with;
+
+  Sessions.AssertUnchanged(Expected, Bought.Session);
+  Session := Bought.Session;
+  for Message: Protocol.ClientMessage in [
+    Protocol.ClientMessage.TradeBuy(Id, Potion, 3),
+    Protocol.ClientMessage.TradeBuy(Id, Potion, 4),
+    Protocol.ClientMessage.TradeSell(Other.Metadata.Id, Sword, 4)
+  ] do
+    const Failed := Request(Session, Message, Client, Server, Settings, Token);
+    Rejected(Failed.Message, 'trade_rejected');
+    Sessions.AssertUnchanged(Session, Failed.Session);
+  end for;
+  const Resized := Request(
+    Session,
+    Protocol.ClientMessage.Viewport(40, 12),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertTrue(Resized.Message is Protocol.ServerMessage.State(_));
+  Sessions.AssertUnchanged(
+    Session with Viewport := SessionUnit.ViewportSize(Width := 40, Height := 12); end with,
+    Resized.Session
+  );
+  Session := Resized.Session;
+  const Broken := Session with Viewport := SessionUnit.ViewportSize(Width := 0, Height := 1); end with;
+  const FailedPrepare := Request(
+    Broken,
+    Protocol.ClientMessage.TradeSell(Id, Sword, 4),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(FailedPrepare.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(Broken, FailedPrepare.Session);
+  var BadQuoteState := Session.State.Unwrap();
+  BadQuoteState.Items[5].Id := 'x'.RepeatStr(129);
+  const BadQuote := Session with State := Some(BadQuoteState); end with;
+  const FailedQuote := Request(
+    BadQuote,
+    Protocol.ClientMessage.TradePage(Id, Protocol.TradeSide.Buy, 0),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(FailedQuote.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(BadQuote, FailedQuote.Session);
+  const Closed := Request(
+    Session,
+    Protocol.ClientMessage.EndTrade(Id),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertTrue(Closed.Message is Protocol.ServerMessage.Dialogue(_, _, _));
+  Test.AssertEquals(4, Closed.Session.LastTradeRevision);
+  Test.AssertTrue(States.SameState(Session.State.Unwrap(), Closed.Session.State.Unwrap()));
+  const Reopened := Request(
+    Offered(Closed.Session),
+    Protocol.ClientMessage.DialogueChoice(Id, 'trade'),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(5, Quote(Reopened.Message).Revision);
+  const Old := Request(
+    Reopened.Session,
+    Protocol.ClientMessage.TradeSell(Id, Sword, 4),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(Old.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(Reopened.Session, Old.Session);
+  const Exhausted := WithFrame(Reopened.Session, 1000000000, 0, 0);
+  const Limit := Request(
+    Exhausted,
+    Protocol.ClientMessage.TradePage(Id, Protocol.TradeSide.Buy, 0),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(Limit.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(Exhausted, Limit.Session);
+  const CanClose := Request(
+    Exhausted,
+    Protocol.ClientMessage.EndTrade(Id),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertTrue(CanClose.Message is Protocol.ServerMessage.Dialogue(_, _, _));
+  Test.AssertEquals(1000000000, CanClose.Session.LastTradeRevision);
+  Session := Request(
+    Reopened.Session,
+    Protocol.ClientMessage.EndTrade(Id),
+    Client,
+    Server,
+    Settings,
+    Token
+  ).Session;
+  Session := Request(
+    Session,
+    Protocol.ClientMessage.EndDialogue,
+    Client,
+    Server,
+    Settings,
+    Token
+  ).Session;
+  Session := Request(
+    Session,
+    Protocol.ClientMessage.ListWorlds(0, true),
+    Client,
+    Server,
+    Settings,
+    Token
+  ).Session;
+  Test.AssertEquals(5, Session.LastTradeRevision);
+  Session := Request(
+    Session,
+    Protocol.ClientMessage.SelectWorld(Other.Metadata.Id),
+    Client,
+    Server,
+    Settings,
+    Token
+  ).Session;
+  Test.AssertEquals(5, Session.LastTradeRevision);
+  Test.AssertEquals(Other.Metadata.Id, Session.World.Metadata.Id);
+  const OtherFixture := Fixtures.HomeFor(Other.Metadata);
+  Session := Offered(
+    Session with State := Some(OtherFixture.State); Interior := OtherFixture.View.Interior; end with
+  );
+  const OtherOpened := Request(
+    Session,
+    Protocol.ClientMessage.DialogueChoice(OtherFixture.MerchantId, 'trade'),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(6, Quote(OtherOpened.Message).Revision);
+  // Opaque page fixtures exercise transport selection; full saved origins have separate proof.
+  var DenseState := OtherOpened.Session.State.Unwrap() with Coins := 100; end with;
+
+  for Index: integer := 0 to 15 do
+    DenseState.Items.PushInPlace(
+      Items.GameItem(
+        Id := 'zz:item:' + Conv.IntToStr(Index),
+        Kind := Items.ItemKind.AncientCoin,
+        Location := Items.ItemLocation.HeldByMerchant(OtherFixture.MerchantId)
+      )
+    );
+  end for;
+  const Dense := OtherOpened.Session with State := Some(DenseState); end with;
+  const PageZero := Request(
+    Dense,
+    Protocol.ClientMessage.TradePage(OtherFixture.MerchantId, Protocol.TradeSide.Buy, 0),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(7, Quote(PageZero.Message).Revision);
+  Test.AssertEquals(21, Quote(PageZero.Message).BuyTotal);
+  Test.AssertEquals(16, Quote(PageZero.Message).BuyItems.Length());
+  const OffPage := Request(
+    PageZero.Session,
+    Protocol.ClientMessage.TradeBuy(OtherFixture.MerchantId, 'zz:item:9', 7),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(OffPage.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(PageZero.Session, OffPage.Session);
+  const PageOne := Request(
+    PageZero.Session,
+    Protocol.ClientMessage.TradePage(OtherFixture.MerchantId, Protocol.TradeSide.Buy, 1),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Test.AssertEquals(8, Quote(PageOne.Message).Revision);
+  Test.AssertEquals(5, Quote(PageOne.Message).BuyItems.Length());
+  Sessions.AssertUnchanged(WithFrame(PageZero.Session, 8, 1, 0), PageOne.Session);
+  const StalePage := Request(
+    PageOne.Session,
+    Protocol.ClientMessage.TradeBuy(OtherFixture.MerchantId, 'zz:item:9', 7),
+    Client,
+    Server,
+    Settings,
+    Token
+  );
+  Rejected(StalePage.Message, 'trade_rejected');
+  Sessions.AssertUnchanged(PageOne.Session, StalePage.Session);
+  Test.AssertFalse(Fs.Exists(Savegame.SaveGamePath(First)));
+  Test.AssertFalse(Fs.Exists(Savegame.SaveGamePath(Other)));
+  discard Net.Close(Server).Unwrap();
+  Test.AssertTrue(
+    Handling.HandleSessionMessage(
+      PageOne.Session,
+      Protocol.ClientMessage.TradePage(OtherFixture.MerchantId, Protocol.TradeSide.Buy, 0), Server,
+      Settings, Token
+    ) is Error(_)
+  );
+  discard Net.Close(Client).Unwrap();
+end.

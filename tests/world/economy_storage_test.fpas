@@ -1,0 +1,53 @@
+// Verifies exact currency JSON and rejects unsupported or invented merchant ownership at save boundaries.
+program EconomyStorageTest;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.GameState as GameState, Dungeon.Items as Items,
+  Dungeon.Terrain.Placement as Placement, Dungeon.World.Savegame as Savegame,
+  Dungeon.Test.StateComparison as States, Std.Test as Test;
+
+begin
+  const Metadata := Placement.NewWorldMetadata('economy-save', 25, 1).Unwrap();
+  const Initial := GameState.NewGame(Metadata);
+  for Coins: integer in [0, 1000000000] do
+    const State := Initial with Coins := Coins; end with;
+    const Saved := Savegame.EncodeSaveGame(Metadata.Id, State);
+    const Loaded := Savegame.DecodeSaveGameState(Saved, Metadata).Unwrap();
+    Test.AssertTrue(States.SameState(State, Loaded));
+    Test.AssertTrue(Areas.ValidateSavedGame(Metadata, Loaded, []) is Ok(_));
+  end for;
+  const Saved := Savegame.EncodeSaveGame(Metadata.Id, Initial);
+  Test.AssertTrue('"coins":0' in Saved);
+  for Bad: string in ['-1', '1000000001', '0.5', 'null', '"0"', 'true'] do
+    const Invalid := Saved.Replace('"coins":0', '"coins":' + Bad);
+    Test.AssertTrue(Invalid <> Saved);
+    Test.AssertTrue(Savegame.DecodeSaveGameState(Invalid, Metadata) is Error(_));
+  end for;
+
+  Test.AssertTrue(
+    Savegame.DecodeSaveGameState(Saved.Replace('"coins":0,', ''), Metadata) is Error(_)
+  );
+  Test.AssertTrue(
+    Savegame.DecodeSaveGameState(Saved.Replace('"coins":0', '"wallet":0'), Metadata) is Error(_)
+  );
+  for Version: string in ['13', '15'] do
+    Test.AssertTrue(
+      Savegame.DecodeSaveGameState(
+        Saved.Replace('"format_version":14', '"format_version":' + Version), Metadata
+      ) is Error(_)
+    );
+  end for;
+  const Forged := Initial with Items := [
+    Items.GameItem(
+      Id := Metadata.Id + ':settlement:home:npc:merchant:stock:0',
+      Kind := Items.ItemKind.HealingPotion,
+      Location := Items.ItemLocation.HeldByMerchant(Metadata.Id + ':settlement:home:npc:merchant')
+    )
+  ]; end with;
+
+  Test.AssertTrue(
+    Savegame.DecodeSaveGameState(
+      Savegame.EncodeSaveGame(Metadata.Id, Forged), Metadata
+    ) is Error(_)
+  );
+end.

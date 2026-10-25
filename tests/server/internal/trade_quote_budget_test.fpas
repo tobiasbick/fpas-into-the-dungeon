@@ -1,0 +1,94 @@
+// Measures real prepared trade envelopes at both capacities, maximal opaque IDs and the largest village viewport.
+program TradeQuoteBudgetTest;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.Coordinates as Coordinates, Dungeon.Dialogue as Dialogue,
+  Dungeon.GameState as GameState, Dungeon.Items as Items, Dungeon.Settlements.Generation as Generation,
+  Dungeon.Settlements.Sites as Sites, Dungeon.Terrain.Placement as Placement,
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Messages,
+  Dungeon.Server.Session as SessionUnit, Dungeon.Server.Projection as Projection,
+  Dungeon.Server.Trade.Quotes as Quotes, Dungeon.Server.Replies as Replies,
+  Dungeon.World as WorldUnit, Std.Conv as Conv, Std.Console as Console, Std.Net.Utf8 as Utf8, Std.Test as Test;
+
+begin
+  const Metadata := Placement.NewWorldMetadata('trade-budget', -1, 1).Unwrap();
+  const Region := Coordinates.ChunkCoordinate(X := -18, Y := 68);
+  var Map := Generation.GenerateMap(Metadata, Region).Unwrap();
+  Test.AssertEquals(31, Map.Width);
+  Test.AssertEquals(21, Map.Height);
+  Map.DisplayName := '"\'.RepeatStr(32);
+  Map.Npcs[3].DisplayName := '"\'.RepeatStr(32);
+  const Merchant := Map.Npcs[3];
+  const View := GameState.AreaView(Metadata := Metadata, Interior := Some(Map));
+  var State := Areas.MaterializeArea(GameState.NewGame(Metadata), Map) with Area := Coordinates.AreaKind.Settlement; AreaId := Map.AreaId; Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := Merchant.Position.X, Y := Merchant.Position.Y + 1)
+  ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
+    Metadata.OutdoorAreaId,
+    Sites.Site(Metadata, Region).Unwrap()
+  ); Coins := 1000000000; Items := []; end with;
+
+  // Opaque transport identities need not be saved placement IDs; storage origins have separate proof.
+  for Index: integer := 0 to 127 do
+    const Suffix := Conv.IntToStr(Index);
+    State.Items.PushInPlace(
+      Items.GameItem(
+        Id := '🌑'.RepeatStr(128 - Suffix.Length()) + Suffix,
+        Kind := Items.ItemKind.AncientCoin,
+        Location := if Index < 64 then Items.ItemLocation.CarriedByPlayer
+          else Items.ItemLocation.HeldByMerchant(Merchant.Id)
+          end if
+      )
+    );
+  end for;
+
+  case Dialogue.Start(View, State).Unwrap() of
+    when Dialogue.Outcome.Continued(const Met, _, _):
+      State := Met;
+    when Dialogue.Outcome.Ended(_):
+      panic('expected a merchant greeting');
+  end case;
+  const World := WorldUnit.WorldSession(
+    Directory := '.temp-data/unused-trade-budget', Metadata := Metadata,
+    Cache := [], Clock := 0, CacheLimit := 32
+  );
+  const Session := SessionUnit.ServerSession(
+    World := World, WorldSelected := true, State := Some(State),
+    Interior := Some(Map), Dirty := true, Finished := false,
+    Viewport := SessionUnit.ViewportSize(Width := 240, Height := 120)
+  );
+  const Visible := Projection.ProjectSession(
+    World,
+    View,
+    State,
+    Session.Viewport,
+    Projection.NoTurnReport()
+  ).Unwrap().State;
+  var Largest := 0;
+  for Page: integer := 0 to 3 do
+    const Frame := SessionUnit.TradeFrame(
+      NpcId := Merchant.Id,
+      Revision := 1000000000,
+      BuyPage := Page,
+      SellPage := Page
+    );
+    const Quote := Quotes.ForSession(Session, Frame).Unwrap();
+    Test.AssertEquals(64, Quote.BuyTotal);
+    Test.AssertEquals(64, Quote.SellTotal);
+    Test.AssertEquals(16, Quote.BuyItems.Length());
+    Test.AssertEquals(16, Quote.SellItems.Length());
+    const Line := Replies.EncodeMessage(
+      Protocol.ServerMessage.Trade(Visible, Quote, true)
+    ).Unwrap();
+    const Bytes := Utf8.Encode(Line).Length();
+    if Bytes > Largest then
+      Largest := Bytes;
+    end if;
+
+    Test.AssertTrue(Bytes <= 65536);
+    Test.AssertTrue(Messages.DecodeServer(Line).Unwrap() is Protocol.ServerMessage.Trade(_, _, _));
+  end for;
+
+  Console.WriteLn(
+    'Largest full-capacity trade envelope: ' + Conv.IntToStr(Largest) + ' UTF-8 bytes'
+  );
+end.

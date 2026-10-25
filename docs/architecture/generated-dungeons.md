@@ -247,7 +247,8 @@ and carried items stay recorded, so re-entering never restores them.
   added rat state and terminal potion locations, format 9 progression, and the
   format 10 level identities. Format 11 adds settlement/NPC records;
   format 12 adds quest state, returned compass ownership and reward origins;
-  current format 13 adds generated-village roles and complete NPC rosters;
+  current format 14 retains complete settlement rosters, separate coins and
+  merchant-held ownership with five original goods per visited merchant;
   obsolete saves are rejected and preserved.
   A visited level deeper than 0 requires its upper level to be visited, and visited
   levels of one dungeon must agree on depth and name.
@@ -255,7 +256,8 @@ and carried items stay recorded, so re-entering never restores them.
   dungeon's level file is read and validated once, the home settlement resolves
   from code, generated settlement definitions are read too, and every item and opponent
   must match exactly one origin placement of a visited area by identity and
-  kind, or one of the two validated reward origins of a rewarded quest. An item's current
+  kind, one of the five original goods of a visited merchant, or one of the two
+  validated reward origins of a rewarded quest. An item's current
   location may differ from its origin, including another visited dungeon.
   Validate its location against that destination map, not its original field.
   Opponents remain in their original area. Per-intention validation checks only

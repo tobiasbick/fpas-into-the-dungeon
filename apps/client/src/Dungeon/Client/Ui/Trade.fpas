@@ -1,0 +1,253 @@
+// Owns trade navigation, capability-based intentions and a selection-following modal.
+unit Dungeon.Client.Ui.Trade;
+
+uses
+  Dungeon.Client.Model as Model, Dungeon.Client.Ui.Layout as Layout,
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.Trades as Trades,
+  Std.Math as Math, Std.Conv as Conv, Std.Tasks as Tasks, Std.Tui as Tui;
+
+function Rows(Quote: Protocol.TradeQuote; Side: Protocol.TradeSide): array of Protocol.TradeItem;
+begin
+  return if Side = Protocol.TradeSide.Buy then Quote.BuyItems else Quote.SellItems end if;
+end function;
+
+function Page(Quote: Protocol.TradeQuote; Side: Protocol.TradeSide): integer;
+begin
+  return if Side = Protocol.TradeSide.Buy then Quote.BuyPage else Quote.SellPage end if;
+end function;
+
+function Total(Quote: Protocol.TradeQuote; Side: Protocol.TradeSide): integer;
+begin
+  return if Side = Protocol.TradeSide.Buy then Quote.BuyTotal else Quote.SellTotal end if;
+end function;
+
+// Installs a new quote without conflating equal names; page navigation starts at row zero.
+public function Install(State: Model.ClientModel; Quote: Protocol.TradeQuote): Model.ClientModel;
+begin
+  var Next := State;
+  var SelectedId := '';
+  case State.ActiveTrade of
+    when Some(const Previous):
+      const OldRows := Rows(Previous, State.TradeSide);
+      if (Previous.NpcId = Quote.NpcId) and not State.TradePagePending
+        and
+        (State.TradeSelection >= 0) and (State.TradeSelection < OldRows.Length())
+      then
+        SelectedId := OldRows[State.TradeSelection].Id;
+      end if;
+    when None:
+      Next.TradeSide := Protocol.TradeSide.Buy;
+      Next.TradeSelection := 0;
+  end case;
+  const Values := Rows(Quote, Next.TradeSide);
+  Next.TradeSelection := Math.Clamp(
+    if State.TradePagePending then 0 else Next.TradeSelection end if,
+    0, Math.Max(0, Values.Length() - 1)
+  );
+  for Index: integer := 0 to Values.Length() - 1 do
+    if Values[Index].Id = SelectedId then
+      Next.TradeSelection := Index;
+    end if;
+  end for;
+
+  Next.ActiveTrade := Some(Quote);
+  Next.ActiveDialogue := None;
+  Next.TradePagePending := false;
+  Next.TradeNotice := '';
+  Next.TradeTextOffset := 0;
+  return Next;
+end function;
+
+function Queue(State: Model.ClientModel; Message: Protocol.ClientMessage; PageChange: boolean): Model.ClientModel;
+begin
+  if State.Pending or (State.ConnectionPhase <> Model.ClientConnectionPhase.Active) then
+    return State;
+  end if;
+
+  case Tasks.TrySend(State.Requests, Message) of
+    when Ok(true):
+      return State with Pending := true; PendingChangesProgress := false; TradePagePending := PageChange; TradeNotice := ''; Status := 'Trading...'; end with;
+    when Ok(false), Error(_):
+      return State;
+  end case;
+end function;
+
+// The modal owns all ordinary keys. Tiny windows allow closing but cannot submit unseen trades.
+public function HandleKey(State: Model.ClientModel; Key: Tui.TuiKeyEvent): Model.ClientModel;
+begin
+  if State.Pending then
+    return State;
+  end if;
+  const Quote := State.ActiveTrade.Unwrap();
+  if Key.kind = Tui.TuiKeyKind.Escape then
+    return Queue(State, Protocol.ClientMessage.EndTrade(Quote.NpcId), false);
+  end if;
+
+  if (State.ViewportWidth < 40) or (State.ViewportHeight < 12) then
+    return State;
+  end if;
+
+  if Key.kind = Tui.TuiKeyKind.Tab then
+    return State with TradeTextOffset := 0; TradeSide := if State.TradeSide =
+      Protocol.TradeSide.Buy then Protocol.TradeSide.Sell
+      else Protocol.TradeSide.Buy
+      end if; TradeSelection := 0; TradeNotice := ''; end with;
+  end if;
+  const Values := Rows(Quote, State.TradeSide);
+  if Key.kind = Tui.TuiKeyKind.Enter then
+    if (State.TradeSelection < 0) or (State.TradeSelection >= Values.Length()) then
+      return State;
+    end if;
+    const Selected := Values[State.TradeSelection];
+    if not Selected.Enabled then
+      return State;
+    end if;
+
+    return Queue(
+      State,
+      if State.TradeSide = Protocol.TradeSide.Buy then Protocol.ClientMessage.TradeBuy(
+        Quote.NpcId,
+        Selected.Id,
+        Quote.Revision
+      )
+        else Protocol.ClientMessage.TradeSell(Quote.NpcId, Selected.Id, Quote.Revision)
+        end if, false
+    );
+  end if;
+
+  if (Key.kind = Tui.TuiKeyKind.PageUp) or (Key.kind = Tui.TuiKeyKind.PageDown) then
+    const Target := Page(Quote, State.TradeSide) +
+      (if Key.kind = Tui.TuiKeyKind.PageDown then 1 else -1 end if);
+    if (Target >= 0) and (Target <= Trades.LastPage(Total(Quote, State.TradeSide))) then
+      return Queue(
+        State,
+        Protocol.ClientMessage.TradePage(Quote.NpcId, State.TradeSide, Target),
+        true
+      );
+    end if;
+
+    return State;
+  end if;
+  var Delta := 0;
+  if (Key.kind = Tui.TuiKeyKind.Left) or (Key.kind = Tui.TuiKeyKind.Right) then
+    const Height := DetailHeight(State);
+    return State with TradeTextOffset := Math.Clamp(
+      State.TradeTextOffset +
+      (if Key.kind = Tui.TuiKeyKind.Right then Height else - Height end if),
+      0, Math.Max(0, DetailLines(State).Length() - Height)
+    ); end with;
+  end if;
+
+  if Key.kind = Tui.TuiKeyKind.Up then
+    Delta := -1;
+  end if;
+
+  if Key.kind = Tui.TuiKeyKind.Down then
+    Delta := 1;
+  end if;
+
+  return State with TradeTextOffset := if Delta = 0 then State.TradeTextOffset else 0 end if; TradeSelection := Math.Clamp(
+    State.TradeSelection + Delta, 0,
+    Math.Max(0, Values.Length() - 1)
+  ); end with;
+end function;
+
+function PriceLabel(Item: Protocol.TradeItem): string;
+begin
+  case Item.Price of
+    when Some(const Price):
+      return Conv.IntToStr(Price) + ' coins';
+    when None:
+      return 'Not for trade';
+  end case;
+end function;
+
+function DetailHeight(State: Model.ClientModel): integer;
+begin
+  return Math.Clamp(State.ViewportHeight - 10, 1, 3);
+end function;
+
+function DetailLines(State: Model.ClientModel): array of string;
+begin
+  const Values := Rows(State.ActiveTrade.Unwrap(), State.TradeSide);
+  var Detail := 'No items on this side.';
+  if Values.Length() > 0 then
+    const Item := Values[Math.Clamp(State.TradeSelection, 0, Values.Length() - 1)];
+    Detail := if Item.Enabled then 'Ready to trade.' else Item.Reason end if;
+  end if;
+
+  if State.TradeNotice <> '' then
+    Detail := State.TradeNotice;
+  end if;
+
+  return Layout.WrappedLines(Detail, Math.Min(76, State.ViewportWidth - 4));
+end function;
+
+// Reserves wallet, side/page, selected price/reason and controls before allocating visible item rows.
+public function View(State: Model.ClientModel): Tui.TuiElement;
+begin
+  const Quote := State.ActiveTrade.Unwrap();
+  if (State.ViewportWidth < 40) or (State.ViewportHeight < 12) then
+    return Tui.TuiElementBuilders.MakeOverlay(
+      'Trade', [
+        Tui.TuiElementBuilders.MakeColumn([
+          Tui.TuiElementBuilders.MakeLabel('Resize to 40x12'),
+          Tui.TuiElementBuilders.MakeLabel('Esc: conversation  Alt-X: quit')
+        ])
+      ]
+    );
+  end if;
+  const Width := Math.Min(76, State.ViewportWidth - 4);
+  const Values := Rows(Quote, State.TradeSide);
+  const Index := Math.Clamp(State.TradeSelection, 0, Math.Max(0, Values.Length() - 1));
+  const Details := DetailLines(State);
+  const DetailRows := Math.Min(Details.Length(), DetailHeight(State));
+  const DetailStart := Math.Clamp(State.TradeTextOffset, 0, Details.Length() - DetailRows);
+  const Count := Math.Max(1, State.ViewportHeight - 8 - DetailRows);
+  const First := Math.Max(0, Index - Count + 1);
+  const Last := Math.Min(Values.Length(), First + Count);
+  const Side := if State.TradeSide = Protocol.TradeSide.Buy then 'Buy' else 'Sell' end if;
+  var Content: array of Tui.TuiElement := [
+    Tui.TuiElementBuilders.MakeLabel(
+      'Coins: ' + Conv.IntToStr(State.Coins) +
+      if Values.Length() = 0 then '' else ' | ' + PriceLabel(Values[Index]) end if
+    ),
+    Tui.TuiElementBuilders.MakeLabel(
+      Side + '  Page ' +
+      Conv.IntToStr(Page(Quote, State.TradeSide) + 1) + '/' +
+      Conv.IntToStr(Trades.LastPage(Total(Quote, State.TradeSide)) + 1) +
+      '  Items: ' + Conv.IntToStr(Total(Quote, State.TradeSide))
+    )
+  ];
+  for Row: integer := First to Last - 1 do
+    Content.PushInPlace(
+      Tui.TuiElementBuilders.MakeLabel(
+        Layout.FitLine(
+          (if Row = Index then '> ' else '  ' end if) + Values[Row].Name +
+          '  ' + PriceLabel(Values[Row]) + (if Values[Row].Enabled then '' else ' [x]' end if),
+          Width
+        )
+      )
+    );
+  end for;
+
+  for Line: integer := DetailStart to DetailStart + DetailRows - 1 do
+    Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Details[Line]));
+  end for;
+
+  Content.PushInPlace(
+    Tui.TuiElementBuilders.MakeLabel(
+      if State.Pending then 'Waiting for server...'
+        elsif Details.Length() > DetailRows then 'Tab side  Up/Down row  L/R text'
+        else 'Tab: Buy/Sell  Arrows: select'
+        end if
+    )
+  );
+  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Enter: trade  PgUp/PgDn: page'));
+  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Esc: conversation  Alt-X: quit'));
+  return Tui.TuiElementBuilders.MakeOverlay(
+    Quote.Speaker,
+    [Tui.TuiElementBuilders.MakeColumn(Content)]
+  );
+end function;
+end unit;

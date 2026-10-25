@@ -522,5 +522,29 @@ overlays are blocked while talking. Alt+X still exits cleanly. Text wraps and
 Page Up/Down scrolls long frames on small terminals. Resize preserves the
 frame and selection; new answers reset selection. No choices or NPC behavior
 are inferred by the client. Pending text names the server-projected speaker.
-Residents, guards and healers use the same controls; healing and topic
+Residents, guards, healers and merchants use the same controls; healing and topic
 availability remain server-owned. See the [15c review route](../architecture/generated-settlements.md#reproducible-acceptance).
+
+## Trade
+
+Elias in Hearthmoor and each village merchant offer **Show me your wares**.
+The separate trade window shows the merchant, coin balance, selected price,
+Buy/Sell side, page, individual goods and reasons for unavailable actions.
+Tab switches sides; Up/Down selects; Page Up/Down requests another 16-item
+page. Enter buys or sells one enabled selected item immediately. Escape
+returns to the conversation, then Escape ends it. Alt+X keeps normal quitting.
+Worn gear must be removed in inventory before selling. The compass is unavailable.
+
+All page rows remain reachable by local scrolling at **40x12** or larger.
+Smaller terminals show a size hint and allow closing, while trade/page actions
+are suppressed. Long refusal text scrolls with Left/Right without hiding price
+or controls. The client renders server prices and capabilities; it calculates
+no transaction result. One pending request blocks further actions. Rejection
+retains the quote and displays the reason. A surviving selected ID remains
+selected after transfer; otherwise its index is clamped. Page replies reset
+to a valid first row. Resize and viewport replies retain the modal and selection.
+
+Coins remain visible in context and inventory outside trade, separately from
+items. The context sidebar reserves the extra wallet row before docking.
+See [economy](../architecture/economy.md) and the
+[running-game verification](../architecture/economy-acceptance.md).

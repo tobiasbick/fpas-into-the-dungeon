@@ -1,0 +1,99 @@
+// Legal generated economy fixtures shared by persistence and listener tests.
+unit Dungeon.Test.TradeWorld;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities,
+  Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Items as Items,
+  Dungeon.Interior as Interior, Dungeon.Interior.Generation as Generation,
+  Dungeon.Settlements.Identities as VillageIds, Dungeon.Settlements.Sites as Sites,
+  Dungeon.Settlements.Generation as Settlements,
+  Dungeon.Terrain.Entrances as Entrances,
+  Dungeon.Test.Trade as Fixtures, Dungeon.World as WorldUnit,
+  Dungeon.World.Interiors.Encoding as Levels, Dungeon.World.Settlements.Encoding as Villages,
+  Std.Conv as Conv, Std.Fs as Fs;
+
+// Canonical path of the fixture dungeon definition.
+public function LevelPath(World: WorldUnit.WorldSession; Map: Interior.InteriorMap): string;
+begin
+  const Id := Identities.ParseDungeonLevelId(World.Metadata, Map.AreaId).Unwrap();
+  return World.Directory + '/dungeons/' + Conv.IntToStr(Id.Region.X) + '_' +
+    Conv.IntToStr(Id.Region.Y) + '/' + Conv.IntToStr(Id.Level) + '.json';
+end function;
+
+// Publishes validated prepared definitions before exercising normal save/load.
+public procedure Publish(World: WorldUnit.WorldSession; Fixture: Fixtures.Scenario);
+begin
+  for Map: Interior.InteriorMap in Fixture.Maps do
+    if Map.AreaId.StartsWith(World.Metadata.Id + ':dungeon:') then
+      const Path := LevelPath(World, Map);
+      const Region := Identities.ParseDungeonLevelId(World.Metadata, Map.AreaId).Unwrap().Region;
+      discard Fs.CreateDirAll(
+        World.Directory + '/dungeons/' + Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y)
+      ).Unwrap();
+      const Text := Levels.EncodeLevel(World.Metadata, Map);
+      discard Levels.DecodeLevel(Text, World.Metadata, Map.AreaId).Unwrap();
+      discard Fs.WriteTextAtomic(Path, Text).Unwrap();
+    elsif Map.AreaId <> World.Metadata.Id + ':settlement:home' then
+      const Region := VillageIds.ParseAreaId(World.Metadata, Map.AreaId).Unwrap();
+      discard Fs.CreateDirAll(World.Directory + '/settlements').Unwrap();
+      const Bytes := Villages.EncodeMap(World.Metadata, Map);
+      discard Villages.DecodeMap(Bytes, World.Metadata, Map.AreaId).Unwrap();
+      discard Fs.WriteTextAtomic(
+        World.Directory + '/settlements/' + Conv.IntToStr(Region.X) + '_' + Conv.IntToStr(Region.Y) +
+        '.json',
+        Bytes
+      ).Unwrap();
+    end if;
+  end for;
+end procedure;
+
+// A generated one-level spawn dungeon, carried loot and a met home merchant.
+public function Home(World: WorldUnit.WorldSession): Fixtures.Scenario;
+begin
+  const Context := Fixtures.HomeFor(World.Metadata);
+  const Region := Entrances.RegionOf(World.Metadata, World.Metadata.Spawn);
+  // Stored depth is authoritative. This legal generated definition keeps quest setup short.
+  const Dungeon := Generation.GenerateDungeon(
+    World.Metadata.Seed, Region.X, Region.Y,
+    0, 1, Context.Maps[0].AreaId, true
+  ).Unwrap();
+  var State := Areas.MaterializeArea(GameState.NewGame(World.Metadata), Dungeon);
+  for Index: integer := 0 to State.Items.Length() - 1 do
+    if State.Items[Index].Kind <> Items.ItemKind.MarasCompass then
+      State.Items[Index].Location := Items.ItemLocation.CarriedByPlayer;
+    end if;
+  end for;
+
+  State := Areas.MaterializeArea(State, Context.Maps[1]) with Area := Context.State.Area; AreaId := Context.State.AreaId; Player := Context.State.Player; ReturnLocation := Context.State.ReturnLocation; Npcs := Context.State.Npcs; end with;
+  const Maps := [Dungeon, Context.Maps[1]];
+  return Context with State := Areas.ValidateSavedGame(World.Metadata, State, Maps).Unwrap(); Maps := Maps; end with;
+end function;
+
+// Supplies enough genuine visited shop origins to test either 64-item capacity without forged IDs.
+public function Capacity(Home: Fixtures.Scenario): Fixtures.Scenario;
+begin
+  var State := Home.State;
+  var Maps := Home.Maps;
+  var Count := 0;
+  for Y: integer := -100 to 100 do
+    for X: integer := -100 to 100 do
+      const Region := Coordinates.ChunkCoordinate(X := X, Y := Y);
+      if Sites.Site(Home.View.Metadata, Region) is Some(_) then
+        const Map := Settlements.GenerateMap(Home.View.Metadata, Region).Unwrap();
+        State := Areas.MaterializeArea(State, Map);
+        Maps.PushInPlace(Map);
+        Count := Count + 1;
+        if Count = 14 then
+          return Home with State := Areas.ValidateSavedGame(
+            Home.View.Metadata,
+            State,
+            Maps
+          ).Unwrap(); Maps := Maps; end with;
+        end if;
+      end if;
+    end for;
+  end for;
+
+  panic('expected fourteen generated settlement sites');
+end function;
+end unit;

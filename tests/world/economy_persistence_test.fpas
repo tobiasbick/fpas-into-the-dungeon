@@ -1,0 +1,251 @@
+// Proves exact traded ownership across stored areas, full save validation, rewind and fresh-game reset.
+program EconomyPersistenceTest;
+
+uses
+  Dungeon.Test.TradeWorld as TradeWorld,
+  Dungeon.Areas as Areas, Dungeon.Areas.Identities as Identities,
+  Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Items as Items,
+  Dungeon.Interior as Interior, Dungeon.Interior.Generation as Generation,
+  Dungeon.Npcs as Npcs, Dungeon.Trade as Trade, Dungeon.Dialogue as Dialogue,
+  Dungeon.Quests as Quests, Dungeon.Quests.Model as QuestModel,
+  Dungeon.Terrain.Entrances as Entrances,
+  Dungeon.Trade.Items as Stock, Dungeon.Test.Trade as Fixtures,
+  Dungeon.Test.StateComparison as States, Dungeon.World as WorldUnit,
+  Dungeon.World.Interiors.Encoding as Levels, Dungeon.World.Settlements.Encoding as Villages,
+  Dungeon.World.Savegame as Savegame, Dungeon.World.Savegame.Errors as Errors,
+  Std.Conv as Conv, Std.Fs as Fs, Std.Test as Test;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Invalid(const Reason):
+      panic(Reason);
+    when Savegame.SaveGameLoad.Missing:
+      panic('expected a saved economy');
+  end case;
+end function;
+
+procedure RoundTrip(World: WorldUnit.WorldSession; State: GameState.GameState);
+begin
+  Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+  Test.AssertTrue(States.SameState(State, Loaded(World)));
+end procedure;
+
+function ClaimReward(Home: Fixtures.Scenario): Fixtures.Scenario;
+begin
+  var State := Home.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 11, Y := 8)
+  ); end with;
+
+  case Dialogue.Start(Home.View, State).Unwrap() of
+    when Dialogue.Outcome.Continued(const Met, _, _):
+      State := Met;
+    when Dialogue.Outcome.Ended(_):
+      panic('expected Mara');
+  end case;
+
+  State := Quests.Accept(
+    Home.View,
+    State,
+    QuestModel.CompassTarget(Home.View.Metadata, 1)
+  ).Unwrap();
+  for Index: integer := 0 to State.Items.Length() - 1 do
+    if State.Items[Index].Kind = Items.ItemKind.MarasCompass then
+      State.Items[Index].Location := Items.ItemLocation.CarriedByPlayer;
+    end if;
+  end for;
+
+  State := Quests.Report(Home.View, State).Unwrap() with Player := Home.State.Player; end with;
+
+  return Home with State := Areas.ValidateSavedGame(Home.View.Metadata, State, Home.Maps).Unwrap(); end with;
+end function;
+
+begin
+  const Root := Test.ScratchDir();
+  const World := WorldUnit.OpenWorld(Root, 'trade-storage', 25, 1, 32).Unwrap();
+  const Home := TradeWorld.Home(World);
+  const Coin := Home.State.Items[0].Id;
+  const HomePotion := Stock.InitialId(Home.MerchantId, 0);
+  const SoldCoin := Trade.Sell(Home.View, Home.State, Home.MerchantId, Coin).Unwrap();
+  const Bought := Trade.Buy(Home.View, SoldCoin, Home.MerchantId, HomePotion).Unwrap();
+  const Village := Fixtures.Village(Home with State := Bought; end with);
+  const Cross := Trade.Sell(Village.View, Village.State, Village.MerchantId, HomePotion).Unwrap();
+  TradeWorld.Publish(World, Village);
+  RoundTrip(World, Cross);
+  Test.AssertEquals(5, Loaded(World).Coins);
+  var Found := false;
+  for Item: Items.GameItem in Loaded(World).Items do
+    if Item.Id = HomePotion then
+      Found := true;
+      Test.AssertTrue(Item.Location = Items.ItemLocation.HeldByMerchant(Village.MerchantId));
+    end if;
+  end for;
+
+  Test.AssertTrue(Found);
+  const SavePath := Savegame.SaveGamePath(World);
+  const Earlier := Fs.ReadText(SavePath).Unwrap();
+  var StockIndex := -1;
+  for Index: integer := 0 to Cross.Items.Length() - 1 do
+    if Cross.Items[Index].Id = HomePotion then
+      StockIndex := Index;
+    end if;
+  end for;
+
+  Test.AssertTrue(StockIndex >= 0);
+  const LevelFile := TradeWorld.LevelPath(World, Village.Maps[0]);
+  const LevelBytes := Fs.ReadText(LevelFile).Unwrap();
+  const VillageFile := World.Directory + '/settlements/85_-83.json';
+  const VillageBytes := Fs.ReadText(VillageFile).Unwrap();
+  // All valid locations retain each original record; kinds still constrain terminal and worn states.
+  const Floor := Items.ItemLocation.InInterior(
+    Home.Maps[0].AreaId,
+    Home.Maps[0].Items[0].Position
+  );
+  for Id: string in [Home.State.Items[1].Id, Stock.InitialId(Home.MerchantId, 3)] do
+    for Location: Items.ItemLocation in [
+      Items.ItemLocation.CarriedByPlayer,
+      Items.ItemLocation.EquippedByPlayer(Items.EquipmentSlot.Weapon), Floor,
+      Items.ItemLocation.HeldByMerchant(Home.MerchantId),
+      Items.ItemLocation.HeldByMerchant(Village.MerchantId)
+    ] do
+      var State := Cross;
+      for Index: integer := 0 to State.Items.Length() - 1 do
+        if State.Items[Index].Id = Id then
+          State.Items[Index].Location := Location;
+        end if;
+      end for;
+
+      RoundTrip(World, State);
+    end for;
+  end for;
+
+  for Id: string in [Home.State.Items[3].Id, HomePotion] do
+    for Location: Items.ItemLocation in [
+      Items.ItemLocation.CarriedByPlayer, Floor,
+      Items.ItemLocation.Consumed, Items.ItemLocation.HeldByMerchant(Home.MerchantId),
+      Items.ItemLocation.HeldByMerchant(Village.MerchantId)
+    ] do
+      var State := Cross;
+      for Index: integer := 0 to State.Items.Length() - 1 do
+        if State.Items[Index].Id = Id then
+          State.Items[Index].Location := Location;
+        end if;
+      end for;
+
+      RoundTrip(World, State);
+    end for;
+  end for;
+  const Rewarded := Fixtures.Village(ClaimReward(Home));
+  TradeWorld.Publish(World, Rewarded);
+  const RewardId := World.Metadata.Id + ':quest:mara-compass:reward:0';
+  const RewardSold := Trade.Sell(
+    Rewarded.View,
+    Rewarded.State,
+    Rewarded.MerchantId,
+    RewardId
+  ).Unwrap();
+  RoundTrip(World, RewardSold);
+  for Location: Items.ItemLocation in [
+    Items.ItemLocation.CarriedByPlayer, Floor,
+    Items.ItemLocation.Consumed, Items.ItemLocation.HeldByMerchant(Home.MerchantId)
+  ] do
+    var State := RewardSold;
+    for Index: integer := 0 to State.Items.Length() - 1 do
+      if State.Items[Index].Id = RewardId then
+        State.Items[Index].Location := Location;
+      end if;
+    end for;
+
+    RoundTrip(World, State);
+  end for;
+
+  // Restore the earlier immutable dungeon definition and economy before malformed candidate writes.
+  discard Fs.WriteTextAtomic(LevelFile, LevelBytes).Unwrap();
+  RoundTrip(World, Cross);
+  Test.AssertEquals(Earlier, Fs.ReadText(SavePath).Unwrap());
+  for Mutation: integer := 0 to 9 do
+    var Bad := Cross;
+    case Mutation of
+      when 0:
+        Bad.Items := Bad.Items.Slice(0, Bad.Items.Length() - 1);
+      when 1:
+        Bad.Items.PushInPlace(Bad.Items[0]);
+      when 2:
+        Bad.Items[StockIndex].Kind := Items.ItemKind.AncientCoin;
+      when 3:
+        Bad.Items[StockIndex].Id := Stock.InitialId(Home.MerchantId, 5);
+      when 4:
+        Bad.Items[StockIndex].Location := Items.ItemLocation.HeldByMerchant(
+          Npcs.MaraId(World.Metadata)
+        );
+      when 5:
+        Bad.Items[StockIndex].Location := Items.ItemLocation.HeldByMerchant(
+          World.Metadata.Id + ':settlement:87:-85:npc:3'
+        );
+      when 6:
+        Bad.Items[StockIndex].Id := Stock.InitialId(
+          World.Metadata.Id + ':settlement:87:-85:npc:3',
+          0
+        );
+      when 7:
+        Bad.Items[StockIndex].Location := Items.ItemLocation.EquippedByPlayer(
+          Items.EquipmentSlot.Weapon
+        );
+      when 8:
+        Bad.Items[0].Location := Items.ItemLocation.Consumed;
+      when 9:
+        Bad.Items[StockIndex].Id := Stock.InitialId(Home.MerchantId, 0) + ':extra';
+      else
+        panic('unknown malformed economy');
+    end case;
+
+    Test.AssertTrue(
+      Savegame.WriteSaveGame(World, Bad) is Error(Errors.PersistenceFailure.InvalidState(_))
+    );
+    Test.AssertEquals(Earlier, Fs.ReadText(SavePath).Unwrap());
+    Test.AssertEquals(LevelBytes, Fs.ReadText(LevelFile).Unwrap());
+    Test.AssertEquals(VillageBytes, Fs.ReadText(VillageFile).Unwrap());
+  end for;
+  // The current area is home: a village-origin/owner must still require its off-screen definition.
+  const HomeView := Cross with AreaId := Home.State.AreaId; Player := Home.State.Player; ReturnLocation := Home.State.ReturnLocation; end with;
+
+  RoundTrip(World, HomeView);
+  const HomeBytes := Fs.ReadText(SavePath).Unwrap();
+  Test.AssertTrue(Fs.DeleteFile(VillageFile).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World) is Error(_));
+  Test.AssertTrue(Savegame.WriteSaveGame(World, HomeView) is Error(_));
+  Test.AssertFalse(Fs.Exists(VillageFile));
+  Test.AssertEquals(HomeBytes, Fs.ReadText(SavePath).Unwrap());
+  Test.AssertTrue(Fs.CreateDir(VillageFile).Unwrap());
+  Test.AssertTrue(Savegame.LoadSaveGame(World) is Error(_));
+  Test.AssertEquals(HomeBytes, Fs.ReadText(SavePath).Unwrap());
+  Test.AssertTrue(Fs.DeleteDir(VillageFile).Unwrap());
+  discard Fs.WriteTextAtomic(VillageFile, VillageBytes).Unwrap();
+  RoundTrip(World, Cross);
+  // Unsaved changes are abandoned by reloading; starting over never overwrites that explicit save.
+  const Unsaved := Trade.Sell(
+    Village.View,
+    Cross,
+    Village.MerchantId,
+    Home.State.Items[1].Id
+  ).Unwrap();
+  Test.AssertFalse(States.SameState(Unsaved, Loaded(World)));
+  Test.AssertTrue(States.SameState(Cross, Loaded(World)));
+  const Fresh := GameState.NewGame(World.Metadata);
+  var Visit := Areas.MaterializeArea(Fresh, Home.Maps[1]);
+  Visit := Areas.MaterializeArea(Visit, Village.Maps[2]);
+  Visit := Areas.MaterializeArea(Visit, Home.Maps[1]);
+  Test.AssertEquals(0, Visit.Coins);
+  Test.AssertEquals(10, Visit.Items.Length());
+  for Npc: Npcs.GameNpc in Visit.Npcs do
+    Test.AssertFalse(Npc.HasMetPlayer);
+  end for;
+
+  Test.AssertEquals(Earlier, Fs.ReadText(SavePath).Unwrap());
+  Test.AssertEquals(LevelBytes, Fs.ReadText(LevelFile).Unwrap());
+  Test.AssertEquals(VillageBytes, Fs.ReadText(VillageFile).Unwrap());
+  const Restarted := WorldUnit.OpenWorld(Root, 'trade-storage', 25, 1, 32).Unwrap();
+  Test.AssertTrue(States.SameState(Cross, Loaded(Restarted)));
+end.

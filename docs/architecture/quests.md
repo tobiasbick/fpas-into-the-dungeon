@@ -130,9 +130,13 @@ rewinds the whole game. Start over resets quest, NPC and mutable item state
 while retaining immutable level files and the previous save until explicitly
 overwritten.
 
-Current versions are world metadata 4, generator 11, level file 4, settlement file 1,
-savegame 13 and protocol 19. Obsolete data is rejected and preserved without migration;
-generator-10 worlds require creating a new world. Generated NPCs never own this
+Reward potions may be sold to merchants, used or dropped while retaining both
+quest-owned records. The compass has no trade price and cannot be merchant-owned.
+Trade does not change quest phase or grant another reward; see [economy](economy.md).
+
+Current versions are world metadata 4, generator 12, level file 4, settlement file 2,
+savegame 14 and protocol 20. Obsolete data is rejected and preserved without migration;
+older-generator worlds require creating a new world. Generated NPCs never own this
 quest or trigger its world preflight; Mara is resolved by stable identity,
 independent of the canonical NPC array position.
 

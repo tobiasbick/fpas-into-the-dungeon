@@ -56,6 +56,7 @@ these projects.
   selection and creation updates) with `Worlds.View` (catalog, creation
   editor and discard confirmation),
   `Intentions` (queued player requests), `Dialogue` (modal frame and input),
+  `Trade` (quoted ID selection, local text/item windows and keyboard intentions),
   `Input` (keys and actions), `Events`
   (network events), `Playback` (combat animation clock), `MapCells`,
   `GameView`, and `Overlays`. `Dungeon.Client.Raycast`, `.Animation`,
@@ -113,7 +114,8 @@ these projects.
   own the policy (`Config`), per-connection session rules (`Session`),
   enumeration conversions (`Mapping`), client-safe projections (`Projection`),
   replies, turn and transition commits (`Replies`), message handling
-  (`Handling`), connection-local dialogue (`Dialogue`), and the mapping of typed storage failures to stable rejection
+  (`Handling`), connection-local dialogue (`Dialogue`) and trade (`Trade`,
+  with paged quotes in `Trade.Quotes`), and the mapping of typed storage failures to stable rejection
   codes (`Failures`), world lifecycle (`Worlds`), bounded diagnostics (`Logging`)
   and optional dashboard/settings (`Console`). `Diagnostics` projects committed
   session facts into typed snapshots, separately from timestamped log text.
@@ -158,6 +160,10 @@ these projects.
   world cache and its LRU clock; successful gameplay sends mark progress unsaved.
   Viewport candidates share preparation/rejection policy but change no game
   state or dirty/save facts. A response or rejection write failure remains fatal.
+  `ActiveInteraction` holds one dialogue or trade frame. Trade revisions remain
+  monotonic across world/game changes in the connection. Its candidate replies
+  reuse the same prepare/send/install path; no separate transaction framework
+  or stock store is introduced.
   First-person rows and exploration-map windows share one interior-field
   decision for visible, remembered and unknown knowledge. Remembered fields
   contain only static geometry; current items and opponents appear only while
@@ -193,7 +199,7 @@ these projects.
     `Dungeon.Npcs.Model` defines independent roles and immutable placements;
     `Dungeon.Npcs` validates complete mutable meeting rosters. `.Interaction`
     resolves the exact adjacent character; `Dungeon.Dialogue.Villages` owns fixed
-    resident, guard and healer topics. See [generated settlements](generated-settlements.md).
+    resident, guard, healer and merchant topics. See [generated settlements](generated-settlements.md).
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
     read-only queries; the `AreaView` type pairs world metadata with a supplied
     current interior map.
@@ -206,6 +212,10 @@ these projects.
     `Dungeon.Equipment`, `Dungeon.Consumables`, `Dungeon.Combat`: the rules that
     change the state. Consumables validates and applies pure potion healing;
     Combat orders the resulting turn and hostile phase.
+  - `Dungeon.Trade`: pure quotes and single-item transfers. `.Model` owns the
+    catalogue, limits and typed refusals; `.Items` owns stock origins and merchant
+    ownership checks without depending on `GameState`. All stock derives from
+    the one item ledger; the wallet is separate. See [economy](economy.md).
   - `Dungeon.Exploration` with `.Model` and `.Sight`: discovery masks,
     outdoor sight and discovery updates, and interior line of sight.
 - `libs/world` owns validated world, chunk, and savegame persistence,
@@ -322,9 +332,10 @@ and ownership rules.
 
 `Dungeon.Settlements`, `Dungeon.Npcs` and `Dungeon.Dialogue` in `libs/game`
 own authored geometry, NPC records and deterministic conversation effects.
-The world save layer owns the exact NPC codec; it resolves settlement maps
-from code. The protocol shares its visible-state codec between ordinary and
-atomic dialogue replies. The server retains the active authoritative frame;
+The world save layer owns the exact NPC codec; it resolves home geometry from
+code and generated villages from immutable files. The protocol shares its
+visible-state codec between ordinary, dialogue and trade replies. The server
+retains one active authoritative interaction frame;
 the client retains its projection and local selection. See
 [NPCs and dialogue](npcs-and-dialogue.md) and [quests](quests.md) for the
 complete contracts.

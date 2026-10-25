@@ -25,11 +25,14 @@ run headless or with a full-terminal dashboard.
 - Visit Hearthmoor, talk to Mara, and receive free healing. Her meeting state
   persists through explicit saves. Recover her lost compass from the deepest
   spawn-dungeon level for two Healing potions, and follow progress in the `J` journal.
-- Find additional named villages with residents, guards and healers. Their maps,
+- Find additional named villages with residents, guards, healers and merchants. Their maps,
   NPC placements and independently remembered greetings persist through Save/Continue.
 - Discover the world through Fog of War and open a pannable exploration map.
 - Inspect and collect ancient coins, equip a rusty short sword and leather
   jerkin, find and use healing potions, and drop carried items.
+- Sell loot for coins and buy individual goods from Elias in Hearthmoor or a
+  village merchant. Stock is finite and independent; money and exact item
+  ownership survive explicit saves. See [trade and economy](docs/architecture/economy.md).
 - Fight restless skeletons and giant rats in turn-based combat, with health, armor, combat
   messages, and animations. Walking outdoors gradually restores health.
 - Create separate worlds, continue a saved game, or start over in an existing
@@ -186,7 +189,7 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 gets its own identity, even when another world uses the same seed.
 
 Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 4**,
-**generator 11**, **level format 4**, **settlement format 1**, **protocol 19** and **save format 13**.
+**generator 12**, **level format 4**, **settlement format 2**, **protocol 20** and **save format 14**.
 Format-12 and older saves remain intact but cannot be continued with this server.
 Generator-10 and older worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds

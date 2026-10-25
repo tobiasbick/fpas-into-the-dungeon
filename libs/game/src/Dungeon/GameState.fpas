@@ -1,7 +1,7 @@
 // The authoritative game state: creation, validation, and read-only queries of its parts.
 unit Dungeon.GameState;
 
-uses Dungeon.Settlements.Identities as SettlementIds, Dungeon.Settlements.Validation as SettlementValidation, Dungeon.Quests.Items as QuestItems, Dungeon.Quests.Model as QuestModel, Dungeon.Npcs as NpcRules, Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Progression as Progression, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
+uses Dungeon.Trade.Items as TradeItems, Dungeon.Settlements.Identities as SettlementIds, Dungeon.Settlements.Validation as SettlementValidation, Dungeon.Quests.Items as QuestItems, Dungeon.Quests.Model as QuestModel, Dungeon.Npcs as NpcRules, Dungeon.Areas.Identities as Identities, Dungeon.Exploration.Model as Model, Dungeon.Coordinates as Coordinates, Dungeon.Hostiles as HostileRules, Dungeon.Interior as InteriorUnit, Dungeon.Items as ItemRules, Dungeon.Progression as Progression, Dungeon.Random as Random, Dungeon.Terrain as Terrain, Dungeon.Terrain.Entrances as Entrances;
 
 // Full health of a new player character; health never exceeds it.
 public const PlayerMaximumHealth: integer := 20;
@@ -27,6 +27,8 @@ public type GameState = record
   public Exploration: Model.ExplorationState;
   // Persistent server-owned item locations and inventory ownership.
   public Items: array of ItemRules.GameItem;
+  // Separate currency; it occupies no inventory slot.
+  public Coins: integer;
   // Current player health, from 1 through PlayerMaximumHealth while a game is active.
   public Health: integer;
   // Every opponent of the world, including destroyed ones.
@@ -77,7 +79,7 @@ begin
   for Item: ItemRules.GameItem in State.Items do
     begin
       case Item.Location of
-        when ItemRules.ItemLocation.InInterior(_, _), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
+        when ItemRules.ItemLocation.InInterior(_, _), ItemRules.ItemLocation.HeldByMerchant(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
           null;
         when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_):
           Items.PushInPlace(Item);
@@ -106,7 +108,7 @@ begin
               return Some(Item);
             end;
           end if;
-        when ItemRules.ItemLocation.InInterior(_, _), ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
+        when ItemRules.ItemLocation.InInterior(_, _), ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.HeldByMerchant(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
           null;
       end case;
     end;
@@ -137,7 +139,7 @@ begin
               return Ok(ItemRules.ItemVisibleCode(Item.Kind));
             end;
           end if;
-        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
+        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.HeldByMerchant(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
           null;
       end case;
     end;
@@ -190,6 +192,7 @@ begin
     VisitedAreas := [],
     Exploration := Model.EmptyExploration(),
     Items := [],
+    Coins := 0,
     Health := PlayerMaximumHealth,
     Hostiles := [],
     Npcs := NpcRules.NewNpcs(Metadata),
@@ -252,6 +255,12 @@ end function;
 public function ValidateStateShape(Metadata: Terrain.WorldMetadata; State: GameState): result of (GameState, string);
 begin
   const ValidNpcs := try NpcRules.ValidateNpcs(Metadata, State.VisitedAreas, State.Npcs);
+  const Ownership := try TradeItems.ValidateOwnership(
+    State.Coins,
+    State.Items,
+    State.Npcs,
+    State.VisitedAreas
+  );
   const ValidQuest := try QuestModel.ValidateQuest(Metadata, State.Quest);
   var TargetVisited := false;
   case QuestModel.ObjectiveOf(State.Quest) of
@@ -360,7 +369,7 @@ begin
                         return Error('interior items must occupy distinct fields');
                       end;
                     end if;
-                  when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
+                  when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.HeldByMerchant(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
                     null;
                 end case;
               end;
@@ -405,7 +414,7 @@ begin
               end;
             end if;
           end;
-        when ItemRules.ItemLocation.ReturnedToMara(_):
+        when ItemRules.ItemLocation.ReturnedToMara(_), ItemRules.ItemLocation.HeldByMerchant(_):
           null;
         when ItemRules.ItemLocation.Consumed:
           if Item.Kind <> ItemRules.ItemKind.HealingPotion then
@@ -604,7 +613,7 @@ begin
           if AreaId = State.AreaId then
             return Error('settlement cannot contain floor items');
           end if;
-        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
+        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.HeldByMerchant(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
           null;
       end case;
     end for;
@@ -656,7 +665,7 @@ begin
               end if;
             end;
           end if;
-        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
+        when ItemRules.ItemLocation.CarriedByPlayer, ItemRules.ItemLocation.EquippedByPlayer(_), ItemRules.ItemLocation.HeldByMerchant(_), ItemRules.ItemLocation.Consumed, ItemRules.ItemLocation.ReturnedToMara(_):
           null;
       end case;
     end;

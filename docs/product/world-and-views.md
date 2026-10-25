@@ -1,7 +1,7 @@
 # World structure and views
 
 This document defines the canonical terms for the spatial world model and its
-presentation, including combat, equipment, progression and deterministic quest terms.
+presentation, including combat, equipment, progression, quests and trade.
 
 ## Terminology
 
@@ -25,7 +25,7 @@ presentation, including combat, equipment, progression and deterministic quest t
   display label shown to players.
 - **Visited area** is a dungeon level or settlement entered in the current
   game. Dungeon entry materializes its original entities; settlement entry
-  materializes its NPC roster and records discovery. Visits survive leaving and
+  materializes its NPC roster and initial merchant goods, and records discovery. Visits survive leaving and
   save/load. A new game starts with no visited areas.
 - **Materialization** is the one-time creation of mutable items, opponents or
   NPC meeting records from an area's immutable placements on first entry in a
@@ -35,7 +35,7 @@ presentation, including combat, equipment, progression and deterministic quest t
 - **Settlement** is an exterior built-up area such as a village or town.
 - **Home settlement** is the world's authored settlement near spawn, currently
   Hearthmoor, with stable identity `<world>:settlement:home`.
-- **Generated village** is a settlement with a stored name, layout and three
+- **Generated village** is a settlement with a stored name, layout and four
   stationary NPC placements. Its identity is `<world>:settlement:<sx>:<sy>`.
 - **Settlement region** is one outdoor chunk used to choose at most one
   generated village gate. It is independent of dungeon entrance-region size.
@@ -45,8 +45,8 @@ presentation, including combat, equipment, progression and deterministic quest t
   home gate lies six traversable cardinal steps from spawn; all gates use `s`.
 - **NPC** is a non-hostile server-owned character with stable identity, kind,
   area and persistent meeting state. A stationary NPC blocks its placement field.
-- **Resident**, **guard** and **healer** are the three generated village NPC
-  roles. Their dialogue is fixed; a healer offers free full healing while hurt.
+- **Resident**, **guard**, **healer** and **merchant** are the generated village
+  NPC roles. Their dialogue is fixed; a healer offers free full healing while hurt.
 - **Dialogue** is a deterministic server-owned conversation with an NPC. Each
   frame offers ordered choices with stable IDs. Answers refresh that frame;
   the active conversation belongs to the connection and is never saved.
@@ -125,8 +125,18 @@ presentation, including combat, equipment, progression and deterministic quest t
 - **Usable** is the server-projected capability of a carried consumable. It is
   independent of current health; the server can reject a request at full health.
 - **Ancient coin** is a collectible item placed in every generated dungeon.
-  It proves inspection, pickup, projection, and persistence without defining a
-  broader loot system.
+  It can be sold to a merchant; picking it up does not add coins to the wallet.
+- **Coins** are the player's spendable balance, separate from physical items
+  and inventory capacity. A new game starts with zero coins.
+- **Merchant** is a settlement character who buys and sells individual goods.
+  Hearthmoor and every generated village have one.
+- **Merchant stock** is the finite set of items owned by one merchant. Buying
+  removes an item and selling adds it; visits and conversations do not refill it.
+- **Trade** is buying from or selling to the merchant currently in reach.
+  Buying and selling are always named from the player's perspective. Worn
+  equipment must be removed before selling; quest items cannot be traded.
+- **Trade quote** is the current offer for that merchant: exact items, prices,
+  availability and refusal reasons. A quote does not reserve or transfer goods.
 - **Equipment** is the set of items the player wears. A worn item is still part
   of the inventory; its location records the slot it occupies.
 - **Healing potion** is a non-equippable item represented by a crimson flask
@@ -143,8 +153,8 @@ presentation, including combat, equipment, progression and deterministic quest t
 - **Quest objective** is the condition the player must satisfy before reporting
   success. Mara's first objective is to recover her compass from the deepest
   level of the spawn dungeon and carry it back to her.
-- **Mara's compass** is the unique recoverable quest item. It cannot be worn or
-  consumed; dropping it in a dungeon leaves it recoverable.
+- **Mara's compass** is the unique recoverable quest item. It cannot be worn,
+  consumed or traded; dropping it in a dungeon leaves it recoverable.
 - **Ready to return** means an accepted quest's compass is currently carried.
   Dropping it removes readiness until it is picked up again.
 - **Completed quest** means Mara has received the compass and granted both

@@ -1,0 +1,285 @@
+// Drives trade through real TUI keys, projected replies, narrow layouts and connection teardown.
+program TradeWindowTest;
+
+uses
+  Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData,
+  Std.Conv as Conv, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Contains(Screen: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Screen.Height - 1 do
+    if Text in Screen.LineAt(Row) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function Projection(Coins: integer): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      Coins := Coins, Title := 'Hearthmoor', OriginX := 0, OriginY := 0, Width := 3, Height := 3,
+      Rows := ['ggg', 'gng', 'ggg'], KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+      PlayerX := 1, PlayerY := 2, WorldX := 6, WorldY := 8, Inventory := [],
+      Health := 20, MaxHealth := 20, Character := [], Journal := []
+    )
+  );
+end function;
+
+function Quote(): Protocol.TradeQuote;
+begin
+  var Items: array of Protocol.TradeItem := [];
+  for Index: integer := 0 to 15 do
+    Items.PushInPlace(
+      Protocol.TradeItem(
+        Id := 'stock:' + Conv.IntToStr(Index),
+        Name := 'Potion ' + Conv.IntToStr(Index), Price := Some(8), Enabled := true, Reason := ''
+      )
+    );
+  end for;
+
+  return Protocol.TradeQuote(
+    NpcId := 'trade:settlement:home:npc:merchant', Speaker := 'Elias',
+    Revision := 1, MerchantCapacity := 64, BuyPage := 0, SellPage := 0,
+    BuyTotal := 17, SellTotal := 2, BuyItems := Items,
+    SellItems := [
+      Protocol.TradeItem(
+        Id := 'sword', Name := 'Rusty short sword',
+        Price := Some(5), Enabled := false, Reason := 'Remove worn equipment before selling.'
+      ),
+      Protocol.TradeItem(
+        Id := 'compass', Name := 'Mara''s compass',
+        Price := None, Enabled := false, Reason := 'This item cannot be traded.'
+      )
+    ]
+  );
+end function;
+
+function Press(App: Tui.TuiApplication; State: Client.ClientModel; Kind: Tui.TuiKeyKind; Ch: string): Client.ClientModel;
+begin
+  App.InjectKeyForTest(
+    Tui.TuiKeyEvent(
+      kind := Kind, ch := Ch,
+      ctrl := false, alt := false, shift := false, meta := false
+    )
+  );
+  return App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 1, 0);
+end function;
+
+function Refresh(State: Client.ClientModel; Value: Protocol.TradeQuote; Coins: integer): Client.ClientModel;
+begin
+  return Client.UpdateClientEvent(
+    State, Client.ClientEvent.Trade(Projection(Coins), Value, true),
+    Tui.TuiCmdOutput.Create()
+  );
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(1);
+  const Cmd := Tui.TuiCmdOutput.Create();
+  var State := Client.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  State := State with ViewportWidth := 120; ViewportHeight := 30; RequestedWorldWidth := 39; RequestedWorldHeight := 25; end with;
+  var Current := Quote();
+  State := Refresh(State, Current, 80);
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(120, 30));
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Elias'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Coins: 80'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Buy  Page 1/2'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), '> Potion 0'));
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  for Ch: string in ['i', 'm', 'c', 'j', 'a', 's'] do
+    State := Press(App, State, Tui.TuiKeyKind.Character, Ch);
+    Test.AssertTrue(State.Overlay = Client.ClientOverlay.NoOverlay);
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  end for;
+
+  State := Press(App, State, Tui.TuiKeyKind.Down, '');
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap() =
+    Some(Protocol.ClientMessage.TradeBuy(Current.NpcId, 'stock:1', 1))
+  );
+  Test.AssertTrue(State.Pending);
+  Test.AssertEquals(80, State.Coins);
+  for Kind: Tui.TuiKeyKind in [
+    Tui.TuiKeyKind.Enter, Tui.TuiKeyKind.Down,
+    Tui.TuiKeyKind.Tab, Tui.TuiKeyKind.PageDown, Tui.TuiKeyKind.Escape
+  ] do
+    State := Press(App, State, Kind, '');
+    Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  end for;
+
+  // A resize during the outstanding transfer preserves its identity and adds no request.
+  App.InjectResizeForTest(Tui.TuiSize.Create(40, 12));
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 1, 0);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  var Changed := Current.BuyItems;
+  Changed := Changed.Slice(1, 15);
+  Current := Current with Revision := 2; BuyItems := Changed; BuyTotal := 15; end with;
+
+  State := Refresh(State, Current, 72);
+  Test.AssertEquals(0, State.TradeSelection);
+  Test.AssertEquals('stock:1', State.ActiveTrade.Unwrap().BuyItems[State.TradeSelection].Id);
+  // The deferred viewport acknowledgement preserves the trade, side and revision.
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap() is Some(Protocol.ClientMessage.Viewport(_, _))
+  );
+  State := Client.UpdateClientEvent(State, Client.ClientEvent.ViewportState(Projection(72)), Cmd);
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertEquals(2, State.ActiveTrade.Unwrap().Revision);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), '> Potion 1'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Esc: conversation'));
+  for Index: integer := 1 to 14 do
+    State := Press(App, State, Tui.TuiKeyKind.Down, '');
+    Test.AssertEquals(Index, State.TradeSelection);
+    Test.AssertTrue(Contains(App.SurfaceSnapshot(), '> Potion ' + Conv.IntToStr(Index + 1)));
+  end for;
+
+  // Selected identity disappears: retain the closest valid row instead of selecting by name.
+  Changed := Current.BuyItems;
+  Changed := Changed.Slice(0, 14);
+  Current := Current with Revision := 3; BuyItems := Changed; BuyTotal := 14; end with;
+
+  State := Refresh(State, Current, 64);
+  Test.AssertEquals(13, State.TradeSelection);
+  State := Press(App, State, Tui.TuiKeyKind.Tab, '');
+  Test.AssertTrue(State.TradeSide = Protocol.TradeSide.Sell);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Remove worn equipment'));
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  State := Press(App, State, Tui.TuiKeyKind.Down, '');
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Not for trade'));
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  Current := Current with Revision := 4; SellItems := [
+    Current.SellItems[0] with Enabled := true; Reason := ''; end with
+  ]; SellTotal := 1; end with;
+
+  State := Refresh(State, Current, 64);
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap() =
+    Some(Protocol.ClientMessage.TradeSell(Current.NpcId, 'sword', 4))
+  );
+  State := Client.UpdateClientEvent(
+    State,
+    Client.ClientEvent.Rejected('trade_rejected', 'The item is no longer available.'),
+    Cmd
+  );
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(State.ActiveTrade is Some(_));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'The item is no longer available.'));
+  Test.AssertFalse(State.Pending);
+  // A 160-character refusal keeps price and close controls visible; all its text remains reachable.
+  const LongReason := 'Long warning '.RepeatStr(11) + 'THE FINAL REASON.';
+  State := Client.UpdateClientEvent(
+    State,
+    Client.ClientEvent.Rejected('trade_rejected', LongReason),
+    Cmd
+  );
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'L/R text'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Esc: conversation'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Coins: 64 | 5 coins'));
+  for Step: integer := 1 to 5 do
+    State := Press(App, State, Tui.TuiKeyKind.Right, '');
+  end for;
+
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'THE FINAL REASON.'));
+  Test.AssertEquals(0, State.TradeSelection);
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  State := Client.UpdateClientEvent(
+    State,
+    Client.ClientEvent.Rejected('trade_rejected', LongReason),
+    Cmd
+  );
+  Test.AssertEquals(0, State.TradeTextOffset);
+  for Step: integer := 1 to 5 do
+    State := Press(App, State, Tui.TuiKeyKind.Left, '');
+  end for;
+
+  Test.AssertEquals(0, State.TradeTextOffset);
+  // Page replies reset selection; empty sides remain safe and closable.
+  State := Press(App, State, Tui.TuiKeyKind.Tab, '');
+  Current := Quote() with Revision := 5; BuyTotal := 32; end with;
+
+  State := Refresh(State, Current, 64);
+  State := Press(App, State, Tui.TuiKeyKind.Down, '');
+  State := Press(App, State, Tui.TuiKeyKind.PageDown, '');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap() =
+    Some(Protocol.ClientMessage.TradePage(Current.NpcId, Protocol.TradeSide.Buy, 1))
+  );
+  // An independent map rejection must not acknowledge or alter the pending trade-page intention.
+  State := Client.UpdateClientEvent(
+    State with MapRequestPending := true; end with,
+    Client.ClientEvent.MapRejected('map_rejected', 'Map unavailable.'), Cmd
+  );
+  Test.AssertTrue(State.Pending);
+  var NextPage: array of Protocol.TradeItem := [];
+  for Index: integer := 16 to 31 do
+    NextPage.PushInPlace(
+      Current.BuyItems[0] with Id := 'stock:' + Conv.IntToStr(Index); Name := 'Potion ' +
+      Conv.IntToStr(Index); end with
+    );
+  end for;
+
+  Current := Current with Revision := 6; BuyPage := 1; BuyItems := NextPage; end with;
+
+  State := Refresh(State, Current, 64);
+  Test.AssertEquals(0, State.TradeSelection);
+  Current := Current with Revision := 7; BuyPage := 0; BuyTotal := 0; BuyItems := []; end with;
+
+  State := Refresh(State, Current, 64);
+  State := Press(App, State, Tui.TuiKeyKind.Enter, '');
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'No items on this side.'));
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  for Size: Tui.TuiSize in [Tui.TuiSize.Create(39, 12), Tui.TuiSize.Create(40, 11)] do
+    App.InjectResizeForTest(Size);
+    State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 1, 0);
+    Test.AssertTrue(
+      Tasks.TryReceive(Requests).Unwrap() is Some(Protocol.ClientMessage.Viewport(_, _))
+    );
+    State := Client.UpdateClientEvent(State, Client.ClientEvent.ViewportState(Projection(64)), Cmd);
+    State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Resize to 40x12'));
+    for Kind: Tui.TuiKeyKind in [Tui.TuiKeyKind.Enter, Tui.TuiKeyKind.PageDown] do
+      State := Press(App, State, Kind, '');
+      Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+    end for;
+  end for;
+
+  State := Press(App, State, Tui.TuiKeyKind.Escape, '');
+  Test.AssertTrue(
+    Tasks.TryReceive(Requests).Unwrap() = Some(Protocol.ClientMessage.EndTrade(Current.NpcId))
+  );
+  State := Client.UpdateClientEvent(
+    State, Client.ClientEvent.Dialogue(
+      Projection(64),
+      Protocol.DialogueFrame(
+        NpcId := Current.NpcId, Speaker := 'Elias', Text := 'Welcome back.',
+        Choices := [Protocol.DialogueChoice(Id := 'goodbye', Text := 'Goodbye.')]
+      ), true
+    ), Cmd
+  );
+  Test.AssertTrue(State.ActiveTrade is None);
+  Test.AssertTrue(State.ActiveDialogue is Some(_));
+  State := Refresh(State, Current, 64);
+  State := Client.UpdateClientEvent(State, Client.ClientEvent.Disconnected, Cmd);
+  Test.AssertTrue(State.ActiveTrade is None);
+  Test.AssertTrue(State.ActiveDialogue is None);
+  App.Close();
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

@@ -1,0 +1,103 @@
+// Proves exact price deltas, stable identities, independent merchants and effect-free offers over legal item origins.
+program TradeRulesTest;
+
+uses
+  Dungeon.Areas as Areas, Dungeon.Equipment as Equipment, Dungeon.GameState as GameState,
+  Dungeon.Items as Items, Dungeon.Trade as Trade, Dungeon.Trade.Model as Model,
+  Dungeon.Trade.Items as Stock, Dungeon.Test.Trade as Fixtures, Dungeon.Test.StateComparison as States,
+  Std.Test as Test;
+
+function Row(Values: array of Model.Offer; Id: string): Model.Offer;
+begin
+  for Value: Model.Offer in Values do
+    if Value.Id = Id then
+      return Value;
+    end if;
+  end for;
+
+  panic('expected an exact quoted item identity');
+end function;
+
+begin
+  const Fixture := Fixtures.Home();
+  const Original := Fixture.State;
+  const Quote := Trade.QuoteFor(Fixture.View, Original, Fixture.MerchantId).Unwrap();
+  Test.AssertEquals('Elias', Quote.Speaker);
+  Test.AssertEquals(5, Quote.BuyItems.Length());
+  Test.AssertEquals(4, Quote.SellItems.Length());
+  for Offer: Model.Offer in Quote.BuyItems do
+    Test.AssertFalse(Offer.Enabled);
+    Test.AssertEquals('Not enough coins.', Offer.Reason);
+  end for;
+  const Sells := [10, 5, 5, 3];
+  const Buys := [20, 12, 12, 8];
+  for Index: integer := 0 to 3 do
+    const Id := Fixture.Maps[0].Items[Index].ItemId;
+    const Offer := Row(Quote.SellItems, Id);
+    Test.AssertTrue(Offer.Enabled);
+    Test.AssertEquals('', Offer.Reason);
+    Test.AssertEquals(Sells[Index], Offer.Price.Unwrap());
+    const Before := Original with Coins := 100; end with;
+    const Sold := Trade.Sell(Fixture.View, Before, Fixture.MerchantId, Id).Unwrap();
+    var Expected := Before with Coins := 100 + Sells[Index]; end with;
+
+    Expected.Items[Index].Location := Items.ItemLocation.HeldByMerchant(Fixture.MerchantId);
+    Test.AssertTrue(States.SameState(Expected, Sold));
+    const Quoted := Trade.QuoteFor(Fixture.View, Sold, Fixture.MerchantId).Unwrap();
+    Test.AssertEquals(Buys[Index], Row(Quoted.BuyItems, Id).Price.Unwrap());
+    Test.AssertEquals(6, Quoted.BuyItems.Length());
+    Test.AssertEquals(3, Quoted.SellItems.Length());
+    const Bought := Trade.Buy(Fixture.View, Sold, Fixture.MerchantId, Id).Unwrap();
+    Test.AssertTrue(
+      States.SameState(Before with Coins := 100 + Sells[Index] - Buys[Index]; end with, Bought)
+    );
+    Test.AssertTrue(Areas.ValidateSavedGame(Fixture.View.Metadata, Bought, Fixture.Maps) is Ok(_));
+  end for;
+
+  Test.AssertTrue(States.SameState(Original, Fixture.State));
+  // Three identically named initial potions remain separate offers and identities.
+  for Slot: integer := 0 to 2 do
+    const Offer := Row(Quote.BuyItems, Stock.InitialId(Fixture.MerchantId, Slot));
+    Test.AssertEquals('Healing potion', Offer.Name);
+    Test.AssertEquals(8, Offer.Price.Unwrap());
+  end for;
+  const Sword := Fixture.Maps[0].Items[1].ItemId;
+  const Worn := Equipment.EquipItem(Original, Sword).Unwrap().State;
+  const Disabled := Row(
+    Trade.QuoteFor(Fixture.View, Worn, Fixture.MerchantId).Unwrap().SellItems,
+    Sword
+  );
+  Test.AssertFalse(Disabled.Enabled);
+  Test.AssertEquals(5, Disabled.Price.Unwrap());
+  Test.AssertEquals('Remove this item before selling it.', Disabled.Reason);
+  const Removed := Equipment.UnequipItem(Worn, Sword).Unwrap().State;
+  Test.AssertTrue(Trade.Sell(Fixture.View, Removed, Fixture.MerchantId, Sword) is Ok(_));
+  const StockPotion := Stock.InitialId(Fixture.MerchantId, 0);
+  const Bought := Trade.Buy(
+    Fixture.View,
+    Original with Coins := 8; end with,
+    Fixture.MerchantId,
+    StockPotion
+  ).Unwrap();
+  const Village := Fixtures.Village(Fixture with State := Bought; end with);
+  const FreshQuote := Trade.QuoteFor(Village.View, Village.State, Village.MerchantId).Unwrap();
+  Test.AssertEquals(5, FreshQuote.BuyItems.Length());
+  Test.AssertEquals(0, Village.State.Coins);
+  const SoldThere := Trade.Sell(
+    Village.View,
+    Village.State,
+    Village.MerchantId,
+    StockPotion
+  ).Unwrap();
+  var Expected := Village.State with Coins := 3; end with;
+
+  Expected.Items[4].Location := Items.ItemLocation.HeldByMerchant(Village.MerchantId);
+  Test.AssertTrue(States.SameState(Expected, SoldThere));
+  Test.AssertTrue(Areas.ValidateSavedGame(Village.View.Metadata, SoldThere, Village.Maps) is Ok(_));
+  Test.AssertTrue(
+    Trade.Buy(
+      Village.View, SoldThere, Village.MerchantId,
+      Stock.InitialId(Fixture.MerchantId, 1)
+    ) is Error(Trade.Failure.WrongOwner)
+  );
+end.

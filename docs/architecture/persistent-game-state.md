@@ -28,7 +28,10 @@ The save layer reads every visited dungeon and generated settlement through
 `Dungeon.World.Areas`, resolves Hearthmoor from code and supplies those maps.
 Both loading and writing use this full check: an unvisited game has no dungeon entities; a visited dungeon has
 exactly its original entity identities and kinds, with their mutable state.
-A rewarded quest additionally retains its two unique reward items.
+A visited merchant additionally requires its five original stock records;
+a rewarded quest retains its two unique reward items. Items can be held by a
+visited merchant regardless of which visited dungeon, shop or quest supplied
+their origin. The bounded coin balance is saved independently of this ledger.
 Missing or unknown entities remain invalid even while the player is outdoors.
 The pure validator accepts the supplied visited maps in any order, with exactly
 one map per visit. `Dungeon.Areas.Validation` checks
@@ -39,7 +42,7 @@ opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
 the supplied current map.
 
-The protocol-19 welcome supplies a bounded catalog with world identities,
+The protocol-20 welcome supplies a bounded catalog with world identities,
 original parameters, compatibility, save classifications and creation defaults.
 Continue loads a valid explicit save or starts at spawn when no save exists.
 An incompatible or unreadable save rejects Continue and remains on disk. Start
@@ -52,11 +55,11 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `13` is an exact JSON object containing the selected world ID,
+Savegame format `14` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
 server-owned item state, NPC meeting records, the accepted quest/objective and
-rewarded outcome, the player's health, every opponent, the
+rewarded outcome, the player's health and required integer `coins`, every opponent, the
 dice generator state, and the `progression` object with the two cumulative
 skill experience counters (see [progression](progression.md)). Outdoor positions use signed world coordinates.
 First-person positions contain the local field coordinate and cardinal facing;
@@ -72,18 +75,16 @@ with `has_met_player = false`.
 First entry materializes the map's placements and records the visit. Loading
 restores the list and entities together; revisiting never recreates taken items
 or defeated opponents. Interior discovery and dungeon entities may reference
-only visited areas. Saves without a required field are rejected. Format 8
-added the giant rat; format 9 (13b) added `progression`; format 10 (14c) uses
-level identities for every area and entity. Format 11 adds settlement-local
-positions and exact NPC meeting records. Format 12 adds the exact quest object,
-returned compass location and quest reward item origins (see [quests](quests.md)).
-Format 13 adds generated-village roles and complete, canonically ordered NPC
-rosters for every visited settlement. Immutable names/positions remain in
-settlement definitions; unknown, missing or unvisited NPC records are invalid.
-The authored settlement map is resolved
-from code, never read or generated as a level file. Active dialogue is absent.
+only visited areas. Saves without a required field are rejected. Merchant-held
+locations have exactly `{kind:"merchant",npc_id}`. Each merchant's five stock
+origins remain required after selling, dropping or consuming its goods.
+NPC rosters are complete and canonically ordered for every visited settlement;
+immutable names/positions remain in settlement definitions. Unknown, missing
+or unvisited NPC records are invalid. The authored settlement map is resolved
+from code, never read or generated as a level file. Dialogue/trade frames,
+page indexes and connection revisions are absent. See [economy](economy.md).
 The version is checked before the
-payload, so an obsolete save reports its version. Format 12 and older saves
+payload, so an obsolete save reports its version. Format 13 and older saves
 remain intact and cannot be continued; recreate progress explicitly
 through Start over.
 

@@ -2,6 +2,7 @@
 program VillagePlayTest;
 
 uses
+  Dungeon.Test.Trades as Trades, Dungeon.Trade.Items as Stock,
   Dungeon.Coordinates as Coordinates, Dungeon.GameState as GameState, Dungeon.Interior as InteriorUnit,
   Dungeon.Npcs as Npcs, Dungeon.Protocol as Protocol, Dungeon.Server as Server,
   Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging,
@@ -82,6 +83,8 @@ begin
       );
     end for;
 
+    Current := try Wire.WalkPastOpponents(Current, Dungeon, Dungeon.Items[0].Position, Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
     Current := Wire.FaceOpponent(Current, Dungeon, Dungeon.Hostiles[0].Position, Token);
     while Wire.FirstPersonOf(Current).Health > 14 do
       Current := Wire.Exchange(Current, Protocol.ClientMessage.Wait, Token);
@@ -111,19 +114,28 @@ begin
       Current := Villages.EndTalk(Current, Token);
     end for;
 
+    Current := Trades.Open(Current, Map, Token);
+    Test.AssertEquals(0, Trades.Coins(Current));
+    Test.AssertEquals(5, Trades.Quote(Current).BuyTotal);
+    Current := Trades.Transfer(Current, false, Dungeon.Items[0].ItemId, Token);
+    Test.AssertEquals(10, Trades.Coins(Current));
+    Current := Trades.Transfer(Current, true, Stock.InitialId(Area + ':npc:3', 0), Token);
+    Test.AssertEquals(2, Trades.Coins(Current));
+    Current := Trades.Close(Current, Token);
     Current := Wire.Exchange(Current, Protocol.ClientMessage.SaveGame, Token);
     Wire.RequireSaved(Current);
   elsif Stage = 1 then
     const Saved := Loaded(World);
     Test.AssertEquals(Area, Saved.AreaId);
-    Test.AssertEquals(4, Saved.Npcs.Length());
+    Test.AssertEquals(5, Saved.Npcs.Length());
     const Map := Store.ReadMap(World, Area).Unwrap();
     Test.AssertEquals(Map.DisplayName, Wire.MapOf(Current).Title);
     const Position := GameState.SettlementPlayerPosition(Saved).Unwrap();
     Test.AssertEquals(Position.X, Wire.MapOf(Current).WorldX);
     Test.AssertEquals(Position.Y, Wire.MapOf(Current).WorldY);
-    // The saved pose is already next to the guard: no intervening move may dirty this greeting.
-    Current := Villages.Talk(Current, Map, 1, Token);
+    Test.AssertEquals(2, Saved.Coins);
+    // The saved pose is already next to the merchant: repeat greeting remains read-only.
+    Current := Villages.Talk(Current, Map, 3, Token);
     Test.AssertTrue('recognizes you' in Villages.Frame(Current).Text);
     Test.AssertTrue(Current.Last is Protocol.ServerMessage.Dialogue(_, _, false));
     Current := Villages.EndTalk(Current, Token);
@@ -134,11 +146,18 @@ begin
     Current := Villages.Talk(Current, Second, 0, Token);
     Test.AssertFalse('recognizes you' in Villages.Frame(Current).Text);
     Current := Villages.EndTalk(Current, Token);
+    Current := Trades.Open(Current, Second, Token);
+    Test.AssertEquals(5, Trades.Quote(Current).BuyTotal);
+    Test.AssertEquals(2, Trades.Coins(Current));
+    Current := Trades.Transfer(Current, false, Stock.InitialId(Area + ':npc:3', 0), Token);
+    Test.AssertEquals(5, Trades.Coins(Current));
+    Current := Trades.Close(Current, Token);
     Current := Leave(Current, Second, SecondGate, Token);
     Current := Wire.Exchange(Current, Protocol.ClientMessage.OverwriteSaveGame, Token);
     Wire.RequireSaved(Current);
     const Both := Loaded(World);
-    Test.AssertEquals(7, Both.Npcs.Length());
+    Test.AssertEquals(9, Both.Npcs.Length());
+    Test.AssertEquals(5, Both.Coins);
     Test.AssertEquals(2, Both.Exploration.InteriorAreas.Length() - 1); // includes the visited dungeon
     Test.AssertTrue(Both.Npcs[Npcs.IndexOf(Both.Npcs, Area + ':npc:0')].HasMetPlayer);
     Test.AssertTrue(Both.Npcs[Npcs.IndexOf(Both.Npcs, SecondArea + ':npc:0')].HasMetPlayer);
@@ -155,6 +174,10 @@ begin
     Current := Villages.Talk(Current, Second, 2, Token);
     Test.AssertFalse('recognizes you' in Villages.Frame(Current).Text);
     Current := Villages.EndTalk(Current, Token);
+    Current := Trades.Open(Current, Second, Token);
+    Test.AssertEquals(6, Trades.Quote(Current).BuyTotal);
+    Test.AssertEquals(5, Trades.Coins(Current));
+    Current := Trades.Close(Current, Token);
     Current := Leave(Current, Second, SecondGate, Token);
   // Disconnect drops these new unsaved meetings; Stage 3 starts a fresh game on a new listener.
   else

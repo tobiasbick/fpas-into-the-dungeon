@@ -1,8 +1,9 @@
 # Generated settlements
 
-Generator 11 adds occasional villages alongside authored Hearthmoor. Each uses
-a bounded map view with closed houses, a resident, a guard and a healer. Trade
-and building interiors are outside 15c. Mara alone owns the compass quest.
+Generator 12 supplies occasional villages alongside authored Hearthmoor. Each
+uses a bounded map view with closed houses, resident, guard, healer and merchant.
+[Trade](economy.md) is available; entered building interiors remain future work.
+Mara alone owns the compass quest.
 
 ## Sites and identities
 
@@ -20,8 +21,8 @@ per chunk; point generation resolves the same rule. Looking at a marker never
 creates a definition or NPC state.
 
 Area IDs are `<world>:settlement:<sx>:<sy>` with canonical signed coordinates.
-Hearthmoor keeps `<world>:settlement:home`. NPC slots 0, 1 and 2 are resident,
-guard and healer, identified by `<area>:npc:<slot>`. Names do not identify an
+Hearthmoor keeps `<world>:settlement:home`. NPC slots 0, 1, 2 and 3 are resident,
+guard, healer and merchant, identified by `<area>:npc:<slot>`. Names do not identify an
 area or NPC. World-ID allocation does not change physical generation.
 
 Layout salt 1613 selects 23 by 15, 27 by 19 or 31 by 21 fields. Name and NPC
@@ -31,7 +32,9 @@ fields; shared validation proves access to the exit and every talk position
 while treating those fields as occupied. Talk positions must be ordinary floor;
 the exit cannot count because Enter there leaves the village. NPCs stay off start/exit and at least
 four Manhattan fields apart. Names contain 1 through 64 printable ASCII
-characters without edge spaces; the three NPC names differ within a village.
+characters without edge spaces; the four NPC names differ within a village.
+Merchant names use `Darin`, `Esme`, `Finn` and `Vera` in the existing slot hash
+domain. Slots 0..2, gates, layouts and healer reach remain unchanged.
 
 ## Definitions and saves
 
@@ -42,9 +45,9 @@ placements together with geometry in the existing area view and server session.
 
 `Dungeon.World.Settlements` reads or opens a definition for an exact current
 entry target. Files live at `worlds/<world>/settlements/<sx>_<sy>.json`.
-Settlement format 1 has exactly sixteen root fields: format/world/generator
+Settlement format 2 has exactly sixteen root fields: format/world/generator
 identity, original seed and dungeon region size, area/region/gate, name,
-width/height/rows, start/exit, and three NPC placements. Points and placements
+width/height/rows, start/exit, and four NPC placements. Points and placements
 have exact nested fields. Text is bounded to 64 KiB; static cells are only
 wall `#`, floor `.` and exit `x`. NPC markers are projections.
 
@@ -54,8 +57,8 @@ they are never regenerated. Stored valid names, layouts and placements are
 authoritative, even when they differ from fresh generation. Hearthmoor still
 resolves from authored code and needs no file.
 
-First entry in a game materializes that village's three initially unmet NPC
-records and discovery. Savegame 13 stores only ID, kind, area and meeting flag
+First entry in a game materializes that village's four initially unmet NPC
+records, five merchant goods and discovery. Savegame 14 stores only ID, kind, area and meeting flag
 for NPCs, canonically sorted. Full validation requires Mara and every visited
 village's complete roster, and resolves all visited definitions even while
 outdoors. Unmet records for unvisited villages are invalid too. Mara is found
@@ -82,17 +85,18 @@ Residents, guards and healers offer `identity`, `settlement` and `goodbye`.
 Only an injured player's healer additionally offers `wounds`, restoring full
 health without changing items, XP or dice. First greeting changes only that
 NPC's meeting flag; repeat greetings and information are read-only. Movement
-still marks progress unsaved. Protocol 19 adds only `settlement` to the topic
-vocabulary. The client renders the projected speaker, including pending text.
+still marks progress unsaved. Merchants additionally offer the root `trade`
+topic under protocol 20. The client renders the projected speaker, including pending text.
 Quest choices and world preflight require Mara's exact identity and current
 quest node. See [NPCs and dialogue](npcs-and-dialogue.md).
 
 ## Reproducible acceptance
 
 Create a **new** world with seed **25**, dungeon region size **1**. Existing
-generator-10 worlds and format-12 saves are preserved and rejected. Current
-versions are world/chunks 4, generator 11, settlement 1, dungeon level 4,
-savegame 13 and protocol 19. Runtime configuration is unchanged.
+older worlds and saves are preserved and rejected. Current
+versions are world/chunks 4, generator 12, settlement 2, dungeon level 4,
+savegame 14 and protocol 20. Runtime configuration is unchanged. The full
+merchant route is recorded in [15d verification](economy-acceptance.md).
 
 Start the server with `--console`, connect the client and create the world in
 its editor. The spawn is (10912,-10144). Directions below count accepted steps:

@@ -1,0 +1,232 @@
+// Connection-local trade authority, revision checks and pure candidate preparation before bounded send/install.
+unit Dungeon.Server.Trade;
+
+uses
+  Dungeon.Dialogue as Dialogue, Dungeon.GameState as GameState, Dungeon.Trade as Rules,
+  Dungeon.Trade.Model as Model, Dungeon.Protocol as Protocol, Dungeon.Protocol.Trades as Codec,
+  Dungeon.Server.Session as SessionUnit, Dungeon.Server.Trade.Quotes as Quotes,
+  Dungeon.Server.Failures as Failures, Dungeon.Server.Logging as Logging, Dungeon.Server.Replies as Replies,
+  Std.Net as Net, Std.Tasks as Tasks;
+
+function Rejected(Reason: string): Failures.FailureRejection;
+begin
+  return Failures.FailureRejection(Code := 'trade_rejected', Message := Reason);
+end function;
+
+function RuleFailure(Cause: Rules.Failure): Failures.FailureRejection;
+begin
+  return Rejected(Model.FailureMessage(Cause));
+end function;
+
+function NextRevision(Session: SessionUnit.ServerSession): result of (integer, Failures.FailureRejection);
+begin
+  if Session.LastTradeRevision >= Protocol.MaximumTradeRevision then
+    return Error(Rejected('Trade revisions are exhausted. Close trade and reconnect.'));
+  end if;
+
+  return Ok(Session.LastTradeRevision + 1);
+end function;
+
+function PrepareOpen(Session: SessionUnit.ServerSession; NpcId: string): result of (SessionUnit.ServerSession, Failures.FailureRejection);
+begin
+  case Session.ActiveInteraction of
+    when Some(SessionUnit.ActiveInteraction.Dialogue(const Frame)):
+      const State := try SessionUnit.RequireActiveState(Session.State).MapError(Rejected);
+      const View := try SessionUnit.SessionAreaView(Session, State).MapError(Rejected);
+      if (Frame.NpcId <> NpcId) or not Dialogue.MayTrade(View, State, Frame) then
+        return Error(Rejected('The current conversation does not offer this trade.'));
+      end if;
+      const Revision := try NextRevision(Session);
+      return Ok(
+        Session with LastTradeRevision := Revision; ActiveInteraction := Some(
+          SessionUnit.ActiveInteraction.Trade(
+            SessionUnit.TradeFrame(
+              NpcId := NpcId, Revision := Revision, BuyPage := 0, SellPage := 0
+            )
+          )
+        ); end with
+      );
+    when None, Some(SessionUnit.ActiveInteraction.Trade(_)):
+      return Error(Rejected('Open trade from the current merchant conversation.'));
+  end case;
+end function;
+
+function Quoted(Items: array of Protocol.TradeItem; Id: string): result of (boolean, Failures.FailureRejection);
+begin
+  for Item: Protocol.TradeItem in Items do
+    if Item.Id = Id then
+      if not Item.Enabled then
+        return Error(Rejected(Item.Reason));
+      end if;
+
+      return Ok(true);
+    end if;
+  end for;
+
+  return Error(Rejected('Select an item from the current quoted page.'));
+end function;
+
+function ClampPage(Page: integer; Total: integer): integer;
+begin
+  const Last := Codec.LastPage(Total);
+  return if Page > Last then Last else Page end if;
+end function;
+
+function PrepareTransfer(
+  Session: SessionUnit.ServerSession; Frame: SessionUnit.TradeFrame;
+  Quote: Protocol.TradeQuote; Side: Protocol.TradeSide; ItemId: string; Revision: integer
+): result of (SessionUnit.ServerSession, Failures.FailureRejection);
+begin
+  if Revision <> Frame.Revision then
+    return Error(Rejected('This trade quote is stale.'));
+  end if;
+  const Enabled := try Quoted(
+    if Side = Protocol.TradeSide.Buy then Quote.BuyItems else Quote.SellItems end if,
+    ItemId
+  );
+  const Next := try NextRevision(Session);
+  const State := try SessionUnit.RequireActiveState(Session.State).MapError(Rejected);
+  const View := try SessionUnit.SessionAreaView(Session, State).MapError(Rejected);
+  const Changed := try (
+    if Side = Protocol.TradeSide.Buy then Rules.Buy(View, State, Frame.NpcId, ItemId)
+      else Rules.Sell(View, State, Frame.NpcId, ItemId)
+      end if
+  ).MapError(RuleFailure);
+  const Delta := if Side = Protocol.TradeSide.Buy then -1 else 1 end if;
+  const Updated := Frame with Revision := Next; BuyPage := ClampPage(
+    Frame.BuyPage,
+    Quote.BuyTotal + Delta
+  ); SellPage := ClampPage(Frame.SellPage, Quote.SellTotal - Delta); end with;
+
+  return Ok(
+    Session with State := Some(Changed); Dirty := true; LastTradeRevision := Next; ActiveInteraction := Some(
+      SessionUnit.ActiveInteraction.Trade(Updated)
+    ); end with
+  );
+end function;
+
+function PrepareFrame(
+  Session: SessionUnit.ServerSession; Frame: SessionUnit.TradeFrame;
+  NpcId: string; Message: Protocol.ClientMessage
+): result of (SessionUnit.ServerSession, Failures.FailureRejection);
+begin
+  if NpcId <> Frame.NpcId then
+    return Error(Rejected('Trade does not match the active merchant.'));
+  end if;
+
+  if Frame.Revision <> Session.LastTradeRevision then
+    return Error(Rejected('This trade quote is stale.'));
+  end if;
+  const Quote := try Quotes.ForSession(Session, Frame).MapError(Rejected);
+  case Message of
+    when Protocol.ClientMessage.TradeBuy(_, const ItemId, const Revision):
+      return PrepareTransfer(Session, Frame, Quote, Protocol.TradeSide.Buy, ItemId, Revision);
+    when Protocol.ClientMessage.TradeSell(_, const ItemId, const Revision):
+      return PrepareTransfer(Session, Frame, Quote, Protocol.TradeSide.Sell, ItemId, Revision);
+    when Protocol.ClientMessage.TradePage(_, const Side, const Page):
+      const Total := if Side = Protocol.TradeSide.Buy then Quote.BuyTotal
+        else Quote.SellTotal
+        end if;
+      if (Page < 0) or (Page > Codec.LastPage(Total)) then
+        return Error(Rejected('Trade page is out of range.'));
+      end if;
+      const Next := try NextRevision(Session);
+      var Updated := Frame with Revision := Next; end with;
+
+      if Side = Protocol.TradeSide.Buy then
+        Updated.BuyPage := Page;
+      else
+        Updated.SellPage := Page;
+      end if;
+
+      return Ok(
+        Session with LastTradeRevision := Next; ActiveInteraction := Some(
+          SessionUnit.ActiveInteraction.Trade(Updated)
+        ); end with
+      );
+    when Protocol.ClientMessage.EndTrade(_):
+      const State := try SessionUnit.RequireActiveState(Session.State).MapError(Rejected);
+      const View := try SessionUnit.SessionAreaView(Session, State).MapError(Rejected);
+      case try Dialogue.Start(View, State).MapError(Rejected) of
+        when Dialogue.Outcome.Continued(const Unchanged, const Root, const Changed):
+          return Ok(
+            Session with State := Some(Unchanged); Dirty := Session.Dirty or Changed; ActiveInteraction := Some(
+              SessionUnit.ActiveInteraction.Dialogue(Root)
+            ); end with
+          );
+        when Dialogue.Outcome.Ended(_):
+          return Error(Rejected('The merchant conversation could not be resumed.'));
+      end case;
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.DialogueChoice(_, _), Protocol.ClientMessage.EndDialogue, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_), Protocol.ClientMessage.Disconnect:
+      return Error(Rejected('Unknown trade intention.'));
+  end case;
+end function;
+
+function PrepareCurrent(Session: SessionUnit.ServerSession; NpcId: string; Message: Protocol.ClientMessage): result of (SessionUnit.ServerSession, Failures.FailureRejection);
+begin
+  case Session.ActiveInteraction of
+    when Some(SessionUnit.ActiveInteraction.Trade(const Frame)):
+      return PrepareFrame(Session, Frame, NpcId, Message);
+    when None, Some(SessionUnit.ActiveInteraction.Dialogue(_)):
+      return Error(
+        Failures.FailureRejection(Code := 'trade_not_active', Message := 'No trade is active.')
+      );
+  end case;
+end function;
+
+function Commit(
+  Session: SessionUnit.ServerSession; Preparation: result of (SessionUnit.ServerSession, Failures.FailureRejection);
+  Connection: Net.Connection; Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
+): result of (SessionUnit.ServerSession, string);
+begin
+  case Preparation of
+    when Ok(const Candidate):
+      return Replies.CommitInteraction(
+        Session,
+        Candidate,
+        'trade_rejected',
+        Connection,
+        Token,
+        Logs
+      );
+    when Error(const Failure):
+      Logging.LogServer(Logs, 'rejected', Failure.Code + ': ' + Failure.Message);
+      const Sent := try Replies.Reject(Connection, Failure.Code, Failure.Message, Token);
+      return Ok(Session);
+  end case;
+end function;
+
+// Runs after the active-game prerequisite and before ordinary dialogue; failed writes remain fatal.
+public function HandleMessage(
+  Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage;
+  Connection: Net.Connection; Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
+): result of (option of SessionUnit.ServerSession, string);
+begin
+  case Message of
+    when Protocol.ClientMessage.DialogueChoice(const NpcId, const ChoiceId):
+      if ChoiceId = 'trade' then
+        return Ok(Some(try Commit(Session, PrepareOpen(Session, NpcId), Connection, Token, Logs)));
+      end if;
+
+      return Ok(None);
+    when Protocol.ClientMessage.TradeBuy(const NpcId, _, _):
+      return Ok(
+        Some(try Commit(Session, PrepareCurrent(Session, NpcId, Message), Connection, Token, Logs))
+      );
+    when Protocol.ClientMessage.TradeSell(const NpcId, _, _):
+      return Ok(
+        Some(try Commit(Session, PrepareCurrent(Session, NpcId, Message), Connection, Token, Logs))
+      );
+    when Protocol.ClientMessage.TradePage(const NpcId, _, _):
+      return Ok(
+        Some(try Commit(Session, PrepareCurrent(Session, NpcId, Message), Connection, Token, Logs))
+      );
+    when Protocol.ClientMessage.EndTrade(const NpcId):
+      return Ok(
+        Some(try Commit(Session, PrepareCurrent(Session, NpcId, Message), Connection, Token, Logs))
+      );
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.EndDialogue, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_), Protocol.ClientMessage.Disconnect:
+      return Ok(None);
+  end case;
+end function;
+end unit;

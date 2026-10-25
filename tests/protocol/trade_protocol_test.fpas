@@ -1,0 +1,175 @@
+// Verifies exact trade intentions, atomic response fields, bounded pages/capabilities and required wallet decoding.
+program TradeProtocolTest;
+
+uses
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.Trades as Trades,
+  Dungeon.Protocol.ClientMessages as Clients, Dungeon.Protocol.ServerMessages as Servers,
+  Std.Json as Json, Std.Json.Fields as Fields, Std.Test as Test;
+
+function State(): Protocol.VisibleState;
+begin
+  return Protocol.VisibleState.MapState(
+    Protocol.MapVisibleState(
+      Coins := 37,
+      Title := 'Hearthmoor', Status := 'Elias', OriginX := 0, OriginY := 0, Width := 1, Height := 1,
+      Rows := ['.'], KnowledgeRows := ['v'], PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0,
+      Inventory := [], Health := 20, MaxHealth := 20, Character := [], Journal := []
+    )
+  );
+end function;
+
+function Quote(): Protocol.TradeQuote;
+begin
+  return Protocol.TradeQuote(
+    NpcId := 'w:settlement:home:npc:merchant', Speaker := 'Elias', Revision := 1,
+    MerchantCapacity := 64, BuyPage := 0, SellPage := 0, BuyTotal := 2, SellTotal := 2,
+    BuyItems := [
+      Protocol.TradeItem(
+        Id := 'pot0',
+        Name := 'Healing potion',
+        Price := Some(8),
+        Enabled := true,
+        Reason := ''
+      ),
+      Protocol.TradeItem(
+        Id := 'pot1',
+        Name := 'Healing potion',
+        Price := Some(8),
+        Enabled := true,
+        Reason := ''
+      )
+    ],
+    SellItems := [
+      Protocol.TradeItem(
+        Id := 'sword',
+        Name := 'Rusty short sword',
+        Price := Some(5),
+        Enabled := false,
+        Reason := 'Remove this item before selling it.'
+      ),
+      Protocol.TradeItem(
+        Id := 'compass',
+        Name := 'Mara''s compass',
+        Price := None,
+        Enabled := false,
+        Reason := 'Quest items cannot be traded.'
+      )
+    ]
+  );
+end function;
+
+procedure RejectQuote(Text: string);
+begin
+  Test.AssertTrue(Trades.DecodeQuote(Fields.ParseObject(Text).Unwrap()) is Error(_));
+end procedure;
+
+begin
+  const Npc := 'w:settlement:home:npc:merchant';
+  const Buy := '{"type":"trade_buy","npc_id":"w:settlement:home:npc:merchant","item_id":"pot0","revision":1}';
+  Test.AssertEquals(Buy, Clients.EncodeClient(Protocol.ClientMessage.TradeBuy(Npc, 'pot0', 1)));
+  Test.AssertTrue(
+    Clients.DecodeClient(Buy).Unwrap() = Protocol.ClientMessage.TradeBuy(Npc, 'pot0', 1)
+  );
+  for Request: Protocol.ClientMessage in [
+    Protocol.ClientMessage.TradeSell(Npc, 'loot', 1000000000),
+    Protocol.ClientMessage.TradePage(Npc, Protocol.TradeSide.Buy, 0),
+    Protocol.ClientMessage.TradePage(Npc, Protocol.TradeSide.Sell, 3),
+    Protocol.ClientMessage.EndTrade(Npc),
+    Protocol.ClientMessage.DialogueChoice(Npc, 'trade')
+  ] do
+    Test.AssertTrue(Clients.DecodeClient(Clients.EncodeClient(Request)).Unwrap() = Request);
+  end for;
+
+  for Revision: string in ['0', '-1', '1000000001', '1.5', '"1"', 'null', 'true'] do
+    Test.AssertTrue(
+      Clients.DecodeClient(Buy.Replace('"revision":1', '"revision":' + Revision)) is Error(_)
+    );
+  end for;
+
+  for Bad: string in [
+    Buy.Replace(',"revision":1', ''), Buy.Replace('"revision":1', '"revision":1,"revision":2'),
+    Buy.Replace('"revision":1', '"revision":1,"quantity":2'),
+    Buy.Replace('"revision":1', '"revision":1,"price":1'),
+    Buy.Replace('"revision":1', '"revision":1,"coins":100'),
+    Buy.Replace('"item_id":"pot0"', '"item_id":""'), Buy.Replace(Npc, 'bad id'),
+    '{"type":"end_trade","npc_id":"x","revision":1}',
+    '{"type":"trade_page","npc_id":"x","side":"buy","page":-1}',
+    '{"type":"trade_page","npc_id":"x","side":"buy","page":4}',
+    '{"type":"trade_page","npc_id":"x","side":"other","page":0}',
+    '{"type":"trade_page","npc_id":"x","side":"buy","page":0,"revision":1}'
+  ] do
+    Test.AssertTrue(Clients.DecodeClient(Bad) is Error(_));
+  end for;
+  const Wire := Servers.EncodeServer(Protocol.ServerMessage.Trade(State(), Quote(), true));
+  case Servers.DecodeServer(Wire).Unwrap() of
+    when Protocol.ServerMessage.Trade(Protocol.VisibleState.MapState(const Map), const Value, const Dirty):
+      Test.AssertEquals(37, Map.Coins);
+      Test.AssertTrue(Dirty);
+      Test.AssertEquals(Npc, Value.NpcId);
+      Test.AssertEquals(1, Value.Revision);
+      Test.AssertEquals(2, Value.BuyItems.Length());
+      Test.AssertEquals('pot0', Value.BuyItems[0].Id);
+      Test.AssertEquals('pot1', Value.BuyItems[1].Id);
+      Test.AssertEquals(8, Value.BuyItems[0].Price.Unwrap());
+      Test.AssertFalse(Value.SellItems[0].Enabled);
+      Test.AssertTrue(Value.SellItems[1].Price is None);
+    when Protocol.ServerMessage.Trade(Protocol.VisibleState.FirstPersonState(_), _, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
+      panic('expected an atomic trade response');
+  end case;
+
+  for Coins: string in ['-1', '1000000001', '0.5', '"37"', 'null', 'true'] do
+    Test.AssertTrue(
+      Servers.DecodeServer(Wire.Replace('"coins":37', '"coins":' + Coins)) is Error(_)
+    );
+  end for;
+
+  Test.AssertTrue(Servers.DecodeServer(Wire.Replace('"coins":37,', '')) is Error(_));
+  Test.AssertTrue(
+    Servers.DecodeServer(Wire.Replace('"dirty":true', '"dirty":true,"price":1')) is Error(_)
+  );
+  Test.AssertTrue(Servers.DecodeServer(Wire.Replace('"trade":', '"quote":')) is Error(_));
+  const Text := Json.Stringify(Trades.EncodeQuote(Quote()));
+  for Revision: string in ['0', '-1', '1000000001', '1.5', '"1"', 'null'] do
+    RejectQuote(Text.Replace('"revision":1', '"revision":' + Revision));
+  end for;
+
+  for Price: string in ['0', '-1', '21', '8.5', '"8"', 'true', 'null'] do
+    RejectQuote(Text.Replace('"price":8', '"price":' + Price));
+  end for;
+
+  for Bad: string in [
+    Text.Replace('"buy_page":0', '"buy_page":1'), Text.Replace('"sell_page":0', '"sell_page":-1'),
+    Text.Replace('"buy_total":2', '"buy_total":3'),
+    Text.Replace('"sell_total":2', '"sell_total":65'),
+    Text.Replace('"merchant_capacity":64', '"merchant_capacity":63'),
+    Text.Replace('"buy_total":2,', ''), Text.Replace('"buy_total":2', '"buy_total":2,"quantity":1'),
+    Text.Replace('"enabled":true', '"enabled":false'),
+    Text.Replace('"enabled":false', '"enabled":true'),
+    Text.Replace('"reason":""', '"reason":"unavailable"'),
+    Text.Replace('"reason":""', '"reason":"","quantity":1'),
+    Text.Replace('pot1', 'pot0'), Text.Replace('sword', 'pot0'),
+    Text.Replace('"id":"pot0"', '"id":""'),
+    Text.Replace('"name":"Healing potion"', '"name":""'),
+    Text.Replace('"speaker":"Elias"', '"speaker":"' + 'x'.RepeatStr(65) + '"'),
+    Text.Replace('Remove this item before selling it.', 'x'.RepeatStr(161))
+  ] do
+    RejectQuote(Bad);
+  end for;
+  var Empty := Quote() with BuyTotal := 0; SellTotal := 0; BuyItems := []; SellItems := []; end with;
+
+  Test.AssertTrue(
+    Trades.DecodeQuote(Fields.ParseObject(Json.Stringify(Trades.EncodeQuote(Empty))).Unwrap()) is Ok(_)
+  );
+  Empty.BuyPage := 1;
+  Test.AssertTrue(Trades.ValidateQuote(Empty) is Error(_));
+  var Rows := Quote();
+  Rows.BuyItems := [];
+  for Index: integer := 0 to 16 do
+    Rows.BuyItems.PushInPlace(Quote().BuyItems[0]);
+  end for;
+
+  Rows.BuyTotal := 17;
+  Test.AssertTrue(
+    Trades.DecodeQuote(Fields.ParseObject(Json.Stringify(Trades.EncodeQuote(Rows))).Unwrap()) is Error(_)
+  );
+end.

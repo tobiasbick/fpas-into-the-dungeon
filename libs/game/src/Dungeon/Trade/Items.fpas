@@ -1,0 +1,100 @@
+// Canonical shop item origins and merchant ownership, independent of GameState and map loading.
+unit Dungeon.Trade.Items;
+
+uses Dungeon.Items as Items, Dungeon.Npcs.Model as Npcs, Dungeon.Trade.Model as Model, Std.Conv as Conv;
+
+// The authored home uses a named slot; all generated settlements reserve slot 3.
+public function MerchantId(AreaId: string): string;
+begin
+  return AreaId + if AreaId.EndsWith(':settlement:home') then ':npc:merchant' else ':npc:3' end if;
+end function;
+
+// Original slots never change when goods are sold, carried, dropped or consumed.
+public function InitialId(MerchantId: string; Slot: integer): string;
+begin
+  return MerchantId + ':stock:' + Conv.IntToStr(Slot);
+end function;
+
+// Exact catalogue slots; a coin can enter stock only through a player sale.
+public function InitialKind(Slot: integer): Items.ItemKind;
+begin
+  case Slot of
+    when 0, 1, 2:
+      return Items.ItemKind.HealingPotion;
+    when 3:
+      return Items.ItemKind.RustyShortSword;
+    when 4:
+      return Items.ItemKind.LeatherJerkin;
+    else
+      panic('merchant stock slot must be 0 through 4');
+  end case;
+end function;
+
+// Recognizes both identity and kind, including after a change of owner or terminal consumption.
+public function HasOrigin(Item: Items.GameItem; MerchantId: string): boolean;
+begin
+  for Slot: integer := 0 to Model.InitialStockSize - 1 do
+    if Item.Id = InitialId(MerchantId, Slot) then
+      return Item.Kind = InitialKind(Slot);
+    end if;
+  end for;
+
+  return false;
+end function;
+
+// Creates permanent ledger entries only during first materialization of a visited merchant.
+public function InitialGoods(MerchantId: string): array of Items.GameItem;
+begin
+  var Values: array of Items.GameItem := [];
+  for Slot: integer := 0 to Model.InitialStockSize - 1 do
+    Values.PushInPlace(
+      Items.GameItem(
+        Id := InitialId(MerchantId, Slot), Kind := InitialKind(Slot),
+        Location := Items.ItemLocation.HeldByMerchant(MerchantId)
+      )
+    );
+  end for;
+
+  return Values;
+end function;
+
+// Map-free checks require an already validated complete NPC roster; full saves also verify its maps.
+public function ValidateOwnership(Coins: integer; Values: array of Items.GameItem; Roster: array of Npcs.GameNpc; Visited: array of string): result of (boolean, string);
+begin
+  if (Coins < 0) or (Coins > Model.MaximumCoins) then
+    return Error('coin balance is outside its range');
+  end if;
+  var Counts := array.Fill(0, Roster.Length());
+  for Item: Items.GameItem in Values do
+    case Item.Location of
+      when Items.ItemLocation.HeldByMerchant(const Id):
+        if Model.Price(Item.Kind) is None then
+          return Error('quest objects cannot belong to a merchant');
+        end if;
+        var Owner := -1;
+        for Index: integer := 0 to Roster.Length() - 1 do
+          if Roster[Index].Id = Id then
+            Owner := Index;
+          end if;
+        end for;
+
+        if Owner < 0 then
+          return Error('merchant owner is absent from the visited NPC roster');
+        end if;
+
+        if (Roster[Owner].Kind <> Npcs.NpcKind.Merchant) or not (Roster[Owner].AreaId in Visited) then
+          return Error('item owner must be a merchant in a visited settlement');
+        end if;
+
+        Counts[Owner] := Counts[Owner] + 1;
+        if Counts[Owner] > Model.MerchantCapacity then
+          return Error('merchant stock exceeds its capacity');
+        end if;
+      when Items.ItemLocation.InInterior(_, _), Items.ItemLocation.CarriedByPlayer, Items.ItemLocation.EquippedByPlayer(_), Items.ItemLocation.Consumed, Items.ItemLocation.ReturnedToMara(_):
+        null;
+    end case;
+  end for;
+
+  return Ok(true);
+end function;
+end unit;

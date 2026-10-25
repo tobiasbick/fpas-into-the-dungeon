@@ -5,22 +5,6 @@ uses
   Dungeon.GameState as GameState, Dungeon.World.Quests as Quests, Dungeon.Server.Failures as Failures, Dungeon.Dialogue as Rules, Dungeon.Protocol as Protocol, Dungeon.Server.Logging as Logging,
   Dungeon.Server.Replies as Replies, Dungeon.Server.Session as SessionUnit, Std.Net as Net, Std.Tasks as Tasks;
 
-// Gates all lifecycle and gameplay dispatch while a conversation is active; resize and disconnect remain valid.
-public function AllowsMessage(Session: SessionUnit.ServerSession; Message: Protocol.ClientMessage): boolean;
-begin
-  if Session.ActiveDialogue is None then
-    return true;
-  end if;
-
-  return (Message is Protocol.ClientMessage.DialogueChoice(_, _))
-    or
-    (Message is Protocol.ClientMessage.EndDialogue)
-    or
-    (Message is Protocol.ClientMessage.Viewport(_, _))
-    or
-    (Message is Protocol.ClientMessage.Disconnect);
-end function;
-
 function Rejected(
   Session: SessionUnit.ServerSession; Code: string; Reason: string; Connection: Net.Connection;
   Token: Tasks.CancellationToken; Logs: option of channel of Logging.ServerLogEvent
@@ -40,14 +24,21 @@ begin
   case Outcome of
     when Rules.Outcome.Continued(const State, const Frame, const ChangesGame):
       Candidate.State := Some(State);
-      Candidate.ActiveDialogue := Some(Frame);
+      Candidate.ActiveInteraction := Some(SessionUnit.ActiveInteraction.Dialogue(Frame));
       Candidate.Dirty := Session.Dirty or ChangesGame;
     when Rules.Outcome.Ended(const State):
       Candidate.State := Some(State);
-      Candidate.ActiveDialogue := None;
+      Candidate.ActiveInteraction := None;
   end case;
 
-  return Replies.CommitDialogue(Session, Candidate, Connection, Token, Logs);
+  return Replies.CommitInteraction(
+    Session,
+    Candidate,
+    'dialogue_rejected',
+    Connection,
+    Token,
+    Logs
+  );
 end function;
 
 // Starts the generic Enter conversation after the caller has selected the game-rule NPC target.
@@ -99,8 +90,8 @@ public function HandleMessage(
 begin
   case Message of
     when Protocol.ClientMessage.DialogueChoice(const NpcId, const ChoiceId):
-      case Session.ActiveDialogue of
-        when None:
+      case Session.ActiveInteraction of
+        when None, Some(SessionUnit.ActiveInteraction.Trade(_)):
           return Ok(
             Some(
               try Rejected(
@@ -113,7 +104,7 @@ begin
               )
             )
           );
-        when Some(const Frame):
+        when Some(SessionUnit.ActiveInteraction.Dialogue(const Frame)):
           if NpcId <> Frame.NpcId then
             return Ok(
               Some(
@@ -146,8 +137,8 @@ begin
           end case;
       end case;
     when Protocol.ClientMessage.EndDialogue:
-      case Session.ActiveDialogue of
-        when None:
+      case Session.ActiveInteraction of
+        when None, Some(SessionUnit.ActiveInteraction.Trade(_)):
           return Ok(
             Some(
               try Rejected(
@@ -160,7 +151,7 @@ begin
               )
             )
           );
-        when Some(const Frame):
+        when Some(SessionUnit.ActiveInteraction.Dialogue(const Frame)):
           const State := try SessionUnit.RequireActiveState(Session.State);
           case Rules.EndConversation(try SessionUnit.SessionAreaView(Session, State), State, Frame) of
             when Ok(const Outcome):
@@ -171,7 +162,7 @@ begin
               );
           end case;
       end case;
-    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_), Protocol.ClientMessage.Disconnect:
+    when Protocol.ClientMessage.Hello(_, _, _), Protocol.ClientMessage.TradeBuy(_, _, _), Protocol.ClientMessage.TradeSell(_, _, _), Protocol.ClientMessage.TradePage(_, _, _), Protocol.ClientMessage.EndTrade(_), Protocol.ClientMessage.StartNewGame, Protocol.ClientMessage.LoadGame, Protocol.ClientMessage.SaveGame, Protocol.ClientMessage.OverwriteSaveGame, Protocol.ClientMessage.ListWorlds(_, _), Protocol.ClientMessage.SelectWorld(_), Protocol.ClientMessage.CreateWorld(_, _), Protocol.ClientMessage.Viewport(_, _), Protocol.ClientMessage.ExplorationMap(_, _, _, _), Protocol.ClientMessage.Move(_, _), Protocol.ClientMessage.StepFirstPerson(_), Protocol.ClientMessage.TurnFirstPerson(_), Protocol.ClientMessage.Interact, Protocol.ClientMessage.Attack, Protocol.ClientMessage.Wait, Protocol.ClientMessage.Equip(_), Protocol.ClientMessage.Unequip(_), Protocol.ClientMessage.DropItem(_), Protocol.ClientMessage.UseItem(_), Protocol.ClientMessage.Disconnect:
       return Ok(None);
   end case;
 end function;

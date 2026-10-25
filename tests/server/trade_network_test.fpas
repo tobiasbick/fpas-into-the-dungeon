@@ -1,0 +1,325 @@
+// Exercises the real client adapter and listener with persisted legal merchant, capacity and overflow fixtures.
+program TradeNetworkTest;
+
+uses
+  Dungeon.Protocol.Trades as Trades, Std.Json as Json,
+  Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.Protocol.Transport as Transport,
+  Dungeon.Protocol.ServerMessages as Servers, Dungeon.GameState as GameState,
+  Dungeon.Items as Items, Dungeon.Exploration as Exploration, Dungeon.Trade.Items as Stock, Dungeon.Test.Trade as Fixtures,
+  Dungeon.Test.TradeWorld as TradeWorld, Dungeon.Test.StateComparison as States,
+  Dungeon.Test.ClientSession as ClientSession, Dungeon.Test.Wire as Wire,
+  Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.World as WorldUnit,
+  Dungeon.World.Savegame as Savegame, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+
+type Driver = record
+  Requests: channel of Protocol.ClientMessage;
+  Events: channel of Client.ClientEvent;
+  Outcomes: channel of string;
+end record;
+
+function Failure(Cause: Net.NetError): string;
+begin
+  return Cause.Message();
+end function;
+
+function Serve(Listener: Net.Listener; Settings: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Connection := try Net.AcceptWithCancellation(Listener, Token).MapError(Failure);
+  discard Net.SetTimeout(Connection, 5000).Unwrap();
+  const Outcome := Server.ServeConnection(Connection, Settings, Token);
+  discard Net.Close(Connection);
+  return Outcome;
+end function;
+
+function Ask(Driver: Driver; Message: Protocol.ClientMessage): Client.ClientEvent;
+begin
+  Test.AssertTrue(Tasks.SendWithTimeout(Driver.Requests, Message, 1000).Unwrap());
+  return ClientSession.NextClientEvent(Driver.Events, Driver.Outcomes, 30000);
+end function;
+
+function Quote(Value: Client.ClientEvent): Protocol.TradeQuote;
+begin
+  case Value of
+    when Client.ClientEvent.Trade(_, const Quote, _):
+      return Quote;
+    when Client.ClientEvent.Connected(_), Client.ClientEvent.Worlds(_), Client.ClientEvent.State(_), Client.ClientEvent.ViewportState(_), Client.ClientEvent.ExplorationMap(_), Client.ClientEvent.Interaction(_, _), Client.ClientEvent.SaveCompleted, Client.ClientEvent.Rejected(_, _), Client.ClientEvent.MapRejected(_, _), Client.ClientEvent.Defeated(_), Client.ClientEvent.Failed(_), Client.ClientEvent.Disconnected, Client.ClientEvent.Dialogue(_, _, _), Client.ClientEvent.DialogueEnded(_, _):
+      panic('expected a trade event');
+  end case;
+end function;
+
+function Coins(Value: Client.ClientEvent): integer;
+begin
+  case Value of
+    when Client.ClientEvent.Trade(const View, _, _), Client.ClientEvent.Dialogue(const View, _, _), Client.ClientEvent.State(const View), Client.ClientEvent.ViewportState(const View), Client.ClientEvent.DialogueEnded(const View, _):
+      case View of
+        when Protocol.VisibleState.MapState(const State):
+          return State.Coins;
+        when Protocol.VisibleState.FirstPersonState(const State):
+          return State.Coins;
+      end case;
+    when Client.ClientEvent.Connected(_), Client.ClientEvent.Worlds(_), Client.ClientEvent.ExplorationMap(_), Client.ClientEvent.Interaction(_, _), Client.ClientEvent.SaveCompleted, Client.ClientEvent.Rejected(_, _), Client.ClientEvent.MapRejected(_, _), Client.ClientEvent.Defeated(_), Client.ClientEvent.Failed(_), Client.ClientEvent.Disconnected:
+      panic('expected projected coins');
+  end case;
+end function;
+
+function Loaded(World: WorldUnit.WorldSession): GameState.GameState;
+begin
+  case Savegame.LoadSaveGame(World).Unwrap() of
+    when Savegame.SaveGameLoad.Loaded(const State, _):
+      return State;
+    when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+      panic('expected saved state');
+  end case;
+end function;
+
+function Owner(State: GameState.GameState; Id: string; Location: Items.ItemLocation): GameState.GameState;
+begin
+  var Next := State;
+  var Found := false;
+  for Index: integer := 0 to Next.Items.Length() - 1 do
+    if Next.Items[Index].Id = Id then
+      Found := true;
+      Next.Items[Index].Location := Location;
+    end if;
+  end for;
+
+  Test.AssertTrue(Found);
+  return Next;
+end function;
+
+// Mode 0 trades home loot, 1 transfers the home-origin potion to the village; 2..4 reject capacity/overflow.
+function Run(
+  Fixture: Fixtures.Scenario; Mode: integer; World: WorldUnit.WorldSession;
+  Listener: Net.Listener; Port: integer; Settings: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken
+): GameState.GameState;
+begin
+  const Initial := Exploration.RevealCurrentArea(Fixture.View, Fixture.State).Unwrap();
+  Test.AssertTrue(Savegame.WriteSaveGame(World, Initial).Unwrap());
+  const Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  var Expected := Initial;
+  const Id := Fixture.MerchantId;
+  const HomeId := World.Metadata.Id + ':settlement:home:npc:merchant';
+  const Coin := Fixture.Maps[0].Items[0].ItemId;
+  const Potion := Stock.InitialId(HomeId, 0);
+  const Driver := Driver(
+    Requests := Tasks.CreateChannel(4),
+    Events := Tasks.CreateChannel(4),
+    Outcomes := Tasks.CreateChannel(4)
+  );
+  scope
+    const ServerWorker := go Serve(Listener, Settings, Token);
+    const ClientWorker := go ClientSession.RunReportedClient(
+      '127.0.0.1', Port, 20, 10,
+      Driver.Requests, Driver.Events, Driver.Outcomes, Token
+    );
+    Test.AssertTrue(
+      ClientSession.NextClientEvent(Driver.Events, Driver.Outcomes, 30000) is Client.ClientEvent.Connected(_)
+    );
+    Test.AssertEquals(Fixture.State.Coins, Coins(Ask(Driver, Protocol.ClientMessage.LoadGame)));
+    Test.AssertTrue(
+      Ask(Driver, Protocol.ClientMessage.TradePage(Id, Protocol.TradeSide.Buy, 0)) is Client.ClientEvent.Rejected('trade_not_active', _)
+    );
+    Test.AssertTrue(
+      Ask(Driver, Protocol.ClientMessage.Interact) is Client.ClientEvent.Dialogue(_, _, false)
+    );
+    var Current := Quote(Ask(Driver, Protocol.ClientMessage.DialogueChoice(Id, 'trade')));
+    Test.AssertEquals(1, Current.Revision);
+    Test.AssertTrue(
+      Ask(Driver, Protocol.ClientMessage.SaveGame) is Client.ClientEvent.Rejected('trade_active', _)
+    );
+    const Resized := Ask(Driver, Protocol.ClientMessage.Viewport(40, 12));
+    Test.AssertTrue(Resized is Client.ClientEvent.ViewportState(_));
+    Test.AssertEquals(Fixture.State.Coins, Coins(Resized));
+    if Mode < 2 then
+      const SoldId := if Mode = 0 then Coin else Potion end if;
+      const Earned := if Mode = 0 then 10 else 3 end if;
+      const Sold := Ask(Driver, Protocol.ClientMessage.TradeSell(Id, SoldId, Current.Revision));
+      Expected := Owner(Expected, SoldId, Items.ItemLocation.HeldByMerchant(Id)) with Coins := Expected.Coins +
+        Earned; end with;
+
+      Test.AssertEquals(Expected.Coins, Coins(Sold));
+      Current := Quote(Sold);
+      Test.AssertEquals(2, Current.Revision);
+      Test.AssertTrue(
+        Ask(Driver, Protocol.ClientMessage.TradeSell(Id, SoldId, 1)) is Client.ClientEvent.Rejected('trade_rejected', _)
+      );
+      if Mode = 0 then
+        const Bought := Ask(Driver, Protocol.ClientMessage.TradeBuy(Id, Potion, 2));
+        Expected := Owner(Expected, Potion, Items.ItemLocation.CarriedByPlayer) with Coins := 2; end with;
+
+        Test.AssertEquals(2, Coins(Bought));
+        Current := Quote(Bought);
+        Test.AssertEquals(3, Current.Revision);
+        Test.AssertTrue(
+          Ask(Driver, Protocol.ClientMessage.TradeBuy(Id, Potion, 2)) is Client.ClientEvent.Rejected('trade_rejected', _)
+        );
+      end if;
+
+      Test.AssertTrue(
+        Ask(
+          Driver,
+          Protocol.ClientMessage.TradeSell(Id, 'foreign:dungeon:0:0:0:item:0', Current.Revision)
+        ) is Client.ClientEvent.Rejected('trade_rejected', _)
+      );
+    else
+      if Mode = 2 then
+        Test.AssertEquals(64, Current.SellTotal);
+        for Item: Protocol.TradeItem in Current.BuyItems do
+          Test.AssertFalse(Item.Enabled);
+          Test.AssertEquals('Your inventory is full.', Item.Reason);
+        end for;
+
+        Test.AssertTrue(
+          Ask(Driver, Protocol.ClientMessage.TradeBuy(Id, Stock.InitialId(Id, 0), 1)) is Client.ClientEvent.Rejected('trade_rejected', _)
+        );
+      else
+        if Mode = 3 then
+          Test.AssertEquals(64, Current.BuyTotal);
+        end if;
+
+        for Item: Protocol.TradeItem in Current.SellItems do
+          Test.AssertFalse(Item.Enabled);
+          Test.AssertEquals(
+            if Mode = 3 then 'The merchant stock is full.'
+              else 'Your coin balance cannot hold the proceeds.'
+              end if,
+            Item.Reason
+          );
+        end for;
+
+        Test.AssertTrue(
+          Ask(Driver, Protocol.ClientMessage.TradeSell(Id, Coin, 1)) is Client.ClientEvent.Rejected('trade_rejected', _)
+        );
+      end if;
+      // Rejections did not consume the quote revision or change any projected capabilities.
+      const Refreshed := Quote(
+        Ask(Driver, Protocol.ClientMessage.TradePage(Id, Protocol.TradeSide.Buy, 0))
+      );
+      Test.AssertEquals(2, Refreshed.Revision);
+      Test.AssertEquals(
+        Json.Stringify(Trades.EncodeQuote(Current with Revision := 2; end with)),
+        Json.Stringify(Trades.EncodeQuote(Refreshed))
+      );
+    end if;
+
+    Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+    Test.AssertTrue(
+      Ask(Driver, Protocol.ClientMessage.EndTrade(Id)) is Client.ClientEvent.Dialogue(_, _, _)
+    );
+    Test.AssertTrue(
+      Ask(Driver, Protocol.ClientMessage.EndDialogue) is Client.ClientEvent.DialogueEnded(_, _)
+    );
+    Test.AssertTrue(
+      Ask(Driver, Protocol.ClientMessage.OverwriteSaveGame) is Client.ClientEvent.SaveCompleted
+    );
+    Test.AssertTrue(Tasks.Send(Driver.Requests, Protocol.ClientMessage.Disconnect).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ClientWorker).Unwrap());
+    Test.AssertTrue(Tasks.Wait(ServerWorker).Unwrap());
+  end scope;
+
+  discard Tasks.CloseChannel(Driver.Requests);
+  discard Tasks.CloseChannel(Driver.Events);
+  discard Tasks.CloseChannel(Driver.Outcomes);
+  Test.AssertTrue(States.SameState(Expected, Loaded(World)));
+  return Expected;
+end function;
+
+begin
+  const Root := Test.ScratchDir();
+  const World := WorldUnit.OpenWorld(Root, 'trade-network', 25, 1, 32).Unwrap();
+  const Settings := ConfigUnit.ServerConfig(
+    ConfigPath := '', Logs := None, WorldsRoot := Root,
+    WorldId := World.Metadata.Id, WorldSeed := 25, DungeonRegionChunks := 1, ChunkCacheLimit := 32,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  const Token := Tasks.GetCancellationToken(Tasks.CreateCancellationSource());
+  const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Listener).Unwrap().Port;
+  const Home := TradeWorld.Home(World);
+  const Village := Fixtures.Village(Home);
+  TradeWorld.Publish(World, Village);
+  const Both := Home with State := Village.State with AreaId := Home.State.AreaId; Player := Home.State.Player; ReturnLocation := Home.State.ReturnLocation; end with; Maps := Village.Maps; end with;
+  const Traded := Run(Both, 0, World, Listener, Port, Settings, Token);
+  const AtVillage := Village with State := Traded with AreaId := Village.State.AreaId; Player := Village.State.Player; ReturnLocation := Village.State.ReturnLocation; end with; end with;
+
+  discard Run(AtVillage, 1, World, Listener, Port, Settings, Token);
+  const Capacity := TradeWorld.Capacity(Home);
+  TradeWorld.Publish(World, Capacity);
+  var FullInventory := Capacity.State with Coins := 100; end with;
+  var Carried := 0;
+  for Index: integer := 0 to FullInventory.Items.Length() - 1 do
+    const Item := FullInventory.Items[Index];
+    if (Item.Kind <> Items.ItemKind.MarasCompass) and (Carried < 64)
+      and
+      not Item.Id.StartsWith(Home.MerchantId + ':stock:')
+    then
+      FullInventory.Items[Index].Location := Items.ItemLocation.CarriedByPlayer;
+      Carried := Carried + 1;
+    end if;
+  end for;
+
+  Test.AssertEquals(64, Carried);
+  discard Run(
+    Capacity with State := FullInventory; end with,
+    2,
+    World,
+    Listener,
+    Port,
+    Settings,
+    Token
+  );
+  var FullStock := Capacity.State;
+  var Held := 0;
+  for Index: integer := 0 to FullStock.Items.Length() - 1 do
+    const Item := FullStock.Items[Index];
+    if (Item.Kind <> Items.ItemKind.MarasCompass) and (Item.Id <> Home.State.Items[0].Id)
+      and
+      (Held < 64)
+    then
+      FullStock.Items[Index].Location := Items.ItemLocation.HeldByMerchant(Home.MerchantId);
+      Held := Held + 1;
+    end if;
+  end for;
+
+  Test.AssertEquals(64, Held);
+  discard Run(
+    Capacity with State := FullStock; end with,
+    3,
+    World,
+    Listener,
+    Port,
+    Settings,
+    Token
+  );
+  discard Run(
+    Home with State := Home.State with Coins := 1000000000; end with; end with,
+    4, World, Listener, Port, Settings, Token
+  );
+  const Saved := Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap();
+  for Extra: string in [',"price":1', ',"quantity":64', ',"coins":100'] do
+    scope
+      const Worker := go Serve(Listener, Settings, Token);
+      var Connection := Wire.ConnectClient(Port, Token);
+      Connection := Wire.Exchange(Connection, Protocol.ClientMessage.LoadGame, Token);
+      Connection := Wire.Exchange(Connection, Protocol.ClientMessage.Interact, Token);
+      Connection := Wire.Exchange(
+        Connection,
+        Protocol.ClientMessage.DialogueChoice(Home.MerchantId, 'trade'),
+        Token
+      );
+      const Forged := '{"type":"trade_buy","npc_id":"' + Home.MerchantId +
+        '","item_id":"' + Stock.InitialId(Home.MerchantId, 0) + '","revision":1' + Extra + '}';
+      Test.AssertTrue(Transport.WriteLine(Connection.Connection, Forged, Token).Unwrap());
+      const Read := Transport.ReadLine(Connection.Reader, Token).Unwrap();
+      Test.AssertTrue(
+        Servers.DecodeServer(Read.Line).Unwrap() is Protocol.ServerMessage.ErrorMessage('invalid_message', _)
+      );
+      discard Net.Close(Connection.Connection).Unwrap();
+      Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+    end scope;
+
+    Test.AssertEquals(Saved, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  end for;
+
+  Test.AssertTrue(Net.CloseListener(Listener).Unwrap());
+end.
