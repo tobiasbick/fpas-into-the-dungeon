@@ -85,7 +85,7 @@ within the existing six-choice limit. Quest frames use `quest_accept`,
 both the retained frame and current state, including a repeated or stale
 choice. Back returns to other questions; explicit end works from every node.
 
-Protocol 18 retains the dialogue envelopes and adds the required `journal`
+Protocol 21 carries dialogue envelopes and the required `journal`
 string array to map and first-person state objects, including embedded dialogue
 states. It admits at most eight lines of 1..160 printable ASCII characters;
 an empty array is valid. Missing/mistyped fields, oversized entries, control
@@ -106,7 +106,7 @@ Preflight failures use sanitized client errors and detailed server logs.
 
 ## Persistence and compatibility
 
-Savegame format 12 adds an exact `quest` object. An unaccepted quest stores
+Savegame format 15 contains an exact `quest` object. An unaccepted quest stores
 `{"phase":"not_accepted"}`. Accepted/rewarded records contain exactly `phase`
 and `objective`; the objective contains exactly `quest_id`, `area_id` and
 `item_id`. Ready status is never serialized.
@@ -134,8 +134,8 @@ Reward potions may be sold to merchants, used or dropped while retaining both
 quest-owned records. The compass has no trade price and cannot be merchant-owned.
 Trade does not change quest phase or grant another reward; see [economy](economy.md).
 
-Current versions are world metadata 4, generator 12, level file 4, settlement file 2,
-savegame 14 and protocol 20. Obsolete data is rejected and preserved without migration;
+Current versions are world metadata 4, generator 13, level file 4, settlement file 3,
+savegame 15 and protocol 21. Obsolete data is rejected and preserved without migration;
 older-generator worlds require creating a new world. Generated NPCs never own this
 quest or trigger its world preflight; Mara is resolved by stable identity,
 independent of the canonical NPC array position.

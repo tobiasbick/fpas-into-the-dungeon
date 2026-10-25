@@ -1,0 +1,70 @@
+// Fixed inn offers and atomic paid rest, independent of connection state and persistence.
+unit Dungeon.Dialogue.Rest;
+
+uses
+  Dungeon.Dialogue.Model as Dialogue, Dungeon.GameState as GameState,
+  Dungeon.Npcs as Npcs, Dungeon.Time as Clock, Std.Conv as Conv;
+
+const Price: integer := 5;
+
+function CanConfirm(State: GameState.GameState): boolean;
+begin
+  return (State.Coins >= Price)
+    and
+    (Clock.Advance(State.WorldMinutes, Clock.RestMinutes) is Ok(_));
+end function;
+
+// Builds an unconsumed offer. Even an unaffordable offer has an explanation and a way back.
+public function Offer(State: GameState.GameState; Npc: Npcs.NpcPlacement): Dialogue.Frame;
+requires Npc.Kind = Npcs.NpcKind.Innkeeper;
+begin
+  var Choices: array of Dialogue.Choice := [];
+  var Text := 'Eight hours of rest cost ' + Conv.IntToStr(Price) +
+    ' coins and restore your full health. You have ' + Conv.IntToStr(State.Coins) + ' coins.';
+  if CanConfirm(State) then
+    Choices.PushInPlace(
+      Dialogue.Choice(
+        Id := 'rest_confirm',
+        Text := 'Pay ' + Conv.IntToStr(Price) + ' coins and rest for 8 hours.'
+      )
+    );
+  else
+    Text := Text +
+      if State.Coins < Price then ' You do not have enough coins.'
+      else ' The world clock cannot advance that far.'
+      end if;
+  end if;
+
+  Choices.PushInPlace(Dialogue.Choice(Id := 'rest_back', Text := 'Back to other questions.'));
+  return Dialogue.Frame(
+    Node := Dialogue.Node.RestOffer, NpcId := Npc.Id,
+    Speaker := Npc.DisplayName, Text := Text, Choices := Choices
+  );
+end function;
+
+// Applies the entire payment, time and healing change or returns no candidate at all.
+public function Confirm(State: GameState.GameState; Npc: Npcs.NpcPlacement): result of (GameState.GameState, string);
+ensures (Returned): case Returned of
+  when Ok(const Next): (Next.Coins = State.Coins - Price)
+    and
+    (Next.WorldMinutes = State.WorldMinutes + Clock.RestMinutes)
+    and
+    (Next.Health = GameState.PlayerMaximumHealth)
+    and
+    (Next.RandomState = State.RandomState);
+  when Error(_): true;
+end case;
+begin
+  if Npc.Kind <> Npcs.NpcKind.Innkeeper then
+    return Error('only an innkeeper can offer rest');
+  end if;
+
+  if State.Coins < Price then
+    return Error('you do not have enough coins to rest');
+  end if;
+  const Minutes := try Clock.Advance(State.WorldMinutes, Clock.RestMinutes);
+  return Ok(
+    State with Coins := State.Coins - Price; WorldMinutes := Minutes; Health := GameState.PlayerMaximumHealth; end with
+  );
+end function;
+end unit;

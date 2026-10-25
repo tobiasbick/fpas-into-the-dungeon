@@ -1,7 +1,7 @@
 # Generated settlements
 
-Generator 12 supplies occasional villages alongside authored Hearthmoor. Each
-uses a bounded map view with closed houses, resident, guard, healer and merchant.
+Generator 13 supplies occasional villages alongside authored Hearthmoor. Each
+uses a bounded map view with closed houses, resident, guard, innkeeper and merchant.
 [Trade](economy.md) is available; entered building interiors remain future work.
 Mara alone owns the compass quest.
 
@@ -22,7 +22,7 @@ creates a definition or NPC state.
 
 Area IDs are `<world>:settlement:<sx>:<sy>` with canonical signed coordinates.
 Hearthmoor keeps `<world>:settlement:home`. NPC slots 0, 1, 2 and 3 are resident,
-guard, healer and merchant, identified by `<area>:npc:<slot>`. Names do not identify an
+guard, innkeeper and merchant, identified by `<area>:npc:<slot>`. Names do not identify an
 area or NPC. World-ID allocation does not change physical generation.
 
 Layout salt 1613 selects 23 by 15, 27 by 19 or 31 by 21 fields. Name and NPC
@@ -34,7 +34,7 @@ the exit cannot count because Enter there leaves the village. NPCs stay off star
 four Manhattan fields apart. Names contain 1 through 64 printable ASCII
 characters without edge spaces; the four NPC names differ within a village.
 Merchant names use `Darin`, `Esme`, `Finn` and `Vera` in the existing slot hash
-domain. Slots 0..2, gates, layouts and healer reach remain unchanged.
+domain. The innkeeper occupies slot 2; gates and layouts retain their placement rules.
 
 ## Definitions and saves
 
@@ -45,7 +45,7 @@ placements together with geometry in the existing area view and server session.
 
 `Dungeon.World.Settlements` reads or opens a definition for an exact current
 entry target. Files live at `worlds/<world>/settlements/<sx>_<sy>.json`.
-Settlement format 2 has exactly sixteen root fields: format/world/generator
+Settlement format 3 has exactly sixteen root fields: format/world/generator
 identity, original seed and dungeon region size, area/region/gate, name,
 width/height/rows, start/exit, and four NPC placements. Points and placements
 have exact nested fields. Text is bounded to 64 KiB; static cells are only
@@ -58,8 +58,8 @@ authoritative, even when they differ from fresh generation. Hearthmoor still
 resolves from authored code and needs no file.
 
 First entry in a game materializes that village's four initially unmet NPC
-records, five merchant goods and discovery. Savegame 14 stores only ID, kind, area and meeting flag
-for NPCs, canonically sorted. Full validation requires Mara and every visited
+records, five merchant goods and discovery. Savegame 15 stores only ID, kind, area and meeting flag
+for NPCs, canonically sorted, and the canonical world clock. Full validation requires all three home NPCs and every visited
 village's complete roster, and resolves all visited definitions even while
 outdoors. Unmet records for unvisited villages are invalid too. Mara is found
 by exact identity rather than array position. Dialogue frames remain transient.
@@ -81,12 +81,12 @@ Only currently visible placements show `n`; remembered fields retain geometry.
 Retained definitions supply titles, talk hints, resize/map replies and console
 area names without outdoor chunk or settlement-file access.
 
-Residents, guards and healers offer `identity`, `settlement` and `goodbye`.
-Only an injured player's healer additionally offers `wounds`, restoring full
-health without changing items, XP or dice. First greeting changes only that
+Residents, guards and innkeepers offer `identity`, `settlement` and `goodbye`.
+Innkeepers additionally offer `rest`: confirmation costs 5 coins, advances eight
+hours and fully heals, even at full health. First greeting changes only that
 NPC's meeting flag; repeat greetings and information are read-only. Movement
 still marks progress unsaved. Merchants additionally offer the root `trade`
-topic under protocol 20. The client renders the projected speaker, including pending text.
+topic under protocol 21. The client renders the projected speaker, including pending text.
 Quest choices and world preflight require Mara's exact identity and current
 quest node. See [NPCs and dialogue](npcs-and-dialogue.md).
 
@@ -94,9 +94,9 @@ quest node. See [NPCs and dialogue](npcs-and-dialogue.md).
 
 Create a **new** world with seed **25**, dungeon region size **1**. Existing
 older worlds and saves are preserved and rejected. Current
-versions are world/chunks 4, generator 12, settlement 2, dungeon level 4,
-savegame 14 and protocol 20. Runtime configuration is unchanged. The full
-merchant route is recorded in [15d verification](economy-acceptance.md).
+versions are world/chunks 4, generator 13, settlement 3, dungeon level 4,
+savegame 15 and protocol 21. Runtime configuration is unchanged. The current
+paid-rest route is recorded in [15e verification](time-and-rest-acceptance.md).
 
 Start the server with `--console`, connect the client and create the world in
 its editor. The spawn is (10912,-10144). Directions below count accepted steps:
@@ -117,15 +117,15 @@ E287 N281
 ```
 
 The nearby dungeon entrance is (10955,-10539), four steps east of Fernhollow's
-gate. Take ordinary dungeon damage, return with fewer than 16 health, walk
-four steps west and enter the village still hurt. Talk beside the healer,
-choose healing, end dialogue and use Ctrl+P to Save. Restart the server and
+gate. Collect and sell an Ancient coin for 10 coins, take ordinary dungeon
+damage, walk four steps west and enter the village still hurt. Talk beside the
+innkeeper, open and confirm rest, end dialogue and use Ctrl+P to Save. Restart the server and
 Continue inside the village; names, map, position and remembered greetings
 remain. Leave through `x`, visit the second village, Save outdoors, restart and
 Continue again. Start over should offer fresh greetings without removing
 definitions or replacing the previous save.
 
-The automated `village_play_test.fpas` performs this injury/healing loop and
+The automated `village_play_test.fpas` performs this injury/paid-rest loop and
 four listener lifetimes with ordinary TCP intentions. `quest_play_test.fpas`
 visits generated villages before running Mara's complete compass loop,
 including remembered completion after restart. Run either by selecting its

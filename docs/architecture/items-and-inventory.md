@@ -99,8 +99,8 @@ no random number.
 
 `Dungeon.Combat.TurnAction.UseItem` applies that change before exactly one
 hostile phase in the current dungeon. The turn returns the usual continued or
-defeated outcome. Outdoors it heals without a hostile phase or the extra health
-from an outdoor step. Unknown, non-carried, consumed or non-consumable items and
+defeated outcome. Outdoors it heals without a hostile phase. Accepted use takes
+one world minute; outdoor movement never heals. Unknown, non-carried, consumed or non-consumable items and
 use at full health return an error without changing state, dice or time.
 The rule expects a validated state; the turn entry point performs validation.
 Checkpoint 06 exposes this rule through the protocol and server session.
@@ -175,9 +175,11 @@ narrow-screen overlay; no new preference or configuration schema is introduced.
 
 ## Persistence
 
-Savegame format 11 stores the complete item array alongside player, return, and
+Savegame format 15 stores the complete item array alongside player, return, and
 exploration state. Each location is an explicit variant: an interior area and
-field, carried by the player, equipped in a slot, or consumed. A consumed
+field, carried by the player, equipped in a slot, held by a merchant, returned
+to Mara, or consumed. See [economy](economy.md) and [quests](quests.md) for
+merchant and reward-origin validation. A consumed
 location is exactly `{"kind":"consumed"}`; extra coordinates, owner, area or
 slot fields are rejected. Only a Healing potion may use it. Loading validates
 the full state before it can replace the active game. Obsolete schemas are rejected and preserved without

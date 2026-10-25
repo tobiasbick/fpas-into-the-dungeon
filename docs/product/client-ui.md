@@ -515,15 +515,24 @@ fog applies in both map views.
 
 Enter beside an NPC opens a framed dialogue with the server's text and ordered
 choices. W/S and arrows wrap the selection; Enter submits the stable choice ID.
-Answers refresh the same window, including removal of healing after health
-is restored. Escape requests an end and retains the window until the reply.
+Answers refresh the same window. An innkeeper's rest offer states the 5-coin
+price, eight-hour duration and full healing. Enter on its confirmation submits
+one rest; Back returns to the root without payment or elapsed time. An
+unaffordable offer has no confirmation. Escape requests an end and retains the window until the reply.
 Pending requests suppress repeated input, and ordinary movement or other
 overlays are blocked while talking. Alt+X still exits cleanly. Text wraps and
 Page Up/Down scrolls long frames on small terminals. Resize preserves the
 frame and selection; new answers reset selection. No choices or NPC behavior
 are inferred by the client. Pending text names the server-projected speaker.
-Residents, guards, healers and merchants use the same controls; healing and topic
-availability remain server-owned. See the [15c review route](../architecture/generated-settlements.md#reproducible-acceptance).
+Residents, guards, innkeepers and merchants use the same controls; rest and topic
+availability remain server-owned. See the [running-game route](../architecture/time-and-rest-acceptance.md).
+
+The Context panel shows `Day N HH:MM` from the server projection. It reserves
+eleven fixed rows before inventory and appears when at least sixteen panel rows
+fit. When hidden, the primary title includes the clock. Night darkens outdoor
+and settlement background colors; markers and Fog of War retain their meaning.
+Dungeon lighting stays unchanged. Menus, rendering and real elapsed time never
+advance the clock. See [time and rest](../architecture/time-and-rest.md).
 
 ## Trade
 

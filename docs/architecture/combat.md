@@ -59,8 +59,9 @@ loaded game continues from its saved state. Identical actions therefore always
 produce identical fights, which keeps tests deterministic without making the
 fight predictable for a player.
 
-Each accepted outdoor step restores one health point up to the player's
-maximum. The player's values come from base values plus equipment; see
+Outdoor travel does not heal. Ordinary combat turns take one game minute;
+outdoor steps take five. Healing comes from potions or paid settlement rest;
+see [time and rest](time-and-rest.md). The player's values come from base values plus equipment; see
 [equipment and character values](equipment.md).
 
 Checkpoint 05 adds `TurnAction.UseItem`: a carried Healing potion restores up
@@ -68,7 +69,7 @@ to six points, capped at derived maximum health, before the hostile phase. Its
 log reports the actual amount, and the exact item becomes consumed. Use draws
 no dice and creates no player attack event. Each standing opponent then acts
 once in stored order, so the healed player can still be defeated. Outdoors
-there is no hostile phase or additional step healing. Invalid item use and use
+there is no hostile phase or passive healing. Invalid item use and use
 at full health return an error before any opponent acts. Checkpoint 06 adds
 the `use_item` protocol/session intention; checkpoint 07 queues it through
 inventory `I`/`Enter`. The client applies health only from the reply and plays
@@ -118,7 +119,7 @@ Introduced with protocol version 11 and extended in versions 12 and 15:
 
 ## Persistence
 
-The save (format 11) holds the player's health, the random generator state, and
+The save (format 15) holds the canonical world clock, player's health, random generator state, and
 the complete record of every opponent of the visited dungeons with identity,
 kind, area, position, health, and alert status. Validation requires exactly one
 record per stored opponent placement, a traversable field in its own area that

@@ -1,7 +1,8 @@
-// Plays natural dungeon damage, Mara healing, explicit save and Continue across a real listener restart.
+// Plays natural dungeon damage, loot-funded inn rest, explicit save and Continue across a real listener restart.
 program SettlementPlayTest;
 
 uses
+  Dungeon.Test.Trades as Trades, Dungeon.Test.Villages as Villages, Dungeon.Settlements as Settlements,
   Dungeon.Coordinates as Coordinates, Dungeon.Protocol as Protocol, Dungeon.Interior as InteriorUnit, Dungeon.Server as Server,
   Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Logging as Logging, Dungeon.Test.Routes as Routes,
   Dungeon.Test.Wire as Wire, Dungeon.World as WorldUnit, Dungeon.World.Savegame as Savegame,
@@ -37,6 +38,14 @@ begin
       else Protocol.ClientMessage.StartNewGame
       end if, Token
   );
+  if Restarted then
+    const SavedState := Savegame.DecodeSaveGameState(
+      Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap(), World.Metadata
+    ).Unwrap();
+    const Clock := Wire.MapOf(Current).Time;
+    Test.AssertEquals(SavedState.WorldMinutes, (Clock.Day - 1) * 1440 + Clock.MinuteOfDay);
+  end if;
+
   if not Restarted then
     Current := Wire.WalkOutdoors(Current, World.Metadata.SpawnEntrance, Token);
     Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
@@ -64,6 +73,8 @@ begin
     end while;
 
     Current := try Wire.FightAhead(Current, Token);
+    Current := try Walk(Current, Dungeon, Dungeon.Items[0].Position, 'coin', Token);
+    Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
     Current := try Walk(Current, Dungeon, Dungeon.Arrival, 'exit', Token);
     Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
     const Route := Routes.OutdoorRoute(
@@ -77,12 +88,21 @@ begin
   const Before := Wire.MapOf(Current).Health;
   Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
   Test.AssertTrue(Wire.MapOf(Current).Title = 'Hearthmoor');
-  for Step: integer := 1 to 4 do
-    Current := Wire.Exchange(Current, Protocol.ClientMessage.Move(0, -1), Token);
-  end for;
-
+  const Home := Settlements.HomeMap(World.Metadata);
   Test.AssertEquals(Before, Wire.MapOf(Current).Health);
-  Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
+  if not Restarted then
+    Current := Trades.Open(Current, Home, Token);
+    Current := Trades.Transfer(
+      Current,
+      false,
+      Routes.SpawnDungeonMap(World.Metadata).Items[0].ItemId,
+      Token
+    );
+    Test.AssertEquals(10, Trades.Coins(Current));
+    Current := Trades.Close(Current, Token);
+  end if;
+
+  Current := Villages.Talk(Current, Home, 2, Token);
   var After := 0;
   var RepeatGreeting := false;
   case Current.Last of
@@ -91,13 +111,18 @@ begin
       if not Restarted then
         Current := Wire.Exchange(
           Current,
-          Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'),
+          Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'rest'),
           Token
         );
       end if;
     when Protocol.ServerMessage.Trade(_, _, _), Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.State(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.ErrorMessage(_, _):
-      return Error('expected Mara greeting');
+      return Error('expected Nora greeting');
   end case;
+
+  if not Restarted then
+    Current := Villages.Choose(Current, 'rest_confirm', Token);
+    Test.AssertEquals(5, Wire.MapOf(Current).Coins);
+  end if;
 
   case Current.Last of
     when Protocol.ServerMessage.Dialogue(Protocol.VisibleState.MapState(const Map), const Frame, _):
@@ -110,9 +135,7 @@ begin
   end case;
 
   Current := Wire.Exchange(Current, Protocol.ClientMessage.EndDialogue, Token);
-  for Step: integer := 1 to 5 do
-    Current := Wire.Exchange(Current, Protocol.ClientMessage.Move(0, 1), Token);
-  end for;
+  Current := Villages.Walk(Current, Home, Home.Arrival, Token);
 
   Current := Wire.Exchange(Current, Protocol.ClientMessage.Interact, Token);
   Test.AssertEquals(World.Metadata.SettlementGate.X, Wire.MapOf(Current).WorldX);

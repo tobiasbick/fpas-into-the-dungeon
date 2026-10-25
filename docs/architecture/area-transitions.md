@@ -4,11 +4,12 @@ Transitions connect the outdoor region with dungeons and settlements, join the
 levels of a dungeon and lead back outdoors. They use the shared interaction intention described in
 [interaction](interaction.md), while transition validity remains an area rule.
 
-Generated settlement gates use canonical region identities and the same free
+Generated settlement gates use canonical region identities and the same explicit
 Enter transition. The server opens a validated immutable village definition
 through `Dungeon.World.Settlements`, then materializes its NPC roster once.
 Hearthmoor remains authored. Entering uses local map coordinates; leaving `x`
-returns to the exact source gate without healing or a combat turn. State and
+returns to the exact source gate without healing or an opponent phase. Each
+accepted area transition takes one world minute. State and
 retained geometry/NPC facts install only after a successful reply; see
 [generated settlements](generated-settlements.md).
 

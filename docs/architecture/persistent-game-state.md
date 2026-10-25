@@ -42,7 +42,7 @@ opponents remain in their origin area. Duplicate identities and occupied item
 fields are rejected by the shared state validator. The current view reuses
 the supplied current map.
 
-The protocol-20 welcome supplies a bounded catalog with world identities,
+The protocol-21 welcome supplies a bounded catalog with world identities,
 original parameters, compatibility, save classifications and creation defaults.
 Continue loads a valid explicit save or starts at spawn when no save exists.
 An incompatible or unreadable save rejects Continue and remains on disk. Start
@@ -55,13 +55,17 @@ installed game, geometry and dirty state. No selection operation saves progress.
 
 ## Savegame contract
 
-Savegame format `14` is an exact JSON object containing the selected world ID,
+Savegame format `15` is an exact JSON object containing the selected world ID,
 current area kind and stable area ID, an explicit player-position variant, and
 the return location, `visited_areas`, persistent discovered-area state, the complete
 server-owned item state, NPC meeting records, the accepted quest/objective and
-rewarded outcome, the player's health and required integer `coins`, every opponent, the
+rewarded outcome, the player's health and required integers `coins` and
+`world_minutes`, every opponent, the
 dice generator state, and the `progression` object with the two cumulative
 skill experience counters (see [progression](progression.md)). Outdoor positions use signed world coordinates.
+The clock is bounded from 0 through 1,000,000,000 minutes and starts at 480.
+Continue restores it exactly; disconnected time does not advance it. See
+[time and rest](time-and-rest.md).
 First-person positions contain the local field coordinate and cardinal facing;
 their return location contains the outdoor area and the exact entrance site of
 the dungeon's region.

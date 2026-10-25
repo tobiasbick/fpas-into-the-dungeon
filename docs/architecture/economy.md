@@ -2,7 +2,7 @@
 
 Every settlement has one merchant. Hearthmoor's Elias stands at (6,7), with
 ID `<world>:settlement:home:npc:merchant`. Generated villages retain resident,
-guard and healer slots 0..2 and add merchant slot 3. The merchant offers
+guard and innkeeper slots 0..2 and merchant slot 3. The merchant offers
 `trade` in the root conversation. Only Mara offers her compass quest; merchants
 cannot heal, accept the quest or report it.
 
@@ -27,6 +27,8 @@ identities are `<merchant-id>:stock:0` through `:4`, with potions at slots
 0..2, sword at 3 and jerkin at 4. First entry in that game materializes them
 once. Buying removes one item from stock; selling adds that exact item.
 There is no automatic replenishment, stock reroll or finite merchant wallet.
+Inn rest costs 5 coins, advances eight hours and restores health; it does not
+refill or otherwise change stock. See [time and rest](time-and-rest.md).
 Stock can contain at most 64 individual items. The player's existing 64-item
 inventory limit includes worn equipment. Selling worn equipment requires
 manually removing it first. Reward potions can be sold; the compass cannot.
@@ -52,7 +54,7 @@ An item's origin and owner are independent. Full save validation requires:
 - Existing definitions for all visited origins and destinations, including
   off-screen villages and dungeons.
 
-Save format **14** requires `coins`. Merchant locations have exactly
+Save format **15** requires `coins` and `world_minutes`. Merchant locations have exactly
 `{"kind":"merchant","npc_id":"..."}`. Neither quotes nor revisions are saved.
 Save/Continue read existing definitions and never regenerate missing visited
 areas. Start over resets balance, stock and meetings for the new game, retaining
@@ -66,7 +68,7 @@ immutable definitions and the prior explicit save. See
 depending on `GameState`. `Dungeon.Trade` owns pure `QuoteFor`, `Buy` and `Sell`.
 Quote construction gathers ownership once, counts inventory/stock once and
 sorts offers by ID. A transfer changes one location and the coin balance.
-It changes no health, XP, discovery or dice state, and consumes no turn.
+It changes no health, XP, discovery, dice state or world time.
 Scalar postconditions check the public transfer and quote boundaries.
 
 The server retains one optional `ActiveInteraction`: dialogue or trade.
@@ -89,9 +91,10 @@ game, interaction, revision, cache, dirty flag and save timestamp. A failed
 write terminates the connection without installing its candidate. Accepted
 transfers mark progress dirty; quotes, pages and closing do not save it.
 
-## Protocol 20
+## Protocol 21
 
-Both visible state families require bounded integer `coins`. A trade reply is
+Both visible state families require bounded integer `coins` and the common
+validated `time` projection. A trade reply is
 one atomic envelope with exactly `type`, `dirty`, `state` and `trade`.
 
 | Intention | Fields besides `type` |
@@ -115,7 +118,7 @@ the compass has no price. IDs cannot repeat within or across the two sides.
 The LF-delimited UTF-8 limit remains **65,536 bytes**. Preparation checks the
 complete encoded line without discarding fields. The largest tested reply,
 including a largest village and both full pages with maximum identities and
-escaped text, is **59,152 bytes**.
+escaped text and the widest valid clock, is **59,211 bytes**.
 
 During trade, only its four intentions, viewport updates and disconnect are
 allowed. Other valid gameplay/lifecycle intentions receive `trade_active`.

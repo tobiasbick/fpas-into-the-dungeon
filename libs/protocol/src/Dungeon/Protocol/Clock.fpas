@@ -1,0 +1,72 @@
+// Shared exact wire codec and bounds for server-authored day, minute and presentation phase.
+unit Dungeon.Protocol.Clock;
+
+uses Dungeon.Protocol as Protocol, Std.Conv as Conv, Std.Json as Json, Std.Json.Fields as Fields;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+// Checks wire ranges without deriving daylight or advancing any clock.
+public function Validate(Value: Protocol.VisibleTime): result of (Protocol.VisibleTime, string);
+begin
+  if (Value.Day < 1) or (Value.Day > Protocol.MaximumWorldMinutes div 1440 + 1)
+    or
+    (Value.MinuteOfDay < 0) or (Value.MinuteOfDay >= 1440)
+  then
+    return Error('visible time is outside its supported range');
+  end if;
+
+  if (Value.Day - 1) * 1440 + Value.MinuteOfDay > Protocol.MaximumWorldMinutes then
+    return Error('visible time exceeds the world-clock limit');
+  end if;
+
+  return Ok(Value);
+end function;
+
+// Encodes the same nested object in map, dungeon, dialogue and trade states.
+public function Encode(Value: Protocol.VisibleTime): Json.JsonValue;
+begin
+  return Json.JsonValue.Object([
+    'day': Json.JsonValue.Number(Conv.IntToReal(Value.Day)),
+    'minute_of_day': Json.JsonValue.Number(Conv.IntToReal(Value.MinuteOfDay)),
+    'phase': Json.JsonValue.String(
+      case Value.Phase of
+        when Protocol.DayPhase.Day: 'day';
+        when Protocol.DayPhase.Night: 'night';
+      end case
+    )
+  ]);
+end function;
+
+// Rejects missing, extra or wrongly typed fields and unknown named phases.
+public function Decode(Value: dict of string to Json.JsonValue): result of (Protocol.VisibleTime, string);
+begin
+  discard try Fields.RequireOnlyFields(
+    Value,
+    ['day', 'minute_of_day', 'phase']
+  ).MapError(FailureMessage);
+  if Value.Length() <> 3 then
+    return Error('time must contain day, minute_of_day and phase');
+  end if;
+  const PhaseName := try Fields.StringField(Value, 'phase').MapError(FailureMessage);
+  var Phase := Protocol.DayPhase.Day;
+  case PhaseName of
+    when 'day':
+      Phase := Protocol.DayPhase.Day;
+    when 'night':
+      Phase := Protocol.DayPhase.Night;
+    else
+      return Error('unknown time phase');
+  end case;
+
+  return Validate(
+    Protocol.VisibleTime(
+      Day := try Fields.IntegerField(Value, 'day').MapError(FailureMessage),
+      MinuteOfDay := try Fields.IntegerField(Value, 'minute_of_day').MapError(FailureMessage),
+      Phase := Phase
+    )
+  );
+end function;
+end unit;

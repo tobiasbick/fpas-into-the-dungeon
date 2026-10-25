@@ -55,7 +55,7 @@ fpas run tools/dap-acceptance/command.fpasprj -- <directory> resize 60 22
 fpas run tools/dap-acceptance/command.fpasprj -- <directory> save
 ```
 
-`dialogue fresh`, `dialogue repeat`, and `dialogue healed` read and check the
+`dialogue fresh`, `dialogue repeat`, and `dialogue rested` read and check the
 current dialogue text. `choice <id>` reads the offered choices and selects the
 matching one through arrow keys and Enter. It never submits a dialogue intention
 directly. Inspected dialogue frames are also appended to `dialogues.jsonl`.

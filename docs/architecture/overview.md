@@ -112,7 +112,7 @@ these projects.
   cooperative, so cleanup can exceed that budget without a forced process exit.
   Other subunits
   own the policy (`Config`), per-connection session rules (`Session`),
-  enumeration conversions (`Mapping`), client-safe projections (`Projection`),
+  enumeration and canonical clock conversions (`Mapping`), client-safe projections (`Projection`),
   replies, turn and transition commits (`Replies`), message handling
   (`Handling`), connection-local dialogue (`Dialogue`) and trade (`Trade`,
   with paged quotes in `Trade.Quotes`), and the mapping of typed storage failures to stable rejection
@@ -172,6 +172,8 @@ these projects.
   including the deterministic outdoor terrain generator. It has one unit per
   concern, layered without cycles:
   - `Dungeon.Coordinates`: positions, facing, relative steps, chunk arithmetic.
+  - `Dungeon.Time`: pure bounded world-minute arithmetic, action durations and
+    day/night derivation; independent of state, storage and system time.
   - `Dungeon.Terrain` with `.Noise`, `.Generation`, `.Entrances`, `.Chunks`, and
     `.Placement`: cells, chunks, and world metadata; noise; natural terrain;
     entrance regions and sites; complete chunks with entrances; spawn and spawn
@@ -199,7 +201,9 @@ these projects.
     `Dungeon.Npcs.Model` defines independent roles and immutable placements;
     `Dungeon.Npcs` validates complete mutable meeting rosters. `.Interaction`
     resolves the exact adjacent character; `Dungeon.Dialogue.Villages` owns fixed
-    resident, guard, healer and merchant topics. See [generated settlements](generated-settlements.md).
+    resident, guard, innkeeper and merchant topics. Private `Dialogue.Rest` owns
+    the guarded offer and confirmed clock/payment/healing change. See
+    [time and rest](time-and-rest.md) and [generated settlements](generated-settlements.md).
   - `Dungeon.GameState`: the authoritative state, new games, validation, and
     read-only queries; the `AreaView` type pairs world metadata with a supplied
     current interior map.
@@ -248,6 +252,8 @@ these projects.
   every code produced by `libs/game` belongs to that alphabet.
   `Dungeon.Protocol` holds the contract itself: limits, codes, and message
   types. `Names`, `Validation`, and `Fields` encode and check nested values;
+  the private `Clock` codec shares the exact bounded time object across both
+  state families, dialogue and trade without importing game rules.
   `ClientMessages` and `ServerMessages` encode and strictly decode whole
   messages; `Worlds` validates bounded world catalogs and selection predicates;
   `Transport` frames them as bounded lines.

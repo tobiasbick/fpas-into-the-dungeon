@@ -24,6 +24,12 @@ Trade refusals appear as warnings, including `trade_active`, `trade_not_active`
 and `trade_rejected`. Preparing the dashboard does not inspect or refill stock.
 The [trade contract](../architecture/economy.md) describes the authoritative
 wallet, stock and complete save validation.
+Accepted rest also marks progress unsaved without updating the last save time.
+Its clock, payment and healing are one prepared reply. An unaffordable offer
+does not change game resources; rejected confirmations use the existing
+`dialogue_rejected` warning. The dashboard's uptime, UTC log timestamps and
+save timestamp are real time, separate from the action-based game clock shown
+by the client. See [time and rest](../architecture/time-and-rest.md).
 Complete-world deletion also removes `settlements/` definitions; its existing
 connection exclusion and confirmation rules still apply.
 

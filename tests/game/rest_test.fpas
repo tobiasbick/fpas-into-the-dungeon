@@ -1,0 +1,125 @@
+// Protects identity-bound inn offers, exact paid recovery, cancellation, replay and resource limits.
+program RestTest;
+
+uses
+  Dungeon.Dialogue as Dialogue, Dungeon.Coordinates as Coordinates,
+  Dungeon.GameState as GameState, Dungeon.Movement as Movement,
+  Dungeon.Terrain.Placement as Placement, Dungeon.Test.StateComparison as States, Std.Test as Test;
+
+type Conversation = record
+  State: GameState.GameState;
+  Frame: Dialogue.Frame;
+  Changed: boolean;
+end record;
+
+function Continued(Value: Dialogue.Outcome): Conversation;
+begin
+  case Value of
+    when Dialogue.Outcome.Continued(const State, const Frame, const Changed):
+      return Conversation(State := State, Frame := Frame, Changed := Changed);
+    when Dialogue.Outcome.Ended(_):
+      panic('expected an active inn conversation');
+  end case;
+end function;
+
+function Has(Frame: Dialogue.Frame; Id: string): boolean;
+begin
+  for Choice: Dialogue.Choice in Frame.Choices do
+    if Choice.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+begin
+  const Metadata := Placement.NewWorldMetadata('rest', 25, 1).Unwrap();
+  const Entry := Movement.ActivateAreaTransition(
+    GameState.AreaView(Metadata := Metadata, Interior := None),
+    GameState.NewGame(Metadata) with Player := Coordinates.PlayerPosition.Outdoor(
+      Metadata.SettlementGate
+    ); end with,
+    None
+  ).Unwrap();
+  const Ready := Entry.State with Player := Coordinates.PlayerPosition.Settlement(
+    Coordinates.InteriorPosition(X := 16, Y := 8)
+  ); Coins := 10; Health := 7; WorldMinutes := 1200; end with;
+  const Root := Continued(Dialogue.Start(Entry.View, Ready).Unwrap());
+  Test.AssertEquals('Nora', Root.Frame.Speaker);
+  Test.AssertTrue(Has(Root.Frame, 'rest'));
+  Test.AssertFalse(Has(Root.Frame, 'wounds'));
+  const Offer := Continued(Dialogue.Choose(Entry.View, Root.State, Root.Frame, 'rest').Unwrap());
+  Test.AssertFalse(Offer.Changed);
+  Test.AssertTrue(States.SameState(Root.State, Offer.State));
+  Test.AssertTrue(Has(Offer.Frame, 'rest_confirm'));
+  const Cancelled := Continued(
+    Dialogue.Choose(Entry.View, Offer.State, Offer.Frame, 'rest_back').Unwrap()
+  );
+  Test.AssertFalse(Cancelled.Changed);
+  Test.AssertTrue(Cancelled.Frame.Node is Dialogue.Node.Root);
+  Test.AssertTrue(States.SameState(Root.State, Cancelled.State));
+  const Rested := Continued(
+    Dialogue.Choose(Entry.View, Offer.State, Offer.Frame, 'rest_confirm').Unwrap()
+  );
+  Test.AssertTrue(Rested.Changed);
+  Test.AssertTrue(
+    States.SameState(
+      Root.State with Coins := 5; Health := 20; WorldMinutes := 1680; end with,
+      Rested.State
+    )
+  );
+  Test.AssertTrue(Rested.Frame.Node is Dialogue.Node.Root);
+  Test.AssertTrue(
+    Dialogue.Choose(Entry.View, Rested.State, Rested.Frame, 'rest_confirm') is Error(_)
+  );
+  for Coins: integer in [0, 4] do
+    const Poor := Root.State with Coins := Coins; end with;
+    const Declined := Continued(Dialogue.Choose(Entry.View, Poor, Root.Frame, 'rest').Unwrap());
+    Test.AssertFalse(Has(Declined.Frame, 'rest_confirm'));
+    Test.AssertTrue(Has(Declined.Frame, 'rest_back'));
+    Test.AssertTrue(States.SameState(Poor, Declined.State));
+    Test.AssertTrue(
+      Dialogue.Choose(
+        Entry.View, Poor, Declined.Frame with Choices := [
+          Dialogue.Choice(Id := 'rest_confirm', Text := 'forged')
+        ]; end with, 'rest_confirm'
+      ) is Error(_)
+    );
+  end for;
+  const Healthy := Root.State with Coins := 5; Health := 20; end with;
+  const HealthyOffer := Continued(
+    Dialogue.Choose(Entry.View, Healthy, Root.Frame, 'rest').Unwrap()
+  );
+  const HealthyRest := Continued(
+    Dialogue.Choose(Entry.View, Healthy, HealthyOffer.Frame, 'rest_confirm').Unwrap()
+  );
+  Test.AssertTrue(
+    States.SameState(Healthy with Coins := 0; WorldMinutes := 1680; end with, HealthyRest.State)
+  );
+  const Late := Root.State with WorldMinutes := 999999521; end with;
+  const LateOffer := Continued(Dialogue.Choose(Entry.View, Late, Root.Frame, 'rest').Unwrap());
+  Test.AssertFalse(Has(LateOffer.Frame, 'rest_confirm'));
+  Test.AssertTrue(Dialogue.Choose(Entry.View, Late, Offer.Frame, 'rest_confirm') is Error(_));
+  const Last := Root.State with WorldMinutes := 999999520; end with;
+  const LastOffer := Continued(Dialogue.Choose(Entry.View, Last, Root.Frame, 'rest').Unwrap());
+  const LastRest := Continued(
+    Dialogue.Choose(Entry.View, Last, LastOffer.Frame, 'rest_confirm').Unwrap()
+  );
+  Test.AssertEquals(1000000000, LastRest.State.WorldMinutes);
+  const Mara := Continued(
+    Dialogue.Start(
+      Entry.View, Root.State with Player := Coordinates.PlayerPosition.Settlement(
+        Coordinates.InteriorPosition(X := 11, Y := 8)
+      ); end with
+    ).Unwrap()
+  );
+  Test.AssertFalse(Has(Mara.Frame, 'rest'));
+  Test.AssertTrue(
+    Dialogue.Choose(
+      Entry.View, Mara.State,
+      Mara.Frame with Node := Dialogue.Node.RestOffer; Choices := Offer.Frame.Choices; end with,
+      'rest_confirm'
+    ) is Error(_)
+  );
+end.

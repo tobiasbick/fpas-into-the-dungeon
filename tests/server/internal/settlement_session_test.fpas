@@ -7,7 +7,7 @@ uses
   Dungeon.Protocol.ServerMessages as Servers, Dungeon.Protocol.Transport as Transport,
   Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Handling as Handling, Dungeon.Server.Projection as Projection,
   Dungeon.Server.Session as SessionUnit, Dungeon.Test.SessionAssertions as Sessions,
-  Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
+  Dungeon.Terrain.Placement as Placement, Dungeon.World as WorldUnit, Std.Fs as Fs, Std.Net as Net, Std.Tasks as Tasks, Std.Test as Test;
 
 function CurrentDialogue(Session: SessionUnit.ServerSession): Dialogue.Frame;
 begin
@@ -129,7 +129,7 @@ begin
   const Broken := Session with Viewport := SessionUnit.ViewportSize(Width := 0, Height := 1); end with;
   const Failed := Handling.HandleSessionMessage(
     Broken,
-    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'), Server, Config, Token
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'identity'), Server, Config, Token
   ).Unwrap();
   const Rejection := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
   Test.AssertTrue(
@@ -148,20 +148,20 @@ begin
     Servers.DecodeServer(ResizeReply.Line).Unwrap() is Protocol.ServerMessage.State(_)
   );
   Sessions.AssertUnchanged(Session with Viewport := Resized.Viewport; end with, Resized);
-  const Healed := Handling.HandleSessionMessage(
+  const Answered := Handling.HandleSessionMessage(
     Resized,
-    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'), Server, Config, Token
+    Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'identity'), Server, Config, Token
   ).Unwrap();
-  const HealingReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  const AnswerReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
   Test.AssertTrue(
-    Servers.DecodeServer(HealingReply.Line).Unwrap() is Protocol.ServerMessage.Dialogue(_, _, true)
+    Servers.DecodeServer(AnswerReply.Line).Unwrap() is Protocol.ServerMessage.Dialogue(_, _, false)
   );
-  Test.AssertEquals(20, Healed.State.Unwrap().Health);
-  Test.AssertEquals(42, Healed.LastSavedAt);
-  Test.AssertEquals(Frame.Choices.Length() - 1, CurrentDialogue(Healed).Choices.Length());
+  Test.AssertEquals(3, Answered.State.Unwrap().Health);
+  Test.AssertEquals(42, Answered.LastSavedAt);
+  Test.AssertEquals(Frame.Choices.Length(), CurrentDialogue(Answered).Choices.Length());
   // The offered objective is retained across failed acceptance preparation.
   const Offered := Handling.HandleSessionMessage(
-    Healed with Dirty := false; end with,
+    Answered with Dirty := false; end with,
     Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'quest'), Server, Config, Token
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
@@ -234,19 +234,19 @@ begin
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
   Sessions.AssertUnchanged(Rewarded, DuplicateReport);
-  // Generic healing/first meeting obey the same prepare/send/install boundary.
+  // Paid rest and first meeting obey the same prepare/send/install boundary.
   const VillageMetadata := Placement.NewWorldMetadata('village-session', 25, 1).Unwrap();
   const VillageRegion := Coordinates.ChunkCoordinate(X := 85, Y := -83);
   const Village := Villages.GenerateMap(VillageMetadata, VillageRegion).Unwrap();
-  const Healer := Village.Npcs[2];
+  const Innkeeper := Village.Npcs[2];
   const VillageState := Areas.MaterializeArea(GameState.NewGame(VillageMetadata), Village) with Area := Coordinates.AreaKind.Settlement; AreaId := Village.AreaId; Player := Coordinates.PlayerPosition.Settlement(
     Coordinates.InteriorPosition(
-      X := Healer.Position.X, Y := Healer.Position.Y + 1
+      X := Innkeeper.Position.X, Y := Innkeeper.Position.Y + 1
     )
   ); ReturnLocation := Coordinates.ReturnLocation.ReturnTo(
     VillageMetadata.OutdoorAreaId,
     Sites.Site(VillageMetadata, VillageRegion).Unwrap()
-  ); Health := 3; end with;
+  ); Health := 3; Coins := 5; WorldMinutes := 1200; end with;
   const VillageSession := Session with World := World with Metadata := VillageMetadata; end with; State := Some(
     VillageState
   ); Interior := Some(Village); ActiveInteraction := None; Dirty := false; end with;
@@ -262,35 +262,77 @@ begin
     Server, Config, Token
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
-  Test.AssertEquals(Healer.Id, CurrentDialogue(Talking).NpcId);
-  const BadHealing := Talking with Dirty := false; Viewport := Broken.Viewport; end with;
-  const FailedHealing := Handling.HandleSessionMessage(
-    BadHealing,
-    Protocol.ClientMessage.DialogueChoice(Healer.Id, 'wounds'), Server, Config, Token
+  Test.AssertEquals(Innkeeper.Id, CurrentDialogue(Talking).NpcId);
+  const InnOffer := Handling.HandleSessionMessage(
+    Talking with Dirty := false; end with,
+    Protocol.ClientMessage.DialogueChoice(Innkeeper.Id, 'rest'), Server, Config, Token
   ).Unwrap();
   discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
-  Sessions.AssertUnchanged(BadHealing, FailedHealing);
+  Test.AssertFalse(InnOffer.Dirty);
+  const BadRest := InnOffer with Viewport := Broken.Viewport; end with;
+  const FailedRest := Handling.HandleSessionMessage(
+    BadRest,
+    Protocol.ClientMessage.DialogueChoice(Innkeeper.Id, 'rest_confirm'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Sessions.AssertUnchanged(BadRest, FailedRest);
+  const Rested := Handling.HandleSessionMessage(
+    InnOffer,
+    Protocol.ClientMessage.DialogueChoice(Innkeeper.Id, 'rest_confirm'), Server, Config, Token
+  ).Unwrap();
+  const RestReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(RestReply.Line).Unwrap() is Protocol.ServerMessage.Dialogue(_, _, true)
+  );
+  Test.AssertEquals(0, Rested.State.Unwrap().Coins);
+  Test.AssertEquals(20, Rested.State.Unwrap().Health);
+  Test.AssertEquals(1680, Rested.State.Unwrap().WorldMinutes);
+  Test.AssertEquals(42, Rested.LastSavedAt);
+  const Replay := Handling.HandleSessionMessage(
+    Rested,
+    Protocol.ClientMessage.DialogueChoice(Innkeeper.Id, 'rest_confirm'), Server, Config, Token
+  ).Unwrap();
+  discard Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Sessions.AssertUnchanged(Rested, Replay);
   const WrongQuest := Handling.HandleSessionMessage(
     Talking,
-    Protocol.ClientMessage.DialogueChoice(Healer.Id, 'quest'), Server, Config, Token
+    Protocol.ClientMessage.DialogueChoice(Innkeeper.Id, 'quest'), Server, Config, Token
   ).Unwrap();
   const WrongQuestReply := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
   Test.AssertTrue(
     Servers.DecodeServer(WrongQuestReply.Line).Unwrap() is Protocol.ServerMessage.Rejected('dialogue_rejected', _)
   );
   Sessions.AssertUnchanged(Talking, WrongQuest);
+  // Clock refusal precedes immutable generated-area creation as well as mutable state changes.
+  const LimitWorld := WorldUnit.OpenWorld(Test.ScratchDir(), 'clock-limit', 25, 1, 32).Unwrap();
+  const LimitState := GameState.NewGame(LimitWorld.Metadata) with WorldMinutes := 1000000000; Player := Coordinates.PlayerPosition.Outdoor(
+    Sites.Site(LimitWorld.Metadata, VillageRegion).Unwrap()
+  ); end with;
+  const AtLimit := VillageSession with World := LimitWorld; State := Some(LimitState); Interior := None; ActiveInteraction := None; end with;
+
+  Test.AssertFalse(Fs.Exists(LimitWorld.Directory + '/settlements'));
+  const Refused := Handling.HandleSessionMessage(
+    AtLimit, Protocol.ClientMessage.Interact,
+    Server, Config, Token
+  ).Unwrap();
+  const Refusal := Transport.ReadLine(Transport.NewLineReader(Client), Token).Unwrap();
+  Test.AssertTrue(
+    Servers.DecodeServer(Refusal.Line).Unwrap() is Protocol.ServerMessage.Rejected('interaction_rejected', _)
+  );
+  Sessions.AssertUnchanged(AtLimit, Refused);
+  Test.AssertFalse(Fs.Exists(LimitWorld.Directory + '/settlements'));
   discard Net.Close(Server).Unwrap();
   Test.AssertTrue(
     Handling.HandleSessionMessage(
-      Talking,
-      Protocol.ClientMessage.DialogueChoice(Healer.Id, 'wounds'), Server, Config, Token
+      InnOffer,
+      Protocol.ClientMessage.DialogueChoice(Innkeeper.Id, 'rest_confirm'), Server, Config, Token
     ) is Error(_)
   );
   Test.AssertEquals(3, Talking.State.Unwrap().Health);
   Test.AssertTrue(
     Handling.HandleSessionMessage(
       Resized,
-      Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'wounds'), Server, Config, Token
+      Protocol.ClientMessage.DialogueChoice(Frame.NpcId, 'identity'), Server, Config, Token
     ) is Error(_)
   );
   Test.AssertEquals(3, Resized.State.Unwrap().Health);

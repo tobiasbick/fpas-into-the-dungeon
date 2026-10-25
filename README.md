@@ -22,10 +22,10 @@ run headless or with a full-terminal dashboard.
   rare dungeon entrances. Movement across terrain chunks is seamless.
 - Enter generated dungeons with rooms, corridors, and stored names. A dungeon's
   layout is fixed on first entry and retained when you revisit it.
-- Visit Hearthmoor, talk to Mara, and receive free healing. Her meeting state
+- Visit Hearthmoor and talk to Mara. Her meeting state
   persists through explicit saves. Recover her lost compass from the deepest
   spawn-dungeon level for two Healing potions, and follow progress in the `J` journal.
-- Find additional named villages with residents, guards, healers and merchants. Their maps,
+- Find additional named villages with residents, guards, innkeepers and merchants. Their maps,
   NPC placements and independently remembered greetings persist through Save/Continue.
 - Discover the world through Fog of War and open a pannable exploration map.
 - Inspect and collect ancient coins, equip a rusty short sword and leather
@@ -34,7 +34,9 @@ run headless or with a full-terminal dashboard.
   village merchant. Stock is finite and independent; money and exact item
   ownership survive explicit saves. See [trade and economy](docs/architecture/economy.md).
 - Fight restless skeletons and giant rats in turn-based combat, with health, armor, combat
-  messages, and animations. Walking outdoors gradually restores health.
+  messages, and animations. Heal with potions or pay an innkeeper 5 coins for
+  eight hours of rest and full health. Travel advances a persistent clock;
+  nights darken outdoor and village views. See [time and rest](docs/architecture/time-and-rest.md).
 - Create separate worlds, continue a saved game, or start over in an existing
   world. Saves retain discovery, inventory, equipment, and visited dungeon state.
 - Monitor the server through status panels, a live log, filters, and settings
@@ -118,12 +120,12 @@ do not advance time. The in-game system menu also lists the controls.
 Hearthmoor's home gate is six steps from spawn. Inside the settlement, walk
 beside Mara and press Enter to talk. W/S or arrows select a topic, Enter submits,
 Escape ends the conversation, and Page Up/Down scrolls long text. Mara offers
-free healing while hurt. End the conversation before saving; her meeting state
+the compass quest; Nora offers a confirmed 5-coin, eight-hour rest. End the conversation before saving; meeting state
 persists only through an explicit save. Houses remain closed.
 
 Generated villages use the same controls. Residents and guards explain their
-village; healers offer free full healing while hurt. Each NPC remembers its
-own meetings. See the [15c review route](docs/architecture/generated-settlements.md#reproducible-acceptance)
+village; innkeepers offer the same paid rest as Nora. Each NPC remembers its
+own meetings. See the [village route](docs/architecture/generated-settlements.md#reproducible-acceptance)
 for a new seed-25 world and ordinary routes to two villages.
 
 ## Screenshots
@@ -189,7 +191,7 @@ New-world seeds are signed 32-bit integers. Entrance regions can be 1 through
 gets its own identity, even when another world uses the same seed.
 
 Worlds, levels, saves, and the protocol are versioned. The current versions are **world format 4**,
-**generator 12**, **level format 4**, **settlement format 2**, **protocol 20** and **save format 14**.
+**generator 13**, **level format 4**, **settlement format 3**, **protocol 21** and **save format 15**.
 Format-12 and older saves remain intact but cannot be continued with this server.
 Generator-10 and older worlds remain on disk but
 cannot be continued; create a new world for this version. Compatible worlds
@@ -231,8 +233,10 @@ quest (15b), accepted with server world administration on 2026-10-17, includes
 explicit acceptance, remembered hand-in, two potion rewards
 and a read-only journal; see [quests](docs/architecture/quests.md). Generated
 settlements are implemented in 15c, with immutable definitions, complete saved
-NPC rosters and natural TCP healing/restart coverage. Economy, building interiors,
-multiplayer and LLM integration remain later work.
+NPC rosters and natural TCP rest/restart coverage. Trade and economy (15d) are
+accepted. Time and rest (15e) add the persistent clock, night colors and paid
+inn recovery; see [time and rest](docs/architecture/time-and-rest.md).
+Building interiors, weather, multiplayer and LLM integration remain later work.
 
 See the [roadmap](docs/roadmap.md) for the current checkpoints.
 The [architecture overview](docs/architecture/overview.md) explains

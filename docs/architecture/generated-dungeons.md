@@ -15,8 +15,8 @@ see [quests](quests.md).
 The hand-authored initial dungeon is removed together with its stone tablet,
 Mara, and the complete dialogue feature (rules, protocol messages, client
 overlay, and tests). NPCs and dialogue returned with Hearthmoor in stage 15a.
-Mara was the only way to heal; every accepted outdoor step restores one health
-point. This remains available in 14b; consumables add healing inside dungeons.
+Healing now uses potions or paid inn rest. Outdoor steps take five game minutes
+without healing; see [time and rest](time-and-rest.md).
 
 Generation stays deterministic and server-owned. Stage 14b checkpoint 02 adds
 stored names; stories and LLM content remain outside this stage.
@@ -247,7 +247,7 @@ and carried items stay recorded, so re-entering never restores them.
   added rat state and terminal potion locations, format 9 progression, and the
   format 10 level identities. Format 11 adds settlement/NPC records;
   format 12 adds quest state, returned compass ownership and reward origins;
-  current format 14 retains complete settlement rosters, separate coins and
+  current format 15 retains complete settlement rosters, a canonical world clock, separate coins and
   merchant-held ownership with five original goods per visited merchant;
   obsolete saves are rejected and preserved.
   A visited level deeper than 0 requires its upper level to be visited, and visited

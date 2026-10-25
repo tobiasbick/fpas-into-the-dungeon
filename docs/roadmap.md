@@ -693,7 +693,7 @@ Settlements, NPCs, deterministic quests, an economy, time, and weather follow
 the vertical slice in `DUNGEON_RPG_IDEAS.md`: enter a settlement, talk to an
 NPC, take a solvable quest into a dungeon, and return to a character that
 remembers the outcome. Every substage is deterministic and server-owned and does
-not depend on LLM integration (stage 16). Stages 15a, 15b and 15c are accepted.
+not depend on LLM integration (stage 16). Stages 15a through 15d are accepted.
 Later substages give an ordering direction and are planned when they become next.
 
 ### 15a. Home settlement and Mara — DONE
@@ -798,10 +798,20 @@ The user accepted 15d on 2026-10-25, and its temporary plan is removed. The
 [economy contract](architecture/economy.md) and
 [running-game verification](architecture/economy-acceptance.md) record the result.
 
-### 15e. Time and rest — NEXT
+### 15e. Time and rest — DONE
 
 A world clock advances with turns and outdoor travel, with a day/night
 presentation and resting at an inn as an alternative way to heal.
+
+The rules follow the user's delegation: action-based time, day/night colors and
+5-coin, eight-hour inn rest with full healing. Innkeepers replace generated healers; outdoor-step
+and free NPC healing are removed. All nine checkpoints are complete in order.
+Formatting, workspace checks and **175/175 test programs** pass. The seed-25,
+region-size-1 DAP route verifies ordinary loot-funded rest in both inns,
+day/night progression, process restarts and preservation of the explicit save
+after unsaved Start over. See the [time/rest contract](architecture/time-and-rest.md)
+and [running-game report](architecture/time-and-rest-acceptance.md).
+The user accepted 15e on 2026-10-25. Its temporary implementation plan is removed.
 
 ### 15f. Weather and changing world state — LATER
 

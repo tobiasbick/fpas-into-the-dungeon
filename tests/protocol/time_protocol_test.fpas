@@ -1,0 +1,61 @@
+// Verifies required bounded time objects in both state families and strict rejection of malformed clock fields.
+program TimeProtocolTest;
+
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.ServerMessages as Servers, Std.Test as Test;
+
+begin
+  const Time := Protocol.VisibleTime(Day := 2, MinuteOfDay := 0, Phase := Protocol.DayPhase.Night);
+  const Views := [
+    Protocol.VisibleState.MapState(
+      Protocol.MapVisibleState(
+        Time := Time,
+        Coins := 0, Title := 'Outside', Status := '', OriginX := 0, OriginY := 0,
+        Width := 1, Height := 1, Rows := ['.'], KnowledgeRows := ['v'],
+        PlayerX := 0, PlayerY := 0, WorldX := 0, WorldY := 0,
+        Inventory := [], Health := 20, MaxHealth := 20, Character := [], Journal := []
+      )
+    ),
+    Protocol.VisibleState.FirstPersonState(
+      Protocol.FirstPersonVisibleState(
+        Time := Time,
+        Coins := 0, Title := 'Dungeon', Status := 'Nothing in reach', Level := 0, Depth := 3,
+        Width := 3, Height := 3, Rows := ['###', '#.#', '###'],
+        KnowledgeRows := ['vvv', 'vvv', 'vvv'],
+        PlayerX := 1, PlayerY := 1, Facing := Protocol.FirstPersonFacing.North,
+        Inventory := [], Health := 20, MaxHealth := 20, Character := [], Journal := [],
+        CombatLog := [], CombatEvents := []
+      )
+    )
+  ];
+  for View: Protocol.VisibleState in Views do
+    const Wire := Servers.EncodeServer(Protocol.ServerMessage.State(View));
+    const ClockJson := '"time":{"day":2,"minute_of_day":0,"phase":"night"}';
+    Test.AssertTrue(ClockJson in Wire);
+    case Servers.DecodeServer(Wire).Unwrap() of
+      when Protocol.ServerMessage.State(Protocol.VisibleState.MapState(const State)):
+        Test.AssertTrue(State.Time = Time);
+      when Protocol.ServerMessage.State(Protocol.VisibleState.FirstPersonState(const State)):
+        Test.AssertTrue(State.Time = Time);
+      when Protocol.ServerMessage.Welcome(_, _), Protocol.ServerMessage.Worlds(_), Protocol.ServerMessage.ExplorationMap(_), Protocol.ServerMessage.Interaction(_, _), Protocol.ServerMessage.SaveCompleted, Protocol.ServerMessage.Defeated(_), Protocol.ServerMessage.Rejected(_, _), Protocol.ServerMessage.ErrorMessage(_, _), Protocol.ServerMessage.Dialogue(_, _, _), Protocol.ServerMessage.DialogueEnded(_, _), Protocol.ServerMessage.Trade(_, _, _):
+        Test.AssertTrue(false);
+    end case;
+
+    for Bad: string in [
+      'null', '[]', '{}',
+      '{"day":0,"minute_of_day":0,"phase":"day"}',
+      '{"day":694445,"minute_of_day":641,"phase":"day"}',
+      '{"day":2,"minute_of_day":1440,"phase":"day"}',
+      '{"day":2,"minute_of_day":-1,"phase":"day"}',
+      '{"day":2.5,"minute_of_day":0,"phase":"day"}',
+      '{"day":2,"minute_of_day":0,"phase":"dusk"}',
+      '{"day":2,"minute_of_day":0,"phase":"night","extra":1}',
+      '{"day":2,"day":3,"minute_of_day":0,"phase":"night"}'
+    ] do
+      const Invalid := Wire.Replace(ClockJson, '"time":' + Bad);
+      Test.AssertTrue(Invalid <> Wire);
+      Test.AssertTrue(Servers.DecodeServer(Invalid) is Error(_));
+    end for;
+
+    Test.AssertTrue(Servers.DecodeServer(Wire.Replace(ClockJson + ',', '')) is Error(_));
+  end for;
+end.

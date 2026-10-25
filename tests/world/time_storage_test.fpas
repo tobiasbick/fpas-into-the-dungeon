@@ -1,0 +1,57 @@
+// Verifies exact persisted clocks, strict invalid-clock rejection and preservation of invalid save bytes.
+program TimeStorageTest;
+
+uses
+  Dungeon.GameState as GameState, Dungeon.World as WorldUnit,
+  Dungeon.World.Savegame as Savegame, Dungeon.Test.StateComparison as States,
+  Std.Fs as Fs, Std.Test as Test;
+
+begin
+  const Root := Test.ScratchDir();
+  const World := WorldUnit.OpenWorld(Root, 'clock', 25, 1, 16).Unwrap();
+  const Initial := GameState.NewGame(World.Metadata);
+  Test.AssertEquals(0, Fs.ReadDir(World.Directory + '/chunks').Unwrap().Length());
+  Test.AssertTrue(
+    WorldUnit.MoveInWorld(
+      World, Initial with WorldMinutes := 1000000000; end with,
+      1, 0
+    ) is Error(_)
+  );
+  Test.AssertEquals(0, Fs.ReadDir(World.Directory + '/chunks').Unwrap().Length());
+  Test.AssertEquals(480, Initial.WorldMinutes);
+  for Minutes: integer in [0, 1439, 1440, 1000000000] do
+    const State := Initial with WorldMinutes := Minutes; end with;
+
+    Test.AssertTrue(Savegame.WriteSaveGame(World, State).Unwrap());
+    case Savegame.LoadSaveGame(World).Unwrap() of
+      when Savegame.SaveGameLoad.Loaded(const Loaded, _):
+        Test.AssertTrue(States.SameState(State, Loaded));
+      when Savegame.SaveGameLoad.Missing, Savegame.SaveGameLoad.Invalid(_):
+        Test.AssertTrue(false);
+    end case;
+  end for;
+  const Saved := Savegame.EncodeSaveGame(World.Metadata.Id, Initial);
+  for Bad: string in ['-1', '1000000001', '0.5', 'null', '"480"', 'true'] do
+    const Invalid := Saved.Replace('"world_minutes":480', '"world_minutes":' + Bad);
+    Test.AssertTrue(Invalid <> Saved);
+    discard Fs.WriteTextAtomic(Savegame.SaveGamePath(World), Invalid).Unwrap();
+    Test.AssertTrue(Savegame.LoadSaveGame(World).Unwrap() is Savegame.SaveGameLoad.Invalid(_));
+    Test.AssertEquals(Invalid, Fs.ReadText(Savegame.SaveGamePath(World)).Unwrap());
+  end for;
+
+  for Invalid: string in [
+    Saved.Replace('"world_minutes":480,', ''),
+    Saved.Replace('"world_minutes":480', '"world_time":480'),
+    Saved.Replace('"world_minutes":480', '"world_minutes":480,"extra_clock":0'),
+    Saved.Replace('"format_version":15', '"format_version":14')
+  ] do
+    Test.AssertTrue(Invalid <> Saved);
+    Test.AssertTrue(Savegame.DecodeSaveGameState(Invalid, World.Metadata) is Error(_));
+  end for;
+
+  for Invalid: integer in [-1, 1000000001] do
+    Test.AssertTrue(
+      Savegame.WriteSaveGame(World, Initial with WorldMinutes := Invalid; end with) is Error(_)
+    );
+  end for;
+end.

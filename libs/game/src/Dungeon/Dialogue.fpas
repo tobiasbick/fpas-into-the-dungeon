@@ -1,8 +1,8 @@
-// Identity-bound stationary NPC dialogue, meeting memory and atomic healing/quest outcomes.
+// Identity-bound stationary NPC dialogue, meeting memory and atomic rest/quest outcomes.
 unit Dungeon.Dialogue;
 
 uses
-  Dungeon.Dialogue.Model as Model, Dungeon.Dialogue.Quests as QuestDialogue,
+  Dungeon.Dialogue.Model as Model, Dungeon.Dialogue.Quests as QuestDialogue, Dungeon.Dialogue.Rest as Rest,
   Dungeon.Dialogue.Villages as Villages, Dungeon.Quests.Model as QuestModel,
   Dungeon.Npcs.Interaction as NpcInteraction, Dungeon.GameState as GameState,
   Dungeon.Interior.Generation.Content as Content, Dungeon.Interior.Generation.Levels as Levels,
@@ -29,7 +29,7 @@ end function;
 function ChoicesFor(State: GameState.GameState; Npc: Npcs.NpcPlacement): array of Choice;
 begin
   if Npc.Kind <> Npcs.NpcKind.Mara then
-    return Villages.Choices(Npc.Kind, State.Health < GameState.PlayerMaximumHealth);
+    return Villages.Choices(Npc.Kind);
   end if;
   var Choices := [
     Choice(Id := 'identity', Text := 'Who are you?'),
@@ -47,10 +47,6 @@ begin
 
   if CarriesCoin then
     Choices.PushInPlace(Choice(Id := 'coin', Text := 'What do you know about this coin?'));
-  end if;
-
-  if State.Health < GameState.PlayerMaximumHealth then
-    Choices.PushInPlace(Choice(Id := 'wounds', Text := 'Could you tend my wounds?'));
   end if;
 
   Choices.PushInPlace(Choice(Id := 'quest', Text := 'About your lost compass...'));
@@ -119,9 +115,18 @@ begin
     return Error('dialogue NPC has not been met');
   end if;
 
-  if not (Current.Node is Node.Root) and (Current.NpcId <> Npcs.MaraId(View.Metadata)) then
-    return Error('only Mara can own a compass quest node');
-  end if;
+  case Current.Node of
+    when Node.Root:
+      null;
+    when Node.CompassOffer(_), Node.CompassStatus:
+      if Current.NpcId <> Npcs.MaraId(View.Metadata) then
+        return Error('only Mara can own a compass quest node');
+      end if;
+    when Node.RestOffer:
+      if Valid.Npcs[Index].Kind <> Npcs.NpcKind.Innkeeper then
+        return Error('only an innkeeper can own a rest offer');
+      end if;
+  end case;
 
   return Ok(Valid);
 end function;
@@ -177,13 +182,44 @@ begin
   );
 end function;
 
-// Checks both retained and freshly available choices before any effect. Healing and quest effects
+// Checks both retained and freshly available choices before any effect. Rest and quest effects
 // change only their explicit candidate state; callers retain prepare/send/install reply ordering.
 public function Choose(View: GameState.AreaView; State: GameState.GameState; Current: Frame; ChoiceId: string): result of (Outcome, string);
 begin
   const Valid := try ValidateConversation(View, State, Current);
   const Map := try GameState.CurrentInterior(View, Valid);
   const Npc := try Npcs.FindPlacement(Map.Npcs, Current.NpcId);
+  if Current.Node is Node.RestOffer then
+    if not Model.Contains(Current.Choices, ChoiceId)
+      or
+      not Model.Contains(Rest.Offer(Valid, Npc).Choices, ChoiceId)
+    then
+      return Error('rest choice is not currently available');
+    end if;
+
+    if ChoiceId = 'rest_back' then
+      return Ok(
+        Outcome.Continued(Valid, RootFrame(Valid, Npc, 'Ask me if you need a room.'), false)
+      );
+    end if;
+
+    if ChoiceId <> 'rest_confirm' then
+      return Error('rest offer requires confirmation or back');
+    end if;
+    const Rested := try Rest.Confirm(Valid, Npc);
+    return Ok(
+      Outcome.Continued(
+        Rested,
+        RootFrame(
+          Rested,
+          Npc,
+          'You rest for eight hours and wake fully healed. Your room is paid for.'
+        ),
+        true
+      )
+    );
+  end if;
+
   if not (Current.Node is Node.Root) then
     if ChoiceId = 'quest_back' then
       if not Model.Contains(Current.Choices, ChoiceId) then
@@ -212,15 +248,14 @@ begin
   if ChoiceId = 'goodbye' then
     return Ok(Outcome.Ended(Valid));
   end if;
-  var Changed := Valid;
+
+  if ChoiceId = 'rest' then
+    return Ok(Outcome.Continued(Valid, Rest.Offer(Valid, Npc), false));
+  end if;
   var Text := '';
   if Npc.Kind <> Npcs.NpcKind.Mara then
     Text := try Villages.Answer(Npc, Map.DisplayName, ChoiceId);
-    if ChoiceId = 'wounds' then
-      Changed.Health := GameState.PlayerMaximumHealth;
-    end if;
-
-    return Ok(Outcome.Continued(Changed, RootFrame(Changed, Npc, Text), ChoiceId = 'wounds'));
+    return Ok(Outcome.Continued(Valid, RootFrame(Valid, Npc, Text), false));
   end if;
 
   case ChoiceId of
@@ -237,7 +272,7 @@ begin
         )
       );
     when 'identity':
-      Text := 'Mara once mapped the nearby halls. She now lives in Hearthmoor and warns travelers who follow the same path.';
+      Text := 'Mara once mapped the nearby halls. She now lives in Hearthmoor and warns travelers who follow the same path. Nora keeps rooms for travelers who need rest.';
     when 'dungeon':
       const Region := Entrances.RegionOf(View.Metadata, View.Metadata.Spawn);
       Text := 'The nearby dungeon is ' +
@@ -246,13 +281,10 @@ begin
         ' levels. Mark each turn and look for the way back. Something restless still walks the inner passages.';
     when 'coin':
       Text := 'Mara studies the crescent-marked coin. She has seen the doorway symbol before, but not who minted it.';
-    when 'wounds':
-      Changed.Health := GameState.PlayerMaximumHealth;
-      Text := 'Mara cleans and binds your wounds with practiced hands. You feel whole again.';
     else
       return Error('unknown dialogue choice');
   end case;
 
-  return Ok(Outcome.Continued(Changed, RootFrame(Changed, Npc, Text), ChoiceId = 'wounds'));
+  return Ok(Outcome.Continued(Valid, RootFrame(Valid, Npc, Text), false));
 end function;
 end unit;

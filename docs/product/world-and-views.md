@@ -45,8 +45,8 @@ presentation, including combat, equipment, progression, quests and trade.
   home gate lies six traversable cardinal steps from spawn; all gates use `s`.
 - **NPC** is a non-hostile server-owned character with stable identity, kind,
   area and persistent meeting state. A stationary NPC blocks its placement field.
-- **Resident**, **guard**, **healer** and **merchant** are the generated village
-  NPC roles. Their dialogue is fixed; a healer offers free full healing while hurt.
+- **Resident**, **guard**, **innkeeper** and **merchant** are the generated village
+  NPC roles. Their dialogue is fixed; innkeepers offer paid rest.
 - **Dialogue** is a deterministic server-owned conversation with an NPC. Each
   frame offers ordered choices with stable IDs. Answers refresh that frame;
   the active conversation belongs to the connection and is never saved.
@@ -195,8 +195,16 @@ presentation, including combat, equipment, progression, quests and trade.
 - **Turn** is one accepted time-consuming player action: a step, attack, wait,
   wearing/removing or dropping an item, or using a potion. In a dungeon it is
   followed by one opponent phase. Turning, inspection, pickup, saving and
-  rejected intentions do not advance time. Outdoors a step heals one point;
-  potion use heals without an opponent phase or additional step healing.
+  rejected intentions do not advance time. An ordinary turn takes one minute;
+  an outdoor step takes five. Movement never heals.
+- **World clock** is the saved server-owned minute count, beginning on day 1
+  at 08:00. Day runs from 06:00 through 19:59; night changes map colors only.
+- **Innkeeper** is a stationary settlement NPC who offers paid rest through
+  dialogue. Nora owns the inn in Hearthmoor; generated village slot 2 is its
+  innkeeper.
+- **Rest** costs five coins, advances eight game hours and restores full
+  health, including when already healthy. It changes no stock, enemies or quest
+  facts and never saves implicitly. See [time and rest](../architecture/time-and-rest.md).
 - **Attack** is the player intention that strikes the field directly ahead.
 - **Combat log** is the ordered list of messages describing one resolved turn.
 - **Combat event** is one structured fact of a resolved turn, such as a hit and
@@ -313,14 +321,15 @@ opponents, one guaranteed Healing potion and up to two optional finds. Each
 level is generated and stored on its first visit and read back afterwards. Items can be inspected from the field before them, picked up with
 `Enter`, worn, dropped with `D`, and carried into other dungeons. The server
 accepts the exit interaction only on the level-0 exit field and then returns the
-player to the dungeon's entrance site; stairs move between levels without
-spending a turn.
+player to the dungeon's entrance site; area transitions and stairs take one
+world minute without an opponent phase.
 
-Accepted outdoor steps restore one health point, up to the player's maximum.
+Accepted outdoor steps take five world minutes without changing health.
 Hearthmoor is a separate authored 23 by 15 area using the map view and bounded
 local positions without facing. Its gate returns to the same outdoor field.
-Mara offers information and free healing from any cardinally adjacent field;
-settlement steps do not heal. See [NPCs and dialogue](../architecture/npcs-and-dialogue.md).
+Mara offers information and her quest from any cardinally adjacent field;
+Nora offers paid rest. Settlement steps take one minute without healing.
+See [NPCs and dialogue](../architecture/npcs-and-dialogue.md).
 
 Skeletons notice the player through line of sight, chase, and fight turn by
 turn; see [combat](../architecture/combat.md).
