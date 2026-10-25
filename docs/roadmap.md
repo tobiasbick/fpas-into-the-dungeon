@@ -783,24 +783,22 @@ before returning to Mara and verifies remembered completion. The permanent
 [settlement contract and review route](architecture/generated-settlements.md)
 describe the implementation and manual review.
 
-### 15d. Trade and economy — IMPLEMENTED, AWAITING ACCEPTANCE
+### 15d. Trade and economy — DONE
 
 A merchant buys and sells for coins, giving the Ancient coin and loot a use.
 Prices, stock, and capacity rules are deterministic and persistent.
 
-The [detailed plan](plans/15d-trade-and-economy.md) records the product decisions
-confirmed on 2026-10-24: a merchant in Hearthmoor and every generated village,
-a separate coin balance, finite stock with a 64-item limit and fixed prices,
-and a dedicated Buy/Sell window. Implementation is authorized and follows the
-plan's checkpoints in order. Baseline verification passed 161/161. Checkpoint 02
-exposed a reproduced FPAS unit-cache defect, now repaired and verified. Checkpoints
-All ten checkpoints are complete, including real TCP proofs and the full seed-25/
-chunk-1 DAP route. Formatting, all workspace project checks and the complete suite
-pass (171/171 programs). The [economy contract](architecture/economy.md) and
-[running-game verification](architecture/economy-acceptance.md) record the result.
-Final user acceptance remains open; the temporary plan stays until acceptance.
+Hearthmoor and every generated village have a merchant with finite stock, a
+64-item limit and fixed prices. The player has a separate coin balance and trades
+through a dedicated Buy/Sell window. All ten checkpoints are complete, including
+real TCP proofs and the full seed-25/chunk-1 DAP route. Formatting, all workspace
+project checks and the complete suite pass (171/171 programs).
 
-### 15e. Time and rest — LATER
+The user accepted 15d on 2026-10-25, and its temporary plan is removed. The
+[economy contract](architecture/economy.md) and
+[running-game verification](architecture/economy-acceptance.md) record the result.
+
+### 15e. Time and rest — NEXT
 
 A world clock advances with turns and outdoor travel, with a day/night
 presentation and resting at an inn as an alternative way to heal.

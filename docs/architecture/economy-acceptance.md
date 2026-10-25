@@ -82,7 +82,7 @@ and reward sales. Focused tests cover 64-item capacities, overflow, hostile
 wire fields, stale revisions, preparation failures and bounded text without
 requiring 64-item farming in the DAP route.
 
-This is agent verification. The user's final 15d acceptance remains pending.
+The user accepted 15d on 2026-10-25 after this running-game verification.
 
 Final checks: `fpas fmt --check apps libs tests tools`, every project through
 `fpas check dungeon.fpasworkspace`, and the complete
