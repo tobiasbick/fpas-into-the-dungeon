@@ -1,0 +1,232 @@
+// One ACP reader owns bounded setup, exact model acknowledgement and explicit prompt completion.
+unit Dungeon.Server.Gamemaster.Session;
+
+uses
+  Dungeon.Server.Gamemaster.Model as Model, Dungeon.Server.Gamemaster.Models as Models,
+  Std.Acp as Acp, Std.Acp.Types as Types, Std.Json as Json, Std.Json.Fields as Fields,
+  Std.Tasks as Tasks, Std.Time as Time;
+
+// Borrowed connection plus session identity; the operation owner closes and releases it.
+public type Session = record
+  public Connection: Acp.Connection;
+  public Id: string;
+  public Choices: array of Model.ModelChoice;
+  public SetupDeadline: integer;
+end record;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+// JSON escaping is delegated to the standard codec for every opaque value.
+public function Quote(Value: string): string;
+begin
+  return Json.Stringify(Json.JsonValue.String(Value));
+end function;
+
+// Creates an owned process connection without a model request or implicit authentication.
+public function Connect(Launch: Acp.Launch): result of (Acp.Connection, string);
+begin
+  var Options := Acp.DefaultOptions();
+  Options.ClientInfo := Some(
+    Types.ImplementationValue(Name := 'dungeon', Title := None, Version := '16a', Meta := None)
+  );
+  Options.Limits.ShutdownMillis := 5000;
+  return Acp.ConnectProcess(Launch, Options).MapError(FailureMessage);
+end function;
+
+function ConfigurationUpdate(Event: Acp.Event): option of dict of string to Json.JsonValue;
+begin
+  case Event.RawMessage of
+    when None:
+      return None;
+    when Some(const Raw):
+      case Fields.ParseObject(Raw.Text) of
+        when Error(_):
+          return None;
+        when Ok(const Message):
+          case Fields.ObjectField(Message, 'params') of
+            when Error(_):
+              return None;
+            when Ok(const Params):
+              case Fields.ObjectField(Params, 'update') of
+                when Error(_):
+                  return None;
+                when Ok(const Update):
+                  if 'configOptions' in Update then
+                    return Some(Update);
+                  end if;
+              end case;
+          end case;
+      end case;
+  end case;
+
+  return None;
+end function;
+
+function UpdateModels(Event: Acp.Event; Expected: string; var Choices: array of Model.ModelChoice): result of (boolean, string);
+begin
+  case ConfigurationUpdate(Event) of
+    when None:
+      return Ok(true);
+    when Some(const Update):
+      Choices := try Models.Decode(Json.Stringify(Json.JsonValue.Object(Update)));
+      if Expected <> '' then
+        for Item: Json.JsonValue in (
+          try Fields.ArrayField(Update, 'configOptions').MapError(FailureMessage)
+        ) do
+          const Setting := try Fields.ParseObject(Json.Stringify(Item)).MapError(FailureMessage);
+          if (try Fields.StringField(Setting, 'id').MapError(FailureMessage)) = 'model' then
+            if (try Fields.StringField(Setting, 'currentValue').MapError(FailureMessage)) <>
+              Expected
+            then
+              return Error('Agent changed the selected model during the request');
+            end if;
+          end if;
+        end for;
+      end if;
+
+      return Ok(true);
+  end case;
+end function;
+
+// Exchanges a standard typed ACP request; only this routine receives connection events.
+public function Exchange(
+  Connection: Acp.Connection; Method: string; Body: string; Token: Tasks.CancellationToken;
+  Deadline: integer; ExpectedModel: string; var Choices: array of Model.ModelChoice
+): result of (string, string);
+begin
+  if Tasks.IsCancellationRequested(Token) then
+    return Error('Gamemaster operation cancelled');
+  end if;
+
+  if Time.MonotonicMillis() >= Deadline then
+    return Error('Gamemaster timeout during ' + Method);
+  end if;
+  const Request := try Types.DecodeClientRequest(
+    Method,
+    Types.RawJson(Text := Body)
+  ).MapError(FailureMessage);
+  const Sent := try Acp.Send(Connection, Request.Payload).MapError(FailureMessage);
+  while Time.MonotonicMillis() < Deadline do
+    if Tasks.IsCancellationRequested(Token) then
+      return Error('Gamemaster operation cancelled');
+    end if;
+
+    case Acp.Receive(Connection, Some(250), Some(Token)) of
+      when Error(const Cause):
+        if Cause is Types.AcpError.Timeout(_) then
+          continue;
+        end if;
+
+        return Error('Agent connection ended or was cancelled; check installation and login');
+      when Ok(const Event):
+        case Event.Payload of
+          when Acp.EventPayload.Response(const Actual, _):
+            if Actual = Sent then
+              const Raw := Event.RawMessage.Unwrap();
+              const ResultValue := try Types.RawJsonMember(Raw, 'result').MapError(FailureMessage);
+              if ResultValue is None then
+                return Error('Agent response has no result');
+              end if;
+
+              return Ok(ResultValue.Unwrap().Text);
+            end if;
+          when Acp.EventPayload.RequestFailed(_, const Cause):
+            if (Cause is Types.AcpError.Closed(_)) or (Cause is Types.AcpError.Host(_)) then
+              return Error('Agent process exited or its transport closed during ' + Method);
+            end if;
+
+            return Error(
+              'Agent rejected ' + Method +
+              '; check login, model availability and agent diagnostics'
+            );
+          when Acp.EventPayload.Request(_, const Responder):
+            discard Acp.RespondError(
+              Responder, Types.ProtocolError(
+                Code := -32000,
+                Message := 'This connection permits only the read-only game MCP probe',
+                Data := None
+              )
+            );
+          when Acp.EventPayload.Closed(_):
+            return Error('Agent process exited before completing ' + Method);
+          when Acp.EventPayload.Notification(_):
+            discard try UpdateModels(Event, ExpectedModel, var Choices);
+          when Acp.EventPayload.UnknownNotification(_, _), Acp.EventPayload.RequestCancelled(_), Acp.EventPayload.McpResponse(_, _), Acp.EventPayload.V2McpResponse(_, _), Acp.EventPayload.V2Response(_, _), Acp.EventPayload.V2Notification(_), Acp.EventPayload.V2Request(_, _), Acp.EventPayload.V2Initialized(_, _):
+            null;
+        end case;
+    end case;
+  end while;
+
+  discard Acp.CancelRequest(Connection, Sent);
+  return Error('Gamemaster timeout during ' + Method);
+end function;
+
+// Performs no model prompt; the advertised list remains authoritative.
+public function Open(Connection: Acp.Connection; Root: string; Descriptors: string; Token: Tasks.CancellationToken): result of (Session, string);
+begin
+  const Deadline := Time.MonotonicMillis() + 60000;
+  var Choices: array of Model.ModelChoice := [];
+  discard try Exchange(
+    Connection,
+    'initialize',
+    '{"protocolVersion":1,"clientInfo":{"name":"dungeon","version":"16a"},"clientCapabilities":{}}',
+    Token,
+    Deadline,
+    '', var Choices
+  );
+  const Created := try Exchange(
+    Connection,
+    'session/new',
+    '{"cwd":' + Quote(Root) + ',"mcpServers":' + Descriptors + '}',
+    Token,
+    Deadline,
+    '', var Choices
+  );
+  const Data := try Fields.ParseObject(Created).MapError(FailureMessage);
+  Choices := try Models.Decode(Created);
+  return Ok(
+    Session(
+      Connection := Connection,
+      Id := try Fields.StringField(Data, 'sessionId').MapError(FailureMessage),
+      Choices := Choices, SetupDeadline := Deadline
+    )
+  );
+end function;
+
+// Rechecks availability and requires an exact currentValue acknowledgement, never an automatic fallback.
+public function SelectModel(Value: Session; ModelId: string; Token: Tasks.CancellationToken): result of (Session, string);
+begin
+  if not Models.Contains(Value.Choices, ModelId) then
+    return Error('Selected model is unavailable; refresh and choose explicitly');
+  end if;
+  var Choices := Value.Choices;
+  const Selected := try Exchange(
+    Value.Connection, 'session/set_config_option', '{"sessionId":' + Quote(Value.Id) +
+    ',"configId":"model","value":' + Quote(ModelId) + '}', Token, Value.SetupDeadline,
+    ModelId, var Choices
+  );
+  const Data := try Fields.ParseObject(Selected).MapError(FailureMessage);
+  for Item: Json.JsonValue in (
+    try Fields.ArrayField(Data, 'configOptions').MapError(FailureMessage)
+  ) do
+    const Setting := try Fields.ParseObject(Json.Stringify(Item)).MapError(FailureMessage);
+    if (try Fields.StringField(Setting, 'id').MapError(FailureMessage)) = 'model' then
+      if (try Fields.StringField(Setting, 'currentValue').MapError(FailureMessage)) <> ModelId then
+        return Error('Agent did not acknowledge the exact selected model');
+      end if;
+
+      Choices := try Models.Decode(Selected);
+      if not Models.Contains(Choices, ModelId) then
+        return Error('Selected model disappeared from the catalog');
+      end if;
+
+      return Ok(Value with Choices := Choices; end with);
+    end if;
+  end for;
+
+  return Error('Agent omitted model acknowledgement');
+end function;
+end unit;

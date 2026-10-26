@@ -1,0 +1,103 @@
+// Resolves installed adapter commands, including Windows npm shims, without downloading packages.
+unit Dungeon.Server.Gamemaster.Presets;
+
+uses
+  Dungeon.RuntimeData.Gamemaster as Settings, Std.Acp as Acp, Std.Env as Env,
+  Std.Fs as Fs, Std.Path as Path;
+
+// Windows npm shims require a node entrypoint rather than direct process spawning.
+public function WindowsHost(): boolean;
+begin
+  return Env.Get('OS') = Some('Windows_NT');
+end function;
+
+function SearchDirectories(): array of string;
+begin
+  case Env.Get('PATH') of
+    when Some(const Text):
+      return Text.Split(if WindowsHost() then ';' else ':' end if);
+    when None:
+      return [];
+  end case;
+end function;
+
+// Resolves executable identity from the server's PATH; arguments are never shell-expanded.
+public function Command(Name: string): result of (string, string);
+begin
+  for Directory: string in SearchDirectories() do
+    const Candidate := Path.Join([Directory, Name + if WindowsHost() then '.exe' else '' end if]);
+    if Fs.IsFile(Candidate) then
+      return Ok(Candidate);
+    end if;
+  end for;
+
+  return Error('Missing command: ' + Name + '; install it and restart the server terminal');
+end function;
+
+function NodePackage(Name: string; PackagePath: string): result of (Acp.Launch, string);
+begin
+  const Node := try Command('node');
+  for Directory: string in SearchDirectories() do
+    const Entry := Path.Join([Directory, 'node_modules', PackagePath]);
+    if Fs.IsFile(Path.Join([Directory, Name + '.cmd'])) and Fs.IsFile(Entry) then
+      return Ok(
+        Acp.Launch(
+          Command := Node,
+          Arguments := [Entry],
+          WorkingDirectory := None,
+          Environment := []
+        )
+      );
+    end if;
+  end for;
+
+  return Error(
+    'Missing installed npm command: ' + Name +
+    '; see docs/architecture/gamemaster-connection.md and install the adapter'
+  );
+end function;
+
+// Launch preset for the installed ACP adapter; working-directory ownership belongs to the operation.
+public function Adapter(Kind: Settings.ConnectionKind): result of (Acp.Launch, string);
+begin
+  const Name := if Kind = Settings.ConnectionKind.Codex then 'codex-acp' else 'pi-acp' end if;
+  if Kind = Settings.ConnectionKind.Unconfigured then
+    return Error('Gamemaster is not configured');
+  end if;
+
+  if WindowsHost() then
+    return NodePackage(
+      Name,
+      if Kind = Settings.ConnectionKind.Codex then '@agentclientprotocol/codex-acp/dist/index.js'
+        else 'pi-acp/dist/index.js'
+        end if
+    );
+  end if;
+
+  return Ok(
+    Acp.Launch(
+      Command := try Command(Name),
+      Arguments := [],
+      WorkingDirectory := None,
+      Environment := []
+    )
+  );
+end function;
+
+// The real Pi command behind the game-owned trust launcher, retaining the user's provider settings.
+public function Pi(): result of (Acp.Launch, string);
+begin
+  if WindowsHost() then
+    return NodePackage('pi', '@earendil-works/pi-coding-agent/dist/cli.js');
+  end if;
+
+  return Ok(
+    Acp.Launch(
+      Command := try Command('pi'),
+      Arguments := [],
+      WorkingDirectory := None,
+      Environment := []
+    )
+  );
+end function;
+end unit;

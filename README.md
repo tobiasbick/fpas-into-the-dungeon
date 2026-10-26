@@ -41,7 +41,7 @@ run headless or with a full-terminal dashboard.
 - Create separate worlds, continue a saved game, or start over in an existing
   world. Saves retain discovery, inventory, equipment, and visited dungeon state.
 - Monitor the server through status panels, a live log, filters, and settings
-  for new-world defaults.
+  for new-world defaults and the global Gamemaster connection.
 
 Each dungeon has three levels. Its entrance level has one skeleton, one giant
 rat, four guaranteed floor finds and up to two optional finds; deeper levels
@@ -55,7 +55,8 @@ You need a true-color terminal and a release build of
 available on your command line. Use the compiler and source standard library
 from the same FPAS checkout or installation. This checkout requires the native
 typed standard-library errors, the `Error` generic constraint, `Result.MapError`
-and `Std.Path.IsAbsolute`. Older builds without these APIs cannot compile it.
+and `Std.Path.IsAbsolute`, plus `Std.Acp`, `Std.Mcp` and native executable builds.
+Older builds without these APIs cannot compile it.
 The game remains under active development.
 
 Run the following commands from the repository root, in **two terminals**.
@@ -95,6 +96,12 @@ To run the server without a dashboard, omit `--console`:
 ```powershell
 fpas run apps/server/server.fpasprj
 ```
+
+For the Gamemaster connection, see [Set up Pi](docs/setup/pi.md) for
+Pi installation, local models and native MCP support. Connection and model
+selection use **F2 -> Gamemaster settings**. The
+[connection guide](docs/architecture/gamemaster-connection.md) also covers Codex.
+An unconfigured server warns and continues listening.
 
 ## Controls
 
@@ -239,7 +246,10 @@ accepted. Time and rest (15e) add the persistent clock, night colors and paid
 inn recovery; see [time and rest](docs/architecture/time-and-rest.md).
 Weather and Hearthmoor's quest recognition (15f) are implemented and verified
 through delegated self-acceptance; see the [weather contract](docs/architecture/weather-and-world-response.md).
-Building interiors, weather, multiplayer and LLM integration remain later work.
+The first LLM integration stage, [16a: Gamemaster connection and model selection](docs/architecture/gamemaster-connection.md),
+supports Codex and Pi through ACP with an explicit embedded MCP tool test. Later LLM
+substages will define actual game-event jobs and generated content.
+Building interiors and multiplayer remain later work.
 
 See the [roadmap](docs/roadmap.md) for the current checkpoints.
 The [architecture overview](docs/architecture/overview.md) explains
@@ -254,8 +264,8 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-Current workspace verification passes: **177/177 test programs**, formatting
-and all 21 project checks. Coverage includes game rules, deterministic generation,
+Current workspace test verification passes: **183/183 test programs**.
+The workspace has 22 projects. Coverage includes game rules, deterministic generation,
 storage, protocol validation, TUI rendering and input, and real TCP sessions.
 
 To inspect generated terrain without starting a game server:

@@ -1,0 +1,202 @@
+// Owns one bounded ACP/MCP lifecycle and retires all endpoint credentials before publishing a result.
+unit Dungeon.Server.Gamemaster.Operation;
+
+uses
+  Dungeon.RuntimeData.Gamemaster as Settings, Dungeon.Server.Gamemaster.Model as Model,
+  Dungeon.Server.Gamemaster.Presets as Presets, Dungeon.Server.Gamemaster.Session as Session, Dungeon.Server.Gamemaster.Models as Models,
+  Dungeon.Server.Gamemaster.Tools as Tools, Dungeon.Server.Gamemaster.Pi as Pi,
+  Std.Acp as Acp, Std.Mcp as Mcp, Std.Crypto as Crypto, Std.Fs as Fs,
+  Std.Json.Fields as Fields, Std.Path as Path, Std.Tasks as Tasks, Std.Time as Time;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+function FreshNonce(): result of (string, string);
+begin
+  var Value := '';
+  for Byte: integer in (try Crypto.RandomBytes(16).MapError(FailureMessage)) do
+    Value := Value + '0123456789abcdef'[Byte div 16] + '0123456789abcdef'[Byte mod 16];
+  end for;
+
+  return Ok(Value);
+end function;
+
+// Borrows an already connected transport; also used by account-independent protocol peers.
+// A tool receipt alone and an assistant's prose alone are both insufficient for probe success.
+public function Perform(
+  Connection: Acp.Connection; Request: Model.Request; Root: string; Descriptors: string;
+  Nonce: string; Seen: channel of boolean; Token: Tasks.CancellationToken
+): result of (Model.Catalog, string);
+begin
+  var Current := try Session.Open(Connection, Root, Descriptors, Token);
+  var Acknowledged := false;
+  if Request.Selection.ModelId <> '' then
+    if not Models.Contains(Current.Choices, Request.Selection.ModelId) then
+      if Request.Probe then
+        return Error('Selected model is unavailable; refresh models');
+      end if;
+
+      return Ok(Model.Catalog(Models := Current.Choices, Acknowledged := false));
+    end if;
+
+    Current := try Session.SelectModel(Current, Request.Selection.ModelId, Token);
+    Acknowledged := true;
+  end if;
+  var Probed := false;
+  var Elapsed: integer := 0;
+  if Request.Probe then
+    if not Acknowledged then
+      return Error('Choose and acknowledge a model before testing');
+    end if;
+    const Started := Time.MonotonicMillis();
+    var Choices := Current.Choices;
+    const Completed := try Session.Exchange(
+      Connection, 'session/prompt', '{"sessionId":' + Session.Quote(Current.Id) +
+      ',"prompt":[{"type":"text","text":' +
+      Session.Quote(
+        'Call the dungeon MCP tool gamemaster_probe with nonce ' + Nonce +
+        ' exactly once. This is a read-only connection check. Do not use other tools. Then reply OK.'
+      ) + '}]}',
+      Token, Started + 180000, Request.Selection.ModelId, var Choices
+    );
+    const Data := try Fields.ParseObject(Completed).MapError(FailureMessage);
+    if (try Fields.StringField(Data, 'stopReason').MapError(FailureMessage)) <> 'end_turn' then
+      return Error('Agent did not complete the diagnostic turn');
+    end if;
+
+    if (try Tasks.TryReceive(Seen).MapError(FailureMessage)) is None then
+      return Error('MCP probe failed: no matching server-side tool call was observed');
+    end if;
+
+    Current.Choices := Choices;
+    if not Models.Contains(Choices, Request.Selection.ModelId) then
+      return Error('Selected model disappeared during the probe');
+    end if;
+
+    Probed := true;
+    Elapsed := Time.MonotonicMillis() - Started;
+  end if;
+
+  return Ok(
+    Model.Catalog(
+      Models := Current.Choices,
+      Acknowledged := Acknowledged,
+      Probed := Probed,
+      ElapsedMillis := Elapsed
+    )
+  );
+end function;
+
+function RunAgent(
+  Launch: Acp.Launch; Request: Model.Request; Cache: string; Root: string; Nonce: string;
+  Access: Mcp.HttpAccess; Seen: channel of boolean; Token: Tasks.CancellationToken
+): result of (Model.Catalog, string);
+begin
+  var Managed := Launch with WorkingDirectory := Some(Root); end with;
+  var Descriptors := Tools.Descriptor(Access);
+  if Request.Selection.Connection = Settings.ConnectionKind.Pi then
+    Managed := try Pi.Prepare(Managed, Cache, Root, Nonce, Tools.PiConfig(Access), Token);
+    Descriptors := '[]';
+  end if;
+
+  if Tasks.IsCancellationRequested(Token) then
+    return Error('Gamemaster operation cancelled');
+  end if;
+  const Connection := try Session.Connect(Managed);
+  const Outcome := Perform(Connection, Request, Root, Descriptors, Nonce, Seen, Token);
+  const Closed := Acp.Close(Connection);
+  const Released := Acp.Release(Connection);
+  if Closed is Error(_) or Released is Error(_) then
+    return Error('Agent process cleanup failed');
+  end if;
+
+  return Outcome;
+end function;
+
+function ServeAndRun(
+  Launch: Acp.Launch; Request: Model.Request; Cache: string; Root: string;
+  Nonce: string; Token: Tasks.CancellationToken
+): result of (Model.Catalog, string);
+begin
+  const Seen: channel of boolean := Tasks.CreateChannel(1);
+  case Tools.Create(Nonce, Seen) of
+    when Error(const Reason):
+      discard Tasks.CloseChannel(Seen);
+      return Error(Reason);
+    when Ok(const Server):
+      var Outcome: result of (Model.Catalog, string) := Error('Cannot publish game MCP endpoint');
+      case Mcp.Publish(Server, Mcp.DefaultHttpOptions()).MapError(FailureMessage) of
+        when Error(const Reason):
+          Outcome := Error(Reason);
+        when Ok(const Endpoint):
+          case Mcp.Access(Endpoint).MapError(FailureMessage) of
+            when Error(const Reason):
+              Outcome := Error(Reason);
+            when Ok(const Access):
+              scope
+                const Worker := go Mcp.Serve(Server, None);
+                Outcome := RunAgent(Launch, Request, Cache, Root, Nonce, Access, Seen, Token);
+                const Closed := Mcp.Close(Server);
+                const Served := Tasks.Wait(Worker);
+                if Closed is Error(_) or Served is Error(_) then
+                  Outcome := Error('MCP worker cleanup failed');
+                end if;
+              end scope;
+          end case;
+      end case;
+      const Closed := Mcp.Close(Server);
+      const Released := Mcp.Release(Server);
+      discard Tasks.CloseChannel(Seen);
+      if Closed is Error(_) or Released is Error(_) then
+        return Error('MCP endpoint cleanup failed');
+      end if;
+
+      return Outcome;
+  end case;
+end function;
+
+// Executes a selected installed preset. No world/save resource is opened or passed to the agent.
+// The supplied cache owns generated bootstrap artifacts; session directories are exclusively created.
+public function Run(Request: Model.Request; Cache: string; Token: Tasks.CancellationToken): result of (Model.Catalog, string);
+begin
+  if Request.Selection.Connection = Settings.ConnectionKind.Unconfigured then
+    return Error('Choose an agent connection');
+  end if;
+  const Launch := try Presets.Adapter(Request.Selection.Connection);
+  const Nonce := try FreshNonce();
+  const Base := Path.Join([
+    if Path.IsAbsolute(Cache) then Cache
+      else Path.Join([try Fs.CurrentDir().MapError(FailureMessage), Cache])
+      end if,
+    'gamemaster'
+  ]);
+  discard try Fs.CreateDirAll(Base).MapError(FailureMessage);
+  const Root := Path.Join([Base, 'session-' + Nonce]);
+  if not (try Fs.CreateDir(Root).MapError(FailureMessage)) then
+    return Error('Cannot exclusively create Gamemaster session directory');
+  end if;
+  var Outcome: result of (Model.Catalog, string) := Error(
+    'Cannot mark Gamemaster session directory'
+  );
+  case Fs.WriteTextAtomic(Path.Join([Root, '.gamemaster-session']), Nonce).MapError(FailureMessage) of
+    when Error(const Reason):
+      Outcome := Error(Reason);
+    when Ok(_):
+      Outcome := ServeAndRun(Launch, Request, Base, Root, Nonce, Token);
+  end case;
+
+  // Root is the exclusively created direct child; never delete caller-supplied paths recursively.
+  if Fs.IsSymLink(Root) then
+    return Error('Gamemaster session directory became a link; cleanup refused');
+  end if;
+
+  case Fs.DeleteDirAll(Root) of
+    when Error(_):
+      return Error('Cannot remove temporary Gamemaster credentials');
+    when Ok(_):
+      return Outcome;
+  end case;
+end function;
+end unit;

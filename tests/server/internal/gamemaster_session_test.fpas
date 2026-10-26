@@ -1,0 +1,141 @@
+// Scripted ACP processes prove game policy through real MCP transport without provider accounts.
+program GamemasterSessionTest;
+
+uses
+  Dungeon.RuntimeData.Gamemaster as Settings, Dungeon.Server.Gamemaster.Model as Model,
+  Dungeon.Server.Gamemaster.Operation as Operation, Dungeon.Server.Gamemaster.Session as Session,
+  Dungeon.Server.Gamemaster.Tools as Tools, Std.Acp as Acp, Std.Acp.Types as Types, Std.Mcp as Mcp,
+  Std.Fs as Fs, Std.Path as Path, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+function Execute(Project: string; Mode: string; Root: string): result of (Model.Catalog, string);
+begin
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  const Seen: channel of boolean := Tasks.CreateChannel(1);
+  const Server := Tools.Create('this-run', Seen).Unwrap();
+  const Access := Mcp.Access(Mcp.Publish(Server, Mcp.DefaultHttpOptions()).Unwrap()).Unwrap();
+  const Connection := Session.Connect(
+    Acp.Launch(
+      Command := 'fpas', Arguments := ['run', Project, '--', Mode],
+      WorkingDirectory := Some(Root), Environment := []
+    )
+  ).Unwrap();
+  var Descriptors := Tools.Descriptor(Access);
+  if Mode = 'native' then
+    discard Fs.CreateDirAll(Path.Join([Root, '.pi'])).Unwrap();
+    discard Fs.WriteTextAtomic(
+      Path.Join([Root, '.pi', 'mcp.json']),
+      Tools.PiConfig(Access)
+    ).Unwrap();
+    Descriptors := '[]';
+  end if;
+  var Outcome: result of (Model.Catalog, string) := Error('Not run');
+  scope
+    const Worker := go Mcp.Serve(Server, None);
+    if Mode = 'stall' then
+      var Choices: array of Model.ModelChoice := [];
+      const Timed := Session.Exchange(
+        Connection, 'initialize',
+        '{"protocolVersion":1,"clientInfo":{"name":"dungeon","version":"16a"},"clientCapabilities":{}}',
+        Token, Time.MonotonicMillis() + 100, '', var Choices
+      );
+      case Timed of
+        when Error(const Reason):
+          Outcome := Error(Reason);
+        when Ok(_):
+          Outcome := Error('Unexpected reply');
+      end case;
+    else
+      Outcome := Operation.Perform(
+        Connection, Model.Request(
+          Revision := 1,
+          Selection := Settings.Selection(
+            Connection := Settings.ConnectionKind.Codex,
+            ModelId := 'fixture/local'
+          ), Probe := Mode <> 'removed'
+        ),
+        Root, Descriptors, 'this-run', Seen, Token
+      );
+    end if;
+
+    discard Acp.Close(Connection).Unwrap();
+    discard Acp.Release(Connection).Unwrap();
+    discard Mcp.Close(Server).Unwrap();
+    discard Tasks.Wait(Worker).Unwrap();
+  end scope;
+
+  discard Mcp.Release(Server).Unwrap();
+  discard Tasks.CloseChannel(Seen);
+  return Outcome;
+end function;
+
+begin
+  var Workspace := Fs.CurrentDir().Unwrap();
+  while not Fs.IsFile(Path.Join([Workspace, 'dungeon.fpasworkspace'])) do
+    Workspace := Path.DirName(Workspace);
+  end while;
+  const Project := Path.Join([Workspace, 'tests', 'server', 'internal', 'peer', 'peer.fpasprj']);
+  const Root := Fs.CreateTempDir().Unwrap();
+  for Mode: string in ['success', 'native'] do
+    const Good := Execute(Project, Mode, Root).Unwrap();
+    Test.AssertTrue(Good.Acknowledged);
+    Test.AssertTrue(Good.Probed);
+  end for;
+
+  for Mode: string in [
+    'text-only',
+    'wrong-nonce',
+    'failed-turn',
+    'bad-ack',
+    'changed-model',
+    'exit',
+    'stall'
+  ] do
+    case Execute(Project, Mode, Root) of
+      when Ok(_):
+        panic('An incomplete or substituted agent result was accepted: ' + Mode);
+      when Error(const Reason):
+        case Mode of
+          when 'text-only', 'wrong-nonce':
+            Test.AssertTrue('no matching server-side tool call' in Reason);
+          when 'failed-turn':
+            Test.AssertTrue('did not complete' in Reason);
+          when 'bad-ack':
+            Test.AssertTrue('exact selected model' in Reason);
+          when 'changed-model':
+            Test.AssertTrue('changed the selected model' in Reason);
+          when 'exit':
+            Test.AssertTrue('exited' in Reason);
+          when 'stall':
+            Test.AssertTrue('timeout' in Reason);
+          else
+            panic('Unknown failure case');
+        end case;
+    end case;
+  end for;
+  const Removed := Execute(Project, 'removed', Root).Unwrap();
+  Test.AssertFalse(Removed.Acknowledged);
+  Test.AssertFalse(Removed.Probed);
+  Test.AssertEquals('other-model', Removed.Models[0].Id);
+  // A known cancellation must prevent dispatch, including a quota-bearing prompt in later phases.
+  var Options := Acp.DefaultOptions();
+  Options.ClientInfo := Some(
+    Types.ImplementationValue(Name := 'dungeon', Title := None, Version := '16a', Meta := None)
+  );
+  const Link := Acp.ConnectMessages(Options).Unwrap();
+  const Cancelled := Tasks.CreateCancellationSource();
+  discard Tasks.Cancel(Cancelled);
+  var Choices: array of Model.ModelChoice := [];
+  Test.AssertTrue(
+    Session.Exchange(
+      Link.Connection, 'initialize',
+      '{"protocolVersion":1,"clientInfo":{"name":"dungeon","version":"16a"},"clientCapabilities":{}}',
+      Tasks.GetCancellationToken(Cancelled), Time.MonotonicMillis() + 1000, '', var Choices
+    ) is Error(_)
+  );
+  Test.AssertTrue(Acp.TryTakeMessage(Link.Endpoint).Unwrap() is None);
+  Test.AssertTrue(Acp.State(Link.Connection).Unwrap().Lifecycle = Acp.Lifecycle.Uninitialized);
+  discard Acp.Close(Link.Connection).Unwrap();
+  discard Acp.Release(Link.Connection).Unwrap();
+  discard Fs.DeleteDirAll(Root).Unwrap();
+end.

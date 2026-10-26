@@ -1,0 +1,93 @@
+// Keyboard and native control events for agent choice, model browsing and explicit probe/save actions.
+unit Dungeon.Server.Console.Gamemaster.Input;
+
+uses
+  Dungeon.RuntimeData.Gamemaster as Settings, Dungeon.Server.Console.Gamemaster.Model as Model,
+  Std.Console as Console, Std.Math as Math, Std.Tui as Tui;
+
+// Keeps model lists finite on short terminals while preserving exact catalog indexes.
+public function PageSize(Height: integer): integer;
+begin
+  return Math.Clamp(Height - 16, 1, 12);
+end function;
+
+// Provider I/O is deferred to the console facade's background subscription.
+public function Update(State: Model.Draft; Msg: Tui.TuiMsg; ConfigPath: string; Height: integer; Cmd: Tui.TuiCmdOutput): Model.Draft;
+begin
+  const Rows := PageSize(Height);
+  case Msg of
+    when Tui.TuiMsg.QuitRequested:
+      return Model.Close(State);
+    when Tui.TuiMsg.FocusChanged(_, const Current):
+      case Current of
+        when Some(const Id):
+          if (Id.Value >= 60) and (Id.Value <= 69) then
+            return State with Focus := Id.Value; end with;
+          end if;
+        when None:
+          null;
+      end case;
+    when Tui.TuiMsg.SelectionChanged(const Source, const Action, const Row):
+      if (Source.Value = 62) and (Action.Value = 62) and (Row >= 0) and (Row < Rows) then
+        return Model.Browse(State, State.Row div Rows * Rows + Row);
+      end if;
+    when Tui.TuiMsg.Action(const Source, const Action):
+      if Source.Value <> Action.Value then
+        return State;
+      end if;
+
+      case Action.Value of
+        when 60:
+          return Model.Choose(State, Settings.ConnectionKind.Codex);
+        when 61:
+          return Model.Choose(State, Settings.ConnectionKind.Pi);
+        when 63:
+          return Model.Request(State with Acknowledged := false; end with, false);
+        when 64:
+          return Model.Request(State, true);
+        when 65:
+          return Model.Save(State, ConfigPath);
+        when 66:
+          return Model.Close(State);
+        when 67:
+          return State with Selection := Settings.Selection(); Choices := []; Acknowledged := true; Revision := State.Revision +
+            1; Pending := false; Ready := None; Message := 'Clear connection: Save to confirm'; end with;
+        when 68:
+          return Model.Browse(State, Math.Max(0, State.Row - Rows));
+        when 69:
+          return Model.Browse(State, Math.Min(State.Choices.Length() - 1, State.Row + Rows));
+        else
+          null;
+      end case;
+    when Tui.TuiMsg.Key(const Value):
+      const Key: Console.KeyEvent := Value;
+      if (Key.ctrl and ((Key.ch = 'c') or (Key.ch = 'C')))
+        or
+        (Key.alt and ((Key.ch = 'x') or (Key.ch = 'X')))
+      then
+        Cmd.Set(Tui.TuiCmd.Quit);
+        return Model.Close(State);
+      end if;
+
+      if Key.kind = Tui.TuiKeyKind.Escape then
+        return Model.Close(State);
+      end if;
+
+      if (Key.kind = Tui.TuiKeyKind.Enter) and (State.Focus = 62) and (State.Choices.Length() > 0) then
+        return Model.Request(Model.Browse(State, State.Row), false);
+      end if;
+
+      if Key.kind = Tui.TuiKeyKind.PageDown then
+        return Model.Browse(State, Math.Min(State.Choices.Length() - 1, State.Row + Rows));
+      end if;
+
+      if Key.kind = Tui.TuiKeyKind.PageUp then
+        return Model.Browse(State, Math.Max(0, State.Row - Rows));
+      end if;
+    when Tui.TuiMsg.Started, Tui.TuiMsg.Tick(_), Tui.TuiMsg.Resize(_), Tui.TuiMsg.Pointer(_), Tui.TuiMsg.ScrollChanged(_, _, _), Tui.TuiMsg.TextChanged(_, _, _, _), Tui.TuiMsg.TextAreaChanged(_, _, _, _, _), Tui.TuiMsg.CheckChanged(_, _, _), Tui.TuiMsg.MenuChanged(_, _, _), Tui.TuiMsg.BackgroundFailed(_, _, _, _, _, _):
+      null;
+  end case;
+
+  return State;
+end function;
+end unit;

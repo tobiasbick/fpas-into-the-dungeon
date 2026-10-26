@@ -1,100 +1,38 @@
-// Dashboard facade owning the server subscription, typed events and shared admission permit.
+// Public dashboard facade; the application owns channels, subscriptions and terminal lifetime.
 unit Dungeon.Server.Console;
 
-uses Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Input as InputUnit, Dungeon.Server.Console.View as ViewUnit, Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Tasks as Tasks, Std.Tui as Tui;
+uses
+  Dungeon.Server.Config as Config, Dungeon.Server.Console.Application as Application,
+  Dungeon.Server.Console.Model as Model, Dungeon.Server.Logging as Logging,
+  Std.Tasks as Tasks, Std.Tui as Tui;
 
-type ConsoleState = record
-  Model: ModelUnit.ConsoleModel;
-  Host: string;
-  Port: integer;
-  Config: ConfigUnit.ServerConfig;
-end record;
-
-// Public framework update seam; headless tests exercise the same keyboard/modal logic as the host.
-public function UpdateServerConsole(State: ModelUnit.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
+// Shared keyboard/modal update for consumers rendering the console model independently.
+public function UpdateServerConsole(State: Model.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): Model.ConsoleModel;
 begin
-  return InputUnit.UpdateDashboard(State, Msg, Cmd);
+  return Application.UpdateServerConsole(State, Msg, Cmd);
 end function;
 
-// Reports ordinary returned server errors explicitly; Result.Error is data, not a task failure.
-// Stop events clear console state after cancellation or listener failure, before the worker returns.
-public function RunConsoleListener(Host: string; Port: integer; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+// Listener failures and stops use the same explicit logging path as the interactive host.
+public function RunConsoleListener(Host: string; Port: integer; Value: Config.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  const Outcome := Server.RunServerWithCancellation(Host, Port, Config, Token);
-  Logging.LogServer(Config.Logs, 'stopped', 'Server stopped');
-  case Outcome of
-    when Error(const Reason):
-      Logging.LogServer(Config.Logs, 'error', Reason);
-    when Ok(_):
-      null;
-  end case;
-
-  return Outcome;
+  return Application.RunConsoleListener(Host, Port, Value, Token);
 end function;
 
-function UpdateConsole(State: ConsoleState; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ConsoleState;
+// Applies immutable diagnostic events without starting background work.
+public function UpdateServerConsoleEvent(State: Model.ConsoleModel; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): Model.ConsoleModel;
 begin
-  const Next := UpdateServerConsole(State.Model, Msg, Cmd);
-  if Msg is Tui.TuiMsg.Started then
-    const Host := State.Host;
-    const Port := State.Port;
-    const Config := State.Config;
-    Cmd.ReplaceSubscription(
-      1, function(Token: Tasks.CancellationToken): result of (boolean, string) begin
-        return RunConsoleListener(Host, Port, Config, Token);
-      end function
-    );
-  end if;
-
-  return State with Model := Next; end with;
+  return Application.UpdateServerConsoleEvent(State, Value, Cmd);
 end function;
 
-// The application-message update shares bounded logging and typed status application with tests.
-public function UpdateServerConsoleEvent(State: ModelUnit.ConsoleModel; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
+// Full-window dashboard with isolated settings and world management.
+public function ViewServerConsole(State: Model.ConsoleModel): Tui.TuiElement;
 begin
-  Cmd.Set(Tui.TuiCmd.NoCommand);
-  return ModelUnit.ApplyConsoleLog(State, Value);
+  return Application.ViewServerConsole(State);
 end function;
 
-function UpdateConsoleEvent(State: ConsoleState; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): ConsoleState;
+// Runs the native terminal host and joins every background operation before returning.
+public function RunServerConsole(Host: string; Port: integer; Value: Config.ServerConfig): integer;
 begin
-  return State with Model := UpdateServerConsoleEvent(State.Model, Value, Cmd); end with;
-end function;
-
-// Full-window responsive dashboard with native scroll/filter controls and optional settings modal.
-public function ViewServerConsole(State: ModelUnit.ConsoleModel): Tui.TuiElement;
-begin
-  return ViewUnit.ViewDashboard(State);
-end function;
-
-function ViewConsole(State: ConsoleState): Tui.TuiElement;
-begin
-  return ViewServerConsole(State.Model);
-end function;
-
-// Closing the dashboard cancels and joins both listener and active session; settings affect new worlds.
-public function RunServerConsole(Host: string; Port: integer; Config: ConfigUnit.ServerConfig): integer;
-begin
-  const Settings := RuntimeData.ReadServerDefaults(Config.ConfigPath).Unwrap();
-  const Events: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
-  const Permit: channel of boolean := Tasks.CreateChannel(1);
-  discard Tasks.Send(Permit, true);
-  const ManagedConfig := Config with Logs := Some(Events); AdmissionPermit := Some(Permit); end with;
-  var Model := ModelUnit.NewConsoleModel(Config.ConfigPath, Settings) with Port := Port; Width := Console.ScreenWidth(); Height := Console.ScreenHeight(); end with;
-
-  Model.Worlds.Config := Some(ManagedConfig);
-  const State := ConsoleState(
-    Model := Model, Host := Host, Port := Port, Config := ManagedConfig
-  );
-  discard Tui.TuiApplication.RunWithBackgroundAndPalette(
-    State,
-    Events,
-    UpdateConsole,
-    UpdateConsoleEvent,
-    ViewConsole,
-    ViewUnit.DashboardPalette()
-  );
-  discard Tasks.CloseChannel(Permit);
-  return 0;
+  return Application.RunServerConsole(Host, Port, Value);
 end function;
 end unit;

@@ -1,0 +1,90 @@
+// Global Gamemaster settings survive independent edits and reject obsolete or malformed files.
+program GamemasterConfigTest;
+
+uses
+  Dungeon.RuntimeData as Runtime, Dungeon.RuntimeData.Gamemaster as Gm,
+  Std.Fs as Fs, Std.Path as Path, Std.Test as Test, Std.Toml as Toml, Std.Toml.Fields as Fields;
+
+begin
+  const Root := Fs.CreateTempDir().Unwrap();
+  const First := Runtime.LoadServerRuntime(Some(Root)).Unwrap();
+  const Config := First.Paths.ServerConfig;
+  const Fresh := Fs.ReadText(Config).Unwrap();
+  Test.AssertEquals('none', Gm.ConnectionName(First.Gamemaster.Connection));
+  Test.AssertEquals('', First.Gamemaster.ModelId);
+  // Non-default unrelated fields catch accidental resets during either settings update.
+  var Existing := Fields.ParseTable(Fresh).Unwrap();
+  Existing['host'] := Toml.TomlValue.String('game.example');
+  Existing['port'] := Toml.TomlValue.Integer(5050);
+  Existing['world_id'] := Toml.TomlValue.String('chosen-world');
+  Existing['chunk_cache_limit'] := Toml.TomlValue.Integer(32);
+  Existing['max_view_width'] := Toml.TomlValue.Integer(96);
+  Existing['max_view_height'] := Toml.TomlValue.Integer(36);
+  Test.AssertTrue(
+    Fs.WriteTextAtomic(Config, Toml.Stringify(Toml.TomlValue.Table(Existing))).Unwrap()
+  );
+  const Selected := Gm.Selection(
+    Connection := Gm.ConnectionKind.Pi,
+    ModelId := 'local/Exact.Model-v2'
+  );
+  Test.AssertTrue(Runtime.SaveGamemaster(Config, Selected).Unwrap());
+  Test.AssertTrue(Runtime.SaveServerDefaults(Config, -25, 1).Unwrap());
+  const Loaded := Runtime.LoadServerRuntime(Some(Root)).Unwrap();
+  Test.AssertEquals(Selected.ModelId, Loaded.Gamemaster.ModelId);
+  Test.AssertEquals('pi', Gm.ConnectionName(Loaded.Gamemaster.Connection));
+  Test.AssertEquals(-25, Loaded.World.Seed);
+  Test.AssertEquals(1, Loaded.World.DungeonRegionChunks);
+  Test.AssertEquals('game.example', Loaded.Network.Host);
+  Test.AssertEquals(5050, Loaded.Network.Port);
+  Test.AssertEquals('chosen-world', Loaded.World.Id);
+  Test.AssertEquals(32, Loaded.World.ChunkCacheLimit);
+  Test.AssertEquals(96, Loaded.World.MaximumViewWidth);
+  Test.AssertEquals(36, Loaded.World.MaximumViewHeight);
+  const Other := Runtime.LoadServerRuntime(Some(Path.Join([Root, 'other']))).Unwrap();
+  Test.AssertEquals('none', Gm.ConnectionName(Other.Gamemaster.Connection));
+  Test.AssertTrue(Runtime.SaveGamemaster(Config, Gm.Selection()).Unwrap());
+  const Cleared := Runtime.LoadServerRuntime(Some(Root)).Unwrap();
+  Test.AssertEquals(-25, Cleared.World.Seed);
+  Test.AssertEquals('', Cleared.Gamemaster.ModelId);
+  Test.AssertEquals('game.example', Cleared.Network.Host);
+  Test.AssertEquals(5050, Cleared.Network.Port);
+  Test.AssertEquals('chosen-world', Cleared.World.Id);
+  Test.AssertEquals(32, Cleared.World.ChunkCacheLimit);
+  Test.AssertEquals(96, Cleared.World.MaximumViewWidth);
+  Test.AssertEquals(36, Cleared.World.MaximumViewHeight);
+  // Each mutation targets the current schema, not an unrelated missing-field failure.
+  for Invalid: string in [
+    Fresh.Replace('gamemaster_connection = "none"', ''),
+    Fresh.Replace('gamemaster_model = ""', ''),
+    Fresh.Replace('gamemaster_connection = "none"', 'gamemaster_connection = "unknown"'),
+    Fresh.Replace('gamemaster_connection = "none"', 'gamemaster_connection = "codex"'),
+    Fresh.Replace('gamemaster_model = ""', 'gamemaster_model = "unexpected"'),
+    Fresh.Replace('gamemaster_model = ""', 'gamemaster_model = 42'),
+    Fresh + string.Chr(10) + 'gamemaster_token = "obsolete"'
+  ] do
+    Test.AssertTrue(Fs.WriteTextAtomic(Config, Invalid).Unwrap());
+    case Runtime.LoadServerRuntime(Some(Root)) of
+      when Ok(_):
+        panic('Malformed Gamemaster configuration was accepted');
+      when Error(const Reason):
+        Test.AssertTrue('delete or recreate it' in Reason);
+    end case;
+
+    Test.AssertEquals(Invalid, Fs.ReadText(Config).Unwrap());
+  end for;
+
+  Test.AssertTrue(Fs.WriteTextAtomic(Config, Fresh).Unwrap());
+  for ModelId: string in ['', '   ', 'bad' + string.Chr(10), 'bad' + string.Chr(127)] do
+    Test.AssertTrue(
+      Runtime.SaveGamemaster(
+        Config,
+        Gm.Selection(Connection := Gm.ConnectionKind.Codex, ModelId := ModelId)
+      ) is Error(_)
+    );
+    Test.AssertEquals(Fresh, Fs.ReadText(Config).Unwrap());
+  end for;
+
+  Test.AssertTrue(Runtime.SaveGamemaster(First.Paths.Config, Selected) is Error(_));
+  Test.AssertEquals(Fresh, Fs.ReadText(Config).Unwrap());
+  Test.AssertTrue(Fs.DeleteDirAll(Root).Unwrap());
+end.

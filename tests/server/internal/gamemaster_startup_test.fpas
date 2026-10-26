@@ -1,0 +1,125 @@
+// Actual headless output and console listener events warn once while ordinary protocol access works.
+program GamemasterStartupTest;
+
+uses
+  Dungeon.RuntimeData as Runtime, Dungeon.RuntimeData.Gamemaster as Settings,
+  Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Log as Log,
+  Dungeon.Server.Config as Config, Dungeon.Server.Logging as Logging,
+  Dungeon.Protocol as Protocol, Dungeon.Test.Wire as Wire,
+  Std.Conv as Conv, Std.Fs as Fs, Std.Path as Path, Std.Proc as Proc,
+  Std.Net as Net, Std.Net.Utf8 as Utf8, Std.Tasks as Tasks, Std.Test as Test, Std.Time as Time;
+
+function FreePort(): integer;
+begin
+  const Reservation := Net.Listen('127.0.0.1', 0).Unwrap();
+  const Port := Net.ListenerLocalAddress(Reservation).Unwrap().Port;
+  discard Net.CloseListener(Reservation).Unwrap();
+  return Port;
+end function;
+
+procedure CheckClient(Port: integer);
+begin
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  const Client := Wire.ConnectClient(Port, Token);
+  Test.AssertTrue(Client.Last is Protocol.ServerMessage.Welcome(_, _));
+  const Listed := Wire.Exchange(Client, Protocol.ClientMessage.ListWorlds(0, false), Token);
+  Test.AssertTrue(Listed.Last is Protocol.ServerMessage.Worlds(_));
+  discard Net.Close(Client.Connection).Unwrap();
+end procedure;
+
+procedure Headless(Project: string; Root: string; Warn: boolean);
+begin
+  const Port := FreePort();
+  const Child := Proc.Start(
+    'fpas',
+    ['run', Project, '--', '--data-dir', Root, '127.0.0.1', Conv.IntToStr(Port)],
+    Proc.DefaultStartOptions()
+  ).Unwrap();
+  var Text := '';
+  var Errors := '';
+  const Deadline := Time.TimestampMillis() + 30000;
+  while Time.TimestampMillis() < Deadline do
+    case Proc.ReadStdout(Child, 16384).Unwrap() of
+      when Some(const Bytes):
+        Text := Text + Utf8.Decode(Bytes).Unwrap();
+      when None:
+        null;
+    end case;
+
+    case Proc.ReadStderr(Child, 16384).Unwrap() of
+      when Some(const Bytes):
+        Errors := Errors + Utf8.Decode(Bytes).Unwrap();
+      when None:
+        null;
+    end case;
+
+    if ('Listening on port' in Text) and (not Warn or ('-- --console' in Text)) then
+      break;
+    end if;
+
+    if Proc.TryWait(Child).Unwrap() is Some(_) then
+      break;
+    end if;
+
+    Time.Sleep(10);
+  end while;
+
+  Test.AssertEquals('', Errors);
+  Test.AssertTrue('Listening on port' in Text);
+  if Warn then
+    Test.AssertEquals(2, Text.Split('Gamemaster is not configured.').Length());
+    Test.AssertTrue('fpas run apps/server/server.fpasprj -- --console' in Text);
+    Test.AssertTrue('Reuse --data-dir PATH' in Text);
+  else
+    Test.AssertFalse('Gamemaster is not configured' in Text);
+  end if;
+
+  CheckClient(Port);
+  discard Proc.Close(Child).Unwrap();
+end procedure;
+
+begin
+  var Workspace := Fs.CurrentDir().Unwrap();
+  while not Fs.IsFile(Path.Join([Workspace, 'dungeon.fpasworkspace'])) do
+    Workspace := Path.DirName(Workspace);
+  end while;
+  const Root := Fs.CreateTempDir().Unwrap();
+  const Data := Runtime.LoadServerRuntime(Some(Root)).Unwrap();
+  const Project := Path.Join([Workspace, 'apps', 'server', 'server.fpasprj']);
+  Headless(Project, Root, true);
+  const Logs: channel of Logging.ServerLogEvent := Tasks.CreateChannel(16);
+  const Stop := Tasks.CreateCancellationSource();
+  const Token := Tasks.GetCancellationToken(Stop);
+  const Port := FreePort();
+  const Value := Config.ServerConfig(
+    ConfigPath := Data.Paths.ServerConfig, CacheRoot := Data.Paths.Cache,
+    Gamemaster := Some(Data.Gamemaster), Logs := Some(Logs), WorldsRoot := Data.Paths.Worlds,
+    WorldId := 'main', WorldSeed := 25, DungeonRegionChunks := 1, ChunkCacheLimit := 64,
+    MaximumViewWidth := 80, MaximumViewHeight := 24
+  );
+  scope
+    const Worker := go ConsoleUnit.RunConsoleListener('127.0.0.1', Port, Value, Token);
+    Test.AssertEquals('status', Tasks.ReceiveWithTimeout(Logs, 10000).Unwrap().Kind);
+    const Warning := Tasks.ReceiveWithTimeout(Logs, 10000).Unwrap();
+    Test.AssertEquals('warning', Warning.Kind);
+    Test.AssertTrue(Log.Severity(Warning) = Log.LogFilter.Warnings);
+    Test.AssertTrue('-- --console' in Warning.Text);
+    CheckClient(Port);
+    discard Tasks.Cancel(Stop);
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  discard Tasks.CloseChannel(Logs);
+  // A configured but unavailable model is loaded without starting or querying the agent.
+  discard Runtime.SaveGamemaster(
+    Data.Paths.ServerConfig,
+    Settings.Selection(
+      Connection := Settings.ConnectionKind.Codex,
+      ModelId := 'must-not-be-queried-on-startup'
+    )
+  ).Unwrap();
+  Headless(Project, Root, false);
+  Test.AssertEquals(0, Fs.ReadDir(Data.Paths.Worlds).Unwrap().Length());
+  discard Fs.DeleteDirAll(Root).Unwrap();
+end.

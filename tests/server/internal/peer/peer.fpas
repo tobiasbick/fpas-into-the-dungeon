@@ -1,0 +1,170 @@
+// Independent ACP process fixture: real HTTP tool calls or deliberately incomplete agent behavior.
+program GamemasterPeer;
+
+uses
+  Std.Args as Args, Std.Console as Console, Std.Json as Json, Std.Json.Fields as Fields,
+  Std.Fs as Fs, Std.Path as Path, Std.Http as Http, Std.Net.Utf8 as Utf8, Std.Time as Time;
+
+type ObjectValue = dict of string to Json.JsonValue;
+
+function Options(Current: string; Offered: string): string;
+begin
+  return '{"configOptions":[{"id":"model","name":"Model","type":"select","currentValue":' +
+    Json.Stringify(Json.JsonValue.String(Current)) + ',"options":[{"value":' +
+    Json.Stringify(Json.JsonValue.String(Offered)) + ',"name":"Scripted model"}]}]}';
+end function;
+
+procedure Reply(Id: string; ResultText: string);
+begin
+  Console.WriteLn('{"jsonrpc":"2.0","id":' + Id + ',"result":' + ResultText + '}');
+end procedure;
+
+function Post(Url: string; Headers: array of Http.Header; Body: string): string;
+begin
+  var Request := Http.Request.Create('POST', Url);
+  Request.Headers := Headers.Concat([
+    Http.Header.Create('Content-Type', 'application/json'),
+    Http.Header.Create('Accept', 'application/json, text/event-stream'),
+    Http.Header.Create('MCP-Protocol-Version', '2025-06-18')
+  ]);
+  Request.Body := Utf8.Encode(Body);
+  Request.TimeoutMillis := 5000;
+  return Http.BodyText(Http.Send(Request).Unwrap()).Unwrap();
+end function;
+
+begin
+  const Mode := Args.ParamStr(0);
+  var Url := '';
+  var Headers: array of Http.Header := [];
+  while true do
+    case Console.ReadLn() of
+      when None:
+        return;
+      when Some(const Line):
+        const Message := Fields.ParseObject(Line).Unwrap();
+        if not ('id' in Message) then
+          continue;
+        end if;
+        const Id := Json.Stringify(Message['id']);
+        const Method := Fields.StringField(Message, 'method').Unwrap();
+        const Params := Fields.ObjectField(Message, 'params').Unwrap();
+        case Method of
+          when 'initialize':
+            if Mode = 'stall' then
+              Time.Sleep(120000);
+            end if;
+
+            Reply(
+              Id,
+              '{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}},"agentInfo":{"name":"scripted","version":"1"}}'
+            );
+          when 'session/new':
+            if Mode = 'exit' then
+              return;
+            end if;
+            const Offered := if Mode = 'removed' then 'other-model' else 'fixture/local' end if;
+            if Mode = 'native' then
+              const Config := Fields.ParseObject(
+                Fs.ReadText(
+                  Path.Join([Fields.StringField(Params, 'cwd').Unwrap(), '.pi', 'mcp.json'])
+                ).Unwrap()
+              ).Unwrap();
+              const Tool := Fields.ObjectField(
+                Fields.ObjectField(Config, 'mcpServers').Unwrap(),
+                'dungeon'
+              ).Unwrap();
+              Url := Fields.StringField(Tool, 'url').Unwrap();
+              const Values := Fields.ObjectField(Tool, 'headers').Unwrap();
+              for Name: string in Values.Keys() do
+                Headers.PushInPlace(
+                  Http.Header.Create(Name, Fields.StringField(Values, Name).Unwrap())
+                );
+              end for;
+
+              if Fields.ArrayField(Params, 'mcpServers').Unwrap().Length() <> 0 then
+                panic('Native route must not receive descriptors');
+              end if;
+            else
+              const Descriptor := Fields.ParseObject(
+                Json.Stringify(Fields.ArrayField(Params, 'mcpServers').Unwrap()[0])
+              ).Unwrap();
+              Url := Fields.StringField(Descriptor, 'url').Unwrap();
+              for Value: Json.JsonValue in Fields.ArrayField(Descriptor, 'headers').Unwrap() do
+                const Header := Fields.ParseObject(Json.Stringify(Value)).Unwrap();
+                Headers.PushInPlace(
+                  Http.Header.Create(
+                    Fields.StringField(Header, 'name').Unwrap(),
+                    Fields.StringField(Header, 'value').Unwrap()
+                  )
+                );
+              end for;
+            end if;
+            const Config := Fields.ParseObject(Options(Offered, Offered)).Unwrap();
+            var Created := Config;
+            Created['sessionId'] := Json.JsonValue.String('scripted-session');
+            Reply(Id, Json.Stringify(Json.JsonValue.Object(Created)));
+          when 'session/set_config_option':
+            const Exact := Fields.StringField(Params, 'value').Unwrap();
+            Reply(
+              Id,
+              Options(if Mode = 'bad-ack' then 'substitute' else Exact end if, 'fixture/local')
+            );
+          when 'session/prompt':
+            if Mode <> 'text-only' then
+              const Prompt := Fields.ParseObject(
+                Json.Stringify(Fields.ArrayField(Params, 'prompt').Unwrap()[0])
+              ).Unwrap();
+              const Text := Fields.StringField(Prompt, 'text').Unwrap();
+              var Nonce := Text.Split('nonce ')[1].Split(' exactly')[0];
+              if Mode = 'wrong-nonce' then
+                Nonce := 'old-run';
+              end if;
+
+              discard Post(
+                Url,
+                Headers,
+                '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}'
+              );
+              discard Post(Url, Headers, '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+              discard Post(
+                Url,
+                Headers,
+                '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gamemaster_probe","arguments":{"nonce":' +
+                Json.Stringify(Json.JsonValue.String(Nonce)) + '}}}'
+              );
+            end if;
+
+            if Mode = 'changed-model' then
+              var Update := Fields.ParseObject(
+                '{"configOptions":[{"id":"model","name":"Model","type":"select","currentValue":"substitute","options":[{"value":"fixture/local","name":"Original"},{"value":"substitute","name":"Substitute"}]}]}'
+              ).Unwrap();
+              Update['sessionUpdate'] := Json.JsonValue.String('config_option_update');
+              Console.WriteLn(
+                Json.Stringify(
+                  Json.JsonValue.Object([
+                    'jsonrpc': Json.JsonValue.String('2.0'),
+                    'method': Json.JsonValue.String('session/update'),
+                    'params': Json.JsonValue.Object([
+                      'sessionId': Json.JsonValue.String('scripted-session'),
+                      'update': Json.JsonValue.Object(Update)
+                    ])
+                  ])
+                )
+              );
+            end if;
+
+            Reply(
+              Id,
+              '{"stopReason":' +
+              Json.Stringify(
+                Json.JsonValue.String(
+                  if Mode = 'failed-turn' then 'max_tokens' else 'end_turn' end if
+                )
+              ) + '}'
+            );
+          else
+            panic('Unexpected ACP method');
+        end case;
+    end case;
+  end while;
+end.

@@ -829,11 +829,35 @@ files after unsaved Start over. The original 15e save also loads unchanged.
 The temporary plan is removed. See the [contract](architecture/weather-and-world-response.md)
 and [running-game report](architecture/weather-and-world-response-acceptance.md).
 
-## 16. LLM integration — LATER
+## 16. LLM integration — IN PROGRESS
 
-LLM integration is explicitly postponed. Its authority boundaries, failure
-behavior, cost controls, and effect on deterministic game rules will be
-designed separately before implementation begins.
+A server-triggered Gamemaster creates content when game events require it.
+The player does not chat with it. ACP connects the server to the selected
+agent; embedded MCP exposes game tools. The server validates a complete
+content draft before publication. Authority over game rules and stored state
+remains with the server.
+
+This stage is split into small substages. 16a implements the connection;
+event triggers, full game-data queries, dungeon/NPC/village creation, content
+validation, persistence and generation cost controls receive later plans.
+
+### 16a. Gamemaster connection and model selection — IMPLEMENTED, ACCEPTANCE PENDING
+
+Choose Codex or Pi and then an advertised model in the server console.
+Save one selection in the server configuration for all worlds in that data
+root. An unconfigured server warns in both startup modes; headless output
+explains how to start with `-- --console`.
+
+The ordered [16a plan](plans/16a-gamemaster-connection.md) covers current-schema
+settings, model discovery, an explicit harmless MCP tool test, responsive TUI,
+startup diagnostics and real acceptance of both adapters. Pi uses its native
+MCP support through a managed directory and process-scoped trust launcher.
+Both live adapter routes passed the production console flow; see the
+[connection contract](architecture/gamemaster-connection.md),
+[acceptance evidence](architecture/gamemaster-connection-acceptance.md) and
+[Set up Pi](setup/pi.md). The plan remains until user acceptance.
+Gameplay generation and world/save/protocol
+formats remain unchanged in this substage.
 
 ## 17. Multiplayer behavior — LATER
 

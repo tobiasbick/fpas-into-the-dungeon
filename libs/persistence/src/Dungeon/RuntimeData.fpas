@@ -1,7 +1,7 @@
 // Runtime paths plus persistent client-network and server-world configuration.
 unit Dungeon.RuntimeData;
 
-uses Std.Env as Env, Std.Fs as Fs, Std.Path as PathOps, Std.Toml as Toml, Std.Toml.Fields as TomlFields;
+uses Dungeon.RuntimeData.Gamemaster as Gamemaster, Std.Env as Env, Std.Fs as Fs, Std.Path as PathOps, Std.Toml as Toml, Std.Toml.Fields as TomlFields;
 
 // Renders typed library failures at this unit's application-owned text boundary.
 function FailureMessage<E: Error>(Cause: E): string;
@@ -24,7 +24,7 @@ const ServerConfigFields: array of string := [
   'dungeon_region_chunks',
   'chunk_cache_limit',
   'max_view_width',
-  'max_view_height'
+  'max_view_height', 'gamemaster_connection', 'gamemaster_model'
 ];
 
 // Validated endpoint configuration shared by client and server startup.
@@ -67,6 +67,7 @@ public type RuntimeSettings = record
   public Network: NetworkConfig;
   public World: ServerWorldConfig;
   public Preferences: ClientPreferences;
+  public Gamemaster: Gamemaster.Selection;
 end record;
 
 function DefaultNetworkConfig(): NetworkConfig;
@@ -186,7 +187,7 @@ begin
   );
 end function;
 
-function EncodeServerConfig(Network: NetworkConfig; World: ServerWorldConfig): string;
+function EncodeServerConfig(Network: NetworkConfig; World: ServerWorldConfig; Agent: Gamemaster.Selection): string;
 begin
   return Toml.Stringify(
     Toml.TomlValue.Table([
@@ -197,7 +198,9 @@ begin
       'dungeon_region_chunks': Toml.TomlValue.Integer(World.DungeonRegionChunks),
       'chunk_cache_limit': Toml.TomlValue.Integer(World.ChunkCacheLimit),
       'max_view_width': Toml.TomlValue.Integer(World.MaximumViewWidth),
-      'max_view_height': Toml.TomlValue.Integer(World.MaximumViewHeight)
+      'max_view_height': Toml.TomlValue.Integer(World.MaximumViewHeight),
+      'gamemaster_connection': Toml.TomlValue.String(Gamemaster.ConnectionName(Agent.Connection)),
+      'gamemaster_model': Toml.TomlValue.String(Agent.ModelId)
     ])
   );
 end function;
@@ -240,7 +243,10 @@ begin
     end;
   end if;
 
-  return Fs.WriteTextAtomic(Path, EncodeServerConfig(Network, World)).MapError(FailureMessage);
+  return Fs.WriteTextAtomic(
+    Path,
+    EncodeServerConfig(Network, World, Gamemaster.Selection())
+  ).MapError(FailureMessage);
 end function;
 
 function PrepareShared(Paths: RuntimePaths): result of (boolean, string);
@@ -262,6 +268,7 @@ end record;
 type ServerFileConfig = record
   Network: NetworkConfig;
   World: ServerWorldConfig;
+  Gamemaster: Gamemaster.Selection;
 end record;
 
 // Adds the file path and recovery guidance to one configuration error.
@@ -393,7 +400,12 @@ begin
     end;
   end if;
 
-  return Ok(ServerFileConfig(Network := try ReadNetworkConfig(Fields), World := World));
+  return Ok(
+    ServerFileConfig(
+      Network := try ReadNetworkConfig(Fields), World := World,
+      Gamemaster := try Gamemaster.Decode(Fields)
+    )
+  );
 end function;
 
 // Reads and validates server.toml; every error names the file and how to recover.
@@ -427,7 +439,7 @@ begin
       Paths := Paths,
       Network := Config.Network,
       World := DefaultServerWorldConfig(),
-      Preferences := Config.Preferences
+      Preferences := Config.Preferences, Gamemaster := Gamemaster.Selection()
     )
   );
 end function;
@@ -436,6 +448,23 @@ end function;
 public function ReadServerDefaults(Path: string): result of (ServerWorldConfig, string);
 begin
   return Ok((try ReadServerConfig(Path)).World);
+end function;
+
+// Reads the global selection without creating files, querying agents or loading a world.
+public function ReadGamemaster(Path: string): result of (Gamemaster.Selection, string);
+begin
+  return Ok((try ReadServerConfig(Path)).Gamemaster);
+end function;
+
+// Atomically replaces only the global selection, preserving all other current server settings.
+public function SaveGamemaster(Path: string; Value: Gamemaster.Selection): result of (boolean, string);
+begin
+  discard try Gamemaster.Validate(Value);
+  const Current := try ReadServerConfig(Path);
+  return Fs.WriteTextAtomic(
+    Path,
+    EncodeServerConfig(Current.Network, Current.World, Value)
+  ).MapError(FailureMessage);
 end function;
 
 // Atomically edits only new-world defaults; endpoint, selection, and viewport policy stay intact.
@@ -447,7 +476,8 @@ begin
     Path,
     EncodeServerConfig(
       Current.Network,
-      Current.World with Seed := Seed; DungeonRegionChunks := RegionChunks; end with
+      Current.World with Seed := Seed; DungeonRegionChunks := RegionChunks; end with,
+      Current.Gamemaster
     )
   ).MapError(FailureMessage);
 end function;
@@ -479,7 +509,7 @@ begin
       Paths := Paths,
       Network := Config.Network,
       World := Config.World,
-      Preferences := DefaultClientPreferences()
+      Preferences := DefaultClientPreferences(), Gamemaster := Config.Gamemaster
     )
   );
 end function;

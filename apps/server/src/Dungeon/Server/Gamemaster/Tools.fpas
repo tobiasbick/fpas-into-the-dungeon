@@ -1,0 +1,98 @@
+// One read-only diagnostic tool shared by every adapter; no gameplay resources enter its closure.
+unit Dungeon.Server.Gamemaster.Tools;
+
+uses Std.Mcp as Mcp, Std.Json as Json, Std.Tasks as Tasks;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+// Creates an operation-owned server. Only its expected nonce can produce the observed receipt.
+public function Create(Nonce: string; Seen: channel of boolean): result of (Mcp.Server, string);
+begin
+  const Server := try Mcp.Create(Mcp.DefaultLimits()).MapError(FailureMessage);
+  const Expected := Json.Stringify(Json.JsonValue.String(Nonce));
+  const Handler: Mcp.ToolHandler := function(Context: Mcp.RequestContext; Arguments: Mcp.RawJson): result of (Mcp.ToolResult, Mcp.McpError) begin
+    case Mcp.JsonMember(Arguments, 'nonce') of
+      when Error(_), Ok(None):
+        return Ok(Mcp.ErrorResult('Missing nonce'));
+      when Ok(Some(const Value)):
+        if Value.Text <> Expected then
+          return Ok(Mcp.ErrorResult('Wrong or stale nonce'));
+        end if;
+    end case;
+
+    discard Tasks.TrySend(Seen, true);
+    return Mcp.StructuredResult(
+      Mcp.ParseJson('{"nonce":' + Expected + ',"service":"dungeon"}').Unwrap()
+    );
+  end function;
+  const Registered := Mcp.RegisterTool(
+    Server, Mcp.ToolDefinition(
+      Name := 'gamemaster_probe',
+      Description := 'Read-only game connection check; returns the supplied nonce.',
+      InputSchema := Mcp.ParseJson(
+        '{"type":"object","properties":{"nonce":{"type":"string","minLength":1,"maxLength":64}},"required":["nonce"],"additionalProperties":false}'
+      ).Unwrap(),
+      OutputSchema := None,
+      Annotations := Some(
+        Mcp.ParseJson(
+          '{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}'
+        ).Unwrap()
+      ), Meta := None
+    ), Handler
+  );
+  case Registered of
+    when Ok(_):
+      return Ok(Server);
+    when Error(const Cause):
+      discard Mcp.Close(Server);
+      discard Mcp.Release(Server);
+      return Error(Cause.Message());
+  end case;
+end function;
+
+// Codex receives an ACP HTTP descriptor; authentication is never added to UI results or logs.
+public function Descriptor(Access: Mcp.HttpAccess): string;
+begin
+  var Headers: array of Json.JsonValue := [];
+  for Header: Mcp.HttpHeader in Access.Headers do
+    Headers.PushInPlace(
+      Json.JsonValue.Object([
+        'name': Json.JsonValue.String(Header.Name),
+        'value': Json.JsonValue.String(Header.Value)
+      ])
+    );
+  end for;
+
+  return Json.Stringify(
+    Json.JsonValue.ArrayValue([
+      Json.JsonValue.Object([
+        'name': Json.JsonValue.String('dungeon'), 'type': Json.JsonValue.String('http'),
+        'url': Json.JsonValue.String(Access.Url), 'headers': Json.JsonValue.ArrayValue(Headers)
+      ])
+    ])
+  );
+end function;
+
+// Pi reads the same endpoint through its native project configuration in the private cwd.
+public function PiConfig(Access: Mcp.HttpAccess): string;
+begin
+  var Headers: dict of string to Json.JsonValue := [:];
+  for Header: Mcp.HttpHeader in Access.Headers do
+    Headers[Header.Name] := Json.JsonValue.String(Header.Value);
+  end for;
+
+  return Json.Stringify(
+    Json.JsonValue.Object([
+      'mcpServers': Json.JsonValue.Object([
+        'dungeon': Json.JsonValue.Object([
+          'url': Json.JsonValue.String(Access.Url), 'headers': Json.JsonValue.Object(Headers),
+          'exposure': Json.JsonValue.String('direct')
+        ])
+      ])
+    ])
+  );
+end function;
+end unit;

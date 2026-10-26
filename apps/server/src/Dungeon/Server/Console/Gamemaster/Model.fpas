@@ -1,0 +1,177 @@
+// Draft-only Gamemaster settings and revision-checked background results for the server console.
+unit Dungeon.Server.Console.Gamemaster.Model;
+
+uses
+  Dungeon.RuntimeData as Runtime, Dungeon.RuntimeData.Gamemaster as Settings,
+  Dungeon.Server.Gamemaster.Model as Work, Dungeon.Server.Gamemaster.Models as Models;
+
+// Provider work is requested by revision; the console facade owns its cancellable subscription.
+public type Draft = record
+  public Saved: Settings.Selection;
+  public Selection: Settings.Selection;
+  public Choices: array of Work.ModelChoice;
+  public Ready: option of Settings.Selection := None;
+  public Open: boolean := false;
+  public Revision: integer := 0;
+  public Pending: boolean := false;
+  public Probe: boolean := false;
+  public Acknowledged: boolean := false;
+  public Row: integer := 0;
+  public Focus: integer := 60;
+  public Message: string := '';
+end record;
+
+// Empty catalogs are not persisted; a stored selection starts unchecked on every server run.
+public function NewDraft(Saved: Settings.Selection): Draft;
+begin
+  return Draft(Saved := Saved, Selection := Saved, Choices := []);
+end function;
+
+// Exact identities are kept separate from friendly display labels.
+public function Same(Left: Settings.Selection; Right: Settings.Selection): boolean;
+begin
+  return (Left.Connection = Right.Connection) and (Left.ModelId = Right.ModelId);
+end function;
+
+// Changes invalidate all pending receipts before starting new work.
+public function Request(State: Draft; Probe: boolean): Draft;
+begin
+  if State.Selection.Connection = Settings.ConnectionKind.Unconfigured then
+    return State;
+  end if;
+
+  if Probe and (State.Selection.ModelId = '') then
+    return State with Message := 'Choose a model first'; end with;
+  end if;
+
+  return State with Revision := State.Revision + 1; Pending := true; Probe := Probe; Ready := None; Message := if Probe then 'Testing connection...'
+    else 'Loading models...'
+    end if; end with;
+end function;
+
+// Opens a fresh draft; setup queries models but makes no model prompt.
+public function Open(State: Draft): Draft;
+begin
+  const Next := State with Open := true; Selection := State.Saved; Choices := []; Acknowledged := false; Row := 0; Focus := 60; Message := ''; end with;
+
+  return Request(Next, false);
+end function;
+
+// Switching adapters discards the draft model instead of silently selecting another one.
+public function Choose(State: Draft; Kind: Settings.ConnectionKind): Draft;
+begin
+  return Request(
+    State with Selection := Settings.Selection(Connection := Kind); Choices := []; Acknowledged := false; Row := 0; Ready := None; end with,
+    false
+  );
+end function;
+
+// Arrow browsing changes only the draft; Enter applies the chosen exact ID in the agent.
+public function Browse(State: Draft; Row: integer): Draft;
+begin
+  if (Row < 0) or (Row >= State.Choices.Length()) then
+    return State;
+  end if;
+
+  return State with Selection := State.Selection with ModelId := State.Choices[Row].Id; end with; Row := Row; Revision := State.Revision +
+    1; Pending := false; Acknowledged := false; Ready := None; Message := 'Press Enter to apply this model, or Test connection'; end with;
+end function;
+
+// Closing invalidates late results and requests subscription cancellation through the revision.
+public function Close(State: Draft): Draft;
+begin
+  return State with Open := false; Pending := false; Revision := State.Revision + 1; Selection := State.Saved; Choices := []; Acknowledged := false; Message := ''; end with;
+end function;
+
+// Only the current open draft may receive a result; an old successful probe never restores readiness.
+public function Apply(State: Draft; Value: Work.Completion): Draft;
+begin
+  if not State.Open or (Value.Revision <> State.Revision)
+    or
+    not Same(Value.Selection, State.Selection)
+  then
+    return State;
+  end if;
+  var Next := State with Pending := false; Message := ''; end with;
+
+  case Value.Outcome of
+    when Error(const Reason):
+      return Next with Message := Reason; Ready := None; Acknowledged := false; end with;
+    when Ok(const Catalog):
+      Next.Choices := Catalog.Models;
+      Next.Acknowledged := Catalog.Acknowledged;
+      Next.Row := 0;
+      if (Next.Focus = 60) or (Next.Focus = 61) then
+        Next.Focus := 62;
+      end if;
+
+      for Index: integer := 0 to Catalog.Models.Length() - 1 do
+        if Catalog.Models[Index].Id = State.Selection.ModelId then
+          Next.Row := Index;
+        end if;
+      end for;
+
+      if Catalog.Probed then
+        Next.Ready := Some(State.Selection);
+        Next.Message := 'Ready: real MCP tool call verified';
+      elsif Catalog.Acknowledged then
+        Next.Message := 'Model applied; Save or Test connection';
+      else
+        Next.Message := 'Choose a model with arrows; Enter applies it';
+        if (State.Selection.ModelId <> '')
+          and
+          not Models.Contains(Catalog.Models, State.Selection.ModelId)
+        then
+          Next.Message := 'Saved model unavailable; choose another explicitly';
+        end if;
+      end if;
+
+      return Next;
+  end case;
+end function;
+
+// Save never starts a model request and never publishes an unresolved selection.
+public function Save(State: Draft; ConfigPath: string): Draft;
+begin
+  if State.Pending then
+    return State;
+  end if;
+
+  if State.Selection.Connection <> Settings.ConnectionKind.Unconfigured then
+    if not State.Acknowledged or not Models.Contains(State.Choices, State.Selection.ModelId) then
+      return State with Message := 'Apply an available model before saving'; end with;
+    end if;
+  end if;
+
+  case Runtime.SaveGamemaster(ConfigPath, State.Selection) of
+    when Error(const Reason):
+      return State with Message := Reason; end with;
+    when Ok(_):
+      return Close(State with Saved := State.Selection; end with);
+  end case;
+end function;
+
+// Status describes the saved choice; readiness is transient and tied to that exact pair.
+public function Status(State: Draft): string;
+begin
+  if State.Pending and State.Probe then
+    return 'Testing';
+  end if;
+
+  if State.Saved.Connection = Settings.ConnectionKind.Unconfigured then
+    return 'Not configured (F2)';
+  end if;
+
+  case State.Ready of
+    when Some(const Value):
+      if Same(Value, State.Saved) then
+        return 'Ready';
+      end if;
+    when None:
+      null;
+  end case;
+
+  return 'Configured: ' + Settings.ConnectionName(State.Saved.Connection) + ' / ' +
+    State.Saved.ModelId;
+end function;
+end unit;

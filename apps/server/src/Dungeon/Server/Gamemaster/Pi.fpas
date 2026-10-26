@@ -1,0 +1,105 @@
+// Native Pi MCP configuration and a cached FPAS launcher with directory-scoped trust.
+unit Dungeon.Server.Gamemaster.Pi;
+
+uses
+  Dungeon.Server.Gamemaster.Presets as Presets, Std.Acp as Acp,
+  Std.Fs as Fs, Std.Path as Path, Std.Proc as Proc, Std.Tasks as Tasks;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+function LauncherSource(): result of (string, string);
+begin
+  var Directory := try Fs.CurrentDir().MapError(FailureMessage);
+  while Directory <> '' do
+    const Candidate := Path.Join([Directory, 'tools', 'pi-launcher', 'src', 'pi_launcher.fpas']);
+    if Fs.IsFile(Candidate) then
+      return Ok(Candidate);
+    end if;
+    const Parent := Path.DirName(Directory);
+    if Parent = Directory then
+      break;
+    end if;
+
+    Directory := Parent;
+  end while;
+
+  return Error('Pi bootstrap source is missing; start the server from the game repository');
+end function;
+
+function BuildLauncher(Cache: string; Token: Tasks.CancellationToken): result of (string, string);
+begin
+  const Source := try LauncherSource();
+  const Compiler := try Presets.Command('fpas');
+  const Directory := Path.Join([Cache, 'pi-launcher']);
+  discard try Fs.CreateDirAll(Directory).MapError(FailureMessage);
+  const Target := Path.Join([
+    Directory,
+    'dungeon-pi-launcher' + if Presets.WindowsHost() then '.exe' else '' end if
+  ]);
+  const StagedSource := Path.Join([Directory, 'main.fpas']);
+  if Fs.IsFile(Target) and Fs.IsFile(StagedSource) then
+    if (try Fs.ReadText(Source).MapError(FailureMessage)) =
+      (try Fs.ReadText(StagedSource).MapError(FailureMessage))
+    then
+      if (try Fs.ModifiedTime(Target).MapError(FailureMessage)) >=
+        (try Fs.ModifiedTime(Compiler).MapError(FailureMessage))
+      then
+        return Ok(Target);
+      end if;
+    end if;
+  end if;
+
+  discard try Fs.CopyFile(Source, StagedSource).MapError(FailureMessage);
+  const Project := Path.Join([Directory, 'launcher.fpasprj']);
+  discard try Fs.WriteTextAtomic(
+    Project, '[project]' + string.Chr(10) + 'name = "dungeon-pi-launcher"' + string.Chr(10) +
+    'kind = "program"' + string.Chr(10) + 'main = "main.fpas"' + string.Chr(10) + '[sources]' +
+    string.Chr(10) + 'include = ["main.fpas"]' + string.Chr(10)
+  ).MapError(FailureMessage);
+  var Options := Proc.DefaultOptions();
+  Options.TimeoutMillis := Some(60000);
+  Options.CancellationToken := Some(Token);
+  const Built := try Proc.RunCaptureWithOptions(
+    Compiler,
+    ['build', '--executable', Project],
+    Options
+  ).MapError(FailureMessage);
+  if Built.ExitCode <> 0 then
+    return Error('Cannot build the managed FPAS Pi launcher');
+  end if;
+
+  return Ok(Target);
+end function;
+
+// Overrides only the child launch environment; never changes personal provider, MCP or trust files.
+public function Prepare(
+  Launch: Acp.Launch; Cache: string; Root: string; Nonce: string; NativeConfig: string;
+  Token: Tasks.CancellationToken
+): result of (Acp.Launch, string);
+begin
+  const RealPi := try Presets.Pi();
+  const Launcher := try BuildLauncher(Cache, Token);
+  discard try Fs.CreateDirAll(Path.Join([Root, '.pi'])).MapError(FailureMessage);
+  discard try Fs.WriteTextAtomic(
+    Path.Join([Root, '.pi', 'mcp.json']),
+    NativeConfig
+  ).MapError(FailureMessage);
+  var Environment := Launch.Environment.Concat([
+    Acp.EnvironmentVariable(Name := 'PI_ACP_PI_COMMAND', Value := Some(Launcher)),
+    Acp.EnvironmentVariable(Name := 'DUNGEON_PI_COMMAND', Value := Some(RealPi.Command)),
+    Acp.EnvironmentVariable(Name := 'DUNGEON_PI_SESSION', Value := Some(Nonce))
+  ]);
+  if RealPi.Arguments.Length() > 0 then
+    Environment.PushInPlace(
+      Acp.EnvironmentVariable(Name := 'DUNGEON_PI_ENTRY', Value := Some(RealPi.Arguments[0]))
+    );
+  else
+    Environment.PushInPlace(Acp.EnvironmentVariable(Name := 'DUNGEON_PI_ENTRY', Value := None));
+  end if;
+
+  return Ok(Launch with Environment := Environment; end with);
+end function;
+end unit;

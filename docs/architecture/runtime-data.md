@@ -62,7 +62,15 @@ dungeon_region_chunks = 4
 chunk_cache_limit = 64
 max_view_width = 240
 max_view_height = 120
+gamemaster_connection = "none"
+gamemaster_model = ""
 ```
+
+The Gamemaster pair is global across worlds in this data root. Configure it in
+the server's F2 settings; see [Gamemaster connection](gamemaster-connection.md).
+Both fields are mandatory in the current schema. An unconfigured pair warns
+without blocking listening; startup loads a configured pair without querying
+its agent. Readiness and temporary MCP credentials are not persisted here.
 
 `world_seed` is a signed 32-bit creation default (-2147483648 through
 2147483647). `dungeon_region_chunks` (1 through 16) sets the side length of entrance regions

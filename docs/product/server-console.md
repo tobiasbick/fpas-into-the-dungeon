@@ -3,7 +3,7 @@
 Start the server with `fpas run apps/server/server.fpasprj -- --console`.
 The console uses the full terminal window. Without the option the server keeps
 its headless text output. Closing the console cancels and joins its listener
-and connected session; it does not save gameplay implicitly.
+and connected session, plus any Gamemaster work; it does not save gameplay implicitly.
 
 ## Dashboard
 
@@ -39,7 +39,7 @@ connection exclusion and confirmation rules still apply.
 
 The large **Live log / UTC** panel fills the remaining space. It displays
 timestamp, severity and text, with a scrollbar and All, Info, Warnings and
-Errors filters. Rejected requests are warnings. Filters preserve the shared
+Errors filters. Rejected requests and startup warnings are warnings. Filters preserve the shared
 history of 128 entries; older entries are evicted. Unknown kinds are info.
 Control characters are replaced by spaces and each diagnostic is limited to
 256 characters, so one event cannot inject extra terminal rows.
@@ -76,12 +76,30 @@ safely rather than allocating negative layout dimensions.
 - F3 cycles All, Info, Warnings and Errors; the buttons select a filter directly.
 - F2 opens Settings. Seed and entrance-region defaults are validated and saved
   atomically to the current `server.toml`; existing world parameters remain fixed.
+  **Gamemaster settings** selects Codex or Pi and an advertised model globally.
 - F4 or Worlds opens the world list, including incompatible worlds and their save status.
 - Escape closes Settings. Settings capture focus and block log/filter commands.
 - Alt+X, Ctrl+C and Stop server close the console and its owned server tasks.
 
 The dashboard is a server administration view. It has no controls for moving the
 player, editing world parameters or bypassing gameplay save/discard guards.
+
+## Gamemaster settings
+
+Choose a connection, browse its model list with arrows, and press Enter to apply
+the exact highlighted model. Previous/Next page through long catalogs. Refresh
+reloads availability; a missing saved model is never replaced automatically.
+Test connection sends a real model request and may use quota. Ready requires an
+actual read-only MCP callback and a completed model turn. Save stores only the
+acknowledged connection/model pair. Clear takes effect only after Save.
+
+Escape or Cancel discards the draft and cancels pending work. Discovery, testing
+and cancellation remain asynchronous. Replaced or closed drafts reject late
+results. Closing the application joins the listener and all provider work.
+The footer shows Not configured, Configured, Testing or Ready. Restart clears
+readiness. An unconfigured startup warns and still accepts normal game clients.
+See [Gamemaster connection](../architecture/gamemaster-connection.md) and
+[Set up Pi](../setup/pi.md).
 
 ## Deleting worlds
 

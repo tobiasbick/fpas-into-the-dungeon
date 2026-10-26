@@ -1,0 +1,179 @@
+// Real settings input/rendering and draft publication reject stale results and failed writes.
+program GamemasterConsoleTest;
+
+uses
+  Dungeon.RuntimeData as Runtime, Dungeon.RuntimeData.Gamemaster as Settings,
+  Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Model as ConsoleModel,
+  Dungeon.Server.Console.Gamemaster.Model as Model, Dungeon.Server.Gamemaster.Model as Work,
+  Std.Fs as Fs, Std.Console as Console, Std.Tasks as Tasks, Std.Test as Test, Std.Tui as Tui;
+
+function Action(Id: integer): Tui.TuiMsg;
+begin
+  return Tui.TuiMsg.Action(Tui.TuiControlId.Create(Id), Tui.TuiAction.Create(Id));
+end function;
+
+function Contains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
+begin
+  for Row: integer := 0 to Snapshot.Height - 1 do
+    if Text in Snapshot.LineAt(Row) then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+begin
+  const Root := Fs.CreateTempDir().Unwrap();
+  const Data := Runtime.LoadServerRuntime(Some(Root)).Unwrap();
+  var State := ConsoleModel.NewConsoleModel(Data.Paths.ServerConfig, Data.World);
+  const Before := Fs.ReadText(Data.Paths.ServerConfig).Unwrap();
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(100, 30));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Not configured (F2)'));
+  App.Inject(Action(1));
+  App.Inject(Action(6));
+  App.Inject(Action(61));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    3,
+    0
+  );
+  Test.AssertTrue(State.Gamemaster.Open);
+  Test.AssertTrue(State.Gamemaster.Pending);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Loading models'));
+  const Old := State.Gamemaster;
+  App.Inject(Action(60));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  const Delayed := Work.Completion(
+    Revision := Old.Revision, Selection := Old.Selection,
+    Outcome := Ok(
+      Work.Catalog(
+        Models := [Work.ModelChoice(Id := 'old', LabelText := 'Old')],
+        Acknowledged := true,
+        Probed := true
+      )
+    )
+  );
+  State.Gamemaster := Model.Apply(State.Gamemaster, Delayed);
+  Test.AssertEquals(0, State.Gamemaster.Choices.Length());
+  Test.AssertTrue(State.Gamemaster.Ready is None);
+  const Choices := [Work.ModelChoice(Id := 'Exact/opaque-ID', LabelText := 'Friendly model')];
+  State.Gamemaster := Model.Apply(
+    State.Gamemaster, Work.Completion(
+      Revision := State.Gamemaster.Revision,
+      Selection := State.Gamemaster.Selection,
+      Outcome := Ok(Work.Catalog(Models := Choices, Acknowledged := false))
+    )
+  );
+  State.FocusedControl := State.Gamemaster.Focus;
+  App.InjectKeyForTest(
+    Console.KeyEvent(
+      kind := Tui.TuiKeyKind.Enter,
+      ch := '',
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertEquals('Exact/opaque-ID', State.Gamemaster.Selection.ModelId);
+  State.Gamemaster := Model.Apply(
+    State.Gamemaster, Work.Completion(
+      Revision := State.Gamemaster.Revision,
+      Selection := State.Gamemaster.Selection,
+      Outcome := Ok(Work.Catalog(Models := Choices, Acknowledged := true))
+    )
+  );
+  const Failed := Model.Save(State.Gamemaster, Data.Paths.Config);
+  Test.AssertTrue(Failed.Open);
+  Test.AssertTrue(Failed.Message <> '');
+  Test.AssertEquals(Before, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
+  App.Inject(Action(65));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertFalse(State.Gamemaster.Open);
+  Test.AssertEquals(
+    'Exact/opaque-ID',
+    Runtime.ReadGamemaster(Data.Paths.ServerConfig).Unwrap().ModelId
+  );
+  Test.AssertTrue('Configured' in Model.Status(State.Gamemaster));
+  const Closed := Model.Apply(Model.Close(Old), Delayed);
+  Test.AssertFalse(Closed.Open);
+  Test.AssertTrue(Closed.Ready is None);
+  // A removed saved model remains visible as unavailable while the fresh catalog offers replacements.
+  var Missing := Model.Open(State.Gamemaster);
+  Missing := Model.Apply(
+    Missing, Work.Completion(
+      Revision := Missing.Revision, Selection := Missing.Selection,
+      Outcome := Ok(
+        Work.Catalog(
+          Models := [Work.ModelChoice(Id := 'other', LabelText := 'Other')],
+          Acknowledged := false
+        )
+      )
+    )
+  );
+  Test.AssertTrue('unavailable' in Missing.Message);
+  Test.AssertFalse(Missing.Acknowledged);
+  State.Gamemaster := Missing;
+  State.FocusedControl := Missing.Focus;
+  for Size: Tui.TuiSize in [
+    Tui.TuiSize.Create(38, 16),
+    Tui.TuiSize.Create(76, 24),
+    Tui.TuiSize.Create(120, 40)
+  ] do
+    App.Inject(Tui.TuiMsg.Resize(Size));
+    State := App.RunIterations(
+      State,
+      ConsoleUnit.UpdateServerConsole,
+      ConsoleUnit.ViewServerConsole,
+      1,
+      0
+    );
+    Test.AssertTrue(State.Gamemaster.Open);
+    Test.AssertFalse(State.Gamemaster.Pending);
+  end for;
+
+  App.Inject(Action(67));
+  App.Inject(Action(65));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    2,
+    0
+  );
+  Test.AssertEquals(
+    'none',
+    Settings.ConnectionName(Runtime.ReadGamemaster(Data.Paths.ServerConfig).Unwrap().Connection)
+  );
+  App.Close();
+  discard Fs.DeleteDirAll(Root).Unwrap();
+end.

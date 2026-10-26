@@ -1,0 +1,90 @@
+// Global agent selection and strict current-schema TOML fields, independent of gameplay.
+unit Dungeon.RuntimeData.Gamemaster;
+
+uses Std.Toml as Toml, Std.Toml.Fields as Fields;
+
+// Installed adapter presets; Unconfigured never starts an agent.
+public type ConnectionKind = enum
+  Unconfigured;
+  Codex;
+  Pi;
+end enum;
+
+// Exact opaque model identity, shared by all worlds within one server data root.
+public type Selection = record
+  public Connection: ConnectionKind := ConnectionKind.Unconfigured;
+  public ModelId: string := '';
+end record;
+
+// Stable persisted names; display labels do not identify a model or adapter.
+public function ConnectionName(Kind: ConnectionKind): string;
+begin
+  case Kind of
+    when ConnectionKind.Unconfigured:
+      return 'none';
+    when ConnectionKind.Codex:
+      return 'codex';
+    when ConnectionKind.Pi:
+      return 'pi';
+  end case;
+end function;
+
+// Restricts retained identities to bounded printable text while preserving exact spelling.
+public function ValidModelId(Value: string): boolean;
+begin
+  if (Value.Trim() = '') or (Value.Length() > 256) then
+    return false;
+  end if;
+
+  for Index: integer := 0 to Value.Length() - 1 do
+    const Code := Value[Index].Ord();
+    if (Code < 32) or ((Code >= 127) and (Code <= 159)) then
+      return false;
+    end if;
+  end for;
+
+  return true;
+end function;
+
+// Validates stored shape without contacting an agent or consulting a stale model catalog.
+public function Validate(Value: Selection): result of (boolean, string);
+begin
+  if Value.Connection = ConnectionKind.Unconfigured then
+    if Value.ModelId <> '' then
+      return Error('unconfigured Gamemaster requires an empty model');
+    end if;
+  elsif not ValidModelId(Value.ModelId) then
+    return Error('gamemaster_model must contain 1 through 256 printable characters');
+  end if;
+
+  return Ok(true);
+end function;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+// Both fields are mandatory; obsolete files are rejected by the runtime configuration boundary.
+public function Decode(Values: dict of string to Toml.TomlValue): result of (Selection, string);
+begin
+  const Name := try Fields.StringField(Values, 'gamemaster_connection').MapError(FailureMessage);
+  var Kind := ConnectionKind.Unconfigured;
+  case Name of
+    when 'none':
+      null;
+    when 'codex':
+      Kind := ConnectionKind.Codex;
+    when 'pi':
+      Kind := ConnectionKind.Pi;
+    else
+      return Error('gamemaster_connection must be none, codex or pi');
+  end case;
+  const Value := Selection(
+    Connection := Kind,
+    ModelId := try Fields.StringField(Values, 'gamemaster_model').MapError(FailureMessage)
+  );
+  discard try Validate(Value);
+  return Ok(Value);
+end function;
+end unit;

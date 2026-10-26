@@ -123,6 +123,12 @@ these projects.
   from the sanitized client reply, with operation and world identity. Typed
   failures use `Failures.PersistenceFailureReason`; incompatible save contents
   retain the loader's reason. Both use the existing non-blocking log delivery.
+  `Console.Application` owns console channels, the admission permit and owned
+  listener/Gamemaster subscriptions. The server's `Gamemaster` subunits own agent
+  presets, ACP model discovery, a nonce-bound MCP diagnostic and Pi's managed
+  native bootstrap. The selection is global runtime configuration; the client,
+  world/save formats and generated content are independent of it. See
+  [Gamemaster connection](gamemaster-connection.md).
   `Worlds.Catalog` resolves page bounds and selection from canonical directory
   identities before invoking full world inspection. A request inspects at most
   64 page entries and one existing off-page selection, with no duplicate

@@ -1,0 +1,91 @@
+// Decodes advertised ACP model choices, including grouped choices, without a fixed catalog.
+unit Dungeon.Server.Gamemaster.Models;
+
+uses
+  Dungeon.RuntimeData.Gamemaster as Settings, Dungeon.Server.Gamemaster.Model as Model,
+  Std.Json as Json, Std.Json.Fields as Fields;
+
+function FailureMessage<E: Error>(Cause: E): string;
+begin
+  return Cause.Message();
+end function;
+
+// Finds an exact identity; absence never selects a replacement.
+public function Contains(Choices: array of Model.ModelChoice; Id: string): boolean;
+begin
+  for Choice: Model.ModelChoice in Choices do
+    if Choice.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function ReadChoices(Items: array of Json.JsonValue; Grouped: boolean): result of (array of Model.ModelChoice, string);
+begin
+  var Choices: array of Model.ModelChoice := [];
+  for Item: Json.JsonValue in Items do
+    const Data := try Fields.ParseObject(Json.Stringify(Item)).MapError(FailureMessage);
+    if 'options' in Data then
+      if not Grouped then
+        return Error('Nested model groups are unsupported');
+      end if;
+      const Nested := try ReadChoices(
+        try Fields.ArrayField(Data, 'options').MapError(FailureMessage),
+        false
+      );
+      Choices := Choices.Concat(Nested);
+    else
+      const Id := try Fields.StringField(Data, 'value').MapError(FailureMessage);
+      if not Settings.ValidModelId(Id) then
+        return Error('Agent advertised an invalid model ID');
+      end if;
+      var LabelText := try Fields.StringField(Data, 'name').MapError(FailureMessage);
+      for Index: integer := 0 to LabelText.Length() - 1 do
+        if LabelText[Index].Ord() < 32 then
+          LabelText := Id;
+          break;
+        end if;
+      end for;
+
+      if LabelText.Length() > 100 then
+        LabelText := LabelText.Slice(0, 100);
+      end if;
+
+      if not Contains(Choices, Id) then
+        Choices.PushInPlace(Model.ModelChoice(Id := Id, LabelText := LabelText));
+      end if;
+    end if;
+
+    if Choices.Length() > 1024 then
+      return Error('Agent model catalog exceeds 1024 choices');
+    end if;
+  end for;
+
+  return Ok(Choices);
+end function;
+
+// Decodes a session result or config update; requires the advertised model selector.
+public function Decode(Text: string): result of (array of Model.ModelChoice, string);
+begin
+  const Data := try Fields.ParseObject(Text).MapError(FailureMessage);
+  const Options := try Fields.ArrayField(Data, 'configOptions').MapError(FailureMessage);
+  for Item: Json.JsonValue in Options do
+    const Setting := try Fields.ParseObject(Json.Stringify(Item)).MapError(FailureMessage);
+    if (try Fields.StringField(Setting, 'id').MapError(FailureMessage)) = 'model' then
+      const Choices := try ReadChoices(
+        try Fields.ArrayField(Setting, 'options').MapError(FailureMessage),
+        true
+      );
+      if Choices.Length() = 0 then
+        return Error('Agent offers no models; configure its provider or login');
+      end if;
+
+      return Ok(Choices);
+    end if;
+  end for;
+
+  return Error('Agent does not advertise ACP model configuration');
+end function;
+end unit;

@@ -1,0 +1,74 @@
+// Real MCP transport rejects foreign nonces and retires the diagnostic endpoint after close.
+program GamemasterToolTest;
+
+uses
+  Dungeon.Server.Gamemaster.Tools as Tools, Std.Mcp as Mcp, Std.Http as Http,
+  Std.Net.Utf8 as Utf8, Std.Tasks as Tasks, Std.Test as Test;
+
+function Request(Access: Mcp.HttpAccess; Body: string): Http.Request;
+begin
+  var Value := Http.Request.Create('POST', Access.Url);
+  Value.Headers := [
+    Http.Header.Create('Content-Type', 'application/json'),
+    Http.Header.Create('Accept', 'application/json, text/event-stream'),
+    Http.Header.Create('MCP-Protocol-Version', '2025-06-18')
+  ];
+  for Header: Mcp.HttpHeader in Access.Headers do
+    Value.Headers.PushInPlace(Http.Header.Create(Header.Name, Header.Value));
+  end for;
+
+  Value.Body := Utf8.Encode(Body);
+  Value.TimeoutMillis := 1000;
+  return Value;
+end function;
+
+function Post(Access: Mcp.HttpAccess; Body: string): string;
+begin
+  return Http.BodyText(Http.Send(Request(Access, Body)).Unwrap()).Unwrap();
+end function;
+
+function Client(Access: Mcp.HttpAccess; Seen: channel of boolean): boolean;
+begin
+  discard Post(
+    Access,
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"game-test","version":"1"}}}'
+  );
+  discard Post(Access, '{"jsonrpc":"2.0","method":"notifications/initialized"}');
+  const Wrong := Post(
+    Access,
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"gamemaster_probe","arguments":{"nonce":"prior-run"}}}'
+  );
+  Test.AssertTrue('Wrong or stale nonce' in Wrong);
+  Test.AssertTrue(Tasks.TryReceive(Seen).Unwrap() is None);
+  const Correct := Post(
+    Access,
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"gamemaster_probe","arguments":{"nonce":"current-run"}}}'
+  );
+  Test.AssertTrue('"service":"dungeon"' in Correct);
+  Test.AssertTrue(Tasks.TryReceive(Seen).Unwrap().Unwrap());
+  return true;
+end function;
+
+begin
+  const Seen: channel of boolean := Tasks.CreateChannel(1);
+  const Server := Tools.Create('current-run', Seen).Unwrap();
+  const Access := Mcp.Access(Mcp.Publish(Server, Mcp.DefaultHttpOptions()).Unwrap()).Unwrap();
+  scope
+    const Worker := go Mcp.Serve(Server, None);
+    const Peer := go Client(Access, Seen);
+    Test.AssertTrue(Tasks.Wait(Peer));
+    Test.AssertTrue(Mcp.Close(Server).Unwrap());
+    Test.AssertTrue(Tasks.Wait(Worker).Unwrap());
+  end scope;
+
+  case Http.Send(Request(Access, '{"jsonrpc":"2.0","id":4,"method":"tools/list"}')) of
+    when Error(_):
+      null;
+    when Ok(const Response):
+      Test.AssertTrue(Response.StatusCode >= 400);
+  end case;
+
+  Test.AssertTrue(Tasks.TryReceive(Seen).Unwrap() is None);
+  discard Mcp.Release(Server).Unwrap();
+  discard Tasks.CloseChannel(Seen);
+end.

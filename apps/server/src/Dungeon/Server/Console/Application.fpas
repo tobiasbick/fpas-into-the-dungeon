@@ -1,0 +1,183 @@
+// Console lifecycle and event reactor shared by native terminal and normal-worker TUI hosts.
+unit Dungeon.Server.Console.Application;
+
+uses
+  Dungeon.RuntimeData as RuntimeData, Dungeon.Server as Server, Dungeon.Server.Config as ConfigUnit,
+  Dungeon.Server.Gamemaster.Model as GmWork, Dungeon.Server.Gamemaster.Operation as GmOperation,
+  Dungeon.Server.Console.Gamemaster.Model as GmModel, Dungeon.Server.Console.Model as ModelUnit,
+  Dungeon.Server.Console.Input as InputUnit, Dungeon.Server.Console.View as ViewUnit,
+  Dungeon.Server.Logging as Logging, Std.Console as Console, Std.Path as Path, Std.Tasks as Tasks, Std.Tui as Tui;
+
+// Owns event channels and the admission permit; close only after the TUI joins background work.
+public type ConsoleState = record
+  public Model: ModelUnit.ConsoleModel;
+  Host: string;
+  Port: integer;
+  Config: ConfigUnit.ServerConfig;
+  GamemasterResults: channel of GmWork.Completion;
+  public Events: channel of Logging.ServerLogEvent;
+end record;
+
+// Public framework update seam; headless tests exercise the same keyboard/modal logic as the host.
+public function UpdateServerConsole(State: ModelUnit.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
+begin
+  return InputUnit.UpdateDashboard(State, Msg, Cmd);
+end function;
+
+// Reports ordinary returned server errors explicitly; Result.Error is data, not a task failure.
+// Stop events clear console state after cancellation or listener failure, before the worker returns.
+public function RunConsoleListener(Host: string; Port: integer; Config: ConfigUnit.ServerConfig; Token: Tasks.CancellationToken): result of (boolean, string);
+begin
+  const Outcome := Server.RunServerWithCancellation(Host, Port, Config, Token);
+  Logging.LogServer(Config.Logs, 'stopped', 'Server stopped');
+  case Outcome of
+    when Error(const Reason):
+      Logging.LogServer(Config.Logs, 'error', Reason);
+    when Ok(_):
+      null;
+  end case;
+
+  return Outcome;
+end function;
+
+// Runs the console reactor; all provider requests execute in owned subscriptions.
+public function UpdateConsole(State: ConsoleState; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ConsoleState;
+begin
+  var Next := UpdateServerConsole(State.Model, Msg, Cmd);
+  case Tasks.TryReceive(State.GamemasterResults) of
+    when Ok(Some(const Value)):
+      Next.Gamemaster := GmModel.Apply(Next.Gamemaster, Value);
+      if Next.Gamemaster.Open then
+        Next.FocusedControl := Next.Gamemaster.Focus;
+      end if;
+    when Ok(None), Error(_):
+      null;
+  end case;
+
+  if Next.Gamemaster.Revision <> State.Model.Gamemaster.Revision then
+    if Next.Gamemaster.Open and Next.Gamemaster.Pending then
+      const Request := GmWork.Request(
+        Revision := Next.Gamemaster.Revision,
+        Selection := Next.Gamemaster.Selection, Probe := Next.Gamemaster.Probe
+      );
+      const Cache := State.Config.CacheRoot;
+      const Results := State.GamemasterResults;
+      Cmd.ReplaceSubscription(
+        2, function(Token: Tasks.CancellationToken): result of (boolean, string) begin
+          const Outcome := GmOperation.Run(Request, Cache, Token);
+          const Value := GmWork.Completion(
+            Revision := Request.Revision,
+            Selection := Request.Selection,
+            Outcome := Outcome
+          );
+          if not Tasks.IsCancellationRequested(Token) then
+            case Tasks.TrySend(Results, Value) of
+              when Ok(false):
+                discard Tasks.TryReceive(Results);
+                discard Tasks.TrySend(Results, Value);
+              when Ok(true), Error(_):
+                null;
+            end case;
+          end if;
+
+          return Ok(true);
+        end function
+      );
+    else
+      Cmd.CancelSubscription(2);
+    end if;
+  end if;
+
+  if Msg is Tui.TuiMsg.Started then
+    const Host := State.Host;
+    const Port := State.Port;
+    const Config := State.Config;
+    Cmd.ReplaceSubscription(
+      1, function(Token: Tasks.CancellationToken): result of (boolean, string) begin
+        return RunConsoleListener(Host, Port, Config, Token);
+      end function
+    );
+  end if;
+
+  return State with Model := Next; end with;
+end function;
+
+// The application-message update shares bounded logging and typed status application with tests.
+public function UpdateServerConsoleEvent(State: ModelUnit.ConsoleModel; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
+begin
+  Cmd.Set(Tui.TuiCmd.NoCommand);
+  return ModelUnit.ApplyConsoleLog(State, Value);
+end function;
+
+// Applies listener output through the same bounded log and dashboard path in either host.
+public function UpdateConsoleEvent(State: ConsoleState; Value: Logging.ServerLogEvent; Cmd: Tui.TuiCmdOutput): ConsoleState;
+begin
+  return State with Model := UpdateServerConsoleEvent(State.Model, Value, Cmd); end with;
+end function;
+
+// Full-window responsive dashboard with native scroll/filter controls and optional settings modal.
+public function ViewServerConsole(State: ModelUnit.ConsoleModel): Tui.TuiElement;
+begin
+  return ViewUnit.ViewDashboard(State);
+end function;
+
+// Renders the application model without provider or filesystem I/O.
+public function ViewConsole(State: ConsoleState): Tui.TuiElement;
+begin
+  return ViewServerConsole(State.Model);
+end function;
+
+// Allocates channels and reads current runtime settings before starting workers.
+public function Open(Host: string; Port: integer; Config: ConfigUnit.ServerConfig): ConsoleState;
+begin
+  const Settings := RuntimeData.ReadServerDefaults(Config.ConfigPath).Unwrap();
+  const Gamemaster := RuntimeData.ReadGamemaster(Config.ConfigPath).Unwrap();
+  const Events: channel of Logging.ServerLogEvent := Tasks.CreateChannel(256);
+  const Permit: channel of boolean := Tasks.CreateChannel(1);
+  const GamemasterResults: channel of GmWork.Completion := Tasks.CreateChannel(1);
+  discard Tasks.Send(Permit, true);
+  const Cache := if Config.CacheRoot = '' then Path.Join([
+    Path.DirName(Path.DirName(Config.ConfigPath)),
+    'cache'
+  ])
+    else Config.CacheRoot
+    end if;
+  const ManagedConfig := Config with CacheRoot := Cache; Logs := Some(Events); AdmissionPermit := Some(
+    Permit
+  ); Gamemaster := Some(
+    Gamemaster
+  ); end with;
+  var Model := ModelUnit.NewConsoleModel(Config.ConfigPath, Settings) with Port := Port; Width := Console.ScreenWidth(); Height := Console.ScreenHeight(); end with;
+
+  Model.Worlds.Config := Some(ManagedConfig);
+  Model.Gamemaster := GmModel.NewDraft(Gamemaster);
+  return ConsoleState(
+    Model := Model, Host := Host, Port := Port, Config := ManagedConfig,
+    GamemasterResults := GamemasterResults, Events := Events
+  );
+end function;
+
+// Releases owned channels after the terminal host has cancelled and joined subscriptions.
+public procedure Close(State: ConsoleState);
+begin
+  discard Tasks.CloseChannel(State.Config.AdmissionPermit.Unwrap());
+  discard Tasks.CloseChannel(State.GamemasterResults);
+  discard Tasks.CloseChannel(State.Events);
+end procedure;
+
+// Closing the dashboard joins listener, session and Gamemaster before channel release.
+public function RunServerConsole(Host: string; Port: integer; Config: ConfigUnit.ServerConfig): integer;
+begin
+  const State := Open(Host, Port, Config);
+  discard Tui.TuiApplication.RunWithBackgroundAndPalette(
+    State,
+    State.Events,
+    UpdateConsole,
+    UpdateConsoleEvent,
+    ViewConsole,
+    ViewUnit.DashboardPalette()
+  );
+  Close(State);
+  return 0;
+end function;
+end unit;
