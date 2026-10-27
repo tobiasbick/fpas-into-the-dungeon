@@ -56,7 +56,8 @@ available on your command line. Use the compiler and source standard library
 from the same FPAS checkout or installation. This checkout requires the native
 typed standard-library errors, the `Error` generic constraint, `Result.MapError`
 and `Std.Path.IsAbsolute`, plus `Std.Acp`, `Std.Mcp` and native executable builds.
-Older builds without these APIs cannot compile it.
+The test fixtures also require the `Equatable` generic constraint. Older builds
+without these APIs and language features cannot compile the full workspace.
 The game remains under active development.
 
 Run the following commands from the repository root, in **two terminals**.
