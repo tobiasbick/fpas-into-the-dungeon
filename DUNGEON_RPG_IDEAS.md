@@ -22,7 +22,7 @@ The prototype already provides:
 
 - a fixed 20 by 16 dungeon map;
 - Wolfenstein-style DDA raycasting;
-- first-person rendering through `Std.Tui` and `TuiCellGrid`;
+- first-person rendering through `Std.Ui.Terminal` and `TuiCellGrid`;
 - two vertical color samples per terminal cell using the `▀` glyph;
 - free movement, turning, strafing, wall clearance, and wall sliding;
 - a responsive layout with the dungeon on the left;

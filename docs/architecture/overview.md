@@ -246,12 +246,12 @@ these projects.
   `Dungeon.World.Quests` coordinates read-only preflight and retained objective
   validation. `Dungeon.World.Savegame.Quests` owns the exact quest codec.
   `Dungeon.World.Catalog` opens existing worlds without creating them, lists
-  non-destructively, and allocates exclusive new identities using `Std.Fs.ReadDir`.
+  non-destructively, and allocates exclusive new identities using `Std.Io.Fs.ReadDir`.
   `ListWorldIds` enumerates canonical directories without opening metadata,
   saves or levels; `InspectWorld` validates one complete entry. `ListWorlds`
   explicitly inspects every identity for callers that need a complete list.
   `DeleteWorld` validates a direct child identity, refuses linked targets and
-  uses `Std.Fs.DeleteDirAll` without decoding obsolete metadata. Callers own
+  uses `Std.Io.Fs.DeleteDirAll` without decoding obsolete metadata. Callers own
   exclusion of active sessions; filesystem failures may leave partial contents.
   `Dungeon.World.Names` holds the persisted kind and facing names shared by saves
   and levels. `Dungeon.World.Savegame` owns the savegame file, its format version,

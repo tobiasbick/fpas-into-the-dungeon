@@ -49,8 +49,8 @@ will be planned in later substages. There is no player chat with the Gamemaster.
 - [Server settings](../product/server-console.md) already use F2 and preserve
   world defaults through a modal. Headless and console output share
   [server logging](../../apps/server/src/Dungeon/Server/Logging.fpas).
-- The installed FPAS and its matching standard library must expose `Std.Acp`,
-  `Std.Acp.Types`, `Std.Mcp`, `Std.Proc` and `Std.Tasks`. Use `fpas` from PATH.
+- The installed FPAS and its matching standard library must expose `Std.Ai.Acp`,
+  `Std.Ai.Acp.Types`, `Std.Ai.Mcp`, `Std.Os.Proc` and `Std.Tasks`. Use `fpas` from PATH.
   Verify the actual public signatures before writing FPAS; do not reimplement
   ACP, JSON-RPC, MCP transport or a second tool-schema validator.
 - FPAS documents both ACP convenience `RegisterTool`/`ServeTools` operations
@@ -74,7 +74,7 @@ startup. Existing provider authentication belongs to the agent installation;
 Pi supports native Streamable HTTP MCP. The current `pi-acp` source advertises
 `mcpCapabilities.http = false` and retains incoming descriptors without passing
 them to Pi. Do not attach the ACP convenience MCP server to this peer and
-ignore the resulting capability error. Use standalone `Std.Mcp` publication
+ignore the resulting capability error. Use standalone `Std.Ai.Mcp` publication
 for the Pi route and keep the ACP session's descriptor list empty where required.
 
 The game prepares `.pi/mcp.json` in its own managed session directory under
@@ -213,7 +213,7 @@ focused. Add no general AI framework or shared client AI library for one server.
 | `tests/server` and its internal project where appropriate | Scripted peer, real tool transport, lifecycle, console input/rendering and startup output |
 | `docs/setup/pi.md`, server-console/runtime-data guides, README and roadmap | Permanent setup/behavior, current support evidence and acceptance state |
 
-Reuse the installed `Std.Acp`/`Std.Mcp` public APIs. A concrete FPAS defect is
+Reuse the installed `Std.Ai.Acp`/`Std.Ai.Mcp` public APIs. A concrete FPAS defect is
 reported with a minimal reproduction under the repository rules, before any
 compiler/runtime repair. Do not hide it in game-specific protocol code.
 
@@ -250,7 +250,7 @@ planned checkpoints are not proof that any production behavior exists.
 
 ### 04. Add the shared embedded MCP probe and Pi delivery
 
-- Register the one read-only tool through `Std.Mcp` with a bounded handler.
+- Register the one read-only tool through `Std.Ai.Mcp` with a bounded handler.
 - Implement the proved Codex and native Pi endpoint-delivery paths, with
   run-owned authentication and no manual user MCP setup.
 - Prove a real callback, wrong/stale nonce rejection, tool failure, timeout,

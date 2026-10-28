@@ -4,7 +4,7 @@ Into the Dungeon is a client-server role-playing game with a terminal user
 interface, written in Functional Pascal.
 
 Before writing Functional Pascal, read the
-[FPAS language reference](https://github.com/tobiasbick/functional-pascal/blob/main/docs/pascal/agent-reference.md).
+[FPAS language reference](https://github.com/tobiasbick/functional-pascal/blob/main/docs/pascal/agents/README.md).
 Before changing this repository, read the
 [game development rules](docs/agent-reference.md).
 

@@ -53,9 +53,11 @@ at a time**.
 You need a true-color terminal and a release build of
 [Functional Pascal](https://github.com/tobiasbick/functional-pascal), with `fpas`
 available on your command line. Use the compiler and source standard library
-from the same FPAS checkout or installation. This checkout requires the native
+from the same FPAS checkout or installation, with the AP53 namespace migration
+(`Std.Ai.Acp`, `Std.Io.Fs`, `Std.Net.Sockets`, and `Std.Ui.Terminal`).
+This checkout requires the native
 typed standard-library errors, the `Error` generic constraint, `Result.MapError`
-and `Std.Path.IsAbsolute`, plus `Std.Acp`, `Std.Mcp` and native executable builds.
+and `Std.Io.Path.IsAbsolute`, plus `Std.Ai.Acp`, `Std.Ai.Mcp` and native executable builds.
 The test fixtures also require the `Equatable` generic constraint. Older builds
 without these APIs and language features cannot compile the full workspace.
 The game remains under active development.

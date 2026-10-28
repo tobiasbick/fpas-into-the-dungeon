@@ -9,7 +9,7 @@ The controller stops as that marker is routed, after earlier framework messages
 have been handled, then inspects its no-op view and waits for pending replies.
 This avoids mistaking a focus or timer frame for an acknowledged key.
 
-Use the current FPAS distribution from PATH, including interactive `Std.Proc`
+Use the current FPAS distribution from PATH, including interactive `Std.Os.Proc`
 pipes and the queue-only terminal acquisition fix. From the repository root:
 
 ```text
