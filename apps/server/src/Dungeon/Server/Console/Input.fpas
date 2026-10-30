@@ -7,7 +7,30 @@ function OpenSettings(State: ModelUnit.ConsoleModel): ModelUnit.ConsoleModel;
 begin
   const Seed := Conv.IntToStr(State.Seed);
   const Region := Conv.IntToStr(State.RegionChunks);
-  return State with SettingsOpen := true; FocusedControl := 10; SettingsError := ''; SeedText := Seed; SeedCaret := Seed.Length(); RegionText := Region; RegionCaret := Region.Length(); end with;
+  return State with SettingsOpen := true; SettingsTab := 0; FocusedControl := 70; SettingsError := ''; SeedText := Seed; SeedCaret := Seed.Length(); RegionText := Region; RegionCaret := Region.Length(); end with;
+end function;
+
+function CloseSettings(State: ModelUnit.ConsoleModel): ModelUnit.ConsoleModel;
+begin
+  var Draft := State.Gamemaster;
+  if Draft.Open then
+    Draft := GmModel.Close(Draft);
+  end if;
+
+  return State with SettingsOpen := false; SettingsTab := 0; FocusedControl := 20; Gamemaster := Draft; end with;
+end function;
+
+function SelectSettingsTab(State: ModelUnit.ConsoleModel; Selected: integer): ModelUnit.ConsoleModel;
+begin
+  if not State.SettingsOpen or (Selected < 0) or (Selected > 1) then
+    return State;
+  end if;
+  var Draft := State.Gamemaster;
+  if (Selected = 1) and not Draft.Open then
+    Draft := GmModel.Open(Draft);
+  end if;
+
+  return State with SettingsTab := Selected; FocusedControl := 70; Gamemaster := Draft; end with;
 end function;
 
 function OpenWorlds(State: ModelUnit.ConsoleModel): ModelUnit.ConsoleModel;
@@ -20,7 +43,56 @@ end function;
 public function UpdateDashboard(State: ModelUnit.ConsoleModel; Msg: Tui.TuiMsg; Cmd: Tui.TuiCmdOutput): ModelUnit.ConsoleModel;
 begin
   Cmd.Set(Tui.TuiCmd.NoCommand);
-  if State.Gamemaster.Open
+  const TinySettings := State.SettingsOpen and ((State.Width < 40) or (State.Height < 12));
+  case Msg of
+    when Tui.TuiMsg.SelectionChanged(const Source, const Action, const Selected):
+      if TinySettings then
+        return State;
+      end if;
+
+      if (Source.Value = 70) and (Action.Value = 70) then
+        return SelectSettingsTab(State, Selected);
+      end if;
+    when Tui.TuiMsg.Action(const Source, const Action):
+      if TinySettings then
+        if (Source.Value = 70) and (Action.Value = 70) then
+          return CloseSettings(State);
+        end if;
+
+        return State;
+      end if;
+    when Tui.TuiMsg.Key(const Key):
+      if TinySettings then
+        if Key.kind = Tui.TuiKeyKind.Escape then
+          return CloseSettings(State);
+        end if;
+
+        if (Key.kind = Tui.TuiKeyKind.Character)
+          and
+          (
+            (Key.ctrl and ((Key.ch = 'c') or (Key.ch = 'C')))
+            or
+            (Key.alt and ((Key.ch = 'x') or (Key.ch = 'X')))
+          )
+        then
+          Cmd.Set(Tui.TuiCmd.Quit);
+        end if;
+
+        return State;
+      end if;
+    when Tui.TuiMsg.QuitRequested:
+      if TinySettings then
+        return CloseSettings(State);
+      end if;
+    when Tui.TuiMsg.FocusChanged(_, Some(const Id)):
+      if State.SettingsOpen and (Id.Value = 70) then
+        return State with FocusedControl := 70; end with;
+      end if;
+    when Tui.TuiMsg.FocusChanged(_, None), Tui.TuiMsg.Started, Tui.TuiMsg.Pointer(_), Tui.TuiMsg.Tick(_), Tui.TuiMsg.Resize(_), Tui.TuiMsg.TextChanged(_, _, _, _), Tui.TuiMsg.TextAreaChanged(_, _, _, _, _), Tui.TuiMsg.CheckChanged(_, _, _), Tui.TuiMsg.ScrollChanged(_, _, _), Tui.TuiMsg.MenuChanged(_, _, _), Tui.TuiMsg.BackgroundFailed(_, _, _, _, _, _):
+      null;
+  end case;
+
+  if State.Gamemaster.Open and (State.SettingsTab = 1)
     and
     (
       (Msg is Tui.TuiMsg.Key(_)) or (Msg is Tui.TuiMsg.Action(_, _))
@@ -30,10 +102,24 @@ begin
       (Msg is Tui.TuiMsg.QuitRequested)
     )
   then
-    const Draft := GmInput.Update(State.Gamemaster, Msg, State.ConfigPath, State.Height, Cmd);
-    return State with Gamemaster := Draft; FocusedControl := if Draft.Open then Draft.Focus
-      else 6
-      end if; end with;
+    const Size := LayoutUnit.SettingsSize(State.Width, State.Height);
+    const Draft := GmInput.Update(
+      State.Gamemaster,
+      Msg,
+      State.ConfigPath,
+      Size.Width,
+      Size.Height,
+      Cmd
+    );
+    if not Draft.Open then
+      return State with Gamemaster := Draft; SettingsTab := 0; FocusedControl := 70; end with;
+    end if;
+
+    if (State.FocusedControl = 70) and not (Msg is Tui.TuiMsg.FocusChanged(_, Some(_))) then
+      return State with Gamemaster := Draft; end with;
+    end if;
+
+    return State with Gamemaster := Draft; FocusedControl := Draft.Focus; end with;
   end if;
 
   if State.Worlds.Open
@@ -65,6 +151,10 @@ begin
       end if;
     when Tui.TuiMsg.Resize(const Size):
       const Layout := LayoutUnit.ResolveLayout(Size.Width, Size.Height);
+      var Focus := State.FocusedControl;
+      if State.SettingsOpen and ((Size.Width < 40) or (Size.Height < 12)) then
+        Focus := 70;
+      end if;
       var Worlds := State.Worlds;
       Worlds.Row := Math.Clamp(
         Worlds.Row,
@@ -72,7 +162,7 @@ begin
         Math.Max(0, WorldModel.VisibleCount(Worlds, Layout.Height) - 1)
       );
 
-      return State with Worlds := Worlds; Width := Layout.Width; Height := Layout.Height; History := LogUnit.ResolveOffset(
+      return State with Worlds := Worlds; Width := Layout.Width; Height := Layout.Height; FocusedControl := Focus; History := LogUnit.ResolveOffset(
         State.History,
         Layout.LogRows
       ); end with;
@@ -103,17 +193,17 @@ begin
       end if;
 
       if State.SettingsOpen then
-        if Action.Value = 6 then
-          const Draft := GmModel.Open(State.Gamemaster);
-          return State with Gamemaster := Draft; FocusedControl := Draft.Focus; end with;
-        end if;
-
         if Action.Value = 2 then
-          return ModelUnit.StoreConsoleSettings(State);
+          const Saved := ModelUnit.StoreConsoleSettings(State);
+          if not Saved.SettingsOpen then
+            return CloseSettings(Saved);
+          end if;
+
+          return Saved;
         end if;
 
         if Action.Value = 3 then
-          return State with SettingsOpen := false; FocusedControl := 20; end with;
+          return CloseSettings(State);
         end if;
       else
         if Action.Value = 1 then
@@ -156,7 +246,11 @@ begin
         return State with History := History; end with;
       end if;
     when Tui.TuiMsg.TextChanged(const Source, const Action, const Text, const Caret):
-      if not State.SettingsOpen or (Text.Length() > 32) or (Caret < 0) or (Caret > Text.Length())
+      if not State.SettingsOpen or TinySettings or (State.SettingsTab <> 0) or (Text.Length() > 32)
+        or
+        (Caret < 0)
+        or
+        (Caret > Text.Length())
         or
         (Source.Value <> Action.Value)
       then
@@ -185,7 +279,7 @@ begin
 
       if State.SettingsOpen then
         if KeyEvent.kind = Tui.TuiKeyKind.Escape then
-          return State with SettingsOpen := false; FocusedControl := 20; end with;
+          return CloseSettings(State);
         end if;
       else
         if KeyEvent.kind = Tui.TuiKeyKind.F2 then
@@ -225,7 +319,7 @@ begin
       end if;
     when Tui.TuiMsg.QuitRequested:
       if State.SettingsOpen then
-        return State with SettingsOpen := false; FocusedControl := 20; end with;
+        return CloseSettings(State);
       end if;
 
       Cmd.Set(Tui.TuiCmd.Quit);

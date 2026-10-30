@@ -1,7 +1,18 @@
 // Real headless keyboard routing, responsive panels, modal guards and small-terminal clipping.
 program DashboardUiTest;
 
-uses Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Dungeon.Server.Console.View as ViewUnit, Dungeon.Server.Logging as Logging, Dungeon.RuntimeData as RuntimeData, Std.Console as Console, Std.Text.Format as Conv, Std.Io.Fs as Fs, Std.Tasks as Tasks, Std.Test as Test, Std.Ui.Terminal as Tui;
+uses Dungeon.Server.Console as ConsoleUnit, Dungeon.Server.Console.Model as ModelUnit, Dungeon.Server.Console.Log as LogUnit, Dungeon.Server.Console.Layout as LayoutUnit, Dungeon.Server.Logging as Logging, Dungeon.Server.Gamemaster.Model as Work, Dungeon.RuntimeData as RuntimeData, Dungeon.Ui.Theme as Theme, Std.Console as Console, Std.Text.Format as Conv, Std.Io.Fs as Fs, Std.Tasks as Tasks, Std.Test as Test, Std.Ui.Terminal as Tui;
+
+function HasRole(Snapshot: Tui.TuiSurfaceSnapshot; Role: Tui.TuiStyleRole): boolean;
+begin
+  for Cell: Tui.TuiCell in Snapshot.Cells do
+    if Cell.Role = Role and Cell.ConcreteStyle is None then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
 
 function Contains(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): boolean;
 begin
@@ -13,6 +24,28 @@ begin
 
   return false;
 end function;
+
+function Find(Snapshot: Tui.TuiSurfaceSnapshot; Text: string): Tui.TuiPoint;
+begin
+  for Y: integer := 0 to Snapshot.Height - 1 do
+    case Snapshot.LineAt(Y).IndexOf(Text) of
+      when Some(const X):
+        return Tui.TuiPoint.Create(X, Y);
+      when None:
+        null;
+    end case;
+  end for;
+
+  panic('dashboard text not found');
+end function;
+
+procedure AssertSettingsFrame(Screen: Tui.TuiSurfaceSnapshot; X: integer; Y: integer; Width: integer; Height: integer);
+begin
+  Test.AssertEquals('╭', Screen.CellAt(X, Y).Glyph);
+  Test.AssertEquals('╮', Screen.CellAt(X + Width - 1, Y).Glyph);
+  Test.AssertEquals('╰', Screen.CellAt(X, Y + Height - 1).Glyph);
+  Test.AssertEquals('╯', Screen.CellAt(X + Width - 1, Y + Height - 1).Glyph);
+end procedure;
 
 function Key(Kind: Tui.TuiKeyKind): Console.KeyEvent;
 begin
@@ -88,7 +121,7 @@ begin
   );
   const App := Tui.TuiApplication.OpenForTestWithPalette(
     Tui.TuiSize.Create(144, 45),
-    ViewUnit.DashboardPalette()
+    Theme.Palette()
   );
   Model := App.RunIterations(
     Model,
@@ -113,13 +146,13 @@ begin
     Test.AssertTrue(Contains(Screen, Title));
   end for;
 
-  Test.AssertTrue('RUNNING' in Screen.LineAt(0));
-  Test.AssertTrue(Screen.CellAt(41, 3).Glyph = '│');
-  Test.AssertTrue(Screen.CellAt(142, 13).Glyph = '│');
-  Test.AssertTrue('SERVER' in Screen.LineAt(1));
-  Test.AssertTrue('SESSION' in Screen.LineAt(1));
-  Test.AssertTrue('WORLD' in Screen.LineAt(1));
-  Test.AssertTrue('Stop server' in Screen.LineAt(44));
+  Test.AssertTrue('RUNNING' in Screen.LineAt(1));
+  Test.AssertTrue('SERVER' in Screen.LineAt(3));
+  Test.AssertTrue('SESSION' in Screen.LineAt(3));
+  Test.AssertTrue('WORLD' in Screen.LineAt(3));
+  Test.AssertTrue('Stop server' in Screen.LineAt(43));
+  Test.AssertTrue(HasRole(Screen, Tui.TuiStyleRole.PanelNormal));
+  Test.AssertEquals(166, Theme.Palette().Frame.Foreground.Red);
   // Retain an actual runtime rendering for visual review, not a hand-drawn mock.
   var Text: string := '';
   for Y: integer := 0 to Screen.Height - 1 do
@@ -131,7 +164,7 @@ begin
   for Cell: Tui.TuiCell in Screen.Cells do
     const Style: Tui.TuiStyle := case Cell.ConcreteStyle of
       when Some(const Value): Value;
-      when None: ViewUnit.DashboardPalette().ForRole(Cell.Role);
+      when None: Theme.Palette().ForRole(Cell.Role);
     end case;
     Colors := Colors + Conv.IntToStr(Style.Foreground.Red) + ',' +
       Conv.IntToStr(Style.Foreground.Green) + ',' + Conv.IntToStr(Style.Foreground.Blue) + ';' +
@@ -159,7 +192,45 @@ begin
   Test.AssertFalse(Contains(App.SurfaceSnapshot(), 'ERROR'));
   Model := Press(App, Model, Tui.TuiKeyKind.F2);
   Test.AssertTrue(Model.SettingsOpen);
-  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Defaults for new worlds'));
+  AssertSettingsFrame(App.SurfaceSnapshot(), 36, 11, 72, 23);
+  Test.AssertEquals(70, Model.FocusedControl);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'World defaults'));
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Gamemaster'));
+  const WorldTab := Find(App.SurfaceSnapshot(), 'World defaults');
+  const GamemasterTab := Find(App.SurfaceSnapshot(), 'Gamemaster');
+  const SeedLabel := Find(App.SurfaceSnapshot(), 'Seed:');
+  Test.AssertTrue(WorldTab.X < SeedLabel.X);
+  Test.AssertEquals(WorldTab.X, GamemasterTab.X);
+  Test.AssertEquals(WorldTab.Y + 1, GamemasterTab.Y);
+  Test.AssertTrue(
+    App.SurfaceSnapshot().CellAt(WorldTab.X, WorldTab.Y).Role = Tui.TuiStyleRole.TabSelectedFocused
+  );
+  Test.AssertTrue(HasRole(App.SurfaceSnapshot(), Tui.TuiStyleRole.OverlayFocusedFrame));
+  Test.AssertTrue(HasRole(App.SurfaceSnapshot(), Tui.TuiStyleRole.OverlayNormal));
+  Test.AssertEquals(43, Theme.Palette().ForRole(Tui.TuiStyleRole.OverlayNormal).Background.Red);
+  Model := Press(App, Model, Tui.TuiKeyKind.Tab);
+  Test.AssertEquals(10, Model.FocusedControl);
+  Model := ConsoleUnit.UpdateServerConsole(
+    Model, Tui.TuiMsg.TextChanged(Tui.TuiControlId.Create(10), Tui.TuiAction.Create(10), '777', 3),
+    Tui.TuiCmdOutput.Create()
+  );
+  for Index: integer := 1 to 4 do
+    Model := Press(App, Model, Tui.TuiKeyKind.Tab);
+  end for;
+
+  Test.AssertEquals(70, Model.FocusedControl);
+  Model := Press(App, Model, Tui.TuiKeyKind.Down);
+  Test.AssertEquals(1, Model.SettingsTab);
+  AssertSettingsFrame(App.SurfaceSnapshot(), 36, 11, 72, 23);
+  Test.AssertTrue(Model.Gamemaster.Open);
+  Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Connection:'));
+  const Revision := Model.Gamemaster.Revision;
+  Model := Press(App, Model, Tui.TuiKeyKind.Up);
+  Test.AssertEquals(0, Model.SettingsTab);
+  Test.AssertEquals('777', Model.SeedText);
+  Model := Press(App, Model, Tui.TuiKeyKind.Down);
+  Test.AssertEquals(Revision, Model.Gamemaster.Revision);
+  Model := Press(App, Model, Tui.TuiKeyKind.Up);
   const Filter := Model.History.Filter;
   Model := Press(App, Model, Tui.TuiKeyKind.F3);
   Test.AssertTrue(Model.History.Filter = Filter);
@@ -193,12 +264,13 @@ begin
   );
   Test.AssertEquals(OldOffset, Model.History.Offset);
   Model := ConsoleUnit.UpdateServerConsole(Model, Tui.TuiMsg.Key(Key(Tui.TuiKeyKind.F2)), Cmd);
+  const ReopenedSeed := Model.SeedText;
   Model := ConsoleUnit.UpdateServerConsole(
     Model,
     Tui.TuiMsg.TextChanged(Tui.TuiControlId.Create(10), Tui.TuiAction.Create(10), 'abc', -1),
     Cmd
   );
-  Test.AssertEquals(OldSeed, Model.SeedText);
+  Test.AssertEquals(ReopenedSeed, Model.SeedText);
   Model := ConsoleUnit.UpdateServerConsole(
     Model,
     Tui.TuiMsg.TextChanged(
@@ -209,7 +281,7 @@ begin
     ),
     Cmd
   );
-  Test.AssertEquals(OldSeed, Model.SeedText);
+  Test.AssertEquals(ReopenedSeed, Model.SeedText);
   App.Close();
   const BeforeFailure := Model.ListenerStatus;
   Model := ConsoleUnit.UpdateServerConsole(
@@ -250,6 +322,161 @@ begin
   Test.AssertTrue(Contains(StoppedApp.SurfaceSnapshot(), 'STOPPED'));
   Test.AssertTrue(Contains(StoppedApp.SurfaceSnapshot(), 'Not connected'));
   StoppedApp.Close();
+  const Compact := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(40, 12));
+  var CompactModel := ModelUnit.NewConsoleModel('', Settings) with Width := 40; Height := 12; end with;
+
+  CompactModel := Compact.RunIterations(
+    CompactModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  CompactModel := Press(Compact, CompactModel, Tui.TuiKeyKind.F2);
+  AssertSettingsFrame(Compact.SurfaceSnapshot(), 0, 0, 40, 12);
+  Test.AssertTrue(Contains(Compact.SurfaceSnapshot(), 'Seed:'));
+  CompactModel := Press(Compact, CompactModel, Tui.TuiKeyKind.Down);
+  AssertSettingsFrame(Compact.SurfaceSnapshot(), 0, 0, 40, 12);
+  for Text: string in ['Codex', 'Pi', 'Clear', 'Refresh', 'Models', 'Test', 'Save', 'Cancel'] do
+    Test.AssertTrue(Contains(Compact.SurfaceSnapshot(), Text));
+  end for;
+
+  for Id: integer in [60, 61, 67, 63, 62, 64, 65, 66] do
+    CompactModel := Press(Compact, CompactModel, Tui.TuiKeyKind.Tab);
+    Test.AssertEquals(Id, CompactModel.FocusedControl);
+  end for;
+
+  CompactModel := Press(Compact, CompactModel, Tui.TuiKeyKind.Enter);
+  Test.AssertFalse(CompactModel.Gamemaster.Open);
+  Test.AssertEquals(0, CompactModel.SettingsTab);
+  CompactModel := Press(Compact, CompactModel, Tui.TuiKeyKind.Down);
+  Test.AssertTrue(CompactModel.Gamemaster.Open);
+
+  Compact.InjectResizeForTest(Tui.TuiSize.Create(30, 10));
+  CompactModel := Compact.RunIterations(
+    CompactModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertEquals(70, CompactModel.FocusedControl);
+  Test.AssertTrue(Contains(Compact.SurfaceSnapshot(), 'Terminal too small'));
+  Test.AssertTrue(Contains(Compact.SurfaceSnapshot(), 'Close'));
+  CompactModel := Press(Compact, CompactModel, Tui.TuiKeyKind.Enter);
+  Test.AssertFalse(CompactModel.SettingsOpen);
+  Test.AssertFalse(CompactModel.Gamemaster.Open);
+  Compact.Close();
+  const Balanced := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 25));
+  var BalancedModel := ModelUnit.NewConsoleModel('', Settings) with Width := 80; Height := 25; end with;
+
+  BalancedModel := Balanced.RunIterations(
+    BalancedModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  BalancedModel := Press(Balanced, BalancedModel, Tui.TuiKeyKind.F2);
+  AssertSettingsFrame(Balanced.SurfaceSnapshot(), 4, 4, 72, 17);
+  BalancedModel := Press(Balanced, BalancedModel, Tui.TuiKeyKind.Down);
+  AssertSettingsFrame(Balanced.SurfaceSnapshot(), 4, 4, 72, 17);
+  for Text: string in [
+    'Codex',
+    'Pi',
+    'Clear',
+    'Refresh',
+    'Test connection',
+    'Save',
+    'Cancel'
+  ] do
+    Test.AssertTrue(Contains(Balanced.SurfaceSnapshot(), Text));
+  end for;
+  var Choices: array of Work.ModelChoice := [];
+  for Index: integer := 0 to 7 do
+    Choices.PushInPlace(
+      Work.ModelChoice(Id := Conv.IntToStr(Index), LabelText := 'Choice ' + Conv.IntToStr(Index))
+    );
+  end for;
+
+  BalancedModel.Gamemaster.Choices := Choices;
+  BalancedModel := Balanced.RunIterations(
+    BalancedModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  Test.AssertTrue(Contains(Balanced.SurfaceSnapshot(), 'Choice 0'));
+  Test.AssertFalse(Contains(Balanced.SurfaceSnapshot(), 'Choice 2'));
+  const BalancedScreen := Balanced.SurfaceSnapshot();
+  const ModelsAt := Find(BalancedScreen, 'Models');
+  const TestAt := Find(BalancedScreen, 'Test connection');
+  const CancelAt := Find(BalancedScreen, 'Cancel');
+  Test.AssertTrue(
+    BalancedScreen.CellAt(ModelsAt.X, ModelsAt.Y).Role = Tui.TuiStyleRole.OverlayTitle
+  );
+  Test.AssertTrue(
+    BalancedScreen.CellAt(CancelAt.X, CancelAt.Y).ButtonAppearance.Unwrap().Kind =
+    Tui.TuiButtonKind.Cancel
+  );
+  Test.AssertEquals('╭', BalancedScreen.CellAt(ModelsAt.X, ModelsAt.Y + 1).Glyph);
+  Test.AssertEquals('╮', BalancedScreen.CellAt(74, ModelsAt.Y + 1).Glyph);
+  Test.AssertEquals(ModelsAt.X, TestAt.X - 1);
+  Test.AssertEquals(TestAt.Y, CancelAt.Y);
+  Test.AssertEquals(74, CancelAt.X + 6);
+  for Index: integer := 1 to 5 do
+    BalancedModel := Press(Balanced, BalancedModel, Tui.TuiKeyKind.Tab);
+  end for;
+
+  Test.AssertEquals(62, BalancedModel.FocusedControl);
+  for Index: integer := 1 to 7 do
+    BalancedModel := Press(Balanced, BalancedModel, Tui.TuiKeyKind.Down);
+    Test.AssertEquals(Index, BalancedModel.Gamemaster.Row);
+  end for;
+
+  Test.AssertTrue(Contains(Balanced.SurfaceSnapshot(), 'Choice 7'));
+  AssertSettingsFrame(Balanced.SurfaceSnapshot(), 4, 4, 72, 17);
+  Balanced.InjectResizeForTest(Tui.TuiSize.Create(120, 40));
+  BalancedModel := Balanced.RunIterations(
+    BalancedModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  AssertSettingsFrame(Balanced.SurfaceSnapshot(), 24, 10, 72, 20);
+  Balanced.InjectResizeForTest(Tui.TuiSize.Create(200, 60));
+  BalancedModel := Balanced.RunIterations(
+    BalancedModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  AssertSettingsFrame(Balanced.SurfaceSnapshot(), 50, 15, 100, 30);
+  Balanced.InjectResizeForTest(Tui.TuiSize.Create(30, 10));
+  BalancedModel := Balanced.RunIterations(
+    BalancedModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertTrue(Contains(Balanced.SurfaceSnapshot(), 'Terminal too small'));
+  Balanced.InjectResizeForTest(Tui.TuiSize.Create(80, 25));
+  BalancedModel := Balanced.RunIterations(
+    BalancedModel,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  AssertSettingsFrame(Balanced.SurfaceSnapshot(), 4, 4, 72, 17);
+  Test.AssertEquals(1, BalancedModel.SettingsTab);
+  Test.AssertEquals(70, BalancedModel.FocusedControl);
+  Test.AssertTrue(BalancedModel.Gamemaster.Open);
+  Balanced.Close();
   for Size: Tui.TuiSize in [
     Tui.TuiSize.Create(80, 40),
     Tui.TuiSize.Create(99, 32),
@@ -277,6 +504,10 @@ begin
     if Size.Width >= 40 then
       Test.AssertTrue(Contains(Tiny.SurfaceSnapshot(), 'LIVE LOG'));
       Test.AssertTrue(Contains(Tiny.SurfaceSnapshot(), 'Stop server'));
+    end if;
+
+    if (Size.Width = 40) and (Size.Height = 12) then
+      Test.AssertEquals('╰', Tiny.SurfaceSnapshot().CellAt(0, 7).Glyph);
     end if;
 
     Tiny.Close();

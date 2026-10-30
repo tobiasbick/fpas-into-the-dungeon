@@ -1,4 +1,4 @@
-// Responsive server-owned connection settings; quota-bearing tests are always explicitly labeled.
+// Responsive Gamemaster settings with a framed, activating model list.
 unit Dungeon.Server.Console.Gamemaster.View;
 
 uses
@@ -8,11 +8,40 @@ uses
 
 function Button(Id: integer; Text: string): Tui.TuiElement;
 begin
+  if Id = 65 then
+    return Tui.TuiElementBuilders.MakeButtonOfKind(
+      Tui.TuiControlId.Create(Id),
+      Text,
+      Tui.TuiAction.Create(Id),
+      Tui.TuiButtonKind.Primary
+    );
+  elsif Id = 66 then
+    return Tui.TuiElementBuilders.MakeButtonOfKind(
+      Tui.TuiControlId.Create(Id),
+      Text,
+      Tui.TuiAction.Create(Id),
+      Tui.TuiButtonKind.Cancel
+    );
+  end if;
+
   return Tui.TuiElementBuilders.MakeButton(
     Tui.TuiControlId.Create(Id),
     Text,
     Tui.TuiAction.Create(Id)
   );
+end function;
+
+function ChoiceButton(Id: integer; Text: string; Active: boolean): Tui.TuiElement;
+begin
+  if Active then
+    return Tui.TuiElementBuilders.MakeActiveButton(
+      Tui.TuiControlId.Create(Id),
+      Text,
+      Tui.TuiAction.Create(Id)
+    );
+  end if;
+
+  return Button(Id, Text);
 end function;
 
 function LabelText(Text: string; Width: integer): Tui.TuiElement;
@@ -21,58 +50,95 @@ begin
   return Tui.TuiElementBuilders.MakeLabel(Clean.Slice(0, Math.Min(Clean.Length(), Width)));
 end function;
 
-// Paged native lists fit a slow provider's loading/error state as well as large catalogs.
+function Fixed(Element: Tui.TuiElement; Width: integer; Height: integer): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeLayout(
+    Tui.TuiLayoutSettings.Default().WithFixedWidth(Width).WithFixedHeight(Height), Element
+  );
+end function;
+
+function Gap(): Tui.TuiElement;
+begin
+  return Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1));
+end function;
+
+// Builds the currently selected page; width and height include the enclosing overlay frame.
 public function View(State: Model.Draft; Width: integer; Height: integer): Tui.TuiElement;
 begin
-  const BodyWidth := Math.Clamp(Width - 8, 16, 92);
-  const Rows := Input.PageSize(Height);
-  const Offset := State.Row div Rows * Rows;
+  const BodyWidth := Math.Max(1, Width - 19);
+  const Rows := Input.PageSize(Width, Height);
+  const Compact := (Width < 60) or (Height < 17);
   var Labels: array of string := [];
-  for Index: integer := Offset to Math.Min(Offset + Rows, State.Choices.Length()) - 1 do
+  for Index: integer := 0 to State.Choices.Length() - 1 do
     const Choice := State.Choices[Index];
-    const Text := Choice.LabelText + ' [' + Choice.Id + ']';
-    Labels.PushInPlace(Text.Slice(0, Math.Min(Text.Length(), BodyWidth)));
+    const Text := Choice.LabelText + ' - ' + Choice.Id;
+    Labels.PushInPlace(Text.Slice(0, Math.Min(Text.Length(), Math.Max(1, BodyWidth - 4))));
   end for;
-  var Selected := -1;
-  if Labels.Length() > 0 then
-    Selected := State.Row - Offset;
-  end if;
-  var Save := Tui.TuiElementBuilders.MakeLabel('Save unavailable: apply a model first');
+  const Selected := if Labels.Length() = 0 then -1 else State.Row end if;
+  const ModelList := Fixed(
+    Tui.TuiElementBuilders.MakePanel(
+      '', [
+        Fixed(
+          Tui.TuiElementBuilders.MakeActivatingList(
+            Tui.TuiControlId.Create(62), Labels, Selected, Tui.TuiAction.Create(62),
+            Tui.TuiAction.Create(72)
+          ), Math.Max(1, BodyWidth - 2), Rows
+        )
+      ]
+    ), BodyWidth, Rows + 2
+  );
+  const Position := if Labels.Length() = 0 then '0 / 0'
+    else Conv.IntToStr(State.Row + 1) + ' / ' + Conv.IntToStr(Labels.Length())
+    end if;
+  var Save := Tui.TuiElement.Button(
+    Tui.TuiButtonSpec.Disabled(
+      Tui.TuiControlId.Create(65), 'Save', '', Tui.TuiAction.Create(65)
+    ) with Kind := Tui.TuiButtonKind.Primary; end with
+  );
   if not State.Pending
     and
     (State.Acknowledged or (State.Selection.Connection = Settings.ConnectionKind.Unconfigured))
   then
     Save := Button(65, 'Save');
   end if;
-  var Items := [
-    LabelText('Connection: ' + Settings.ConnectionName(State.Selection.Connection), BodyWidth),
-    Tui.TuiElementBuilders.MakeRowSpaced(
-      [Button(60, 'Codex'), Button(61, 'Pi'), Button(67, 'Clear')],
-      1
-    ),
-    LabelText(State.Message, BodyWidth),
-    Tui.TuiElementBuilders.MakeList(
-      Tui.TuiControlId.Create(62),
-      Labels,
-      Selected,
-      Tui.TuiAction.Create(62)
-    ),
-    LabelText('Model: ' + State.Selection.ModelId, BodyWidth),
-    LabelText(
-      Conv.IntToStr(State.Choices.Length()) + ' models / arrows browse, Enter applies',
-      BodyWidth
-    ),
-    Tui.TuiElementBuilders.MakeRowSpaced(
-      [Button(68, 'Previous'), Button(69, 'Next'), Button(63, 'Refresh models')],
-      1
-    ),
-    LabelText('Model request; may use quota.', BodyWidth),
-    Button(64, 'Test connection'),
-    Tui.TuiElementBuilders.MakeRowSpaced([Save, Button(66, 'Cancel / Back')], 2)
-  ];
-  return Tui.TuiElementBuilders.MakeOverlay(
-    'Gamemaster / all worlds',
-    [Tui.TuiElementBuilders.MakeColumn(Items)]
+  const Stretch := Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(0));
+  const Codex := ChoiceButton(
+    60,
+    'Codex',
+    State.Selection.Connection = Settings.ConnectionKind.Codex
   );
+  const Pi := ChoiceButton(61, 'Pi', State.Selection.Connection = Settings.ConnectionKind.Pi);
+  const Clear := ChoiceButton(
+    67,
+    'Clear',
+    State.Selection.Connection = Settings.ConnectionKind.Unconfigured
+  );
+  if Compact then
+    return Tui.TuiElementBuilders.MakeColumn([
+      LabelText('Connection: ' + Settings.ConnectionName(State.Selection.Connection), BodyWidth),
+      Tui.TuiElementBuilders.MakeRowSpaced([Codex, Pi], 1),
+      Tui.TuiElementBuilders.MakeRowSpaced([Clear, Button(63, 'Refresh')], 1),
+      Tui.TuiElementBuilders.MakeHeading('Models ' + Position), ModelList,
+      LabelText(State.Message, BodyWidth), Stretch, Button(64, 'Test (quota)'),
+      Tui.TuiElementBuilders.MakeRowSpaced([Save, Button(66, 'Cancel')], 1)
+    ]);
+  end if;
+  const Heading := Fixed(
+    Tui.TuiElementBuilders.MakeRow([
+      Tui.TuiElementBuilders.MakeHeading('Models ' + Position), Stretch, Button(63, 'Refresh')
+    ]), BodyWidth, 1
+  );
+  const Footer := Fixed(
+    Tui.TuiElementBuilders.MakeRow([
+      Button(64, 'Test connection'), Stretch, Save, Gap(), Button(66, 'Cancel')
+    ]), BodyWidth, 1
+  );
+  return Tui.TuiElementBuilders.MakeColumn([
+    Tui.TuiElementBuilders.MakeHeading('GAMEMASTER - all worlds'), Gap(),
+    LabelText('Connection: ' + Settings.ConnectionName(State.Selection.Connection), BodyWidth),
+    Tui.TuiElementBuilders.MakeRowSpaced([Codex, Pi, Clear], 1),
+    Gap(), Heading, ModelList, Gap(), LabelText('Status: ' + State.Message, BodyWidth),
+    LabelText('Connection test may use quota', BodyWidth), Stretch, Footer
+  ]);
 end function;
 end unit;

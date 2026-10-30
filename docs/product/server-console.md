@@ -66,6 +66,8 @@ At narrower widths, tall terminals stack the three summaries. Short terminals
 use a compact summary so the log and controls remain usable. Resizing preserves
 the selected filter and clamps the scroll position. Very small windows clip
 safely rather than allocating negative layout dimensions.
+Below 18 rows the separate header is omitted; when the log is only five rows
+tall, its follow-status line is omitted to leave room for a log entry and frame.
 
 ## Controls and settings
 
@@ -74,11 +76,17 @@ safely rather than allocating negative layout dimensions.
 - Scrolling away from the newest page pauses following. End, or scrolling back
   to the newest page, resumes it. New entries preserve a paused retained anchor.
 - F3 cycles All, Info, Warnings and Errors; the buttons select a filter directly.
-- F2 opens Settings. Seed and entrance-region defaults are validated and saved
-  atomically to the current `server.toml`; existing world parameters remain fixed.
-  **Gamemaster settings** selects Codex or Pi and an advertised model globally.
+- F2 opens Settings with focus on the **World defaults** and **Gamemaster** tabs
+  to the left of the content. Use Up/Down or click a tab to switch; drafts remain intact.
+  Seed and entrance-region defaults are validated and saved atomically to the
+  current `server.toml`; existing world parameters remain fixed. The Gamemaster
+  tab selects Codex or Pi and an advertised model globally, with its own Save.
+  Both tabs share a centered, content-independent size: 72 × 17 at 80 × 25,
+  growing with larger terminals. At 40 × 12 the controls use a compact layout;
+  smaller terminals show a size notice and a Close button until resized.
 - F4 or Worlds opens the world list, including incompatible worlds and their save status.
-- Escape closes Settings. Settings capture focus and block log/filter commands.
+- Escape closes Settings from World defaults; from Gamemaster it discards that
+  draft and returns to World defaults. Settings block log/filter commands.
 - Alt+X, Ctrl+C and Stop server close the console and its owned server tasks.
 
 The dashboard is a server administration view. It has no controls for moving the
@@ -86,14 +94,16 @@ player, editing world parameters or bypassing gameplay save/discard guards.
 
 ## Gamemaster settings
 
-Choose a connection, browse its model list with arrows, and press Enter to apply
-the exact highlighted model. Previous/Next page through long catalogs. Refresh
+Choose a connection, browse its model list with arrows, and press Enter or click
+a model to apply the exact highlighted model. The list scrolls with the selection. Refresh
 reloads availability; a missing saved model is never replaced automatically.
 Test connection sends a real model request and may use quota. Ready requires an
 actual read-only MCP callback and a completed model turn. Save stores only the
 acknowledged connection/model pair. Clear takes effect only after Save.
 
-Escape or Cancel discards the draft and cancels pending work. Discovery, testing
+Escape or Cancel on the Gamemaster tab discards that draft and returns to
+World defaults; closing Settings also cancels any open Gamemaster draft. Switching
+tabs retains both drafts and pending work. Discovery, testing
 and cancellation remain asynchronous. Replaced or closed drafts reject late
 results. Closing the application joins the listener and all provider work.
 The footer shows Not configured, Configured, Testing or Ready. Restart clears

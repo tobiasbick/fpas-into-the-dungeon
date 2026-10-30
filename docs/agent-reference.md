@@ -41,12 +41,11 @@ never adjust a fingerprint to make a test pass without that.
 
 ## Verification
 
-- Format changed Functional Pascal files with `fpas fmt`, run `fpas check` for
-  every changed project, and run the relevant test project, for example
-  `fpas test --timeout 600 tests/game/game-tests.fpasprj`.
-- Before handing work back, run the complete suite with
-  `fpas test --timeout 600 dungeon.fpasworkspace`. Report failures with their
-  output; do not call work done while the suite is red.
+- Format changed Functional Pascal files with `fpas fmt` and run `fpas check`
+  for every changed project.
+- Select tests according to the change's scope and risk; run the complete suite
+  (`fpas test --timeout 600 dungeon.fpasworkspace`) when appropriate. Report
+  failures with their output; do not call work done while required checks fail.
 - Run long commands in the background and say so.
 
 ## Source documentation

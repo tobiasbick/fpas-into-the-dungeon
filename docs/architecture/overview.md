@@ -23,6 +23,7 @@ fpas-into-the-dungeon/
 │   ├── game/
 │   ├── world/
 │   ├── protocol/
+│   ├── ui/
 │   └── persistence/
 │       └── runtime-data.fpasprj
 ├── tools/
@@ -46,6 +47,8 @@ programs live beside their test manifest. The root `.fpasworkspace` connects
 these projects.
 
 ## Module ownership
+
+- `libs/ui` owns the terminal palette shared by the client and server console.
 
 - `apps/client` owns the client program entry point, input handling, and the
   connection to the game simulation.

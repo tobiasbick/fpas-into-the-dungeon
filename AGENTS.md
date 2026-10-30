@@ -7,6 +7,8 @@ Before writing Functional Pascal, read the
 [FPAS language reference](https://github.com/tobiasbick/functional-pascal/blob/main/docs/pascal/agents/README.md).
 Before changing this repository, read the
 [game development rules](docs/agent-reference.md).
+Before changing the game's visuals or user interface, read the
+[design language](docs/product/design-language.md).
 
 ## Code
 
