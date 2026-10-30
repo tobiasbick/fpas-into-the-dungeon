@@ -1,7 +1,7 @@
 // LF-delimited UTF-8 framing over a Functional Pascal TCP connection.
 unit Dungeon.Protocol.Transport;
 
-uses Dungeon.Protocol as Protocol, Std.Net.Sockets as Net, Std.Text.Utf8 as Utf8, Std.Tasks as Tasks;
+uses Dungeon.Protocol as Protocol, Std.Bytes as Bytes, Std.Net.Sockets as Net, Std.Text.Utf8 as Utf8, Std.Tasks as Tasks;
 
 // Renders typed library failures at this unit's application-owned text boundary.
 function FailureMessage<E: Error>(Cause: E): string;
@@ -15,7 +15,7 @@ public const LineTooLongError: string := 'protocol line exceeds 64 KiB';
 // Carries a connection and unread bytes across immutable framing calls.
 public type LineReader = record
   public ConnectionValue: Net.Connection;
-  public Buffer: array of integer;
+  public Buffer: Bytes.ByteBuffer;
 end record;
 
 // Couples a decoded line with the reader state required for the next read.
@@ -27,14 +27,14 @@ end record;
 // Starts line framing with no retained bytes.
 public function NewLineReader(ConnectionValue: Net.Connection): LineReader;
 begin
-  return LineReader(ConnectionValue := ConnectionValue, Buffer := []);
+  return LineReader(ConnectionValue := ConnectionValue, Buffer := Bytes.Create(0).Unwrap());
 end function;
 
-function LineFeedIndex(Bytes: array of integer): integer;
+function LineFeedIndex(Data: Bytes.ByteBuffer): integer;
 begin
-  for Index: integer := 0 to Bytes.Length() - 1 do
+  for Index: integer := 0 to Data.Length() - 1 do
     begin
-      if Bytes[Index] = 10 then
+      if Data[Index] = 10 then
         begin
           return Index;
         end;
@@ -57,7 +57,7 @@ begin
           return Error(LineTooLongError);
         end;
       end if;
-      const Part: array of integer := try Net.ReceiveBytesWithCancellation(
+      const Part := try Net.ReceiveBytesWithCancellation(
         Next.ConnectionValue,
         4096,
         Token
@@ -68,7 +68,7 @@ begin
         end;
       end if;
 
-      Next.Buffer := Next.Buffer.Concat(Part);
+      discard try Next.Buffer.ConcatInPlace(Part).MapError(FailureMessage);
       LineEnd := LineFeedIndex(Next.Buffer);
     end;
   end while;
@@ -78,25 +78,28 @@ begin
       return Error(LineTooLongError);
     end;
   end if;
-  const LineBytes: array of integer := Next.Buffer.Slice(0, LineEnd);
+  const LineBytes := try Next.Buffer.Slice(0, LineEnd).MapError(FailureMessage);
   const RemainingStart: integer := LineEnd + 1;
-  Next.Buffer := Next.Buffer.Slice(RemainingStart, Next.Buffer.Length() - RemainingStart);
+  Next.Buffer := try Next.Buffer.Slice(
+    RemainingStart,
+    Next.Buffer.Length() - RemainingStart
+  ).MapError(FailureMessage);
   return Ok(LineRead(Line := try Utf8.Decode(LineBytes).MapError(FailureMessage), Reader := Next));
 end function;
 
 // Writes one complete LF-delimited line, including partial-write handling.
 public function WriteLine(ConnectionValue: Net.Connection; Text: string; Token: Tasks.CancellationToken): result of (boolean, string);
 begin
-  const Bytes: array of integer := Utf8.Encode(Text + #10);
-  if Bytes.Length() - 1 > Protocol.MaximumLineBytes then
+  const Data := try Utf8.Encode(Text + #10).MapError(FailureMessage);
+  if Data.Length() - 1 > Protocol.MaximumLineBytes then
     begin
       return Error(LineTooLongError);
     end;
   end if;
   var Offset: integer := 0;
-  while Offset < Bytes.Length() do
+  while Offset < Data.Length() do
     begin
-      const Remaining: array of integer := Bytes.Slice(Offset, Bytes.Length() - Offset);
+      const Remaining := try Data.Slice(Offset, Data.Length() - Offset).MapError(FailureMessage);
       const Written: integer := try Net.SendBytesWithCancellation(
         ConnectionValue,
         Remaining,

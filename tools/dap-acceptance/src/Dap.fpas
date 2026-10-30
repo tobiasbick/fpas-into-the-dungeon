@@ -1,12 +1,12 @@
 // Exchanges byte-framed DAP messages with an owned debugger process.
 unit Acceptance.Dap;
 
-uses Std.Text.Format as Conv, Std.Math as Math, Std.Io.Fs as Fs, Std.Encoding.Json as Json, Std.Encoding.Json.Fields as Fields, Std.Text.Utf8 as Utf8, Std.Text.Parse as Parse, Std.Os.Proc as Proc, Std.Time as Time;
+uses Std.Bytes as ByteStorage, Std.Text.Format as Conv, Std.Math as Math, Std.Io.Fs as Fs, Std.Encoding.Json as Json, Std.Encoding.Json.Fields as Fields, Std.Text.Utf8 as Utf8, Std.Text.Parse as Parse, Std.Os.Proc as Proc, Std.Time as Time;
 
 // Owns the debugger, incomplete framing bytes and the last stop's thread identity.
 public type Session = record
   public Child: Proc.Process;
-  public Buffer: array of integer;
+  public Buffer: ByteStorage.ByteBuffer;
   public Sequence: integer := 0;
   public Stopped: boolean := false;
   public Thread: integer := 1;
@@ -32,7 +32,7 @@ begin
   return Json.JsonValue.Number(Math.IntToReal(Value));
 end function;
 
-procedure Write(Child: Proc.Process; Bytes: array of integer);
+procedure Write(Child: Proc.Process; Bytes: ByteStorage.ByteBuffer);
 begin
   var Offset := 0;
   const Deadline := Time.MonotonicMillis() + 300000;
@@ -40,7 +40,10 @@ begin
     if Time.MonotonicMillis() >= Deadline then
       panic('DAP write timed out');
     end if;
-    const Count := Proc.WriteStdin(Child, Bytes.Slice(Offset, Bytes.Length() - Offset)).Unwrap();
+    const Count := Proc.WriteStdin(
+      Child,
+      Bytes.Slice(Offset, Bytes.Length() - Offset).Unwrap()
+    ).Unwrap();
     Offset := Offset + Count;
     if Count = 0 then
       Time.Sleep(1);
@@ -64,18 +67,18 @@ begin
     end for;
 
     if HeaderEnd >= 0 then
-      const Header := Utf8.Decode(State.Buffer.Slice(0, HeaderEnd)).Unwrap();
+      const Header := Utf8.Decode(State.Buffer.Slice(0, HeaderEnd).Unwrap()).Unwrap();
       const Length := Parse.Int(Header.Split(':')[1].Trim()).Unwrap();
       if (Length < 0) or (Length > 16777216) then
         panic('invalid DAP length');
       end if;
 
       if State.Buffer.Length() >= HeaderEnd + 4 + Length then
-        const Body := Utf8.Decode(State.Buffer.Slice(HeaderEnd + 4, Length)).Unwrap();
+        const Body := Utf8.Decode(State.Buffer.Slice(HeaderEnd + 4, Length).Unwrap()).Unwrap();
         State.Buffer := State.Buffer.Slice(
           HeaderEnd + 4 + Length,
           State.Buffer.Length() - HeaderEnd - 4 - Length
-        );
+        ).Unwrap();
         const Message := Fields.ParseObject(Body).Unwrap();
         if 'event' in Message then
           discard Fs.AppendText(State.TerminalPath + '.events.jsonl', Body + #10).Unwrap();
@@ -121,7 +124,7 @@ begin
           panic('DAP EOF');
         end if;
 
-        State.Buffer := State.Buffer.Concat(Bytes);
+        discard State.Buffer.ConcatInPlace(Bytes).Unwrap();
       when None:
         Time.Sleep(1);
     end case;
@@ -146,8 +149,8 @@ begin
   Write(
     State.Child,
     Utf8.Encode(
-      'Content-Length: ' + Conv.IntToStr(Utf8.Encode(Body).Length()) + #13#10#13#10 + Body
-    )
+      'Content-Length: ' + Conv.IntToStr(Utf8.Encode(Body).Unwrap().Length()) + #13#10#13#10 + Body
+    ).Unwrap()
   );
   while true do
     const Message := Receive(var State);

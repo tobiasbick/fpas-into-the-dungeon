@@ -58,7 +58,8 @@ from the same FPAS checkout or installation, with the AP53 namespace migration
 This checkout requires the native
 typed standard-library errors, the `Error` generic constraint, `Result.MapError`
 and `Std.Io.Path.IsAbsolute`, plus `Std.Ai.Acp`, `Std.Ai.Mcp` and native executable builds.
-The test fixtures also require the `Equatable` generic constraint. Older builds
+The game uses the AP54 `Std.Bytes.ByteBuffer` binary APIs. The test fixtures also
+require the `Equatable` generic constraint. Older builds
 without these APIs and language features cannot compile the full workspace.
 The game remains under active development.
 

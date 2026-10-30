@@ -1,0 +1,127 @@
+// Compares cached and uncached client frames across view changes and checks live input routing.
+program ClientSubviewUiTest;
+
+uses
+  Dungeon.Client as Client, Dungeon.Client.Animation as Animation, Dungeon.Protocol as Protocol,
+  Dungeon.RuntimeData as Runtime, Std.Tasks as Tasks, Std.Test as Test, Std.Ui.Terminal as Tui;
+
+procedure AssertFrames(Reference: Tui.TuiApplication; Cached: Tui.TuiApplication; State: Client.ClientModel);
+begin
+  discard Reference.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  discard Cached.RunIterations(State, Client.UpdateClient, Client.ViewClientCached, 0, 0);
+  const Expected := Reference.SurfaceSnapshot();
+  const Actual := Cached.SurfaceSnapshot();
+  Test.AssertEquals(Expected.Width, Actual.Width);
+  Test.AssertEquals(Expected.Height, Actual.Height);
+  Test.AssertEquals(Expected.Cells.Length(), Actual.Cells.Length());
+  for Index: integer := 0 to Expected.Cells.Length() - 1 do
+    Test.AssertTrue(Expected.Cells[Index] = Actual.Cells[Index]);
+  end for;
+end procedure;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(2);
+  var State := Client.NewClientModel(
+    '127.0.0.1',
+    4040,
+    '',
+    Runtime.DefaultClientPreferences(),
+    Requests,
+    Events
+  );
+  State.Screen := Client.ClientScreen.GameScreen;
+  State.ConnectionPhase := Client.ClientConnectionPhase.Active;
+  State.FocusedControl := 0;
+  State.ViewportWidth := 80;
+  State.ViewportHeight := 24;
+  State.HasVisibleState := true;
+  State.View := Protocol.ViewKind.Map;
+  State.Width := 3;
+  State.Height := 3;
+  State.Rows := ['ggg', 'geg', 'ggg'];
+  State.KnowledgeRows := ['vvv', 'vvv', 'vvv'];
+  State.PlayerX := 1;
+  State.PlayerY := 1;
+  State.PrimaryTitle := 'Test region';
+  State.PrimaryStatus := 'Nothing in reach';
+  const Reference := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 24));
+  const Cached := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 24));
+
+  AssertFrames(Reference, Cached, State);
+  State.Status := 'Updated without changing the map';
+  AssertFrames(Reference, Cached, State);
+  State.Rows[0] := 'gfg';
+  State.KnowledgeRows[0] := 'vrv';
+  State.PlayerX := 0;
+  State.DayPhase := Protocol.DayPhase.Night;
+  State.Weather := Some(Protocol.WeatherKind.Rain);
+  AssertFrames(Reference, Cached, State);
+  State.ContextPanelVisible := false;
+  State.MessagePanelVisible := true;
+  State.Messages := ['Message panel changed'];
+  AssertFrames(Reference, Cached, State);
+
+  State.View := Protocol.ViewKind.FirstPerson;
+  State.Rows := ['#####', '#...#', '#####'];
+  State.KnowledgeRows := ['vvvvv', 'vvvvv', 'vvvvv'];
+  State.Width := 5;
+  State.Height := 3;
+  State.PlayerX := 1;
+  State.PlayerY := 1;
+  State.FirstPersonFacing := Protocol.FirstPersonFacing.East;
+  State.PrimaryTitle := 'Dungeon';
+  State.PrimaryStatus := 'Look ahead';
+  State.Weather := None;
+  AssertFrames(Reference, Cached, State);
+  State.Status := 'Different status only';
+  AssertFrames(Reference, Cached, State);
+  State.FirstPersonFacing := Protocol.FirstPersonFacing.West;
+  State.DamageTaken := true;
+  AssertFrames(Reference, Cached, State);
+  State.Overlay := Client.ClientOverlay.ContextOverlay;
+  AssertFrames(Reference, Cached, State);
+  State.Overlay := Client.ClientOverlay.NoOverlay;
+  State.Animation := Animation.StartAnimation(
+    [
+      Protocol.VisibleCombatEvent(
+        Kind := Protocol.VisibleCombatEventKind.PlayerMiss,
+        Amount := 0,
+        HostileCode := 'h'
+      )
+    ],
+    false
+  );
+  AssertFrames(Reference, Cached, State);
+  State.Animation := Animation.NoAnimation();
+  AssertFrames(Reference, Cached, State);
+  // The same subview definition must maintain separate entries for each application.
+  const SmallReference := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(40, 14));
+  const SmallCached := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(40, 14));
+  State.ViewportWidth := 40;
+  State.ViewportHeight := 14;
+  AssertFrames(SmallReference, SmallCached, State);
+  State.ViewportWidth := 80;
+  State.ViewportHeight := 24;
+  AssertFrames(Reference, Cached, State);
+
+  Cached.InjectKeyForTest(
+    Tui.TuiKeyEvent(
+      kind := Tui.TuiKeyKind.Space,
+      ch := ' ',
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+  State := Cached.RunIterations(State, Client.UpdateClient, Client.ViewClientCached, 1, 0);
+  Test.AssertTrue(State.Pending);
+  Test.AssertTrue(Tasks.ReceiveWithTimeout(Requests, 0).Unwrap() is Protocol.ClientMessage.Attack);
+  Reference.Close();
+  Cached.Close();
+  SmallReference.Close();
+  SmallCached.Close();
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

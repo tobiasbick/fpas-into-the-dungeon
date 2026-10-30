@@ -1,16 +1,15 @@
 // Verifies the exact UTF-8 framing boundary over TCP, including JSON escapes and rejected writes.
 program TransportLimitsTest;
 
-uses Dungeon.Protocol as Protocol, Dungeon.Protocol.Transport as Transport, Std.Encoding.Json as Json, Std.Net.Sockets as Net, Std.Text.Utf8 as Utf8, Std.Tasks as Tasks, Std.Test as Test;
+uses Dungeon.Protocol as Protocol, Dungeon.Protocol.Transport as Transport, Std.Bytes as ByteStorage, Std.Encoding.Json as Json, Std.Net.Sockets as Net, Std.Text.Utf8 as Utf8, Std.Tasks as Tasks, Std.Test as Test;
 
-function SendRaw(Connection: Net.Connection; Text: string; Token: Tasks.CancellationToken): boolean;
+function SendBuffer(Connection: Net.Connection; Bytes: ByteStorage.ByteBuffer; Token: Tasks.CancellationToken): boolean;
 begin
-  const Bytes := Utf8.Encode(Text + #10);
   var Offset := 0;
   while Offset < Bytes.Length() do
     const Written := Net.SendBytesWithCancellation(
       Connection,
-      Bytes.Slice(Offset, Bytes.Length() - Offset),
+      Bytes.Slice(Offset, Bytes.Length() - Offset).Unwrap(),
       Token
     ).Unwrap();
     Test.AssertTrue(Written > 0);
@@ -20,6 +19,11 @@ begin
   return true;
 end function;
 
+function SendRaw(Connection: Net.Connection; Text: string; Token: Tasks.CancellationToken): boolean;
+begin
+  return SendBuffer(Connection, Utf8.Encode(Text + #10).Unwrap(), Token);
+end function;
+
 begin
   Test.AssertEquals(65536, Protocol.MaximumLineBytes);
   const JsonText := Json.Stringify(
@@ -27,12 +31,12 @@ begin
   );
   Test.AssertTrue('\n' in JsonText);
   Test.AssertTrue('\"' in JsonText);
-  const Line := JsonText + ' '.RepeatStr(65536 - Utf8.Encode(JsonText).Length());
-  Test.AssertEquals(65536, Utf8.Encode(Line).Length());
+  const Line := JsonText + ' '.RepeatStr(65536 - Utf8.Encode(JsonText).Unwrap().Length());
+  Test.AssertEquals(65536, Utf8.Encode(Line).Unwrap().Length());
   Test.AssertTrue(Line.Length() < 65536);
   Test.AssertTrue(Json.Parse(Line) is Ok(_));
   const Oversized := Line + ' ';
-  Test.AssertEquals(65537, Utf8.Encode(Oversized).Length());
+  Test.AssertEquals(65537, Utf8.Encode(Oversized).Unwrap().Length());
   const Listener := Net.Listen('127.0.0.1', 0).Unwrap();
   const Client := Net.Connect(
     '127.0.0.1',
@@ -64,6 +68,17 @@ begin
   const After := Transport.ReadLine(Reader, Token).Unwrap();
   Test.AssertEquals('after rejection', After.Line);
   Reader := After.Reader;
+  // Multiple frames in one write retain their order and their UTF-8 contents.
+  Test.AssertTrue(SendRaw(Client, 'first' + #10 + 'éclair', Token));
+  const First := Transport.ReadLine(Reader, Token).Unwrap();
+  Test.AssertEquals('first', First.Line);
+  const Second := Transport.ReadLine(First.Reader, Token).Unwrap();
+  Test.AssertEquals('éclair', Second.Line);
+  Reader := Second.Reader;
+  // Invalid UTF-8 is rejected instead of being replaced in the decoded line.
+  const Invalid := ByteStorage.FromArray([255, 10]).Unwrap();
+  Test.AssertTrue(SendBuffer(Client, Invalid, Token));
+  Test.AssertTrue(Transport.ReadLine(Reader, Token) is Error(_));
   scope
     const Sent: task of boolean := go SendRaw(Client, Oversized, Token);
     case Transport.ReadLine(Reader, Token) of
