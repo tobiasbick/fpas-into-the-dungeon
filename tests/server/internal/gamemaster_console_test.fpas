@@ -38,18 +38,25 @@ begin
   );
   Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Not configured (F2)'));
   App.Inject(Action(1));
+  App.Inject(
+    Tui.TuiMsg.TextChanged(Tui.TuiControlId.Create(10), Tui.TuiAction.Create(10), '777', 3)
+  );
   App.Inject(Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(70), Tui.TuiAction.Create(70), 1));
   App.Inject(Action(61));
   State := App.RunIterations(
     State,
     ConsoleUnit.UpdateServerConsole,
     ConsoleUnit.ViewServerConsole,
-    3,
+    4,
     0
   );
   Test.AssertTrue(State.Gamemaster.Open);
   Test.AssertTrue(State.Gamemaster.Pending);
   Test.AssertTrue(Contains(App.SurfaceSnapshot(), 'Loading models'));
+  const PendingSave := ConsoleUnit.UpdateServerConsole(State, Action(2), Tui.TuiCmdOutput.Create());
+  Test.AssertTrue(PendingSave.SettingsOpen);
+  Test.AssertTrue('Wait' in PendingSave.Gamemaster.Message);
+  Test.AssertEquals(Before, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
   const DraftRevision := State.Gamemaster.Revision;
   App.Inject(Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(70), Tui.TuiAction.Create(70), 0));
   App.Inject(Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(70), Tui.TuiAction.Create(70), 1));
@@ -119,24 +126,93 @@ begin
       Outcome := Ok(Work.Catalog(Models := Choices, Acknowledged := true))
     )
   );
-  const Failed := Model.Save(State.Gamemaster, Data.Paths.Config);
-  Test.AssertTrue(Failed.Open);
-  Test.AssertTrue(Failed.Message <> '');
+  const Failed := ConsoleModel.StoreConsoleSettings(
+    State with ConfigPath := Data.Paths.Config; end with
+  );
+  Test.AssertTrue(Failed.SettingsOpen);
+  Test.AssertTrue(Failed.SettingsError <> '');
   Test.AssertEquals(Before, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
-  App.Inject(Action(65));
+  const InvalidWorld := ConsoleUnit.UpdateServerConsole(
+    State with SeedText := 'invalid'; end with, Action(2), Tui.TuiCmdOutput.Create()
+  );
+  Test.AssertTrue(InvalidWorld.SettingsOpen);
+  Test.AssertEquals(0, InvalidWorld.SettingsTab);
+  Test.AssertTrue(InvalidWorld.SettingsError <> '');
+  Test.AssertEquals(Before, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
+  const InvalidRegion := ConsoleUnit.UpdateServerConsole(
+    State with RegionText := '0'; end with, Action(2), Tui.TuiCmdOutput.Create()
+  );
+  Test.AssertTrue(InvalidRegion.SettingsOpen);
+  Test.AssertEquals(0, InvalidRegion.SettingsTab);
+  Test.AssertTrue(InvalidRegion.SettingsError <> '');
+  Test.AssertEquals(Before, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
+  const InvalidAgent := ConsoleUnit.UpdateServerConsole(
+    State with SettingsTab := 0; Gamemaster := State.Gamemaster with Acknowledged := false; end with; end with,
+    Action(2), Tui.TuiCmdOutput.Create()
+  );
+  Test.AssertTrue(InvalidAgent.SettingsOpen);
+  Test.AssertEquals(1, InvalidAgent.SettingsTab);
+  Test.AssertTrue('Apply' in InvalidAgent.Gamemaster.Message);
+  Test.AssertEquals(Before, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
+  App.Inject(Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(70), Tui.TuiAction.Create(70), 0));
+  App.Inject(Action(2));
   State := App.RunIterations(
     State,
     ConsoleUnit.UpdateServerConsole,
     ConsoleUnit.ViewServerConsole,
-    1,
+    2,
     0
   );
   Test.AssertFalse(State.Gamemaster.Open);
+  Test.AssertFalse(State.SettingsOpen);
+  Test.AssertEquals(777, Runtime.ReadServerDefaults(Data.Paths.ServerConfig).Unwrap().Seed);
   Test.AssertEquals(
     'Exact/opaque-ID',
     Runtime.ReadGamemaster(Data.Paths.ServerConfig).Unwrap().ModelId
   );
   Test.AssertTrue('Configured' in Model.Status(State.Gamemaster));
+  const SavedFile := Fs.ReadText(Data.Paths.ServerConfig).Unwrap();
+  var CancelDraft := ConsoleUnit.UpdateServerConsole(State, Action(1), Tui.TuiCmdOutput.Create());
+  CancelDraft := ConsoleUnit.UpdateServerConsole(
+    CancelDraft,
+    Tui.TuiMsg.TextChanged(Tui.TuiControlId.Create(10), Tui.TuiAction.Create(10), '999', 3),
+    Tui.TuiCmdOutput.Create()
+  );
+  CancelDraft := ConsoleUnit.UpdateServerConsole(
+    CancelDraft,
+    Tui.TuiMsg.SelectionChanged(Tui.TuiControlId.Create(70), Tui.TuiAction.Create(70), 1),
+    Tui.TuiCmdOutput.Create()
+  );
+  CancelDraft := ConsoleUnit.UpdateServerConsole(
+    CancelDraft,
+    Action(67),
+    Tui.TuiCmdOutput.Create()
+  );
+  const EscapeDraft := ConsoleUnit.UpdateServerConsole(
+    CancelDraft, Tui.TuiMsg.Key(
+      Console.KeyEvent(
+        kind := Tui.TuiKeyKind.Escape, ch := '', shift := false, ctrl := false, alt := false,
+        meta := false
+      )
+    ), Tui.TuiCmdOutput.Create()
+  );
+  Test.AssertFalse(EscapeDraft.SettingsOpen);
+  Test.AssertFalse(EscapeDraft.Gamemaster.Open);
+  Test.AssertEquals(SavedFile, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
+  CancelDraft := ConsoleUnit.UpdateServerConsole(CancelDraft, Action(3), Tui.TuiCmdOutput.Create());
+  Test.AssertFalse(CancelDraft.SettingsOpen);
+  Test.AssertFalse(CancelDraft.Gamemaster.Open);
+  Test.AssertEquals('Exact/opaque-ID', CancelDraft.Gamemaster.Saved.ModelId);
+  Test.AssertEquals(SavedFile, Fs.ReadText(Data.Paths.ServerConfig).Unwrap());
+  const UnchangedPending := ConsoleModel.StoreConsoleSettings(
+    State with SettingsOpen := true; Gamemaster := Model.Open(State.Gamemaster); end with
+  );
+  Test.AssertFalse(UnchangedPending.SettingsOpen);
+  Test.AssertFalse(UnchangedPending.Gamemaster.Pending);
+  Test.AssertEquals(
+    'Exact/opaque-ID',
+    Runtime.ReadGamemaster(Data.Paths.ServerConfig).Unwrap().ModelId
+  );
   const Closed := Model.Apply(Model.Close(Old), Delayed);
   Test.AssertFalse(Closed.Open);
   Test.AssertTrue(Closed.Ready is None);
@@ -155,6 +231,7 @@ begin
   );
   Test.AssertTrue('unavailable' in Missing.Message);
   Test.AssertFalse(Missing.Acknowledged);
+  State.SettingsOpen := true;
   State.Gamemaster := Missing;
   State.SettingsTab := 1;
   State.FocusedControl := Missing.Focus;
@@ -176,7 +253,7 @@ begin
   end for;
 
   App.Inject(Action(67));
-  App.Inject(Action(65));
+  App.Inject(Action(2));
   State := App.RunIterations(
     State,
     ConsoleUnit.UpdateServerConsole,

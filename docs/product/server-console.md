@@ -80,13 +80,13 @@ tall, its follow-status line is omitted to leave room for a log entry and frame.
   to the left of the content. Use Up/Down or click a tab to switch; drafts remain intact.
   Seed and entrance-region defaults are validated and saved atomically to the
   current `server.toml`; existing world parameters remain fixed. The Gamemaster
-  tab selects Codex or Pi and an advertised model globally, with its own Save.
+  tab selects Codex or Pi and an advertised model globally. The shared Save
+  validates and atomically stores changes from both tabs; Cancel discards both.
   Both tabs share a centered, content-independent size: 72 × 17 at 80 × 25,
   growing with larger terminals. At 40 × 12 the controls use a compact layout;
   smaller terminals show a size notice and a Close button until resized.
 - F4 or Worlds opens the world list, including incompatible worlds and their save status.
-- Escape closes Settings from World defaults; from Gamemaster it discards that
-  draft and returns to World defaults. Settings block log/filter commands.
+- Escape closes Settings and discards both drafts. Settings block log/filter commands.
 - Alt+X, Ctrl+C and Stop server close the console and its owned server tasks.
 
 The dashboard is a server administration view. It has no controls for moving the
@@ -101,8 +101,7 @@ Test connection sends a real model request and may use quota. Ready requires an
 actual read-only MCP callback and a completed model turn. Save stores only the
 acknowledged connection/model pair. Clear takes effect only after Save.
 
-Escape or Cancel on the Gamemaster tab discards that draft and returns to
-World defaults; closing Settings also cancels any open Gamemaster draft. Switching
+Escape or Cancel closes Settings and discards both drafts. Switching
 tabs retains both drafts and pending work. Discovery, testing
 and cancellation remain asynchronous. Replaced or closed drafts reject late
 results. Closing the application joins the listener and all provider work.

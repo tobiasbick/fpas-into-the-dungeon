@@ -28,9 +28,11 @@ Before a session, the client shows a framed menu centered in the terminal:
 
 ```text
                  ┌────── INTO THE DUNGEON ──────┐
-                 │ Connect                      │
-                 │ Information                  │
-                 │ Quit                         │
+                 │                              │
+                 │  Connect                     │
+                 │  Information                 │
+                 │  Quit                        │
+                 │                              │
                  └──────────────────────────────┘
 ```
 
@@ -358,7 +360,8 @@ it. This includes a viewport request deferred behind an inventory action.
 `I` opens the inventory overlay. Every carried and worn item is reachable in
 a selection-following window of at most twelve rows, reduced to terminal height.
 The title shows the visible range and total. Projected health, selected Enter
-action, drop/navigation/close hints and the turn cost stay below the window.
+action and drop/navigation/close hints stay below the window. At the smallest
+supported height the turn-cost reminder is omitted to retain those controls.
 Long entry text is clipped by terminal-cell width without splitting graphemes;
 the selected action remains visible separately. W/S or Up/Down select;
 `Enter` asks the server to use a usable
@@ -391,7 +394,8 @@ maximum health, hit chance, damage, armor, Unarmed and Blades; skill lines show
 total experience and the next cumulative threshold (see
 [progression](../architecture/progression.md)).
 
-- Body rows are the terminal height minus 6; the body is at most
+- Body rows are the terminal height minus 8; at height 8, the health and range
+  share a row so that one body row remains visible. The body is at most
   `min(width - 4, 76)` cells wide and clips by terminal cells.
 - `Up`/`Down` or `W`/`S` scroll one row, clamped without wrapping. Other keys,
   including Space and Enter, do nothing; no key reaches the game while the sheet
@@ -407,7 +411,9 @@ total experience and the next cumulative threshold (see
 
 `Ctrl+P` opens a framed overlay above the game screen. It contains at least
 resume, save, current key bindings, information, available session actions, and
-quit. A first save is sent directly. When the server reports that a save already
+quit. Short terminals show fewer key hints to keep actions visible; below ten
+rows, a resize notice and Back replace the menu. A first save is sent directly.
+When the server reports that a save already
 exists, `Save` opens a confirmation that clearly names the overwrite; cancel
 sends nothing. The status reports success only after the server acknowledges
 the completed atomic write, and a rejected save can be retried.

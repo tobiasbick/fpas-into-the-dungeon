@@ -1,7 +1,7 @@
 // The game screen: primary map or first-person view, sidebar panels, messages, and status line.
 unit Dungeon.Client.Ui.GameView;
 
-uses Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.MapCells as MapCells, Dungeon.Client.Ui.Playback as Playback, Dungeon.Client.Ui.PrimaryCache as PrimaryCache, Dungeon.Client.Animation as AnimationUnit, Dungeon.Client.Character as Character, Dungeon.Client.Model as Model, Dungeon.Client.Raycast as Raycast, Dungeon.Protocol as Protocol, Std.Text.Format as Conv, Std.Ui.Terminal as Tui;
+uses Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.MapCells as MapCells, Dungeon.Client.Ui.Playback as Playback, Dungeon.Client.Ui.PrimaryCache as PrimaryCache, Dungeon.Client.Animation as AnimationUnit, Dungeon.Client.Character as Character, Dungeon.Client.Model as Model, Dungeon.Client.Raycast as Raycast, Dungeon.Protocol as Protocol, Std.Math as Math, Std.Text.Format as Conv, Std.Ui.Terminal as Tui;
 
 function ClockText(State: Model.ClientModel): string;
 begin
@@ -233,6 +233,11 @@ begin
       end if;
     end;
   end if;
+  const Equipment := Character.EquipmentLines(State.Inventory);
+  const ContextRows := Layout.ContextContentRows(State);
+  const Docked := Layout.ContextCanDock(State);
+  const ShowSectionSpacing := Docked or (ContextRows >= 11 + Equipment.Length());
+  const ShowLocationHeading := Docked or (ContextRows >= 10 + Equipment.Length());
   var Elements: array of Tui.TuiElement := [
     Tui.TuiElementBuilders.MakeHeading('Character'),
     Tui.TuiElementBuilders.MakeLabel(HealthLabel(State)),
@@ -241,21 +246,30 @@ begin
     Tui.TuiElementBuilders.MakeLabel('Weather: ' + WeatherText(State))
   ];
   var FixedRows := Layout.ContextFixedSummaryLines;
-  if Layout.ContextCanDock(State) then
+  if Docked then
     Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(''));
   else
     // The context overlay reserves its Close button instead of this optional spacer.
     FixedRows := FixedRows - 1;
   end if;
 
+  if ShowLocationHeading then
+    Elements.PushInPlace(Tui.TuiElementBuilders.MakeHeading('Location'));
+  else
+    FixedRows := FixedRows - 1;
+  end if;
+
   Elements := Elements.Concat([
-    Tui.TuiElementBuilders.MakeHeading('Location'),
     Tui.TuiElementBuilders.MakeLabel(Location),
-    Tui.TuiElementBuilders.MakeLabel('Position: ' + Position),
-    Tui.TuiElementBuilders.MakeLabel(''),
-    Tui.TuiElementBuilders.MakeHeading('Equipment')
+    Tui.TuiElementBuilders.MakeLabel('Position: ' + Position)
   ]);
-  const Equipment := Character.EquipmentLines(State.Inventory);
+  if ShowSectionSpacing then
+    Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(''));
+  else
+    FixedRows := FixedRows - 1;
+  end if;
+
+  Elements.PushInPlace(Tui.TuiElementBuilders.MakeHeading('Equipment'));
   for Line: string in Equipment do
     begin
       Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(Line, Width)));
@@ -281,15 +295,20 @@ end function;
 public function ViewMessages(State: Model.ClientModel): Tui.TuiElement;
 begin
   var Elements: array of Tui.TuiElement := [];
-  if State.Messages.Length() = 0 then
+  const Available := Math.Max(0, State.ViewportHeight - 5);
+  const Width := Math.Max(1, State.ViewportWidth - 4);
+  if (State.Messages.Length() = 0) and (Available > 0) then
     begin
       Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel('No messages'));
     end;
   else
     begin
-      for Message: string in State.Messages do
+      const First := Math.Max(0, State.Messages.Length() - Available);
+      for Index: integer := First to State.Messages.Length() - 1 do
         begin
-          Elements.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Message));
+          Elements.PushInPlace(
+            Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(State.Messages[Index], Width))
+          );
         end;
       end for;
     end;
@@ -347,6 +366,26 @@ end function;
 // Text remains server-provided; this view never derives item or interaction rules.
 public function ViewSidebar(State: Model.ClientModel): Tui.TuiElement;
 begin
+  if not Layout.ContextCanDock(State) and (State.ViewportHeight < 25) then
+    const Width := Math.Max(1, State.ViewportWidth - 4);
+    var Items: array of Tui.TuiElement := [
+      Tui.TuiElementBuilders.MakeHeading('Character'),
+      Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(HealthLabel(State), Width)),
+      Tui.TuiElementBuilders.MakeLabel(
+        Layout.FitLine('Coins: ' + Conv.IntToStr(State.Coins), Width)
+      ),
+      Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(ClockText(State), Width)),
+      Tui.TuiElementBuilders.MakeLabel(Layout.FitLine('Weather: ' + WeatherText(State), Width)),
+      Tui.TuiElementBuilders.MakeHeading('Location'),
+      Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(State.PrimaryTitle, Width)),
+      Tui.TuiElementBuilders.MakeHeading('Equipment')
+    ];
+    for Line: string in Character.EquipmentLines(State.Inventory) do
+      Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(Line, Width)));
+    end for;
+    const Available := Math.Clamp(State.ViewportHeight - 5, 0, Items.Length());
+    return Tui.TuiElementBuilders.MakeColumn(Items.Slice(0, Available));
+  end if;
   var Width: integer := (State.ViewportWidth - Layout.PrimaryTerminalWidth(State)) - 2;
   if not Layout.ContextCanDock(State) then
     begin

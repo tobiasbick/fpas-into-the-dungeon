@@ -42,14 +42,19 @@ into the page. Disabled tabs use muted text.
 
 - Keep a dialog's size stable when switching tabs or changing content. Center
   it and let it grow with the terminal.
-- Place vertical tabs at the left or right of the content, with at least one
-  empty column between the tab bar and the page.
+- Leave one empty character between overlay content and its frame on every
+  side. Place tabs directly against the frame, with one empty character between
+  the tab bar and its page.
 - Separate headings, controls, lists and actions with empty lines when space
   permits. Keep related controls together.
+- Keep a field's label next to its input, and leave one empty row before the
+  next field when space permits.
 - Lists use the available content width. Align their frame with the content
   and action row.
 - Place primary and cancel actions together at the bottom right, in the order
   `Save  Cancel` or `OK  Cancel`.
+- In a tabbed settings dialog, the shared Save and Cancel apply to the entire
+  dialog and remain in the same position on every tab.
 - Place secondary actions such as `Test connection` at the bottom left,
   aligned with the content, on the same row when space permits.
 - On smaller terminals, reduce spacing and visible list rows first. Keep actions

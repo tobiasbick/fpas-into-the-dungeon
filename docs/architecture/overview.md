@@ -48,7 +48,8 @@ these projects.
 
 ## Module ownership
 
-- `libs/ui` owns the terminal palette shared by the client and server console.
+- `libs/ui` owns the terminal palette and overlay spacing shared by the client
+  and server console.
 
 - `apps/client` owns the client program entry point, input handling, and the
   connection to the game simulation.
