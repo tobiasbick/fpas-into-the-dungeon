@@ -48,8 +48,8 @@ these projects.
 
 ## Module ownership
 
-- `libs/ui` owns the terminal palette and overlay spacing shared by the client
-  and server console.
+- `libs/ui` owns the terminal palette, overlay spacing, and curated landscape
+  seed descriptions and buttons shared by the client and server console.
 
 - `apps/client` owns the client program entry point, input handling, and the
   connection to the game simulation.
@@ -59,6 +59,7 @@ these projects.
   `Session` (connection and session lifecycle), `Worlds` (catalog requests,
   selection and creation updates) with `Worlds.View` (catalog, creation
   editor and discard confirmation),
+  `Dialog` (responsive modal bounds, fixed action rows and scrollable bodies),
   `Intentions` (queued player requests), `Dialogue` (modal frame and input),
   `Trade` (quoted ID selection, local text/item windows and keyboard intentions),
   `Input` (keys and actions), `Events`

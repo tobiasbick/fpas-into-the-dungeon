@@ -1,7 +1,7 @@
 // Presents the world catalog, creation editor and progress-discard confirmation.
 unit Dungeon.Client.Ui.Worlds.View;
 
-uses Dungeon.Client.Model as Model, Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.Worlds as Worlds, Dungeon.Ui.Overlay as Overlay, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Std.Text.Format as Conv, Std.Ui.Terminal as Tui;
+uses Dungeon.Client.Model as Model, Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.Dialog as Dialog, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.Worlds as Worlds, Dungeon.Ui.Overlay as Overlay, Dungeon.Ui.WorldSeeds as Seeds, Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as WorldsUnit, Std.Math as Math, Std.Text.Format as Conv, Std.Ui.Terminal as Tui;
 
 // Widest catalog content in terminal cells; rows clip and the selected reason wraps within it.
 const MaximumCatalogWidth: integer := 76;
@@ -9,7 +9,7 @@ const MaximumCatalogWidth: integer := 76;
 // Content width of the catalog: the terminal minus frame and margin, at most MaximumCatalogWidth.
 function CatalogWidth(State: Model.ClientModel): integer;
 begin
-  var Width := State.ViewportWidth - 8;
+  var Width := Dialog.Width(State);
   if Width > MaximumCatalogWidth then
     Width := MaximumCatalogWidth;
   end if;
@@ -67,10 +67,37 @@ begin
   );
 end function;
 
-// Shows a fixed-column world table, then the selected world's reason wrapped within the catalog width.
-public function ViewWorldChoices(State: Model.ClientModel): array of Tui.TuiElement;
+// Keeps the catalog, page range and selected reason above two fixed bottom action rows.
+public function ViewCatalog(State: Model.ClientModel): Tui.TuiElement;
 begin
-  var Items: array of Tui.TuiElement := [];
+  if ((State.ViewportWidth > 0) and (State.ViewportWidth < 40))
+    or
+    ((State.ViewportHeight > 0) and (State.ViewportHeight < 12))
+  then
+    return Dialog.View(
+      State, 'Worlds', [Tui.TuiElementBuilders.MakeLabel('Resize to 40x12')], [
+        Dialog.Actions(
+          [], [
+            Tui.TuiElementBuilders.MakeButtonOfKind(
+              Tui.TuiControlId.Create(Controls.StartDisconnectControlId), 'Disconnect',
+              Tui.TuiAction.Create(Controls.DisconnectAction), Tui.TuiButtonKind.Cancel
+            )
+          ]
+        ),
+        Dialog.Actions(
+          [], [
+            Tui.TuiElementBuilders.MakeButton(
+              Tui.TuiControlId.Create(Controls.StartQuitControlId), 'Quit',
+              Tui.TuiAction.Create(Controls.QuitAction)
+            )
+          ]
+        )
+      ]
+    );
+  end if;
+  var Items: array of Tui.TuiElement := [
+    Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(State.Status, CatalogWidth(State)))
+  ];
   var Labels: array of string := [];
   const Width := CatalogWidth(State);
   const Selected := Worlds.ReconcileWorldCursor(State).WorldCursor;
@@ -79,7 +106,36 @@ begin
       Labels.PushInPlace(WorldRow(State.Catalog.Worlds[Index], Width));
     end if;
   end for;
+  var Paging: array of Tui.TuiElement := [];
+  if State.Catalog.Offset > 0 then
+    Paging.PushInPlace(
+      Tui.TuiElementBuilders.MakeButton(
+        Tui.TuiControlId.Create(Controls.PreviousWorldsControlId), 'Previous',
+        Tui.TuiAction.Create(Controls.PreviousWorldsAction)
+      )
+    );
+  end if;
 
+  if State.Catalog.Offset + Worlds.PageSize(State) < State.Catalog.Total then
+    Paging.PushInPlace(
+      Tui.TuiElementBuilders.MakeButton(
+        Tui.TuiControlId.Create(Controls.NextWorldsControlId), 'Next',
+        Tui.TuiAction.Create(Controls.NextWorldsAction)
+      )
+    );
+  end if;
+  const First := if Labels.IsEmpty() then 0 else State.Catalog.Offset + 1 end if;
+  Items.PushInPlace(
+    Dialog.Actions(
+      [
+        Tui.TuiElementBuilders.MakeHeading(
+          Conv.IntToStr(First) + '-' +
+          Conv.IntToStr(State.Catalog.Offset + Labels.Length()) + ' of ' +
+          Conv.IntToStr(State.Catalog.Total)
+        )
+      ], Paging
+    )
+  );
   Items.PushInPlace(
     Tui.TuiElementBuilders.MakeHeading(
       Layout.FitLine(
@@ -90,67 +146,61 @@ begin
     )
   );
   Items.PushInPlace(
-    Tui.TuiElementBuilders.MakeList(
-      Tui.TuiControlId.Create(Controls.WorldListControlId),
-      Labels,
-      Selected,
-      Tui.TuiAction.Create(Controls.SelectWorldAction)
+    Tui.TuiElementBuilders.MakeLayout(
+      Tui.TuiLayoutSettings.Default().WithFixedHeight(Worlds.PageSize(State)),
+      Tui.TuiElementBuilders.MakeList(
+        Tui.TuiControlId.Create(Controls.WorldListControlId),
+        Labels,
+        Selected,
+        Tui.TuiAction.Create(Controls.SelectWorldAction)
+      )
     )
   );
-  if State.Catalog.Offset > 0 then
-    Items.PushInPlace(
-      Tui.TuiElementBuilders.MakeButton(
-        Tui.TuiControlId.Create(Controls.PreviousWorldsControlId),
-        'Previous worlds',
-        Tui.TuiAction.Create(Controls.PreviousWorldsAction)
-      )
-    );
-  end if;
-
-  if State.Catalog.Offset + Worlds.PageSize(State) < State.Catalog.Total then
-    Items.PushInPlace(
-      Tui.TuiElementBuilders.MakeButton(
-        Tui.TuiControlId.Create(Controls.NextWorldsControlId),
-        'Next worlds',
-        Tui.TuiAction.Create(Controls.NextWorldsAction)
-      )
-    );
-  end if;
-
+  var Detail := State.Catalog.SelectionReason;
+  var Secondary: array of Tui.TuiElement := [];
   case WorldsUnit.SelectedWorld(State.Catalog) of
     when Some(const World):
       begin
         // The reason appears once, for the selected world only, wrapped instead of clipped.
-        var Detail := 'Selected: ' + World.Id;
+        Detail := 'Selected: ' + World.Id;
         if World.Reason <> '' then
           Detail := Detail + ' - ' + World.Reason;
         end if;
 
-        for Line: string in Layout.WrappedLines(Detail, Width) do
-          Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
-        end for;
-
         if World.Status = 'ready' then
-          Items.PushInPlace(
+          Secondary.PushInPlace(
             Tui.TuiElementBuilders.MakeButtonOfKind(
               Tui.TuiControlId.Create(Controls.NewGameControlId),
-              'Start over',
+              if Width < 50 then 'Restart' else 'Start over' end if,
               Tui.TuiAction.Create(Controls.NewGameAction), Tui.TuiButtonKind.Warning
             )
           );
         end if;
       end;
     when None:
-      // A configured world outside the list still explains why it is unavailable.
-      if State.Catalog.SelectionReason <> '' then
-        for Line: string in Layout.WrappedLines(State.Catalog.SelectionReason, Width) do
-          Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
-        end for;
-      end if;
+      null;
   end case;
+  var Details: array of Tui.TuiElement := [];
+  for Line: string in Layout.WrappedLines(Detail, Width) do
+    Details.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
+  end for;
 
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeLayout(
+      Tui.TuiLayoutSettings.Default().WithFixedHeight(
+        Math.Max(1, Dialog.BodyRows(State, 2) - Worlds.PageSize(State) - 3)
+      ),
+      Tui.TuiElementBuilders.MakeScroll(
+        Tui.TuiControlId.Create(Controls.DialogScrollControlId),
+        Tui.TuiPoint.Create(0, State.DialogScrollOffset),
+        Tui.TuiAction.Create(Controls.DialogScrollAction),
+        Tui.TuiElementBuilders.MakeColumn(Details)
+      )
+    )
+  );
+  var Primary: array of Tui.TuiElement := [];
   if WorldsUnit.CanContinueWorld(State.Catalog) then
-    Items.PushInPlace(
+    Primary.PushInPlace(
       Tui.TuiElementBuilders.MakeButtonOfKind(
         Tui.TuiControlId.Create(Controls.LoadGameControlId),
         'Continue',
@@ -158,92 +208,160 @@ begin
       )
     );
   end if;
-
-  Items.PushInPlace(
+  var Actions: array of Tui.TuiElement := [];
+  Actions.PushInPlace(
     Tui.TuiElementBuilders.MakeButton(
       Tui.TuiControlId.Create(Controls.RefreshWorldsControlId),
-      'Refresh worlds',
+      if Width < 50 then 'Refresh' else 'Refresh worlds' end if,
       Tui.TuiAction.Create(Controls.RefreshWorldsAction)
     )
   );
-  Items.PushInPlace(
+  Actions.PushInPlace(
     Tui.TuiElementBuilders.MakeButton(
       Tui.TuiControlId.Create(Controls.CreateWorldControlId),
-      'Create world',
+      if Width < 50 then 'Create' else 'Create world' end if,
       Tui.TuiAction.Create(Controls.CreateWorldAction)
     )
   );
-  return Items;
-end function;
-
-// Displays server-supplied defaults/ranges and the model-owned creation editor.
-public function ViewNewWorld(State: Model.ClientModel): Tui.TuiElement;
-begin
-  return Overlay.Create(
-    'Create world', [
-      Tui.TuiElementBuilders.MakeColumn([
-        Tui.TuiElementBuilders.MakeLabel(
-          (('Seed: ' + Conv.IntToStr(State.Catalog.MinimumSeed)) + ' through ') +
-          Conv.IntToStr(State.Catalog.MaximumSeed)
-        ),
-        Tui.TuiElementBuilders.MakeInput(
-          Tui.TuiControlId.Create(Controls.SeedControlId),
-          State.SeedText,
-          State.SeedCaret,
-          Tui.TuiAction.Create(Controls.SeedChangedAction)
-        ),
-        Tui.TuiElementBuilders.MakeLabel(
-          (
-            (
-              ('Entrance region: ' + Conv.IntToStr(State.Catalog.MinimumRegionChunks)) +
-              ' through '
-            ) + Conv.IntToStr(State.Catalog.MaximumRegionChunks)
-          ) +
-          ' chunks'
-        ),
-        Tui.TuiElementBuilders.MakeInput(
-          Tui.TuiControlId.Create(Controls.RegionControlId),
-          State.RegionText,
-          State.RegionCaret,
-          Tui.TuiAction.Create(Controls.RegionChangedAction)
-        ),
-        Tui.TuiElementBuilders.MakeLabel(State.Status),
-        Tui.TuiElementBuilders.MakeButtonOfKind(
-          Tui.TuiControlId.Create(Controls.SubmitWorldControlId),
-          'Create',
-          Tui.TuiAction.Create(Controls.SubmitWorldAction), Tui.TuiButtonKind.Primary
-        ),
-        Tui.TuiElementBuilders.MakeButtonOfKind(
-          Tui.TuiControlId.Create(Controls.OverlayBackControlId),
-          'Cancel',
-          Tui.TuiAction.Create(Controls.BackAction), Tui.TuiButtonKind.Cancel
-        )
-      ])
-    ]
+  Actions := Actions.Concat(Secondary);
+  Actions.PushInPlace(
+    Tui.TuiElementBuilders.MakeButton(
+      Tui.TuiControlId.Create(Controls.StartInformationControlId),
+      if Width < 64 then 'Info' else 'Information' end if,
+      Tui.TuiAction.Create(Controls.InformationAction)
+    )
+  );
+  Primary := Primary.Concat([
+    Tui.TuiElementBuilders.MakeButtonOfKind(
+      Tui.TuiControlId.Create(Controls.StartDisconnectControlId),
+      'Disconnect', Tui.TuiAction.Create(Controls.DisconnectAction), Tui.TuiButtonKind.Cancel
+    ),
+    Tui.TuiElementBuilders.MakeButton(
+      Tui.TuiControlId.Create(Controls.StartQuitControlId), 'Quit',
+      Tui.TuiAction.Create(Controls.QuitAction)
+    )
+  ]);
+  return Dialog.View(
+    State,
+    'INTO THE DUNGEON',
+    Items,
+    [Dialog.Actions(Actions, []), Dialog.Actions([], Primary)]
   );
 end function;
 
-// Discard is explicit; cancellation returns to the still-installed game session.
-public function ViewDiscardConfirmation(): Tui.TuiElement;
+// Keeps the creation form stable while presets or custom values change, with actions at the bottom.
+public function ViewNewWorld(State: Model.ClientModel): Tui.TuiElement;
 begin
-  return Overlay.Create(
-    'Discard unsaved progress?', [
-      Tui.TuiElementBuilders.MakeColumn([
-        Tui.TuiElementBuilders.MakeLabel('Unsaved progress will be lost. The last save is kept.'),
-        Tui.TuiElementBuilders.MakeButtonOfKind(
-          Tui.TuiControlId.Create(Controls.DiscardControlId),
-          'Discard and choose world',
-          Tui.TuiAction.Create(Controls.ConfirmDiscardAction), Tui.TuiButtonKind.Dangerous
-        ),
-        Tui.TuiElement.Button(
-          Tui.TuiButtonSpec.DefaultButton(
-            Tui.TuiControlId.Create(Controls.OverlayBackControlId),
-            'Cancel',
-            '',
-            Tui.TuiAction.Create(Controls.BackAction)
-          ) with Kind := Tui.TuiButtonKind.Cancel; end with
+  const Rule := Dialog.Rule();
+  const Size := Dialog.Size(State);
+  if ((State.ViewportWidth > 0) and (State.ViewportWidth < 40))
+    or
+    ((State.ViewportHeight > 0) and (State.ViewportHeight < 12))
+  then
+    return Dialog.View(
+      State,
+      'Create world', [
+        Tui.TuiElementBuilders.MakeLabel('Need at least 40 x 12')
+      ], [
+        Dialog.Actions(
+          [], [
+            Tui.TuiElementBuilders.MakeButtonOfKind(
+              Tui.TuiControlId.Create(Controls.OverlayBackControlId), 'Cancel',
+              Tui.TuiAction.Create(Controls.BackAction), Tui.TuiButtonKind.Cancel
+            )
+          ]
         )
-      ])
+      ]
+    );
+  end if;
+  const Width := Math.Max(1, Size.Width - 4);
+  const Compact := (Size.Width < 60) or (Size.Height < 17);
+  var SeedLabel := 'Seed: ' + Conv.IntToStr(State.Catalog.MinimumSeed) + ' through ' +
+    Conv.IntToStr(State.Catalog.MaximumSeed);
+  var RegionLabel := 'Entrance region: ' + Conv.IntToStr(State.Catalog.MinimumRegionChunks) +
+    ' through ' + Conv.IntToStr(State.Catalog.MaximumRegionChunks) + ' chunks';
+  if Compact then
+    SeedLabel := 'Seed: signed 32-bit';
+    RegionLabel := 'Entrance region: 1-16';
+  end if;
+  var Items := [
+    Tui.TuiElementBuilders.MakeLabel(SeedLabel),
+    Tui.TuiElementBuilders.MakeInput(
+      Tui.TuiControlId.Create(Controls.SeedControlId), State.SeedText, State.SeedCaret,
+      Tui.TuiAction.Create(Controls.SeedChangedAction)
+    )
+  ];
+  if not Compact then
+    Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Seeds.Description(State.SeedText)));
+  end if;
+
+  Items.PushInPlace(Seeds.Choices(State.SeedText, Controls.FirstSeedPresetControlId, Compact));
+  if Size.Height >= 17 then
+    Items.PushInPlace(Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)));
+  end if;
+
+  Items := Items.Concat([
+    Tui.TuiElementBuilders.MakeLabel(RegionLabel),
+    Tui.TuiElementBuilders.MakeInput(
+      Tui.TuiControlId.Create(Controls.RegionControlId), State.RegionText, State.RegionCaret,
+      Tui.TuiAction.Create(Controls.RegionChangedAction)
+    )
+  ]);
+  if State.Status <> '' then
+    Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(State.Status, Width)));
+  elsif not Compact then
+    Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Larger region = fewer dungeon entrances.'));
+  end if;
+
+  Items := Items.Concat([
+    Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(1)),
+    Tui.TuiElementBuilders.MakeRow([
+      Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(0)),
+      Tui.TuiElementBuilders.MakeButtonOfKind(
+        Tui.TuiControlId.Create(Controls.SubmitWorldControlId), 'Create',
+        Tui.TuiAction.Create(Controls.SubmitWorldAction), Tui.TuiButtonKind.Primary
+      ),
+      Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)),
+      Tui.TuiElementBuilders.MakeButtonOfKind(
+        Tui.TuiControlId.Create(Controls.OverlayBackControlId), 'Cancel',
+        Tui.TuiAction.Create(Controls.BackAction), Tui.TuiButtonKind.Cancel
+      )
+    ])
+  ]);
+  return Overlay.Responsive('Create world', Rule, Items);
+end function;
+
+// Discard is explicit; cancellation returns to the still-installed game session.
+public function ViewDiscardConfirmation(State: Model.ClientModel): Tui.TuiElement;
+begin
+  var Body: array of Tui.TuiElement := [];
+  for Line: string in Layout.WrappedLines(
+    'Unsaved progress will be lost. The last save is kept.',
+    Dialog.Width(State)
+  ) do
+    Body.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
+  end for;
+
+  return Dialog.View(
+    State,
+    'Discard unsaved progress?', Body, [
+      Dialog.Actions(
+        [], [
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.DiscardControlId),
+            'Discard and choose world',
+            Tui.TuiAction.Create(Controls.ConfirmDiscardAction), Tui.TuiButtonKind.Dangerous
+          ),
+          Tui.TuiElement.Button(
+            Tui.TuiButtonSpec.DefaultButton(
+              Tui.TuiControlId.Create(Controls.OverlayBackControlId),
+              'Cancel',
+              '',
+              Tui.TuiAction.Create(Controls.BackAction)
+            ) with Kind := Tui.TuiButtonKind.Cancel; end with
+          )
+        ]
+      )
     ]
   );
 end function;

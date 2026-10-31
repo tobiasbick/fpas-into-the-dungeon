@@ -57,7 +57,7 @@ viewport requests:
 host = "127.0.0.1"
 port = 4040
 world_id = "main"
-world_seed = 12345
+world_seed = 32
 dungeon_region_chunks = 4
 chunk_cache_limit = 64
 max_view_width = 240
@@ -77,6 +77,12 @@ its agent. Readiness and temporary MCP credentials are not persisted here.
 in chunks and therefore how rare dungeon entrances are. Like `world_seed`, it
 applies only when a world is created; an existing world keeps the value stored
 in its metadata. A file without it is obsolete and is rejected.
+
+New server configurations default to seed 32 (Forest edge). Existing configuration
+files retain their saved creation defaults. The server settings and client world
+creation form offer four described landscape seeds: 32 (Forest edge), 38 (River
+and lake), 53 (Forest river), and 24 (Meadow lake). Choosing one changes only the
+seed; the seed and entrance-region inputs remain editable.
 
 Command-line `HOST` and `PORT` values override the loaded file for that run.
 The server's `--world ID` preselects an existing world without changing the

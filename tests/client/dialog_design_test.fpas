@@ -1,0 +1,168 @@
+// Verifies approved dialog bounds, one-cell insets, bottom actions and selected row colors at the client boundary.
+program DialogDesignTest;
+
+uses
+  Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData,
+  Std.Tasks as Tasks, Std.Test as Test, Std.Ui.Terminal as Tui;
+
+type Example = record
+  Width: integer;
+  Height: integer;
+  X: integer;
+  Y: integer;
+  DialogWidth: integer;
+  DialogHeight: integer;
+end record;
+
+function Find(Screen: Tui.TuiSurfaceSnapshot; Text: string): Tui.TuiPoint;
+begin
+  for Y: integer := 0 to Screen.Height - 1 do
+    case Screen.LineAt(Y).IndexOf(Text) of
+      when Some(const X):
+        return Tui.TuiPoint.Create(X, Y);
+      when None:
+        null;
+    end case;
+  end for;
+
+  panic('missing dialog text: ' + Text);
+end function;
+
+procedure Frame(Screen: Tui.TuiSurfaceSnapshot; Size: Example);
+begin
+  Test.AssertEquals('╭', Screen.CellAt(Size.X, Size.Y).Glyph);
+  Test.AssertEquals('╮', Screen.CellAt(Size.X + Size.DialogWidth - 1, Size.Y).Glyph);
+  Test.AssertEquals('╰', Screen.CellAt(Size.X, Size.Y + Size.DialogHeight - 1).Glyph);
+  Test.AssertEquals(
+    '╯',
+    Screen.CellAt(Size.X + Size.DialogWidth - 1, Size.Y + Size.DialogHeight - 1).Glyph
+  );
+  for X: integer := Size.X + 1 to Size.X + Size.DialogWidth - 2 do
+    Test.AssertEquals(' ', Screen.CellAt(X, Size.Y + 1).Glyph);
+    Test.AssertEquals(' ', Screen.CellAt(X, Size.Y + Size.DialogHeight - 2).Glyph);
+  end for;
+end procedure;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(8);
+  for Size: Example in [
+    Example(Width := 80, Height := 25, X := 4, Y := 4, DialogWidth := 72, DialogHeight := 17),
+    Example(Width := 40, Height := 12, X := 0, Y := 0, DialogWidth := 40, DialogHeight := 12),
+    Example(Width := 144, Height := 45, X := 36, Y := 11, DialogWidth := 72, DialogHeight := 23)
+  ] do
+    var State := Client.NewClientModel(
+      '127.0.0.1',
+      4040,
+      '',
+      RuntimeData.DefaultClientPreferences(),
+      Requests,
+      Events
+    ) with Screen := Client.ClientScreen.GameScreen; ViewportWidth := Size.Width; ViewportHeight := Size.Height; DescriptionTitle := 'Inspection'; DescriptionText := 'A short inscription.'; DefeatMessage := 'Defeated.'; Inventory := [
+      Protocol.VisibleInventoryItem(
+        Id := 'practice', Name := 'Practice sword',
+        Slot := Protocol.VisibleItemSlot.Weapon, Equipped := false, Usable := false
+      )
+    ]; end with;
+    const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(Size.Width, Size.Height));
+    for Overlay: Client.ClientOverlay in [
+      Client.ClientOverlay.InformationOverlay, Client.ClientOverlay.SaveConfirmationOverlay,
+      Client.ClientOverlay.SessionCancelConfirmationOverlay,
+      Client.ClientOverlay.DiscardConfirmationOverlay,
+      Client.ClientOverlay.DescriptionOverlay, Client.ClientOverlay.InventoryOverlay,
+      Client.ClientOverlay.CharacterSheetOverlay, Client.ClientOverlay.JournalOverlay,
+      Client.ClientOverlay.DefeatOverlay, Client.ClientOverlay.ContextOverlay,
+      Client.ClientOverlay.MessageOverlay
+    ] do
+      State.Overlay := Overlay;
+      State.FocusedControl := 0;
+      if Overlay = Client.ClientOverlay.InformationOverlay then
+        State.FocusedControl := 20;
+      end if;
+
+      if Overlay = Client.ClientOverlay.SaveConfirmationOverlay then
+        State.FocusedControl := 30;
+      end if;
+
+      if Overlay = Client.ClientOverlay.SessionCancelConfirmationOverlay then
+        State.FocusedControl := 33;
+      end if;
+
+      if Overlay = Client.ClientOverlay.DiscardConfirmationOverlay then
+        State.FocusedControl := 20;
+      end if;
+
+      if Overlay = Client.ClientOverlay.DefeatOverlay then
+        State.FocusedControl := 20;
+      end if;
+
+      if (Overlay = Client.ClientOverlay.ContextOverlay)
+        or
+        (Overlay = Client.ClientOverlay.MessageOverlay)
+      then
+        State.FocusedControl := 21;
+      end if;
+
+      State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+      const Screen := App.SurfaceSnapshot();
+      Frame(Screen, Size);
+      const Bottom := Size.Y + Size.DialogHeight - 3;
+      if Overlay = Client.ClientOverlay.InformationOverlay then
+        Test.AssertEquals(Bottom, Find(Screen, 'Back').Y);
+      end if;
+
+      if Overlay = Client.ClientOverlay.SaveConfirmationOverlay then
+        const Cancel := Find(Screen, 'Cancel');
+        const Overwrite := Tui.TuiPoint.Create(
+          Screen.LineAt(Bottom).IndexOf('Overwrite').Unwrap(),
+          Bottom
+        );
+        Test.AssertEquals(Bottom, Cancel.Y);
+        Test.AssertTrue(Overwrite.X < Cancel.X);
+        Test.AssertTrue(
+          Screen.CellAt(Overwrite.X, Overwrite.Y).ButtonAppearance.Unwrap().Kind =
+          Tui.TuiButtonKind.Dangerous
+        );
+        Test.AssertTrue(
+          Screen.CellAt(Cancel.X, Cancel.Y).ButtonAppearance.Unwrap().Kind =
+          Tui.TuiButtonKind.Cancel
+        );
+      end if;
+
+      if Overlay = Client.ClientOverlay.InventoryOverlay then
+        const Item := Find(Screen, '> Practice sword');
+        Test.AssertTrue(Screen.CellAt(Item.X, Item.Y).Role = Tui.TuiStyleRole.Focused);
+        Test.AssertTrue(
+          Screen.CellAt(Size.X + Size.DialogWidth - 3, Item.Y).Role = Tui.TuiStyleRole.Focused
+        );
+        Test.AssertEquals(Bottom, Find(Screen, 'Esc/I close').Y);
+      end if;
+    end for;
+
+    // Empty and long content retain the same outer bounds and final action row.
+    State := State with Overlay := Client.ClientOverlay.DescriptionOverlay; FocusedControl := 0; DescriptionText := 'A much longer inscription. '.RepeatStr(
+      100
+    ); end with;
+
+    State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+    Frame(App.SurfaceSnapshot(), Size);
+    Test.AssertEquals(
+      Size.Y + Size.DialogHeight - 3,
+      Find(App.SurfaceSnapshot(), 'Enter/Esc close').Y
+    );
+    State := State with Screen := Client.ClientScreen.StartScreen; Overlay := Client.ClientOverlay.NoOverlay; ConnectionPhase := Client.ClientConnectionPhase.Failed; FocusedControl := 1; Status := 'Unable to reach server.'; end with;
+
+    State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+    const Failure := Find(App.SurfaceSnapshot(), 'Unable to reach server.');
+    Test.AssertTrue(
+      App.SurfaceSnapshot().CellAt(Failure.X, Failure.Y).Role = Tui.TuiStyleRole.Failure
+    );
+    Frame(App.SurfaceSnapshot(), Size);
+    Test.AssertEquals(Size.Y + Size.DialogHeight - 3, Find(App.SurfaceSnapshot(), 'Connect ').Y);
+    App.Close();
+  end for;
+
+  Test.AssertTrue(Tasks.TryReceive(Requests).Unwrap() is None);
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

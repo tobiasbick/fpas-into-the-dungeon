@@ -51,12 +51,15 @@ into the page. Disabled tabs use muted text.
   next field when space permits.
 - Lists use the available content width. Align their frame with the content
   and action row.
-- Place primary and cancel actions together at the bottom right, in the order
-  `Save  Cancel` or `OK  Cancel`.
+- Place dialog actions on the bottom row, with primary and cancel actions
+  together at the bottom right in the order `Save  Cancel` or `OK  Cancel`.
+  When a narrow terminal requires multiple action rows, keep them together at
+  the bottom and keep the primary and cancel actions on the last row.
 - In a tabbed settings dialog, the shared Save and Cancel apply to the entire
   dialog and remain in the same position on every tab.
 - Place secondary actions such as `Test connection` at the bottom left,
   aligned with the content, on the same row when space permits.
+- Place list counts and page ranges above the list, not among dialog actions.
 - On smaller terminals, reduce spacing and visible list rows first. Keep actions
   reachable and preserve their order.
 

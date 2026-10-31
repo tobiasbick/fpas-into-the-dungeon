@@ -43,7 +43,14 @@ through the list. The server fully checks only the requested page and, when
 outside that page, the selected world. Refresh checks those entries again;
 Continue independently validates the selected save and all its referenced
 dungeon levels. `Create world` opens controlled seed and region inputs with
-server-provided defaults and ranges. `Continue` loads the selected world's
+server-provided defaults and ranges. Seed 32 (Forest edge) is the default for a
+new server configuration. Four landscape buttons offer Forest edge (32), River
+and lake (38), Forest river (53), and Meadow lake (24), with a description of
+the current choice. A preset changes only the seed, which remains editable;
+custom seeds are also supported. The entrance region controls dungeon spacing,
+with larger values producing fewer entrances. The creation dialog keeps its
+size as choices change, with Create and Cancel at the bottom right.
+`Continue` loads the selected world's
 explicit save or starts at spawn if absent. `Start over` starts fresh in the
 same world and keeps its earlier save. The catalog is a table with fixed
 columns (world, status, seed, region, save), at most 76 cells wide; rows clip
@@ -77,6 +84,26 @@ the client returns to a start screen. Rendering a standalone unprepared model
 still builds the correctly sized artwork without changing the supplied model.
 
 ## Game screen
+
+Client dialogs follow the [design language](design-language.md). Standard dialogs
+use a stable 72 by 17 baseline at an 80 by 25 terminal and grow with larger
+terminals. Their content keeps a one-cell inset, with bottom-right primary and
+cancel actions separated from the body. Secondary actions occupy the bottom
+left; multiple action rows stay together at the bottom. Changing a selection,
+validation message or projected content does not move the frame or footer.
+The compact start menu and the larger exploration map retain their own sizing.
+
+The world catalog places its page range and paging controls above the table,
+and creation, refresh, session and exit actions below it. The selected world's
+long explanation scrolls within its reserved area. Context and message overlays
+and the system menu use native scrolling above a fixed closing or action row.
+Tab focuses a scrollable body; arrows, Page Up/Down and Home/End then scroll it.
+Inventory, trade, dialogue, descriptions, the character sheet and journal retain
+their existing keyboard ownership and show their closing shortcuts at the bottom
+right. Selected inventory, trade and dialogue rows use the focused selection
+colors across the available content width.
+Connection failures display the wrapped error above retry, information and quit
+actions instead of hiding it behind the start menu.
 
 The active game uses a bordered main row, an optional framed message panel,
 and a persistent framed status view:
@@ -387,16 +414,17 @@ authoritative refresh recalculate the visible window without extra scroll state.
 
 `C` opens the character sheet, a read-only scrolling overlay owned by
 `Dungeon.Client.CharacterSheet`. Health and the visible row range stay above the
-body; two hint rows stay below it. The body shows each server-formatted line as
+body; a fixed hint row stays below it. The body shows each server-formatted line as
 a label/value row and a source row, for example `Blades L2 XP 12/36` and
 `· Active; next: hit +1`, followed by the worn equipment. The six lines are
 maximum health, hit chance, damage, armor, Unarmed and Blades; skill lines show
 total experience and the next cumulative threshold (see
 [progression](../architecture/progression.md)).
 
-- Body rows are the terminal height minus 8; at height 8, the health and range
-  share a row so that one body row remains visible. The body is at most
-  `min(width - 4, 76)` cells wide and clips by terminal cells.
+- Body rows follow the resolved dialog height after reserving the header,
+  frame, inset and closing row. At terminal height 8, health and range share
+  a row so that one body row remains visible. Text uses the full dialog width
+  and clips by terminal cells.
 - `Up`/`Down` or `W`/`S` scroll one row, clamped without wrapping. Other keys,
   including Space and Enter, do nothing; no key reaches the game while the sheet
   is open. Opening, closing and scrolling consume no turn.
@@ -411,7 +439,7 @@ total experience and the next cumulative threshold (see
 
 `Ctrl+P` opens a framed overlay above the game screen. It contains at least
 resume, save, current key bindings, information, available session actions, and
-quit. Short terminals show fewer key hints to keep actions visible; below ten
+quit. Key bindings scroll independently of the fixed action rows; below ten
 rows, a resize notice and Back replace the menu. A first save is sent directly.
 When the server reports that a save already
 exists, `Save` opens a confirmation that clearly names the overwrite; cancel

@@ -1,7 +1,7 @@
 // Responsive native world list and identity-bound permanent-deletion confirmation.
 unit Dungeon.Server.Console.Worlds.View;
 
-uses Dungeon.Server.Console.Worlds.Model as Model, Dungeon.Server.Console.Log as LogUnit, Dungeon.Ui.Overlay as Overlay, Std.Text.Format as Conv, Std.Math as Math, Std.Ui.Terminal as Tui;
+uses Dungeon.Server.Console.Worlds.Model as Model, Dungeon.Server.Console.Layout as Layout, Dungeon.Server.Console.Log as LogUnit, Dungeon.Ui.Overlay as Overlay, Std.Text.Format as Conv, Std.Math as Math, Std.Ui.Terminal as Tui;
 
 function Fit(Text: string; Width: integer): string;
 begin
@@ -18,12 +18,28 @@ begin
   var Lines: array of Tui.TuiElement := [];
   var Offset := 0;
   while (Offset < Clean.Length()) and (Lines.Length() < Limit) do
-    Lines.PushInPlace(
-      Tui.TuiElementBuilders.MakeLabel(
-        Clean.Slice(Offset, Math.Min(Width, Clean.Length() - Offset))
-      )
-    );
-    Offset := Offset + Width;
+    var Take := Math.Min(Width, Clean.Length() - Offset);
+    if Offset + Take < Clean.Length() then
+      var Split := Take;
+      while (Split > 0) and (Clean[Offset + Split] <> ' ') do
+        Split := Split - 1;
+      end while;
+
+      if Split > 0 then
+        Take := Split;
+      end if;
+    end if;
+    var Line := Clean.Slice(Offset, Take);
+    Offset := Offset + Take;
+    while (Offset < Clean.Length()) and (Clean[Offset] = ' ') do
+      Offset := Offset + 1;
+    end while;
+
+    if (Lines.Length() + 1 = Limit) and (Offset < Clean.Length()) then
+      Line := Line.Slice(0, Math.Min(Line.Length(), Width - 1)) + '…';
+    end if;
+
+    Lines.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Line));
   end while;
 
   return Lines;
@@ -57,36 +73,38 @@ end function;
 // Shows incompatible worlds without opening them; Cancel receives initial confirmation focus.
 public function View(State: Model.WorldManager; Width: integer; Height: integer): Tui.TuiElement;
 begin
-  const BodyWidth := Math.Clamp(Width - 8, 16, 88);
+  const Size := Layout.WorldsSize(Width, Height);
+  const BodyWidth := Math.Max(1, Size.Width - 4);
+  const Compact := Size.Height < 17;
   var Items: array of Tui.TuiElement := [];
   case State.Confirmation of
     when Some(const Id):
-      Items := Labels('Delete world ' + Id + '?', BodyWidth, 4);
+      Items := Labels('Delete world ' + Id + '?', BodyWidth, 2);
+      if not Compact then
+        Items.PushInPlace(Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)));
+      end if;
+
       Items := Items.Concat(
-        Labels('Permanently removes its save, chunks and dungeon levels.', BodyWidth, 4)
+        Labels('Permanently removes its save, chunks and dungeon levels.', BodyWidth, 2)
       );
-      Items := Items.Concat(Labels(State.Message, BodyWidth, 4));
+      Items := Items.Concat(Labels(State.Message, BodyWidth, 2));
+      Items.PushInPlace(Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(0)));
       Items.PushInPlace(
-        Tui.TuiElementBuilders.MakeRowSpaced(
+        Tui.TuiElementBuilders.MakeRow(
           [
-            Button(46, 'Delete permanently'), Button(47, 'Cancel')
-          ], 2
+            Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(0)),
+            Button(46, if BodyWidth < 30 then 'Delete' else 'Delete permanently' end if),
+            Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)),
+            Button(47, 'Cancel')
+          ]
         )
       );
-      Items.PushInPlace(
-        Tui.TuiElementBuilders.MakeLabel(Fit('Y: delete  N/Esc: cancel', BodyWidth))
-      );
-      return Overlay.Create(
-        'Confirm world deletion',
-        [Tui.TuiElementBuilders.MakeColumn(Items)]
+      return Overlay.Responsive(
+        'Confirm world deletion', Layout.WorldsRule(), Items
       );
     when None:
       null;
   end case;
-
-  Items.PushInPlace(
-    Tui.TuiElementBuilders.MakeHeading(Fit('  World              Status        Save', BodyWidth))
-  );
   var Rows: array of string := [];
   const Count := Model.VisibleCount(State, Height);
   for Index: integer := 0 to Count - 1 do
@@ -94,7 +112,7 @@ begin
     Rows.PushInPlace(
       Fit(
         Fit(World.Id, 18).PadRight(19, ' ') +
-        World.Status.PadRight(14, ' ') + World.SaveStatus, BodyWidth
+        World.Status.PadRight(14, ' ') + World.SaveStatus, Math.Max(1, BodyWidth - 2)
       )
     );
   end for;
@@ -102,13 +120,6 @@ begin
   if Count > 0 then
     SelectedRow := Math.Clamp(State.Row, 0, Count - 1);
   end if;
-
-  Items.PushInPlace(
-    Tui.TuiElementBuilders.MakeList(
-      Tui.TuiControlId.Create(40), Rows,
-      SelectedRow, Tui.TuiAction.Create(40)
-    )
-  );
   var Range := 'No worlds.';
   if Count > 0 then
     Range := Conv.IntToStr(State.Catalog.Offset + 1) + '-' +
@@ -116,16 +127,40 @@ begin
   end if;
 
   Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Range));
-  case Model.Selected(State) of
-    when Some(const World):
-      Items := Items.Concat(
-        Labels(World.Id + ': ' + World.SaveStatus + ' ' + World.Reason, BodyWidth, 2)
-      );
-    when None:
-      null;
-  end case;
+  const ListSettings := Tui.TuiLayoutSettings.Create(
+    Tui.TuiMargins.Uniform(0), Tui.TuiSizePolicy.Expanding(), Tui.TuiAlignment.Fill(), 0
+  ).WithFixedWidth(BodyWidth);
+  Items.PushInPlace(
+    Tui.TuiElementBuilders.MakeLayout(
+      ListSettings,
+      Tui.TuiElementBuilders.MakePanel(
+        '', [
+          Tui.TuiElementBuilders.MakeHeading(
+            Fit('  World              Status        Save', Math.Max(1, BodyWidth - 2))
+          ),
+          Tui.TuiElementBuilders.MakeList(
+            Tui.TuiControlId.Create(40), Rows, SelectedRow, Tui.TuiAction.Create(40)
+          )
+        ]
+      )
+    )
+  );
+  if not Compact or (State.Message = '') then
+    case Model.Selected(State) of
+      when Some(const World):
+        Items := Items.Concat(
+          Labels(
+            World.Id + ': ' + World.SaveStatus + ' ' + World.Reason, BodyWidth,
+            if Compact or (State.Message <> '') then 1 else 2 end if
+          )
+        );
+      when None:
+        null;
+    end case;
+  end if;
 
-  Items := Items.Concat(Labels(State.Message, BodyWidth, 2));
+  Items := Items.Concat(Labels(State.Message, BodyWidth, if Compact then 1 else 2 end if));
+  Items.PushInPlace(Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(0)));
   var Pages: array of Tui.TuiElement := [];
   if State.Catalog.Offset > 0 then
     Pages.PushInPlace(Button(44, 'Previous'));
@@ -136,13 +171,23 @@ begin
   end if;
 
   Pages.PushInPlace(Button(41, 'Refresh'));
-  Items.PushInPlace(Tui.TuiElementBuilders.MakeRowSpaced(Pages, 2));
-  Items.PushInPlace(
-    Tui.TuiElementBuilders.MakeRowSpaced([Button(42, 'Delete world'), Button(43, 'Close')], 2)
-  );
-  Items.PushInPlace(
-    Tui.TuiElementBuilders.MakeLabel(Fit('D: delete  R: refresh  Esc: close', BodyWidth))
-  );
-  return Overlay.Create('Worlds', [Tui.TuiElementBuilders.MakeColumn(Items)]);
+  if BodyWidth >= 58 then
+    Pages := Pages.Concat([
+      Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(0)),
+      Button(42, 'Delete world'), Button(43, 'Close')
+    ]);
+    Items.PushInPlace(Tui.TuiElementBuilders.MakeRowSpaced(Pages, 1));
+  else
+    Items.PushInPlace(Tui.TuiElementBuilders.MakeRowSpaced(Pages, 1));
+    Items.PushInPlace(
+      Tui.TuiElementBuilders.MakeRow([
+        Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Expanding(0)),
+        Button(42, if BodyWidth < 24 then 'Delete' else 'Delete world' end if),
+        Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)), Button(43, 'Close')
+      ])
+    );
+  end if;
+
+  return Overlay.Responsive('Worlds', Layout.WorldsRule(), Items);
 end function;
 end unit;

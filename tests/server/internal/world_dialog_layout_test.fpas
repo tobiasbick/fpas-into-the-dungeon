@@ -1,0 +1,167 @@
+// World selection must not move the dialog or its bottom actions.
+program WorldDialogLayoutTest;
+
+uses
+  Dungeon.Protocol as Protocol, Dungeon.Protocol.Worlds as Worlds,
+  Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Console as ConsoleUnit,
+  Dungeon.Server.Console.Model as ModelUnit, Std.Console as Console, Std.Test as Test,
+  Std.Ui.Terminal as Tui;
+
+function Find(Screen: Tui.TuiSurfaceSnapshot; Text: string): Tui.TuiPoint;
+begin
+  for Y: integer := 0 to Screen.Height - 1 do
+    case Screen.LineAt(Y).IndexOf(Text) of
+      when Some(const X):
+        return Tui.TuiPoint.Create(X, Y);
+      when None:
+        null;
+    end case;
+  end for;
+
+  panic('Expected dialog text not found');
+end function;
+
+begin
+  const Settings := RuntimeData.ServerWorldConfig(
+    Id := 'main', Seed := 1, DungeonRegionChunks := 4,
+    ChunkCacheLimit := 64, MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  var State := ModelUnit.NewConsoleModel('', Settings) with Width := 80; Height := 25; FocusedControl := 40; end with;
+
+  State.Worlds.Open := true;
+  State.Worlds.Catalog := Worlds.EmptyWorldCatalog(0, 2);
+  State.Worlds.Catalog.Total := 2;
+  State.Worlds.Catalog.Worlds := [
+    Protocol.WorldSummary(
+      Id := 'short',
+      Seed := 1,
+      RegionChunks := 4,
+      Status := 'ready',
+      SaveStatus := 'missing',
+      Reason := ''
+    ),
+    Protocol.WorldSummary(
+      Id := 'long',
+      Seed := 1,
+      RegionChunks := 4,
+      Status := 'incompatible',
+      SaveStatus := 'unknown',
+      Reason := 'An incompatible world has a much longer explanation that must not resize the dialog when the selection changes.'
+    )
+  ];
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 25));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    0,
+    0
+  );
+  const Before := App.SurfaceSnapshot();
+  const Title := Find(Before, 'Worlds');
+  const Close := Find(Before, 'Close');
+  App.InjectKeyForTest(
+    Console.KeyEvent(
+      kind := Tui.TuiKeyKind.Down, ch := '', shift := false,
+      ctrl := false, alt := false, meta := false
+    )
+  );
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  const After := App.SurfaceSnapshot();
+  Test.AssertEquals(Title.X, Find(After, 'Worlds').X);
+  Test.AssertEquals(Title.Y, Find(After, 'Worlds').Y);
+  Test.AssertEquals(Close.X, Find(After, 'Close').X);
+  Test.AssertEquals(Close.Y, Find(After, 'Close').Y);
+  Test.AssertTrue(Find(Before, '1-2 of 2').Y < Find(Before, '  World').Y);
+  Test.AssertEquals('─', After.CellAt(Close.X, Close.Y + 2).Glyph);
+  Test.AssertEquals(Close.Y, Find(After, 'Delete world').Y);
+  Test.AssertEquals(Close.Y, Find(After, 'Refresh').Y);
+  Test.AssertEquals(
+    '╭',
+    After.CellAt(Find(After, '1-2 of 2').X, Find(After, '  World').Y - 1).Glyph
+  );
+  Test.AssertEquals(
+    '╮',
+    After.CellAt(Find(After, '1-2 of 2').X + 67, Find(After, '  World').Y - 1).Glyph
+  );
+  App.InjectKeyForTest(
+    Console.KeyEvent(
+      kind := Tui.TuiKeyKind.Character, ch := 'd', shift := false,
+      ctrl := false, alt := false, meta := false
+    )
+  );
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  const Confirmation := App.SurfaceSnapshot();
+  Test.AssertEquals(Title.Y, Find(Confirmation, 'Confirm world deletion').Y);
+  Test.AssertEquals(Close.Y, Find(Confirmation, 'Cancel').Y);
+  Test.AssertEquals(Close.Y, Find(Confirmation, 'Delete permanently').Y);
+  App.InjectResizeForTest(Tui.TuiSize.Create(40, 14));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertTrue(
+    Find(App.SurfaceSnapshot(), 'Cancel').Y > Find(App.SurfaceSnapshot(), 'Delete world').Y
+  );
+  App.InjectKeyForTest(
+    Console.KeyEvent(
+      kind := Tui.TuiKeyKind.Escape, ch := '', shift := false,
+      ctrl := false, alt := false, meta := false
+    )
+  );
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertEquals(
+    Find(App.SurfaceSnapshot(), 'Close').Y,
+    Find(App.SurfaceSnapshot(), 'Delete world').Y
+  );
+  App.InjectResizeForTest(Tui.TuiSize.Create(40, 12));
+  State.Worlds.Message := 'World list updated';
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  Test.AssertEquals(
+    Find(App.SurfaceSnapshot(), 'Close').Y,
+    Find(App.SurfaceSnapshot(), 'Delete world').Y
+  );
+  Test.AssertTrue(
+    Find(App.SurfaceSnapshot(), 'World list updated').Y < Find(App.SurfaceSnapshot(), 'Close').Y
+  );
+  App.InjectResizeForTest(Tui.TuiSize.Create(160, 60));
+  State := App.RunIterations(
+    State,
+    ConsoleUnit.UpdateServerConsole,
+    ConsoleUnit.ViewServerConsole,
+    1,
+    0
+  );
+  const Large := App.SurfaceSnapshot();
+  Test.AssertEquals('╭', Large.CellAt(40, 15).Glyph);
+  Test.AssertEquals('╯', Large.CellAt(119, 44).Glyph);
+  Test.AssertEquals(42, Find(Large, 'Close').Y);
+  App.Close();
+end.

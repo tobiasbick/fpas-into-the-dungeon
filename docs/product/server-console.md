@@ -75,17 +75,26 @@ tall, its follow-status line is omitted to leave room for a log entry and frame.
 - Up/Down, PageUp/PageDown and Home scroll the focused log.
 - Scrolling away from the newest page pauses following. End, or scrolling back
   to the newest page, resumes it. New entries preserve a paused retained anchor.
-- F3 cycles All, Info, Warnings and Errors; the buttons select a filter directly.
+- F3 and the footer's Filter button cycle All, Info, Warnings and Errors; the log
+  buttons select a filter directly.
 - F2 opens Settings with focus on the **World defaults** and **Gamemaster** tabs
   to the left of the content. Use Up/Down or click a tab to switch; drafts remain intact.
   Seed and entrance-region defaults are validated and saved atomically to the
-  current `server.toml`; existing world parameters remain fixed. The Gamemaster
+  current `server.toml`; existing world parameters remain fixed. New configurations
+  use seed 32. World defaults offer the described Forest edge (32), River and
+  lake (38), Forest river (53), and Meadow lake (24) landscapes. Choosing one
+  edits only the seed field; both seed and entrance-region values remain freely
+  editable. The selected seed's description and the region's effect on dungeon
+  spacing appear when space permits. The Gamemaster
   tab selects Codex or Pi and an advertised model globally. The shared Save
   validates and atomically stores changes from both tabs; Cancel discards both.
   Both tabs share a centered, content-independent size: 72 × 17 at 80 × 25,
   growing with larger terminals. At 40 × 12 the controls use a compact layout;
   smaller terminals show a size notice and a Close button until resized.
 - F4 or Worlds opens the world list, including incompatible worlds and their save status.
+  The centered dialog keeps its size while the selection or confirmation changes;
+  the page range stays above the list and actions stay at the bottom. Visible
+  rows adapt to the available height.
 - Escape closes Settings and discards both drafts. Settings block log/filter commands.
 - Alt+X, Ctrl+C and Stop server close the console and its owned server tasks.
 

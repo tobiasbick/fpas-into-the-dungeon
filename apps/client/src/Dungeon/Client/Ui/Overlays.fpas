@@ -1,23 +1,36 @@
 // The start screen and every modal overlay: menus, confirmations, map, description, and defeat.
 unit Dungeon.Client.Ui.Overlays;
 
-uses Dungeon.Client.Ui.Trade as Trade, Dungeon.Client.Journal as Journal, Dungeon.Client.Ui.Dialogue as Dialogue, Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.GameView as GameView, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.MapCells as MapCells, Dungeon.Client.Ui.Worlds.View as WorldView, Dungeon.Client.Character as Character, Dungeon.Client.CharacterSheet as CharacterSheet, Dungeon.Client.Model as Model, Dungeon.Ui.Overlay as Overlay, Dungeon.Protocol as Protocol, Std.Ui.Terminal as Tui;
+uses Dungeon.Client.Ui.Trade as Trade, Dungeon.Client.Journal as Journal, Dungeon.Client.Ui.Dialogue as Dialogue, Dungeon.Client.Ui.Dialog as Dialog, Dungeon.Client.Ui.Controls as Controls, Dungeon.Client.Ui.GameView as GameView, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.MapCells as MapCells, Dungeon.Client.Ui.Worlds.View as WorldView, Dungeon.Client.Character as Character, Dungeon.Client.CharacterSheet as CharacterSheet, Dungeon.Client.Model as Model, Dungeon.Ui.Overlay as Overlay, Dungeon.Protocol as Protocol, Std.Ui.Terminal as Tui;
+
+function Wrapped(State: Model.ClientModel; Text: string; Role: Tui.TuiStyleRole): array of Tui.TuiElement;
+begin
+  var Items: array of Tui.TuiElement := [];
+  for Line: string in Layout.WrappedLines(Text, Dialog.Width(State)) do
+    Items.PushInPlace(Tui.TuiElement.Label(Tui.TuiLabel(Text := Line, Role := Role)));
+  end for;
+
+  return Items;
+end function;
 
 // Renders the information overlay about the game and its controls.
-public function ViewInformation(): Tui.TuiElement;
+public function ViewInformation(State: Model.ClientModel): Tui.TuiElement;
 begin
-  return Overlay.Create(
+  return Dialog.View(
+    State,
     'Information', [
-      Tui.TuiElementBuilders.MakeColumn([
-        Tui.TuiElementBuilders.MakeHeading('Into the Dungeon'),
-        Tui.TuiElementBuilders.MakeLabel('A Functional Pascal client-server RPG.'),
-        Tui.TuiElementBuilders.MakeLabel(''),
-        Tui.TuiElementBuilders.MakeButton(
-          Tui.TuiControlId.Create(Controls.OverlayBackControlId),
-          'Back',
-          Tui.TuiAction.Create(Controls.BackAction)
-        )
-      ])
+      Tui.TuiElementBuilders.MakeHeading('Into the Dungeon'),
+      Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1))
+    ].Concat(Wrapped(State, 'A Functional Pascal client-server RPG.', Tui.TuiStyleRole.Normal)), [
+      Dialog.Actions(
+        [], [
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.OverlayBackControlId),
+            'Back',
+            Tui.TuiAction.Create(Controls.BackAction), Tui.TuiButtonKind.Cancel
+          )
+        ]
+      )
     ]
   );
 end function;
@@ -25,53 +38,73 @@ end function;
 // Renders the start screen with connection and session choices for the current phase.
 public function ViewStartScreen(State: Model.ClientModel): Tui.TuiElement;
 begin
+  if State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession then
+    if not State.Pending then
+      return WorldView.ViewCatalog(State);
+    end if;
+
+    return Dialog.View(
+      State, 'INTO THE DUNGEON', [
+        Tui.TuiElementBuilders.MakeLabel(Layout.FitLine(State.Status, Dialog.Width(State))),
+        Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)),
+        Tui.TuiElementBuilders.MakeLabel('Please wait.')
+      ], [
+        Dialog.Actions(
+          [], [
+            Tui.TuiElementBuilders.MakeButtonOfKind(
+              Tui.TuiControlId.Create(Controls.CancelSessionStartControlId), 'Cancel',
+              Tui.TuiAction.Create(Controls.RequestCancelSessionAction), Tui.TuiButtonKind.Cancel
+            )
+          ]
+        )
+      ]
+    );
+  end if;
+
+  if State.ConnectionPhase = Model.ClientConnectionPhase.Failed then
+    return Dialog.View(
+      State, 'Connection failed', Wrapped(State, State.Status, Tui.TuiStyleRole.Failure), [
+        Dialog.Actions(
+          [
+            Tui.TuiElementBuilders.MakeButton(
+              Tui.TuiControlId.Create(Controls.StartInformationControlId),
+              if Dialog.Width(State) < 44 then 'Info' else 'Information' end if,
+              Tui.TuiAction.Create(Controls.InformationAction)
+            )
+          ], [
+            Tui.TuiElement.Button(
+              Tui.TuiButtonSpec.DefaultButton(
+                Tui.TuiControlId.Create(Controls.ConnectControlId), 'Connect', '',
+                Tui.TuiAction.Create(Controls.ConnectAction)
+              ) with Kind := Tui.TuiButtonKind.Primary; end with
+            ),
+            Tui.TuiElementBuilders.MakeButtonOfKind(
+              Tui.TuiControlId.Create(Controls.StartQuitControlId),
+              'Quit', Tui.TuiAction.Create(Controls.QuitAction), Tui.TuiButtonKind.Cancel
+            )
+          ]
+        )
+      ]
+    );
+  end if;
   var Items: array of Tui.TuiElement := [];
   if State.ConnectionPhase = Model.ClientConnectionPhase.Connecting then
     begin
       Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(State.Status));
     end;
   else
-    if State.ConnectionPhase = Model.ClientConnectionPhase.AwaitingSession then
-      begin
-        Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel(State.Status));
-        if State.Pending then
-          begin
-            Items.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Please wait.'));
-            Items.PushInPlace(
-              Tui.TuiElementBuilders.MakeButtonOfKind(
-                Tui.TuiControlId.Create(Controls.CancelSessionStartControlId),
-                'Cancel',
-                Tui.TuiAction.Create(Controls.RequestCancelSessionAction), Tui.TuiButtonKind.Cancel
-              )
-            );
-          end;
-        else
-          begin
-            Items := Items.Concat(WorldView.ViewWorldChoices(State));
-            Items.PushInPlace(
-              Tui.TuiElementBuilders.MakeButton(
-                Tui.TuiControlId.Create(Controls.StartDisconnectControlId),
-                'Disconnect',
-                Tui.TuiAction.Create(Controls.DisconnectAction)
-              )
-            );
-          end;
-        end if;
-      end;
-    else
-      begin
-        Items.PushInPlace(
-          Tui.TuiElement.Button(
-            Tui.TuiButtonSpec.DefaultButton(
-              Tui.TuiControlId.Create(Controls.ConnectControlId),
-              'Connect',
-              '',
-              Tui.TuiAction.Create(Controls.ConnectAction)
-            ) with Kind := Tui.TuiButtonKind.Primary; end with
-          )
-        );
-      end;
-    end if;
+    begin
+      Items.PushInPlace(
+        Tui.TuiElement.Button(
+          Tui.TuiButtonSpec.DefaultButton(
+            Tui.TuiControlId.Create(Controls.ConnectControlId),
+            'Connect',
+            '',
+            Tui.TuiAction.Create(Controls.ConnectAction)
+          ) with Kind := Tui.TuiButtonKind.Primary; end with
+        )
+      );
+    end;
   end if;
 
   if not State.Pending then
@@ -93,8 +126,9 @@ begin
     end;
   end if;
 
-  return Overlay.Create(
+  return Overlay.Responsive(
     'INTO THE DUNGEON',
+    Tui.TuiOverlaySizeRule.Create(Tui.TuiSize.Create(32, 9), 4, 25),
     [Tui.TuiElementBuilders.MakeColumn(Items)]
   );
 end function;
@@ -102,33 +136,24 @@ end function;
 function ViewSystemMenu(State: Model.ClientModel): Tui.TuiElement;
 begin
   if State.ViewportHeight < 10 then
-    return Overlay.Create(
-      'System menu', [
-        Tui.TuiElementBuilders.MakeLabel('Resize to 32x10'),
-        Tui.TuiElementBuilders.MakeButton(
-          Tui.TuiControlId.Create(Controls.ResumeControlId),
-          'Back', Tui.TuiAction.Create(Controls.ResumeAction)
+    return Dialog.View(
+      State,
+      'System menu', [Tui.TuiElementBuilders.MakeLabel('Resize to 32x10')],
+      [
+        Dialog.Actions(
+          [], [
+            Tui.TuiElementBuilders.MakeButtonOfKind(
+              Tui.TuiControlId.Create(Controls.ResumeControlId),
+              'Back', Tui.TuiAction.Create(Controls.ResumeAction), Tui.TuiButtonKind.Cancel
+            )
+          ]
         )
       ]
     );
   end if;
   var Items: array of Tui.TuiElement := [
-    Tui.TuiElementBuilders.MakeButton(
-      Tui.TuiControlId.Create(Controls.ResumeControlId),
-      'Resume',
-      Tui.TuiAction.Create(Controls.ResumeAction)
-    ),
-    Tui.TuiElementBuilders.MakeButton(
-      Tui.TuiControlId.Create(Controls.SystemInformationControlId),
-      'Information',
-      Tui.TuiAction.Create(Controls.InformationAction)
-    ),
-    Tui.TuiElementBuilders.MakeButtonOfKind(
-      Tui.TuiControlId.Create(Controls.SaveControlId),
-      'Save',
-      Tui.TuiAction.Create(Controls.SaveAction), Tui.TuiButtonKind.Primary
-    ),
-    Tui.TuiElementBuilders.MakeRule('Key bindings')
+    Tui.TuiElementBuilders.MakeHeading('Key bindings'),
+    Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1))
   ];
   if not State.HasVisibleState or (State.View = Protocol.ViewKind.Map) then
     begin
@@ -155,121 +180,109 @@ begin
     Tui.TuiElementBuilders.MakeLabel('Ctrl+P Menu'),
     Tui.TuiElementBuilders.MakeLabel('Alt+X  Quit')
   ]);
-  // Reserve the remaining action buttons and the overlay's frame and inset.
-  var PrefixRows := State.ViewportHeight - 7;
-  if PrefixRows < 3 then
-    PrefixRows := 3;
-  end if;
-
-  if Items.Length() > PrefixRows then
-    Items := Items.Slice(0, PrefixRows);
-  end if;
-
-  if (State.ConnectionPhase = Model.ClientConnectionPhase.Active)
-    or
-    (State.ConnectionPhase = Model.ClientConnectionPhase.Connecting)
-  then
-    begin
-      Items.PushInPlace(
-        Tui.TuiElementBuilders.MakeButton(
-          Tui.TuiControlId.Create(Controls.DisconnectControlId),
-          'Disconnect',
-          Tui.TuiAction.Create(Controls.DisconnectAction)
-        )
-      );
-    end;
-  else
-    begin
-      Items.PushInPlace(
-        Tui.TuiElementBuilders.MakeButton(
-          Tui.TuiControlId.Create(Controls.DisconnectControlId),
-          'Return to start',
-          Tui.TuiAction.Create(Controls.DisconnectAction)
-        )
-      );
-    end;
-  end if;
-
-  Items.PushInPlace(
-    Tui.TuiElementBuilders.MakeButton(
-      Tui.TuiControlId.Create(Controls.WorldSelectionControlId),
-      'Choose world',
-      Tui.TuiAction.Create(Controls.WorldSelectionAction)
-    )
-  );
-  Items.PushInPlace(
-    Tui.TuiElementBuilders.MakeButton(
-      Tui.TuiControlId.Create(Controls.SystemQuitControlId),
-      'Quit',
-      Tui.TuiAction.Create(Controls.QuitAction)
-    )
-  );
-  return Overlay.Create(
-    'System menu',
-    [Tui.TuiElementBuilders.MakeColumn(Items)]
-  );
-end function;
-
-function ViewSaveConfirmation(): Tui.TuiElement;
-begin
-  return Overlay.Create(
-    'Overwrite save?', [
-      Tui.TuiElementBuilders.MakeColumn([
-        Tui.TuiElementBuilders.MakeLabel('The existing save for this world will be replaced.'),
-        Tui.TuiElement.Button(
-          Tui.TuiButtonSpec.DefaultButton(
-            Tui.TuiControlId.Create(Controls.ConfirmSaveControlId),
-            'Overwrite',
-            '',
-            Tui.TuiAction.Create(Controls.ConfirmSaveAction)
-          ) with Kind := Tui.TuiButtonKind.Dangerous; end with
-        ),
-        Tui.TuiElementBuilders.MakeButtonOfKind(
-          Tui.TuiControlId.Create(Controls.CancelSaveControlId),
-          'Cancel',
-          Tui.TuiAction.Create(Controls.CancelSaveAction), Tui.TuiButtonKind.Cancel
-        )
-      ])
+  const Compact := Dialog.Width(State) < 50;
+  return Dialog.Scrollable(
+    State, 'System menu', Tui.TuiElementBuilders.MakeColumn(Items), [
+      Dialog.Actions(
+        [
+          Tui.TuiElementBuilders.MakeButton(
+            Tui.TuiControlId.Create(Controls.SystemInformationControlId),
+            if Compact then 'Info' else 'Information' end if,
+            Tui.TuiAction.Create(Controls.InformationAction)
+          ),
+          Tui.TuiElementBuilders.MakeButton(
+            Tui.TuiControlId.Create(Controls.WorldSelectionControlId),
+            if Compact then 'Worlds' else 'Choose world' end if,
+            Tui.TuiAction.Create(Controls.WorldSelectionAction)
+          ),
+          Tui.TuiElementBuilders.MakeButton(
+            Tui.TuiControlId.Create(Controls.DisconnectControlId),
+            if State.ConnectionPhase = Model.ClientConnectionPhase.Active then 'Disconnect'
+              else 'Return to start'
+              end if,
+            Tui.TuiAction.Create(Controls.DisconnectAction)
+          )
+        ], []
+      ),
+      Dialog.Actions(
+        [
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.SystemQuitControlId),
+            'Quit', Tui.TuiAction.Create(Controls.QuitAction), Tui.TuiButtonKind.Warning
+          )
+        ], [
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.SaveControlId),
+            'Save', Tui.TuiAction.Create(Controls.SaveAction), Tui.TuiButtonKind.Primary
+          ),
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.ResumeControlId),
+            'Resume', Tui.TuiAction.Create(Controls.ResumeAction), Tui.TuiButtonKind.Cancel
+          )
+        ]
+      )
     ]
   );
 end function;
 
-function ViewSessionCancelConfirmation(): Tui.TuiElement;
+function ViewSaveConfirmation(State: Model.ClientModel): Tui.TuiElement;
 begin
-  return Overlay.Create(
-    'Cancel session start?', [
-      Tui.TuiElementBuilders.MakeColumn([
-        Tui.TuiElementBuilders.MakeLabel('The connection will be closed.'),
-        Tui.TuiElement.Button(
-          Tui.TuiButtonSpec.DefaultButton(
-            Tui.TuiControlId.Create(Controls.ContinueSessionStartControlId),
-            'Continue waiting',
-            '',
-            Tui.TuiAction.Create(Controls.ContinueSessionStartAction)
-          ) with Kind := Tui.TuiButtonKind.Primary; end with
-        ),
-        Tui.TuiElementBuilders.MakeButtonOfKind(
-          Tui.TuiControlId.Create(Controls.ConfirmCancelSessionControlId),
-          'Cancel and disconnect',
-          Tui.TuiAction.Create(Controls.ConfirmCancelSessionAction), Tui.TuiButtonKind.Warning
-        )
-      ])
+  return Dialog.View(
+    State,
+    'Overwrite save?',
+    Wrapped(State, 'The existing save for this world will be replaced.', Tui.TuiStyleRole.Normal),
+    [
+      Dialog.Actions(
+        [], [
+          Tui.TuiElement.Button(
+            Tui.TuiButtonSpec.DefaultButton(
+              Tui.TuiControlId.Create(Controls.ConfirmSaveControlId),
+              'Overwrite',
+              '',
+              Tui.TuiAction.Create(Controls.ConfirmSaveAction)
+            ) with Kind := Tui.TuiButtonKind.Dangerous; end with
+          ),
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.CancelSaveControlId),
+            'Cancel',
+            Tui.TuiAction.Create(Controls.CancelSaveAction), Tui.TuiButtonKind.Cancel
+          )
+        ]
+      )
+    ]
+  );
+end function;
+
+function ViewSessionCancelConfirmation(State: Model.ClientModel): Tui.TuiElement;
+begin
+  return Dialog.View(
+    State,
+    'Cancel session start?',
+    Wrapped(State, 'The connection will be closed.', Tui.TuiStyleRole.Normal), [
+      Dialog.Actions(
+        [], [
+          Tui.TuiElement.Button(
+            Tui.TuiButtonSpec.DefaultButton(
+              Tui.TuiControlId.Create(Controls.ContinueSessionStartControlId),
+              'Continue waiting',
+              '',
+              Tui.TuiAction.Create(Controls.ContinueSessionStartAction)
+            ) with Kind := Tui.TuiButtonKind.Primary; end with
+          ),
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.ConfirmCancelSessionControlId),
+            if Dialog.Width(State) < 44 then 'Disconnect' else 'Cancel and disconnect' end if,
+            Tui.TuiAction.Create(Controls.ConfirmCancelSessionAction), Tui.TuiButtonKind.Warning
+          )
+        ]
+      )
     ]
   );
 end function;
 
 function ViewPanelOverlay(State: Model.ClientModel; Title: string; Content: Tui.TuiElement): Tui.TuiElement;
 begin
-  return Overlay.Create(
-    Title, [
-      Content,
-      Tui.TuiElementBuilders.MakeButton(
-        Tui.TuiControlId.Create(Controls.PanelCloseControlId),
-        'Close',
-        Tui.TuiAction.Create(Controls.ClosePanelAction)
-      )
-    ]
-  );
+  return Dialog.Scrollable(State, Title, Content, [Dialog.Actions([], [Dialog.CloseButton()])]);
 end function;
 
 function ViewExplorationMap(State: Model.ClientModel): Tui.TuiElement;
@@ -284,18 +297,37 @@ begin
       Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Loading map...'));
     end;
   end if;
-
-  Content.PushInPlace(
-    Tui.TuiElementBuilders.MakeLabel('WASD/arrows pan  Home center  M/Esc close')
-  );
   var Title: string := 'Map';
   if State.MapLabel <> '' then
     begin
       Title := 'Map - ' + State.MapLabel;
     end;
   end if;
-
-  return Overlay.Create(Title, [Tui.TuiElementBuilders.MakeColumn(Content)]);
+  const Expected := Layout.DesiredMapViewport(State);
+  const Rule := Tui.TuiOverlaySizeRule.Create(
+    Tui.TuiSize.Create(Expected.Width + 4, Expected.Height + 6),
+    4,
+    10
+  );
+  return Overlay.Responsive(
+    Title, Rule, [
+      Tui.TuiElementBuilders.MakeLayout(
+        Tui.TuiLayoutSettings.Default().WithFixedWidth(
+          Expected.Width
+        ).WithFixedHeight(Expected.Height),
+        Tui.TuiElementBuilders.MakeColumn(Content)
+      ),
+      Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)),
+      Dialog.Actions(
+        [
+          Dialog.Hint(
+            if Expected.Width < 44 then 'WASD pan' else 'WASD/arrows pan  Home center' end if
+          )
+        ],
+        [Dialog.Hint('M/Esc close')]
+      )
+    ]
+  );
 end function;
 
 function ViewDescription(State: Model.ClientModel): Tui.TuiElement;
@@ -325,36 +357,40 @@ begin
     end;
   end for;
 
-  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(''));
-  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Enter/Esc close'));
-  if Lines.Length() > PageHeight then
-    begin
-      Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Up/Down scroll'));
-    end;
-  end if;
-
-  return Overlay.Create(
-    State.DescriptionTitle, [
-      Tui.TuiElementBuilders.MakeColumn(Content)
+  return Dialog.View(
+    State, State.DescriptionTitle, Content, [
+      Dialog.Actions(
+        [
+          Dialog.Hint(if Lines.Length() > PageHeight then 'Up/Down scroll' else '' end if)
+        ], [Dialog.Hint('Enter/Esc close')]
+      )
     ]
   );
 end function;
 
 function ViewDefeat(State: Model.ClientModel): Tui.TuiElement;
 begin
-  return Overlay.Create(
+  return Dialog.View(
+    State,
     'You have fallen', [
-      Tui.TuiElementBuilders.MakeColumn([
-        Tui.TuiElementBuilders.MakeLabel(State.DefeatMessage),
-        Tui.TuiElementBuilders.MakeLabel(''),
-        Tui.TuiElementBuilders.MakeLabel('Load your last save or start a new game.'),
-        Tui.TuiElementBuilders.MakeLabel(''),
-        Tui.TuiElementBuilders.MakeButton(
-          Tui.TuiControlId.Create(Controls.OverlayBackControlId),
-          'Continue',
-          Tui.TuiAction.Create(Controls.BackAction)
+      Tui.TuiElement.Label(
+        Tui.TuiLabel(
+          Text := Layout.FitLine(State.DefeatMessage, Dialog.Width(State)),
+          Role := Tui.TuiStyleRole.Failure
         )
-      ])
+      ),
+      Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(1)),
+      Tui.TuiElementBuilders.MakeLabel('Load your last save or start a new game.')
+    ], [
+      Dialog.Actions(
+        [], [
+          Tui.TuiElementBuilders.MakeButtonOfKind(
+            Tui.TuiControlId.Create(Controls.OverlayBackControlId),
+            'Continue',
+            Tui.TuiAction.Create(Controls.BackAction), Tui.TuiButtonKind.Primary
+          )
+        ]
+      )
     ]
   );
 end function;
@@ -377,7 +413,7 @@ begin
       end;
     when Model.ClientOverlay.DiscardConfirmationOverlay:
       begin
-        return WorldView.ViewDiscardConfirmation();
+        return WorldView.ViewDiscardConfirmation(State);
       end;
     when Model.ClientOverlay.DescriptionOverlay:
       begin
@@ -385,7 +421,7 @@ begin
       end;
     when Model.ClientOverlay.InformationOverlay:
       begin
-        return ViewInformation();
+        return ViewInformation(State);
       end;
     when Model.ClientOverlay.SystemMenuOverlay:
       begin
@@ -393,11 +429,11 @@ begin
       end;
     when Model.ClientOverlay.SaveConfirmationOverlay:
       begin
-        return ViewSaveConfirmation();
+        return ViewSaveConfirmation(State);
       end;
     when Model.ClientOverlay.SessionCancelConfirmationOverlay:
       begin
-        return ViewSessionCancelConfirmation();
+        return ViewSessionCancelConfirmation(State);
       end;
     when Model.ClientOverlay.ContextOverlay:
       begin
