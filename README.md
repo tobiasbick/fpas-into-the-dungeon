@@ -50,18 +50,13 @@ at a time**.
 
 ## Quick start
 
-You need a true-color terminal and a release build of
+You need a true-color terminal and a current build of
 [Functional Pascal](https://github.com/tobiasbick/functional-pascal), with `fpas`
-available on your command line. Use the compiler and source standard library
-from the same FPAS checkout or installation, with the AP53 namespace migration
-(`Std.Ai.Acp`, `Std.Io.Fs`, `Std.Net.Sockets`, and `Std.Ui.Terminal`).
-This checkout requires the native
-typed standard-library errors, the `Error` generic constraint, `Result.MapError`
-and `Std.Io.Path.IsAbsolute`, plus `Std.Ai.Acp`, `Std.Ai.Mcp` and native executable builds.
-The game uses the AP54 `Std.Bytes.ByteBuffer` binary APIs. The test fixtures also
-require the `Equatable` generic constraint. Older builds
-without these APIs and language features cannot compile the full workspace.
-The game remains under active development.
+available on your command line. Use the compiler and standard library from the
+same FPAS checkout or installation. The workspace uses typed standard-library
+errors, the `Error` and `Equatable` generic constraints, `Std.Bytes.ByteBuffer`
+and `using const` resource locals. The Gamemaster integration also requires
+`Std.Ai.Acp`, `Std.Ai.Mcp` and native executable builds.
 
 Run the following commands from the repository root, in **two terminals**.
 
@@ -268,9 +263,9 @@ fpas check dungeon.fpasworkspace
 fpas test --timeout 600 --jobs 1 dungeon.fpasworkspace
 ```
 
-Current workspace test verification passes: **183/183 test programs**.
-The workspace has 22 projects. Coverage includes game rules, deterministic generation,
-storage, protocol validation, TUI rendering and input, and real TCP sessions.
+The workspace has 23 projects and 184 test programs. Coverage includes game rules,
+deterministic generation, storage, protocol validation, TUI rendering and input,
+and real TCP sessions.
 
 To inspect generated terrain without starting a game server:
 

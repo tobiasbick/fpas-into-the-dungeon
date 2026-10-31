@@ -353,4 +353,31 @@ begin
   Test.AssertTrue(Tasks.TryReceive(ClosedEvents).Unwrap() is None);
   AssertReleased(CloseFailure);
   FinishChannels(ClosedRequests, ClosedEvents);
+  // A failed publisher unwinds the production connection owner without terminating its host.
+  const PanicListener := Net.Listen('127.0.0.1', 0).Unwrap();
+  const PanicPort := Net.ListenerLocalAddress(PanicListener).Unwrap().Port;
+  const PanicRequests: channel of Protocol.ClientMessage := Tasks.CreateChannel(1);
+  const PanicWorkers := Tasks.CreateTaskGroup();
+  discard Tasks.StartTaskInGroup(
+    PanicWorkers, procedure(WorkerToken: Tasks.CancellationToken) begin
+      discard Network.RunNetworkPublishing(
+        '127.0.0.1', PanicPort, 1, 1, PanicRequests,
+        function(Value: ModelUnit.ClientEvent): result of (boolean, string) begin
+          panic('controlled publication panic');
+        end function, WorkerToken
+      );
+    end procedure
+  );
+  const PanicPeer := Net.Accept(PanicListener).Unwrap();
+  discard Net.CloseListener(PanicListener).Unwrap();
+  discard Net.SetTimeout(PanicPeer, 5000).Unwrap();
+  discard Welcome(PanicPeer, Token);
+  const AfterPanic := Net.ReceiveBytes(PanicPeer, 1);
+  const Failures := Tasks.CloseTaskGroup(PanicWorkers);
+  discard Net.Close(PanicPeer).Unwrap();
+  discard Tasks.CloseChannel(PanicRequests);
+  Test.AssertEquals(1, Failures.Length());
+  Test.AssertTrue(Failures[0].Kind = Tasks.TaskFailureKind.Panicked);
+  Test.AssertEquals('panic: controlled publication panic', Failures[0].Message);
+  Test.AssertEquals(0, AfterPanic.Unwrap().Length());
 end.

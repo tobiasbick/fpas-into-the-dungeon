@@ -104,15 +104,28 @@ begin
   if Tasks.IsCancellationRequested(Token) then
     return Error('Gamemaster operation cancelled');
   end if;
-  const Connection := try Session.Connect(Managed);
+  using const Connection := try Session.Connect(Managed);
   const Outcome := Perform(Connection, Request, Root, Descriptors, Nonce, Seen, Token);
-  const Closed := Acp.Close(Connection);
   const Released := Acp.Release(Connection);
-  if Closed is Error(_) or Released is Error(_) then
+  if Released is Error(_) then
     return Error('Agent process cleanup failed');
   end if;
 
   return Outcome;
+end function;
+
+// Borrows the server while one publication owns its endpoint and access credentials.
+function RunEndpoint(
+  Server: Mcp.Server; Launch: Acp.Launch; Request: Model.Request; Cache: string; Root: string;
+  Nonce: string; Seen: channel of boolean; Token: Tasks.CancellationToken
+): result of (Model.Catalog, string);
+begin
+  using const Endpoint := try Mcp.Publish(
+    Server,
+    Mcp.DefaultHttpOptions()
+  ).MapError(FailureMessage);
+  const Access := try Mcp.Access(Endpoint).MapError(FailureMessage);
+  return RunAgent(Launch, Request, Cache, Root, Nonce, Access, Seen, Token);
 end function;
 
 function ServeAndRun(
@@ -126,33 +139,21 @@ begin
       discard Tasks.CloseChannel(Seen);
       return Error(Reason);
     when Ok(const Server):
-      var Outcome: result of (Model.Catalog, string) := Error('Cannot publish game MCP endpoint');
-      case Mcp.Publish(Server, Mcp.DefaultHttpOptions()).MapError(FailureMessage) of
-        when Error(const Reason):
-          Outcome := Error(Reason);
-        when Ok(const Endpoint):
-          case Mcp.Access(Endpoint).MapError(FailureMessage) of
-            when Error(const Reason):
-              Outcome := Error(Reason);
-            when Ok(const Access):
-              scope
-                const Worker := go Mcp.Serve(Server, None);
-                Outcome := RunAgent(Launch, Request, Cache, Root, Nonce, Access, Seen, Token);
-                const Closed := Mcp.Close(Server);
-                const Served := Tasks.Wait(Worker);
-                if Closed is Error(_) or Served is Error(_) then
-                  Outcome := Error('MCP worker cleanup failed');
-                end if;
-              end scope;
-          end case;
-      end case;
-      const Closed := Mcp.Close(Server);
-      const Released := Mcp.Release(Server);
-      discard Tasks.CloseChannel(Seen);
-      if Closed is Error(_) or Released is Error(_) then
-        return Error('MCP endpoint cleanup failed');
-      end if;
+      var Outcome: result of (Model.Catalog, string) := Error('MCP worker did not run');
+      scope
+        const Worker := go Mcp.Serve(Server, None);
+        // Release before the scope joins its worker, including during failure unwinding.
+        using const Owner := Server;
+        Outcome := RunEndpoint(Owner, Launch, Request, Cache, Root, Nonce, Seen, Token);
+        const Closed := Mcp.Close(Owner);
+        const Served := Tasks.Wait(Worker);
+        const Released := Mcp.Release(Owner);
+        if Closed is Error(_) or Served is Error(_) or Released is Error(_) then
+          Outcome := Error('MCP worker cleanup failed');
+        end if;
+      end scope;
 
+      discard Tasks.CloseChannel(Seen);
       return Outcome;
   end case;
 end function;
