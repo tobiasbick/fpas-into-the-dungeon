@@ -1,6 +1,7 @@
 # Gamemaster connection acceptance
 
-Date: 2026-10-26. Branch: `codex/16-llm-integration`. User acceptance is pending.
+Verification date: 2026-10-26. Branch: `codex/16-llm-integration`.
+Accepted by the user on 2026-11-01.
 
 ## Live adapters
 
@@ -54,8 +55,7 @@ edited. Temporary endpoints and authentication were removed after each run.
 The final complete game suite passed **183/183 programs** against the rebuilt
 PATH distribution, including the pre-dispatch cancellation regression. Formatting
 and checks passed for all **22 workspace projects** and the separate scripted ACP
-peer project. An FPAS helper verified **98 local Markdown links**. The final run
-is recorded in the retained [implementation plan](../plans/16a-gamemaster-connection.md).
+peer project. An FPAS helper verified **98 local Markdown links**.
 
 ## FPAS repairs found during integration
 

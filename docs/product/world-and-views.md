@@ -342,7 +342,7 @@ See [NPCs and dialogue](../architecture/npcs-and-dialogue.md).
 Skeletons notice the player through line of sight, chase, and fight turn by
 turn; see [combat](../architecture/combat.md).
 
-Further settlements, building interiors, mutable terrain, broader
-world simulation, isometric rendering, LLM integration, and broader mutable RPG
-systems remain outside this slice. Their intended order is tracked in the
-[roadmap](../roadmap.md).
+Building interiors, mutable terrain, broader world simulation, isometric
+rendering and broader mutable RPG systems remain future work.
+The [Gamemaster discussion](../plans/gamemaster.md) explores possible LLM-driven
+outdoor generation.

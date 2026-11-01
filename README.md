@@ -245,12 +245,13 @@ accepted. Time and rest (15e) add the persistent clock, night colors and paid
 inn recovery; see [time and rest](docs/architecture/time-and-rest.md).
 Weather and Hearthmoor's quest recognition (15f) are implemented and verified
 through delegated self-acceptance; see the [weather contract](docs/architecture/weather-and-world-response.md).
-The first LLM integration stage, [16a: Gamemaster connection and model selection](docs/architecture/gamemaster-connection.md),
-supports Codex and Pi through ACP with an explicit embedded MCP tool test. Later LLM
-substages will define actual game-event jobs and generated content.
+The accepted [Gamemaster connection and model selection](docs/architecture/gamemaster-connection.md)
+supports Codex and Pi through ACP with an explicit embedded MCP tool test.
+Possible game-event jobs and generated content remain future work.
 Building interiors and multiplayer remain later work.
 
-See the [roadmap](docs/roadmap.md) for the current checkpoints.
+The [Gamemaster discussion](docs/plans/gamemaster.md) explores outdoor generation
+and open questions about sessions, models, context and tools.
 The [architecture overview](docs/architecture/overview.md) explains
 module ownership, and [world structure and views](docs/product/world-and-views.md)
 defines the game's terms.

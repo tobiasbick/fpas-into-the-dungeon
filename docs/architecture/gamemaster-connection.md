@@ -2,8 +2,9 @@
 
 The server stores one agent connection and model for every world in its data
 root. 16a supports Codex through `codex-acp` and Pi through `pi-acp`. It provides
-configuration and an explicit read-only connection test. Event-driven dungeon,
-village and NPC creation follow in later roadmap steps.
+configuration and an explicit read-only connection test. This work is accepted.
+The [Gamemaster discussion](../plans/gamemaster.md) explores future generation
+and open questions about sessions, models, context and tools.
 
 ## Setup
 

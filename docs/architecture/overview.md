@@ -36,7 +36,8 @@ fpas-into-the-dungeon/
 │   ├── runtime/
 │   └── server/
 └── docs/
-│   ├── roadmap.md
+│   ├── plans/
+│   │   └── gamemaster.md
 │   ├── product/
 │   └── architecture/
 ```
@@ -340,8 +341,8 @@ and ownership rules.
 
 ## Documentation
 
-- The [roadmap](../roadmap.md) records the incremental development order and
-  completion criteria without defining the complete game in advance.
+- The [Gamemaster discussion](../plans/gamemaster.md) explores possible outdoor
+  generation and open questions about sessions, models, context and tools.
 - `docs/product` describes the game and player experience. The
   [world structure and views](../product/world-and-views.md) document defines
   the canonical spatial terminology and presentation rules. The
