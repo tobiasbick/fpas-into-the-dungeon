@@ -86,7 +86,7 @@ tall, its follow-status line is omitted to leave room for a log entry and frame.
   edits only the seed field; both seed and entrance-region values remain freely
   editable. The selected seed's description and the region's effect on dungeon
   spacing appear when space permits. The Gamemaster
-  tab selects Codex or Pi and an advertised model globally. The shared Save
+  tab selects Codex, Pi or OpenCode and an advertised model globally. The shared Save
   validates and atomically stores changes from both tabs; Cancel discards both.
   Both tabs share a centered, content-independent size: 72 × 17 at 80 × 25,
   growing with larger terminals. At 40 × 12 the controls use a compact layout;
@@ -119,8 +119,8 @@ Cancel remain fixed at the bottom; Test connection stays aligned with the page
 and moves to the preceding action row when the terminal is narrow.
 The footer shows Not configured, Configured, Testing or Ready. Restart clears
 readiness. An unconfigured startup warns and still accepts normal game clients.
-See [Gamemaster connection](../architecture/gamemaster-connection.md) and
-[Set up Pi](../setup/pi.md).
+See [Gamemaster connection](../architecture/gamemaster-connection.md),
+[Set up Pi](../setup/pi.md) and [Set up OpenCode](../setup/opencode.md).
 
 ## Deleting worlds
 

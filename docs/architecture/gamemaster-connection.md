@@ -1,8 +1,9 @@
 # Gamemaster connection
 
 The server stores one agent connection and model for every world in its data
-root. 16a supports Codex through `codex-acp` and Pi through `pi-acp`. It provides
-configuration and an explicit read-only connection test. This work is accepted.
+root. It supports Codex through `codex-acp`, Pi through `pi-acp`, and OpenCode
+through its built-in `opencode acp` command. It provides configuration and an
+explicit read-only connection test.
 The [Gamemaster discussion](../plans/gamemaster.md) explores future generation
 and open questions about sessions, models, context and tools.
 
@@ -15,10 +16,12 @@ npm install -g @openai/codex @agentclientprotocol/codex-acp
 codex login
 ```
 
-For Pi, follow [Set up Pi](../setup/pi.md). Authentication and provider settings
+For Pi, follow [Set up Pi](../setup/pi.md); for OpenCode, follow
+[Set up OpenCode](../setup/opencode.md). Authentication and provider settings
 belong to the installed agent. The server neither downloads adapters on startup
 nor stores provider credentials. Windows npm launchers are resolved to their
-installed Node entrypoints; executables and arguments remain separate.
+installed Node entrypoints or OpenCode's packaged native executable; executables
+and arguments remain separate.
 
 Start `fpas run apps/server/server.fpasprj -- --console`, open **F2 -> Gamemaster
 settings** and choose a connection. The server queries the agent's model catalog
@@ -42,8 +45,8 @@ gamemaster_connection = "none"
 gamemaster_model = ""
 ```
 
-Connection names are `none`, `codex` and `pi`. A configured connection requires
-a nonempty printable model ID of at most 256 characters. The ID retains its
+Connection names are `none`, `codex`, `pi` and `opencode`. A configured connection
+requires a nonempty printable model ID of at most 256 characters. The ID retains its
 exact case and spelling. A file missing either field is obsolete and is rejected
 with recreate-config guidance. There is no automatic migration. Model lists,
 transcripts, tokens and readiness are never stored in this file.
@@ -65,14 +68,14 @@ subscriptions for either the native terminal or a normal-worker TUI host.
 The console's Gamemaster Model/Input/View units retain only draft presentation.
 
 An operation creates a private directory under `cache/gamemaster`, a fresh nonce
-and an authenticated loopback MCP publication. Codex receives its HTTP descriptor
-through ACP. Pi receives native `.pi/mcp.json` in that directory. The game builds
-and caches `tools/pi-launcher` with PATH FPAS on first Pi use, then rebuilds it
+and an authenticated loopback MCP publication. Codex and OpenCode receive the HTTP
+descriptor through ACP. Pi receives native `.pi/mcp.json` in that directory. The
+game builds and caches `tools/pi-launcher` with PATH FPAS on first Pi use, then rebuilds it
 when its source or compiler changes. The launcher verifies the session marker
 before passing process-scoped `--approve` to Pi and inheriting its RPC pipes.
 Personal Pi provider, credential, MCP and global trust files are preserved.
 
-Both adapters call `gamemaster_probe` with the operation's nonce. Its handler
+Each agent calls `gamemaster_probe` with the operation's nonce. Its handler
 returns the nonce and `service: dungeon`; it has no world, save or character
 resource. Success requires both the observed matching handler receipt and an
 ACP `end_turn` completion from the exact acknowledged model. Text claiming a
