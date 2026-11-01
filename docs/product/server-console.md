@@ -114,6 +114,9 @@ Escape or Cancel closes Settings and discards both drafts. Switching
 tabs retains both drafts and pending work. Discovery, testing
 and cancellation remain asynchronous. Replaced or closed drafts reject late
 results. Closing the application joins the listener and all provider work.
+Long settings and provider errors wrap and scroll inside the page. Save and
+Cancel remain fixed at the bottom; Test connection stays aligned with the page
+and moves to the preceding action row when the terminal is narrow.
 The footer shows Not configured, Configured, Testing or Ready. Restart clears
 readiness. An unconfigured startup warns and still accepts normal game clients.
 See [Gamemaster connection](../architecture/gamemaster-connection.md) and

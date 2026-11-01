@@ -2,7 +2,7 @@
 unit Dungeon.Client.Ui.Trade;
 
 uses
-  Dungeon.Client.Model as Model, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.Dialog as Dialog,
+  Dungeon.Client.Model as Model, Dungeon.Client.Ui.Layout as Layout, Dungeon.Client.Ui.Dialog as Dialog, Dungeon.Client.Ui.Controls as Controls,
   Dungeon.Protocol as Protocol, Dungeon.Protocol.Trades as Trades,
   Std.Math as Math, Std.Text.Format as Conv, Std.Tasks as Tasks, Std.Ui.Terminal as Tui;
 
@@ -164,7 +164,21 @@ end function;
 
 function DetailHeight(State: Model.ClientModel): integer;
 begin
-  return Math.Clamp(Dialog.BodyRows(State, 1) - 4, 1, 3);
+  return Math.Clamp((Dialog.BodyRows(State, 1) - 5) div 2, 1, 3);
+end function;
+
+// Selection changes inspect disabled offers without authorizing a trade.
+public function SelectRow(State: Model.ClientModel; Row: integer): Model.ClientModel;
+begin
+  if State.Pending or (State.ActiveTrade is None) then
+    return State;
+  end if;
+
+  if (Row < 0) or (Row >= Rows(State.ActiveTrade.Unwrap(), State.TradeSide).Length()) then
+    return State;
+  end if;
+
+  return State with TradeSelection := Row; TradeTextOffset := 0; end with;
 end function;
 
 function DetailLines(State: Model.ClientModel): array of string;
@@ -199,9 +213,8 @@ begin
   const Details := DetailLines(State);
   const DetailRows := Math.Min(Details.Length(), DetailHeight(State));
   const DetailStart := Math.Clamp(State.TradeTextOffset, 0, Details.Length() - DetailRows);
-  const Count := Math.Max(1, Dialog.BodyRows(State, 1) - 3 - DetailRows);
-  const First := Math.Max(0, Index - Count + 1);
-  const Last := Math.Min(Values.Length(), First + Count);
+  const Gap := if Dialog.Size(State).Height >= 17 then 1 else 0 end if;
+  const Count := Math.Max(1, Dialog.BodyRows(State, 1) - 4 - DetailRows - 2 * Gap);
   const Side := if State.TradeSide = Protocol.TradeSide.Buy then 'Buy' else 'Sell' end if;
   var Content: array of Tui.TuiElement := [
     Tui.TuiElementBuilders.MakeLabel(
@@ -215,23 +228,42 @@ begin
       '  Items: ' + Conv.IntToStr(Total(Quote, State.TradeSide))
     )
   ];
-  for Row: integer := First to Last - 1 do
-    Content.PushInPlace(
-      Dialog.SelectedRow(
-        Layout.FitLine(
-          (if Row = Index then '> ' else '  ' end if) + Values[Row].Name +
-          '  ' + PriceLabel(Values[Row]) + (if Values[Row].Enabled then '' else ' [x]' end if),
-          Width
-        ), Width, Row = Index
+  Content.PushInPlace(Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(Gap)));
+  var Labels: array of string := [];
+  var Roles: array of Tui.TuiStyleRole := [];
+  var Disabled: array of boolean := [];
+  for Row: integer := 0 to Values.Length() - 1 do
+    Labels.PushInPlace(
+      Layout.FitLine(
+        Values[Row].Name + '  ' + PriceLabel(Values[Row]) +
+        (if Values[Row].Enabled then '' else ' [x]' end if), Width - 4
       )
     );
+    Roles.PushInPlace(
+      if Row = Index then Tui.TuiStyleRole.Focused else Tui.TuiStyleRole.Normal end if
+    );
+    Disabled.PushInPlace(not Values[Row].Enabled);
   end for;
+
+  Content.PushInPlace(
+    Dialog.ListFrame(
+      Tui.TuiElement.List(
+        Tui.TuiControlId.Create(Controls.TradeListControlId), Labels,
+        if Labels.IsEmpty() then -1 else Index end if,
+        Tui.TuiListActions(
+          Change := Tui.TuiAction.Create(Controls.TradeSelectAction),
+          Activate := Some(Tui.TuiAction.Create(Controls.TradeActivateAction)),
+          ItemRoles := Some(Roles), DisabledItems := Some(Disabled), HandleKeys := false
+        )
+      ), Count, Width
+    )
+  );
+  Content.PushInPlace(Tui.TuiElementBuilders.MakeSpacer(Tui.TuiSpacer.Fixed(Gap)));
 
   for Line: integer := DetailStart to DetailStart + DetailRows - 1 do
     Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel(Details[Line]));
   end for;
 
-  Content.PushInPlace(Tui.TuiElementBuilders.MakeLabel('Enter: trade  PgUp/PgDn: page'));
   return Dialog.View(
     State, Quote.Speaker, Content, [
       Dialog.Actions(
@@ -240,7 +272,7 @@ begin
             Layout.FitLine(
               if State.Pending then 'Waiting for server...'
                 elsif Details.Length() > DetailRows then 'L/R text'
-                else 'Tab: Buy/Sell'
+                else 'Enter trade  Tab Buy/Sell'
                 end if, Math.Max(1, Width - 19)
             )
           )

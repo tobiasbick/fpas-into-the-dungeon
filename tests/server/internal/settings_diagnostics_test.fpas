@@ -1,0 +1,75 @@
+// Ensures long provider failures remain readable and footer actions remain fixed during scrolling.
+program SettingsDiagnosticsTest;
+
+uses
+  Dungeon.RuntimeData as RuntimeData, Dungeon.Server.Console as ConsoleUnit,
+  Dungeon.Server.Console.Model as Model, Std.Test as Test, Std.Ui.Terminal as Tui;
+
+function Find(Screen: Tui.TuiSurfaceSnapshot; Text: string): Tui.TuiPoint;
+begin
+  for Y: integer := 0 to Screen.Height - 1 do
+    case Screen.LineAt(Y).IndexOf(Text) of
+      when Some(const X):
+        return Tui.TuiPoint.Create(X, Y);
+      when None:
+        null;
+    end case;
+  end for;
+
+  panic('Missing text: ' + Text);
+end function;
+
+begin
+  const Settings := RuntimeData.ServerWorldConfig(
+    Id := 'main', Seed := 32, DungeonRegionChunks := 4,
+    ChunkCacheLimit := 64, MaximumViewWidth := 240, MaximumViewHeight := 120
+  );
+  for Size: Tui.TuiSize in [Tui.TuiSize.Create(80, 25), Tui.TuiSize.Create(40, 12)] do
+    var State := Model.NewConsoleModel('', Settings) with Width := Size.Width; Height := Size.Height; SettingsOpen := true; SettingsTab := 1; FocusedControl := 74; end with;
+
+    State.Gamemaster := State.Gamemaster with Open := true; MessageError := true; Message := 'Provider failure. '.RepeatStr(
+      40
+    ) + 'ERROR-END'; end with;
+    const App := Tui.TuiApplication.OpenForTest(Size);
+    State := App.RunIterations(
+      State,
+      ConsoleUnit.UpdateServerConsole,
+      ConsoleUnit.ViewServerConsole,
+      0,
+      0
+    );
+    const Save := Find(App.SurfaceSnapshot(), 'Save');
+    const Cancel := Find(App.SurfaceSnapshot(), 'Cancel');
+    App.InjectKeyForTest(
+      Tui.TuiKeyEvent(
+        kind := Tui.TuiKeyKind.EndKey,
+        ch := '',
+        shift := false,
+        ctrl := false,
+        alt := false,
+        meta := false
+      )
+    );
+    State := App.RunIterations(
+      State,
+      ConsoleUnit.UpdateServerConsole,
+      ConsoleUnit.ViewServerConsole,
+      1,
+      0
+    );
+    const Last := Find(App.SurfaceSnapshot(), 'ERROR-END');
+    Test.AssertTrue(App.SurfaceSnapshot().CellAt(Last.X, Last.Y).Role = Tui.TuiStyleRole.Failure);
+    Test.AssertTrue(Find(App.SurfaceSnapshot(), 'Save') = Save);
+    Test.AssertTrue(Find(App.SurfaceSnapshot(), 'Cancel') = Cancel);
+    App.InjectResizeForTest(Tui.TuiSize.Create(240, 100));
+    State := App.RunIterations(
+      State,
+      ConsoleUnit.UpdateServerConsole,
+      ConsoleUnit.ViewServerConsole,
+      1,
+      0
+    );
+    Test.AssertEquals(70, State.FocusedControl);
+    App.Close();
+  end for;
+end.

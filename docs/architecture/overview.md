@@ -50,6 +50,7 @@ these projects.
 
 - `libs/ui` owns the terminal palette, overlay spacing, and curated landscape
   seed descriptions and buttons shared by the client and server console.
+  `Dungeon.Ui.Text` wraps messages and diagnostics by terminal-cell width.
 
 - `apps/client` owns the client program entry point, input handling, and the
   connection to the game simulation.

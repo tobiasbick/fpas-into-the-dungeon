@@ -62,6 +62,10 @@ into the page. Disabled tabs use muted text.
 - Place list counts and page ranges above the list, not among dialog actions.
 - On smaller terminals, reduce spacing and visible list rows first. Keep actions
   reachable and preserve their order.
+  At the minimum height, a single compact inventory area can share its dialog's
+  outer frame so the selected item, values and action hints remain visible.
+- Wrap diagnostics to the actual content width. Overflowing text remains
+  scrollable above the fixed actions; do not silently shorten error messages.
 
 ## Controls and focus
 

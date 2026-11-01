@@ -1,0 +1,67 @@
+// Checks bottom-aligned start actions and complete wrapped messages through the rendered client.
+program DialogLayoutRegressionTest;
+
+uses
+  Dungeon.Client as Client, Dungeon.Protocol as Protocol, Dungeon.RuntimeData as RuntimeData,
+  Std.Tasks as Tasks, Std.Test as Test, Std.Ui.Terminal as Tui;
+
+function Find(Screen: Tui.TuiSurfaceSnapshot; Text: string): Tui.TuiPoint;
+begin
+  for Y: integer := 0 to Screen.Height - 1 do
+    case Screen.LineAt(Y).IndexOf(Text) of
+      when Some(const X):
+        return Tui.TuiPoint.Create(X, Y);
+      when None:
+        null;
+    end case;
+  end for;
+
+  panic('Missing text: ' + Text);
+end function;
+
+begin
+  const Requests: channel of Protocol.ClientMessage := Tasks.CreateChannel(8);
+  const Events: channel of Client.ConnectionEvent := Tasks.CreateChannel(8);
+  const App := Tui.TuiApplication.OpenForTest(Tui.TuiSize.Create(80, 25));
+  var State := Client.NewClientModel(
+    'localhost',
+    4040,
+    '',
+    RuntimeData.DefaultClientPreferences(),
+    Requests,
+    Events
+  ) with ViewportWidth := 80; ViewportHeight := 25; end with;
+
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  Test.AssertEquals(16, Find(App.SurfaceSnapshot(), 'Connect').Y);
+  Test.AssertEquals(16, Find(App.SurfaceSnapshot(), 'Quit').Y);
+  State := State with Screen := Client.ClientScreen.GameScreen; Overlay := Client.ClientOverlay.MessageOverlay; FocusedControl := 21; Messages := [
+    'A long event ' + 'word '.RepeatStr(20) + 'MESSAGE-END', '界'.RepeatStr(35) + 'UNICODE-END'
+  ]; end with;
+
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  discard Find(App.SurfaceSnapshot(), 'MESSAGE-END');
+  discard Find(App.SurfaceSnapshot(), 'UNICODE-END');
+  State := State with Screen := Client.ClientScreen.StartScreen; ConnectionPhase := Client.ClientConnectionPhase.AwaitingSession; Overlay := Client.ClientOverlay.NewWorldOverlay; Pending := false; FocusedControl := 26; DialogScrollOffset := 0; SeedText := '32'; RegionText := '4'; Status := 'Validation error. '.RepeatStr(
+    20
+  ) + 'VALIDATION-END'; end with;
+
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 0, 0);
+  const Cancel := Find(App.SurfaceSnapshot(), 'Cancel');
+  App.InjectKeyForTest(
+    Tui.TuiKeyEvent(
+      kind := Tui.TuiKeyKind.EndKey,
+      ch := '',
+      shift := false,
+      ctrl := false,
+      alt := false,
+      meta := false
+    )
+  );
+  State := App.RunIterations(State, Client.UpdateClient, Client.ViewClient, 1, 0);
+  discard Find(App.SurfaceSnapshot(), 'VALIDATION-END');
+  Test.AssertTrue(Find(App.SurfaceSnapshot(), 'Cancel') = Cancel);
+  App.Close();
+  discard Tasks.CloseChannel(Requests);
+  discard Tasks.CloseChannel(Events);
+end.

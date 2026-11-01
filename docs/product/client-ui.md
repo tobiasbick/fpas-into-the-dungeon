@@ -578,6 +578,11 @@ completed compass quest. These changes are authoritative projections; see
 Elias in Hearthmoor and each village merchant offer **Show me your wares**.
 The separate trade window shows the merchant, coin balance, selected price,
 Buy/Sell side, page, individual goods and reasons for unavailable actions.
+Clicking an inventory item, enabled trade offer or conversation choice selects
+and activates that exact entry. Wrapped conversation lines belong to their
+choice. Unavailable trade offers stay selectable for their explanation, use
+muted text and cannot be activated.
+
 Tab switches sides; Up/Down selects; Page Up/Down requests another 16-item
 page. Enter buys or sells one enabled selected item immediately. Escape
 returns to the conversation, then Escape ends it. Alt+X keeps normal quitting.
