@@ -1,0 +1,171 @@
+// Owns settlement conversation topics and per-NPC first meetings.
+unit Dungeon.Game.Dialogue;
+
+uses Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land, Dungeon.Game.Settlements as Town, System as Sys;
+
+/// A selectable topic and its display label.
+public type Topic = record
+  /// Stable topic identifier within the current frame.
+  public Id: string;
+  /// Player-facing label.
+  public Label: string;
+end record;
+
+/// A transient conversation frame for one speaker.
+public type Frame = record
+  /// Settlement in which the conversation began.
+  public Site: Land.Village;
+  /// Speaker and stable slot.
+  public Speaker: Town.Npc;
+  /// Current greeting or answer.
+  public Text: string;
+  /// Topics available from this frame.
+  public Topics: array of Topic;
+end record;
+
+/// Effect of selecting a dialogue topic.
+public type Result = union
+  /// The speaker or topic no longer matches the frame.
+  Rejected;
+  /// The player chose to end the conversation.
+  Closed;
+  /// The new frame to display for the same speaker.
+  Answer(Value: Frame);
+end union;
+
+const Who: Topic := new Topic('identity', 'Who are you?');
+const Village: Topic := new Topic('settlement', 'Tell me about this place.');
+const Dungeon: Topic := new Topic('dungeon', 'Tell me about the nearby dungeon.');
+const News: Topic := new Topic('news', 'Any news from Hearthmoor?');
+const Back: Topic := new Topic('back', 'Ask something else.');
+const Bye: Topic := new Topic('goodbye', 'Goodbye.');
+
+function Root(Site: Land.Village; Npc: Town.Npc; Text: string): Frame;
+begin
+  const Topics: array of Topic := if Npc.Kind = Town.Role.Mara then [Who, Dungeon, Bye]
+    else if Land.IsHome(Site) then [Who, Village, News, Bye] else [Who, Village, Bye] end if
+    end if;
+  return new Frame(Site, Npc, Text, Topics);
+end function;
+
+function Adjacent(World: Game.State): Town.Npc?;
+begin
+  for Npc: Town.Npc? in [
+    Game.NpcAt(World, World.X, World.Y - 1), Game.NpcAt(World, World.X + 1, World.Y),
+    Game.NpcAt(World, World.X, World.Y + 1), Game.NpcAt(World, World.X - 1, World.Y)
+  ] do
+    if Npc <> null then
+      return Npc;
+    end if;
+  end for;
+
+  return null;
+end function;
+
+/// Starts an adjacent NPC conversation in World and records only that NPC's first meeting.
+public function Open(World: Game.State): Frame?;
+begin
+  const Site: Land.Village? := World.Settlement;
+  if Site = null or World.Health = 0 or Game.TileAt(World, World.X, World.Y) = Land.Tile.Exit then
+    return null;
+  end if;
+  const Npc: Town.Npc? := Adjacent(World);
+  if Npc = null then
+    return null;
+  end if;
+
+  const First: bool := Game.Meet(World, Npc.Slot);
+  const Place: string := Town.Name(World.Seed, Site);
+  const Greeting: string := if First then 'Welcome to ' + Place + '. I am ' + Npc.Name + '.'
+    else 'Good to see you again, traveler.'
+    end if;
+  return Root(Site, Npc, Greeting);
+end function;
+
+function Identity(Npc: Town.Npc; Place: string): string;
+begin
+  case Npc.Kind of
+    when Town.Role.Mara:
+      return 'I am Mara. I grew up in Hearthmoor and know the old paths around the moor.';
+    when Town.Role.Resident:
+      return 'I am ' + Npc.Name + '. My family has lived in ' + Place + ' for years.';
+    when Town.Role.Guard:
+      return 'I am ' + Npc.Name + '. I keep watch over the gate and the paths outside ' + Place +
+        '.';
+    when Town.Role.Innkeeper:
+      return 'I am ' + Npc.Name + '. I keep the inn in ' + Place + '.';
+    when Town.Role.Merchant:
+      return 'I am ' + Npc.Name + '. I supply travelers and buy what they bring back to ' + Place +
+        '.';
+    else
+      return 'I live here in ' + Place + '.';
+  end case;
+end function;
+
+function LocalInfo(Npc: Town.Npc; Place: string): string;
+begin
+  case Npc.Kind of
+    when Town.Role.Guard:
+      return 'The gate brings you back to the same field outside ' + Place +
+        '. Keep an eye on the tree line.';
+    when Town.Role.Innkeeper:
+      return 'Travelers come to ' + Place +
+        ' for a roof and a dry hearth. The houses around the square are private.';
+    when Town.Role.Merchant:
+      return 'Most goods reach ' + Place +
+        ' by way of the gate. The open square is where we meet travelers.';
+    else
+      return 'The square is the heart of ' + Place +
+        '. Follow the main path south to return to the gate.';
+  end case;
+end function;
+
+function Offered(Current: Frame; Id: string): bool;
+begin
+  for Choice: Topic in Current.Topics do
+    if Choice.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+/// Resolves Id against Current's offered choices for the adjacent speaker in World.
+public function Choose(World: Game.State; Current: Frame; Id: string): Result;
+begin
+  const Site: Land.Village? := World.Settlement;
+  const Npc: Town.Npc := Current.Speaker;
+  if Site = null or Site.GateX <> Current.Site.GateX or Site.GateY <> Current.Site.GateY
+    or Sys.Math.Abs(
+    World.X - Npc.X
+  ) + Sys.Math.Abs(World.Y - Npc.Y) <> 1 or not Offered(Current, Id)
+  then
+    return Result.Rejected;
+  end if;
+
+  if Id = 'goodbye' then
+    return Result.Closed;
+  end if;
+
+  if Id = 'back' then
+    return Result.Answer(Root(Site, Npc, 'What else would you like to know?'));
+  end if;
+
+  const Place: string := Town.Name(World.Seed, Site);
+  const Text: string := case Id of
+    when 'identity': Identity(Npc, Place);
+    when 'settlement': LocalInfo(Npc, Place);
+    when 'dungeon': 'The entrance near spawn leads to ' + Land.Name(
+      World.Seed,
+      new Land.Floor(3, 0, 0)
+    ) + '. It has three levels.';
+    when 'news': if Npc.Kind =
+        Town.Role.Innkeeper then 'The fire is lit. Most of the travelers are talking about the old dungeon.'
+      else 'I have seen more adventurers than carts lately. Mara knows the paths they use.'
+      end if;
+    else '';
+  end case;
+  return Result.Answer(new Frame(Site, Npc, Text, [Back, Bye]));
+end function;
+end unit;

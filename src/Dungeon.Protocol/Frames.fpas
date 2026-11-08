@@ -1,0 +1,43 @@
+// Sends bounded UTF-8 JSON frames over a byte stream.
+unit Dungeon.Protocol.Frames;
+
+uses
+  System as Sys, System.IO as IO, System.Text as Text, System.Threading as Threads,
+  System.Threading.Tasks as Tasks;
+
+const MaximumBytes: int := 65536;
+const Utf8: Text.UTF8Encoding := new Text.UTF8Encoding(false, true);
+
+/// Reads one big-endian length-prefixed UTF-8 frame from Stream. Cancellation aborts the read.
+public async function Read(Stream: IO.Stream; Cancellation: Threads.CancellationToken): Tasks.Task<string>;
+begin
+  const Header: array of byte := new byte[4];
+  await Stream.ReadExactlyAsync(Header, 0, Header.Length, Cancellation);
+  const Length: int := cast<int>(Header[
+    1
+  ]) * 65536 + cast<int>(Header[2]) * 256 + cast<int>(Header[3]);
+  if Header[0] <> 0 or Length <= 0 or Length > MaximumBytes then
+    raise new IO.InvalidDataException('Invalid frame length.');
+  end if;
+
+  const Body: array of byte := new byte[Length];
+  await Stream.ReadExactlyAsync(Body, 0, Body.Length, Cancellation);
+  return Utf8.GetString(Body);
+end function;
+
+/// Encodes Payload and writes one bounded frame to Stream. Cancellation aborts the write.
+public async function Write(Stream: IO.Stream; Payload: string; Cancellation: Threads.CancellationToken): Tasks.Task;
+begin
+  const Length: int := Utf8.GetByteCount(Payload);
+  if Length <= 0 or Length > MaximumBytes then
+    raise new IO.InvalidDataException('Invalid frame length.');
+  end if;
+
+  const Frame: array of byte := new byte[Length + 4];
+  Frame[1] := cast<byte>(Length div 65536);
+  Frame[2] := cast<byte>((Length div 256) mod 256);
+  Frame[3] := cast<byte>(Length mod 256);
+  discard Utf8.GetBytes(Payload, 0, Payload.Length, Frame, 4);
+  await Stream.WriteAsync(Frame, 0, Frame.Length, Cancellation);
+end function;
+end unit;

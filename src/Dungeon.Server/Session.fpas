@@ -1,0 +1,185 @@
+// Resolves requests against one authoritative game and its transient conversation.
+unit Dungeon.Server.Session;
+
+uses
+  Dungeon.Game.Rules as Rules, Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land,
+  Dungeon.Game.Settlements as Town, Dungeon.Game.Exploration as Sight, Dungeon.Game.Dialogue as Talk,
+  Dungeon.Protocol.Messages as Wire, Dungeon.Server.SaveFiles as Files,
+  System as Sys, System.Collections.Generic as Generic, System.IO as IO, System.Text.Json as Json;
+
+/// State owned by one accepted connection.
+public type State = record
+  /// Active game, if the client has created or continued one.
+  public World: Game.State? := null;
+  /// Current conversation. The save file contains meetings but no active frame.
+  public Conversation: Talk.Frame? := null;
+  /// Last assigned dialogue revision for this connection.
+  public Revision: long := 0L;
+end record;
+
+function Load(Path: string): Rules.Change?;
+begin
+  try
+    return new Rules.Change(Files.Load(Path), 'You continue the saved world.');
+  catch Ignored: IO.FileNotFoundException do
+    return null;
+  catch Ignored: IO.DirectoryNotFoundException do
+    return null;
+  end try;
+end function;
+
+function Resolve(Current: Game.State?; Request: Wire.Request; Path: string): Rules.Change?;
+begin
+  case Request.Action of
+    when 'create':
+      return new Rules.Change(Rules.Create(Request.Seed), 'A new world awaits.');
+    when 'continue':
+      return Load(Path);
+    else
+      if Current = null then
+        return null;
+      end if;
+
+      if Request.Action = 'save' then
+        Files.Save(Path, Current);
+        return new Rules.Change(Current, 'Game saved.');
+      end if;
+
+      return Rules.Act(Current, Request.Action);
+  end case;
+end function;
+
+function Project(World: Game.State?; MapX: int?; MapY: int?): Wire.View?;
+begin
+  if World = null then
+    return null;
+  end if;
+
+  const Site: Land.Floor? := World.Floor;
+  const Village: Land.Village? := World.Settlement;
+  const Area: string := if Village <> null then Town.Name(World.Seed, Village)
+    else if Site = null then 'Outdoors' else Land.Name(World.Seed, Site) end if
+    end if;
+  const Level: int := if Site = null then 0 else Site.Level + 1 end if;
+  const Depth: int := if Site = null then 0 else Land.Depth end if;
+  const Window: Sight.Window := Sight.Project(World, MapX ?? World.X, MapY ?? World.Y);
+  return new Wire.View(
+    World.Seed, Area, Level, Depth, World.X, World.Y, World.Health, World.Turn,
+    Window.OriginX, Window.OriginY, Window.Rows, Window.Knowledge
+  );
+end function;
+
+function Dialogue(State: State): Wire.Dialogue?;
+begin
+  const Current: Talk.Frame? := State.Conversation;
+  if Current = null then
+    return null;
+  end if;
+
+  const Topics: Generic.List<Wire.Topic> := new Generic.List<Wire.Topic>(Current.Topics.Length);
+  for Choice: Talk.Topic in Current.Topics do
+    Topics.Add(new Wire.Topic(Choice.Id, Choice.Label));
+  end for;
+
+  return new Wire.Dialogue(State.Revision, Current.Speaker.Name, Current.Text, Topics.ToArray());
+end function;
+
+function Reply(State: State; Message: string; MapX: int? := null; MapY: int? := null): Wire.Reply;
+begin
+  return new Wire.Reply(Wire.Version, Message, Project(State.World, MapX, MapY), Dialogue(State));
+end function;
+
+function ConversationRequest(
+  Request: Wire.Request; World: Game.State; Current: Talk.Frame; ref Player: State
+): Wire.Reply;
+begin
+  if Request.Action <> 'dialogue_choice' and Request.Action <> 'end_dialogue' then
+    return Reply(Player, 'Finish the conversation first.');
+  end if;
+
+  if Request.FrameId <> Player.Revision then
+    return Reply(Player, 'That conversation has moved on.');
+  end if;
+
+  if Request.Action = 'end_dialogue' then
+    Player := Player with
+      Conversation := null;
+    end with;
+    return Reply(Player, 'You end the conversation.');
+  end if;
+
+  case Talk.Choose(World, Current, Request.Topic) of
+    when Talk.Result.Rejected:
+      return Reply(Player, 'That topic is not available.');
+    when Talk.Result.Closed:
+      Player := Player with
+        Conversation := null;
+      end with;
+      return Reply(Player, 'You end the conversation.');
+    when Talk.Result.Answer(const Next: Talk.Frame):
+      Player := Player with
+        Conversation := Next;
+        Revision := Player.Revision + 1L;
+      end with;
+      return Reply(Player, 'You speak with ' + Next.Speaker.Name + '.');
+  end case;
+end function;
+
+/// Applies Request to Player using Path for explicit saves and returns the current view and conversation.
+public function Handle(Request: Wire.Request; Path: string; ref Player: State): Wire.Reply;
+begin
+  if Request.Version <> Wire.Version then
+    return new Wire.Reply(Wire.Version, 'Unsupported protocol version.', null);
+  end if;
+
+  if Request.Action = 'map' then
+    return Reply(Player, 'Exploration map.', Request.MapX, Request.MapY);
+  end if;
+
+  const World: Game.State? := Player.World;
+  const Current: Talk.Frame? := Player.Conversation;
+  if World <> null and Current <> null then
+    return ConversationRequest(Request, World, Current, ref Player);
+  end if;
+
+  if Request.Action = 'dialogue_choice' or Request.Action = 'end_dialogue' then
+    return Reply(Player, 'There is no active conversation.');
+  end if;
+
+  if Request.Action = 'enter' and World <> null then
+    const Started: Talk.Frame? := Talk.Open(World);
+    if Started <> null then
+      Player := Player with
+        Conversation := Started;
+        Revision := Player.Revision + 1L;
+      end with;
+      return Reply(Player, 'You speak with ' + Started.Speaker.Name + '.');
+    end if;
+  end if;
+
+  var Message: string := '';
+  try
+    const Result: Rules.Change? := Resolve(World, Request, Path);
+    if Result <> null then
+      Player := Player with
+        World := Result.World;
+      end with;
+      Message := Result.Message;
+    else
+      Message := if Request.Action = 'continue' then 'No saved game exists.'
+        else 'Create or continue a world first.'
+        end if;
+    end if;
+  catch Failure: IO.InvalidDataException do
+    Message := Failure.Message;
+  catch Ignored: Json.JsonException do
+    Message := 'The saved game is not valid JSON.';
+  catch Ignored: Sys.UnauthorizedAccessException do
+    Message := 'The saved game could not be accessed.';
+  catch Ignored: IO.IOException do
+    Message := 'The saved game could not be accessed.';
+  end try;
+
+  return Reply(Player, Message);
+end function;
+end unit;

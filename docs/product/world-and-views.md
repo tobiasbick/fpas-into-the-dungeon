@@ -2,6 +2,8 @@
 
 This document defines the canonical terms for the spatial world model and its
 presentation, including combat, equipment, progression, quests and trade.
+It describes the shipped game that the CLR rewrite uses as a product reference.
+See [rewrite progress](../plans/clr-rewrite.md) for the implemented CLR scope.
 
 ## Terminology
 
@@ -206,13 +208,13 @@ presentation, including combat, equipment, progression, quests and trade.
 - **Local news** is Nora's and Elias' read-only home topic. Successful compass
   hand-in changes their greetings and news, derived from the completed quest.
   It grants no extra reward and changes no prices. See
-  [weather and world response](../architecture/weather-and-world-response.md).
+  [weather and world response](https://github.com/tobiasbick/fpas-into-the-dungeon/blob/rust-backup/docs/architecture/weather-and-world-response.md).
 - **Innkeeper** is a stationary settlement NPC who offers paid rest through
   dialogue. Nora owns the inn in Hearthmoor; generated village slot 2 is its
   innkeeper.
 - **Rest** costs five coins, advances eight game hours and restores full
   health, including when already healthy. It changes no stock, enemies or quest
-  facts and never saves implicitly. See [time and rest](../architecture/time-and-rest.md).
+  facts and never saves implicitly. See [time and rest](https://github.com/tobiasbick/fpas-into-the-dungeon/blob/rust-backup/docs/architecture/time-and-rest.md).
 - **Attack** is the player intention that strikes the field directly ahead.
 - **Combat log** is the ordered list of messages describing one resolved turn.
 - **Combat event** is one structured fact of a resolved turn, such as a hit and
@@ -337,10 +339,10 @@ Hearthmoor is a separate authored 23 by 15 area using the map view and bounded
 local positions without facing. Its gate returns to the same outdoor field.
 Mara offers information and her quest from any cardinally adjacent field;
 Nora offers paid rest. Settlement steps take one minute without healing.
-See [NPCs and dialogue](../architecture/npcs-and-dialogue.md).
+See [NPCs and dialogue](https://github.com/tobiasbick/fpas-into-the-dungeon/blob/rust-backup/docs/architecture/npcs-and-dialogue.md).
 
 Skeletons notice the player through line of sight, chase, and fight turn by
-turn; see [combat](../architecture/combat.md).
+turn; see [combat](https://github.com/tobiasbick/fpas-into-the-dungeon/blob/rust-backup/docs/architecture/combat.md).
 
 Building interiors, mutable terrain, broader world simulation, isometric
 rendering and broader mutable RPG systems remain future work.

@@ -1,0 +1,338 @@
+// Generates terrain and dungeon layouts from stable coordinates and a seed.
+unit Dungeon.Game.Terrain;
+
+uses System as Sys;
+
+const Prime: long := 2147483647L;
+const RegionSize: int := 64;
+const VillageRegion: int := 128;
+const VillageCandidates: int := 8;
+const NameStart: array of string := [
+  'Hollow',
+  'Ashen',
+  'Silent',
+  'Iron',
+  'Shattered',
+  'Sunken',
+  'Forgotten',
+  'Moonlit'
+];
+const NameEnd: array of string := [
+  'Sanctum',
+  'Vault',
+  'Crypt',
+  'Keep',
+  'Halls',
+  'Catacomb',
+  'Bastion',
+  'Depths'
+];
+
+/// Version of the generated terrain, layouts, names and placements.
+public const GeneratorVersion: int := 3;
+/// Outdoor column of the Hearthmoor gate.
+public const HomeX: int := 0;
+/// Outdoor row of the Hearthmoor gate, six steps south of spawn.
+public const HomeY: int := 6;
+/// The inclusive outdoor coordinate limit on each axis.
+public const Limit: int := 1000000;
+/// Width of a dungeon level, including the boundary walls.
+public const Width: int := 31;
+/// Height of a dungeon level, including the boundary walls.
+public const Height: int := 21;
+/// Number of floors in every generated dungeon.
+public const Depth: int := 3;
+/// Row of the corridor connecting the stairs and rooms.
+public const Corridor: int := 10;
+/// Column of the stairs leading up or out.
+public const Up: int := 1;
+/// Column of the stairs leading down on the first two floors.
+public const Down: int := 29;
+
+/// Stable identity of a dungeon level inside a world.
+public type Floor = record
+  /// Outdoor entrance column.
+  public EntranceX: int;
+  /// Outdoor entrance row.
+  public EntranceY: int;
+  /// Zero-based depth within this dungeon.
+  public Level: int;
+end record;
+
+/// Stable identity of a settlement by its exact outdoor gate.
+public type Village = record
+  /// Outdoor gate column.
+  public GateX: int;
+  /// Outdoor gate row.
+  public GateY: int;
+end record;
+
+/// Returns whether Site identifies the authored home settlement.
+public function IsHome(Site: Village): bool;
+begin
+  return Site.GateX = HomeX and Site.GateY = HomeY;
+end function;
+
+/// Static terrain and transition markers.
+public type Tile = enum: byte
+  Void;
+  Grass;
+  Sand;
+  Water;
+  Tree;
+  Rock;
+  Floor;
+  Wall;
+  Entrance;
+  Exit;
+  StairsUp;
+  StairsDown;
+  VillageGate;
+  House;
+end enum;
+
+function Mix(Value: long): long;
+begin
+  const Key: long := (Value mod Prime + Prime) mod Prime;
+  return (Key * Key + 1000003L * Key + 104729L) mod Prime;
+end function;
+
+function Hash(Seed: int; X: int; Y: int; Salt: int): long;
+begin
+  return Mix(Mix(Mix(Seed) + X) + cast<long>(Y) * 73856093L + Salt);
+end function;
+
+function Region(Value: int; Size: int): int;
+begin
+  return if Value < 0 then (Value + 1) div Size - 1 else Value div Size end if;
+end function;
+
+function Noise(Seed: int; X: int; Y: int; Size: int; Salt: int): int;
+begin
+  const Rx: int := Region(X, Size);
+  const Ry: int := Region(Y, Size);
+  const Dx: int := X - Rx * Size;
+  const Dy: int := Y - Ry * Size;
+  const A: long := Hash(Seed, Rx, Ry, Salt) mod 100;
+  const B: long := Hash(Seed, Rx + 1, Ry, Salt) mod 100;
+  const C: long := Hash(Seed, Rx, Ry + 1, Salt) mod 100;
+  const D: long := Hash(Seed, Rx + 1, Ry + 1, Salt) mod 100;
+  return cast<int>(((A * (Size - Dx) + B * Dx) * (Size - Dy) + (C * (Size - Dx) + D * Dx) * Dy) div
+    (Size * Size));
+end function;
+
+function Ground(Seed: int; X: int; Y: int): Tile;
+begin
+  if X >= -8 and X <= 8 and Y >= -8 and Y <= 8 then
+    return Tile.Grass;
+  end if;
+
+  const Height: int := Noise(Seed, X, Y, 23, 41);
+  if Height < 24 then
+    return Tile.Water;
+  end if;
+
+  if Height < 29 then
+    return Tile.Sand;
+  end if;
+
+  if Height >= 80 then
+    return Tile.Rock;
+  end if;
+
+  if Noise(Seed, X, Y, 9, 137) >= 72 and Hash(Seed, X, Y, 523) mod 5 <> 0 then
+    return Tile.Tree;
+  end if;
+
+  return Tile.Grass;
+end function;
+
+/// Returns whether X and Y are valid outdoor coordinates.
+public function OutdoorBounds(X: int; Y: int): bool;
+begin
+  return X >= -Limit and X <= Limit and Y >= -Limit and Y <= Limit;
+end function;
+
+function DungeonGate(Seed: int; X: int; Y: int): bool;
+begin
+  if X = 3 and Y = 0 then
+    return true;
+  end if;
+  const Rx: int := Region(X, RegionSize);
+  const Ry: int := Region(Y, RegionSize);
+  if (Rx = 0 and Ry = 0) or Hash(Seed, Rx, Ry, 2953) mod 3 <> 0 then
+    return false;
+  end if;
+  const SiteX: int := Rx * RegionSize + 4 + cast<int>(Hash(Seed, Rx, Ry, 6197) mod 56);
+  const SiteY: int := Ry * RegionSize + 4 + cast<int>(Hash(Seed, Rx, Ry, 8101) mod 56);
+  return X = SiteX and Y = SiteY;
+end function;
+
+function VillageX(Seed: int; Rx: int; Ry: int; Slot: int): int;
+begin
+  return Rx * VillageRegion + 16 + cast<int>(Hash(Seed, Rx, Ry, 1607 + Slot * 37) mod 96);
+end function;
+
+function VillageY(Seed: int; Rx: int; Ry: int; Slot: int): int;
+begin
+  return Ry * VillageRegion + 16 + cast<int>(Hash(Seed, Rx, Ry, 1609 + Slot * 53) mod 96);
+end function;
+
+function OpenGround(Seed: int; X: int; Y: int): bool;
+begin
+  if not OutdoorBounds(X, Y) then
+    return false;
+  end if;
+  const Cell: Tile := Ground(Seed, X, Y);
+  return Cell = Tile.Grass or Cell = Tile.Sand;
+end function;
+
+function GateFits(Seed: int; X: int; Y: int): bool;
+begin
+  return OutdoorBounds(X, Y) and Sys.Math.Abs(X) + Sys.Math.Abs(Y) >= 32
+    and Sys.Math.Abs(X - HomeX) + Sys.Math.Abs(Y - HomeY) >= 32 and Ground(Seed, X, Y) = Tile.Grass
+    and not DungeonGate(Seed, X, Y)
+    and not DungeonGate(Seed, X - 1, Y) and not DungeonGate(Seed, X + 1, Y)
+    and not DungeonGate(Seed, X, Y - 1) and not DungeonGate(Seed, X, Y + 1)
+    and (OpenGround(Seed, X - 1, Y) or OpenGround(Seed, X + 1, Y)
+    or OpenGround(Seed, X, Y - 1) or OpenGround(Seed, X, Y + 1));
+end function;
+
+function GeneratedGate(Seed: int; X: int; Y: int): bool;
+begin
+  const Rx: int := Region(X, VillageRegion);
+  const Ry: int := Region(Y, VillageRegion);
+  if Hash(Seed, Rx, Ry, 1601) mod 3 <> 0 then
+    return false;
+  end if;
+
+  // Most field lookups match no candidate and need no additional terrain samples.
+  for Slot: int := 0 to VillageCandidates - 1 do
+    if VillageX(Seed, Rx, Ry, Slot) = X and VillageY(Seed, Rx, Ry, Slot) = Y then
+      if not GateFits(Seed, X, Y) then
+        return false;
+      end if;
+
+      for Earlier: int := 0 to Slot - 1 do
+        if GateFits(Seed, VillageX(Seed, Rx, Ry, Earlier), VillageY(Seed, Rx, Ry, Earlier)) then
+          return false;
+        end if;
+      end for;
+
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+/// Returns static outdoor terrain at X and Y, including dungeon entrances and settlement gates.
+public function Outdoors(Seed: int; X: int; Y: int): Tile;
+begin
+  if not OutdoorBounds(X, Y) then
+    return Tile.Void;
+  end if;
+
+  if X = HomeX and Y = HomeY then
+    return Tile.VillageGate;
+  end if;
+
+  const Cell: Tile := Ground(Seed, X, Y);
+  if Cell <> Tile.Grass then
+    return Cell;
+  end if;
+
+  if DungeonGate(Seed, X, Y) then
+    return Tile.Entrance;
+  end if;
+
+  if GeneratedGate(Seed, X, Y) then
+    return Tile.VillageGate;
+  end if;
+
+  return Cell;
+end function;
+
+/// Samples a deterministic value for a village feature. Salt separates independent features.
+public function VillageRoll(Seed: int; Site: Village; Salt: int; Count: int): int;
+requires Count > 0;
+begin
+  return cast<int>(Hash(Seed, Site.GateX, Site.GateY, Salt) mod Count);
+end function;
+
+/// Returns whether X and Y are inside the finite rectangle of a dungeon floor.
+public function Inside(X: int; Y: int): bool;
+begin
+  return X >= 0 and X < Width and Y >= 0 and Y < Height;
+end function;
+
+/// Returns static dungeon terrain at X and Y for Seed and Site.
+public function Dungeon(Seed: int; Site: Floor; X: int; Y: int): Tile;
+begin
+  if not Inside(X, Y) then
+    return Tile.Void;
+  end if;
+
+  if X = 0 or X = Width - 1 or Y = 0 or Y = Height - 1 then
+    return Tile.Wall;
+  end if;
+
+  if Y = Corridor then
+    if X = Up then
+      return if Site.Level = 0 then Tile.Exit else Tile.StairsUp end if;
+    end if;
+
+    if X = Down and Site.Level < Depth - 1 then
+      return Tile.StairsDown;
+    end if;
+
+    return Tile.Floor;
+  end if;
+
+  const Room: int := (X - 1) div 7;
+  if Room >= 4 then
+    return Tile.Wall;
+  end if;
+  const Center: int := 4 + Room * 7;
+  const Shape: long := Hash(Seed, Site.EntranceX, Site.EntranceY, Site.Level * 41 + Room * 109);
+  const Half: int := 2 + cast<int>(Shape mod 2);
+  const North: int := Corridor - 3 - cast<int>(Shape div 7 mod 5);
+  const South: int := Corridor + 3 + cast<int>(Shape div 29 mod 5);
+  if X >= Center - Half and X <= Center + Half and Y >= North and Y <= South then
+    return Tile.Floor;
+  end if;
+
+  return Tile.Wall;
+end function;
+
+/// Returns the stable display name for all levels of Site in Seed.
+public function Name(Seed: int; Site: Floor): string;
+begin
+  const A: int := cast<int>(Hash(Seed, Site.EntranceX, Site.EntranceY, 1097) mod NameStart.Length);
+  const B: int := cast<int>(Hash(Seed, Site.EntranceX, Site.EntranceY, 1291) mod NameEnd.Length);
+  return NameStart[A] + ' ' + NameEnd[B];
+end function;
+
+/// Returns whether a player can move onto static Cell.
+public function Walkable(Cell: Tile): bool;
+begin
+  case Cell of
+    when Tile.Grass, Tile.Sand, Tile.Floor, Tile.Entrance, Tile.Exit, Tile.StairsUp, Tile.StairsDown, Tile.VillageGate:
+      return true;
+    else
+      return false;
+  end case;
+end function;
+
+/// Encodes validated signed coordinates X and Y as a unique integer key.
+public function Key(X: int; Y: int): long;
+begin
+  return (cast<long>(X) + Limit) * (2L * Limit + 1L) + Y + Limit;
+end function;
+
+/// Returns the stable dictionary key for a valid dungeon Site.
+public function FloorKey(Site: Floor): long;
+begin
+  return Key(Site.EntranceX, Site.EntranceY) * Depth + Site.Level;
+end function;
+end unit;

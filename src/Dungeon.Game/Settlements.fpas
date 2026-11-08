@@ -1,0 +1,189 @@
+// Generates settlement maps and their stationary NPC rosters.
+unit Dungeon.Game.Settlements;
+
+uses Dungeon.Game.Terrain as Land;
+
+const Prefixes: array of string := [
+  'Fern',
+  'Bracken',
+  'Ash',
+  'Willow',
+  'Alder',
+  'Mist',
+  'Thorn',
+  'Elm'
+];
+const Suffixes: array of string := [
+  'hollow',
+  'ford',
+  'brook',
+  'wick',
+  'mere',
+  'stead',
+  'bridge',
+  'field'
+];
+const Residents: array of string := ['Ada', 'Bram', 'Cora', 'Ivo'];
+const Guards: array of string := ['Gareth', 'Rhea', 'Rowan', 'Tess'];
+const Innkeepers: array of string := ['Bess', 'Linn', 'Oswin', 'Ruth'];
+const Merchants: array of string := ['Darin', 'Esme', 'Finn', 'Vera'];
+
+/// Role of an NPC and the source of their dialogue topics.
+public type Role = enum: byte
+  Mara;
+  Resident;
+  Guard;
+  Innkeeper;
+  Merchant;
+end enum;
+
+/// Stationary NPC identified by its slot in one settlement.
+public type Npc = record
+  /// Stable slot within the current settlement.
+  public Slot: int;
+  /// Role used to select greeting and topic text.
+  public Kind: Role;
+  /// Player-facing name.
+  public Name: string;
+  /// Local column occupied by the NPC.
+  public X: int;
+  /// Local row occupied by the NPC.
+  public Y: int;
+end record;
+
+/// Returns the display name for Site in Seed.
+public function Name(Seed: int; Site: Land.Village): string;
+begin
+  if Land.IsHome(Site) then
+    return 'Hearthmoor';
+  end if;
+
+  return Prefixes[Land.VillageRoll(Seed, Site, 1619, Prefixes.Length)] +
+    Suffixes[Land.VillageRoll(Seed, Site, 1716, Suffixes.Length)];
+end function;
+
+function Variant(Seed: int; Site: Land.Village): int;
+begin
+  return if Land.IsHome(Site) then 0 else Land.VillageRoll(Seed, Site, 1613, 3) end if;
+end function;
+
+/// Returns the width of Site, including boundary walls.
+public function Width(Seed: int; Site: Land.Village): int;
+begin
+  return 23 + 4 * Variant(Seed, Site);
+end function;
+
+/// Returns the height of Site, including boundary walls.
+public function Height(Seed: int; Site: Land.Village): int;
+begin
+  case Variant(Seed, Site) of
+    when 0:
+      return 15;
+    when 1:
+      return 19;
+    else
+      return 21;
+  end case;
+end function;
+
+/// Returns the roster size for Site.
+public function RosterSize(Site: Land.Village): int;
+begin
+  return if Land.IsHome(Site) then 3 else 4 end if;
+end function;
+
+/// Returns static terrain at X and Y in Site. NPCs are separate occupants.
+public function Tile(Seed: int; Site: Land.Village; X: int; Y: int): Land.Tile;
+begin
+  const Columns: int := Width(Seed, Site);
+  const Rows: int := Height(Seed, Site);
+  if X < 0 or X >= Columns or Y < 0 or Y >= Rows then
+    return Land.Tile.Void;
+  end if;
+
+  if X = 0 or X = Columns - 1 or Y = 0 or Y = Rows - 1 then
+    return Land.Tile.Wall;
+  end if;
+
+  if X = Columns div 2 and Y = Rows - 2 then
+    return Land.Tile.Exit;
+  end if;
+
+  if Land.IsHome(Site) then
+    if ((X >= 3 and X <= 7) or (X >= 15 and X <= 19))
+      and ((Y >= 3 and Y <= 5) or (Y >= 9 and Y <= 11))
+    then
+      return Land.Tile.House;
+    end if;
+  else
+    const Wing: int := Land.VillageRoll(Seed, Site, 1807, 2);
+    const Center: int := Rows div 2;
+    if ((X >= 3 and X <= 6 + Wing) or (X >= Columns - 7 - Wing and X <= Columns - 4))
+      and ((Y >= 3 and Y <= Center - 3) or (Y >= Center + 3 and Y <= Rows - 4))
+    then
+      return Land.Tile.House;
+    end if;
+  end if;
+
+  return Land.Tile.Floor;
+end function;
+
+function HomeNpc(X: int; Y: int): Npc?;
+begin
+  if Y <> 7 then
+    return null;
+  end if;
+
+  case X of
+    when 11:
+      return new Npc(0, Role.Mara, 'Mara', X, Y);
+    when 6:
+      return new Npc(1, Role.Merchant, 'Elias', X, Y);
+    when 16:
+      return new Npc(2, Role.Innkeeper, 'Nora', X, Y);
+    else
+      return null;
+  end case;
+end function;
+
+function Named(Seed: int; Site: Land.Village; Slot: int; Kind: Role; Names: array of string; X: int; Y: int): Npc;
+begin
+  return new Npc(
+    Slot,
+    Kind,
+    Names[Land.VillageRoll(Seed, Site, 1621 + Slot * 73, Names.Length)],
+    X,
+    Y
+  );
+end function;
+
+/// Returns the NPC standing at X and Y in Site, or null for an unoccupied field.
+public function At(Seed: int; Site: Land.Village; X: int; Y: int): Npc?;
+begin
+  if Land.IsHome(Site) then
+    return HomeNpc(X, Y);
+  end if;
+
+  const Columns: int := Width(Seed, Site);
+  const Rows: int := Height(Seed, Site);
+  const CenterX: int := Columns div 2;
+  const CenterY: int := Rows div 2;
+  if X = CenterX and Y = CenterY - 2 then
+    return Named(Seed, Site, 0, Role.Resident, Residents, X, Y);
+  end if;
+
+  if X = CenterX + 2 and Y = Rows - 4 then
+    return Named(Seed, Site, 1, Role.Guard, Guards, X, Y);
+  end if;
+
+  if X = Columns - 6 and Y = CenterY then
+    return Named(Seed, Site, 2, Role.Innkeeper, Innkeepers, X, Y);
+  end if;
+
+  if X = 5 and Y = CenterY then
+    return Named(Seed, Site, 3, Role.Merchant, Merchants, X, Y);
+  end if;
+
+  return null;
+end function;
+end unit;

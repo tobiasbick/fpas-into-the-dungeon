@@ -1,0 +1,221 @@
+// Resolves movement, dungeon transitions and turn-based combat.
+unit Dungeon.Game.Rules;
+
+uses
+  Dungeon.Game.Terrain as Land, Dungeon.Game.World as Game, Dungeon.Game.Exploration as Sight,
+  Dungeon.Game.Settlements as Town, System as Sys;
+
+/// The result of resolving one player intention.
+public type Change = record
+  /// Authoritative state after the intention.
+  public World: Game.State;
+  /// Player-facing description of the outcome.
+  public Message: string;
+end record;
+
+/// Creates a new world for Seed and reveals the initial outdoor view.
+public function Create(Seed: int): Game.State;
+begin
+  const World: Game.State := Game.NewWorld(Seed);
+  Sight.Reveal(World);
+  return World;
+end function;
+
+function Nearby(World: Game.State): Game.Enemy;
+begin
+  for Enemy: Game.Enemy in [
+    Game.EnemyAt(World, World.X, World.Y - 1), Game.EnemyAt(World, World.X + 1, World.Y),
+    Game.EnemyAt(World, World.X, World.Y + 1), Game.EnemyAt(World, World.X - 1, World.Y)
+  ] do
+    if Enemy <> Game.Enemy.None then
+      return Enemy;
+    end if;
+  end for;
+
+  return Game.Enemy.None;
+end function;
+
+function Advance(World: Game.State; Message: string; Retaliate: bool): Change;
+begin
+  const Turn: long := if World.Turn = long.MaxValue then World.Turn else World.Turn + 1L end if;
+  const Turned: Game.State := World with
+    Turn := Turn;
+  end with;
+  if not Retaliate then
+    return new Change(Turned, Message);
+  end if;
+
+  const Enemy: Game.Enemy := Nearby(Turned);
+  if Enemy = Game.Enemy.None then
+    return new Change(Turned, Message);
+  end if;
+
+  const Hit: Game.State := Turned with
+    Health := Turned.Health - 1;
+  end with;
+  const Attacker: string := if Enemy = Game.Enemy.Skeleton then ' The skeleton strikes.'
+    else ' The giant rat bites.'
+    end if;
+  const After: string := if Hit.Health = 0 then ' You fall.' else '' end if;
+  return new Change(Hit, Message + Attacker + After);
+end function;
+
+function Move(World: Game.State; Dx: int; Dy: int): Change;
+begin
+  const X: int := World.X + Dx;
+  const Y: int := World.Y + Dy;
+  if not Land.Walkable(
+    Game.TileAt(World, X, Y)
+  ) or Game.EnemyAt(World, X, Y) <> Game.Enemy.None or Game.NpcAt(World, X, Y) <> null
+  then
+    return new Change(World, 'The way is blocked.');
+  end if;
+
+  const Next: Game.State := World with
+    X := X;
+    Y := Y;
+  end with;
+  Sight.Reveal(Next);
+  return Advance(Next, 'You move.', true);
+end function;
+
+function Arrive(World: Game.State; Site: Land.Floor; X: int; Message: string): Change;
+begin
+  Game.Visit(World, Site);
+  const Next: Game.State := World with
+    Floor := Site;
+    X := X;
+    Y := Land.Corridor;
+  end with;
+  Sight.Reveal(Next);
+  return Advance(Next, Message, false);
+end function;
+
+function ArriveVillage(World: Game.State): Change;
+begin
+  const Site: Land.Village := new Land.Village(World.X, World.Y);
+  const X: int := Town.Width(World.Seed, Site) div 2;
+  const Y: int := Town.Height(World.Seed, Site) - 3;
+  Game.Visit(World, Site);
+  const Next: Game.State := World with
+    Settlement := Site;
+    X := X;
+    Y := Y;
+  end with;
+  Sight.Reveal(Next);
+  return Advance(Next, 'You enter ' + Town.Name(World.Seed, Site) + '.', false);
+end function;
+
+function ReturnOutdoors(World: Game.State; X: int; Y: int): Change;
+begin
+  const Next: Game.State := World with
+    Floor := null;
+    Settlement := null;
+    X := X;
+    Y := Y;
+  end with;
+  Sight.Reveal(Next);
+  return Advance(Next, 'You return outdoors.', false);
+end function;
+
+function Enter(World: Game.State): Change;
+begin
+  const Village: Land.Village? := World.Settlement;
+  if Village <> null then
+    if Game.TileAt(World, World.X, World.Y) = Land.Tile.Exit then
+      return ReturnOutdoors(World, Village.GateX, Village.GateY);
+    end if;
+
+    return new Change(World, 'There is no one within reach.');
+  end if;
+  const Site: Land.Floor? := World.Floor;
+  const Tile: Land.Tile := Game.TileAt(World, World.X, World.Y);
+  if Site = null then
+    if Tile = Land.Tile.VillageGate then
+      return ArriveVillage(World);
+    end if;
+
+    if Tile <> Land.Tile.Entrance then
+      return new Change(World, 'There is no entrance here.');
+    end if;
+    const First: Land.Floor := new Land.Floor(World.X, World.Y, 0);
+    return Arrive(World, First, Land.Up + 1, 'You enter ' + Land.Name(World.Seed, First) + '.');
+  end if;
+
+  case Tile of
+    when Land.Tile.Exit:
+      return ReturnOutdoors(World, Site.EntranceX, Site.EntranceY);
+    when Land.Tile.StairsDown:
+      const Next: Land.Floor := Site with
+        Level := Site.Level + 1;
+      end with;
+      return Arrive(World, Next, Land.Up + 1, 'You take the stairs down.');
+    when Land.Tile.StairsUp:
+      const Next: Land.Floor := Site with
+        Level := Site.Level - 1;
+      end with;
+      return Arrive(World, Next, Land.Down - 1, 'You take the stairs up.');
+    else
+      return new Change(World, 'There is no stair or exit here.');
+  end case;
+end function;
+
+function Attack(World: Game.State): Change;
+begin
+  const Site: Land.Floor? := World.Floor;
+  if Site = null then
+    return new Change(World, 'No opponent is within reach.');
+  end if;
+
+  const Id: long := Land.FloorKey(Site);
+  const Current: Game.Progress := World.Floors[Id];
+  case Nearby(World) of
+    when Game.Enemy.Skeleton:
+      const Health: int := Sys.Math.Max(0, Current.Skeleton - 2);
+      World.Floors[Id] := Current with
+        Skeleton := Health;
+      end with;
+      const Message: string := if Health = 0 then 'The skeleton collapses.'
+        else 'You strike the skeleton.'
+        end if;
+      return Advance(World, Message, true);
+    when Game.Enemy.Rat:
+      const Health: int := Sys.Math.Max(0, Current.Rat - 2);
+      World.Floors[Id] := Current with
+        Rat := Health;
+      end with;
+      const Message: string := if Health = 0 then 'The giant rat falls.'
+        else 'You strike the giant rat.'
+        end if;
+      return Advance(World, Message, true);
+    else
+      return new Change(World, 'No opponent is within reach.');
+  end case;
+end function;
+
+/// Applies Action to World and returns the resulting state and message.
+public function Act(World: Game.State; Action: string): Change;
+requires Action.Length > 0;
+begin
+  if World.Health = 0 then
+    return new Change(World, 'You have fallen. Create or continue a world.');
+  end if;
+
+  case Action of
+    when 'north':
+      return Move(World, 0, -1);
+    when 'south':
+      return Move(World, 0, 1);
+    when 'west':
+      return Move(World, -1, 0);
+    when 'east':
+      return Move(World, 1, 0);
+    when 'enter':
+      return Enter(World);
+    when 'attack':
+      return Attack(World);
+    else
+      return new Change(World, 'Unknown action.');
+  end case;
+end function;
+end unit;

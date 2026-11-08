@@ -1,0 +1,78 @@
+// Runs integration journeys through the production TCP listener and client exchange.
+unit Dungeon.Tests.TcpGame;
+
+uses
+  Dungeon.Server.Host as Host, Dungeon.Client.Connection as Connection, Dungeon.Protocol.Messages as Wire,
+  System as Sys, System.IO as IO, System.Net as Net, System.Net.Sockets as Sockets,
+  System.Threading as Threads, System.Threading.Tasks as Tasks;
+
+/// Starts a fresh server for Path, invokes Visit on a real connection and stops the server.
+public procedure VisitServer(Path: string; Visit: procedure(IO.Stream));
+begin
+  using const Stop: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(15000);
+  const Listener: Sockets.TcpListener := new Sockets.TcpListener(Net.IPAddress.Loopback, 0);
+  Listener.Start();
+  const Server: Tasks.Task := Host.Run(Listener, Path, Stop.Token);
+  try
+    const Address: Net.IPEndPoint := cast<Net.IPEndPoint>(Listener.LocalEndpoint);
+    using const Client: Sockets.TcpClient := new Sockets.TcpClient();
+    Client.ConnectAsync(Address.Address, Address.Port, Stop.Token).GetAwaiter().GetResult();
+    Visit(Client.GetStream());
+  finally
+    Stop.Cancel();
+    try
+      Server.GetAwaiter().GetResult();
+    finally
+      Listener.Stop();
+    end try;
+  end try;
+end procedure;
+
+/// Sends an Action with optional Seed, map center or dialogue choice and returns the reply.
+public function Send(
+  Stream: IO.Stream; Action: string; Seed: int := 25; MapX: int := 0; MapY: int := 0;
+  Topic: string := ''; FrameId: long := 0L
+): Wire.Reply;
+begin
+  return Connection.Exchange(
+    Stream,
+    new Wire.Request(Wire.Version, Action, Seed, MapX, MapY, Topic, FrameId),
+    Threads.CancellationToken.None
+  ).GetAwaiter().GetResult();
+end function;
+
+/// Returns the world projection in Reply or fails with the server message.
+public function World(Reply: Wire.Reply): Wire.View;
+begin
+  const Current: Wire.View? := Reply.World;
+  if Current = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Current;
+end function;
+
+/// Reads the glyph at X and Y in View.
+public function Glyph(View: Wire.View; X: int; Y: int): string;
+begin
+  return View.Rows[Y - View.OriginY].Substring(X - View.OriginX, 1);
+end function;
+
+/// Reads the knowledge code at X and Y in View.
+public function Knowledge(View: Wire.View; X: int; Y: int): string;
+begin
+  return View.Knowledge[Y - View.OriginY].Substring(X - View.OriginX, 1);
+end function;
+
+/// Sends Steps moves in Direction and returns the final view.
+public function Walk(Stream: IO.Stream; Direction: string; Steps: int): Wire.View;
+requires Steps > 0;
+begin
+  var Reply: Wire.Reply := Send(Stream, Direction);
+  for Step: int := 2 to Steps do
+    Reply := Send(Stream, Direction);
+  end for;
+
+  return World(Reply);
+end function;
+end unit;

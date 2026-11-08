@@ -1,0 +1,322 @@
+// Owns authoritative player state and sparse progress for explored areas.
+unit Dungeon.Game.World;
+
+uses Dungeon.Game.Terrain as Land, Dungeon.Game.Settlements as Town, System.Collections.Generic as Generic;
+
+const PlayerHealth: int := 12;
+const SkeletonX: int := 6;
+const SkeletonHealth: int := 4;
+const RatHealth: int := 2;
+const RatX: int := 11;
+const RatY: int := 8;
+
+/// Opponent that occupies a floor cell.
+public type Enemy = enum: byte
+  None;
+  Skeleton;
+  Rat;
+end enum;
+
+/// Discovery and combat state of one visited dungeon level.
+public type Progress = record
+  /// Identity used to regenerate this level's static layout.
+  public Site: Land.Floor;
+  /// Remaining health of the level's skeleton.
+  public Skeleton: int;
+  /// Remaining health of the level's giant rat.
+  public Rat: int;
+  /// Discovered local cells in row-independent coordinate order.
+  public Seen: Generic.HashSet<long>;
+end record;
+
+/// Persistent discovery and meetings for one visited settlement.
+public type VillageProgress = record
+  /// Identity used to regenerate the settlement.
+  public Site: Land.Village;
+  /// Discovered local fields.
+  public Seen: Generic.HashSet<long>;
+  /// Slots of NPCs that have met the player.
+  public Met: Generic.HashSet<int>;
+end record;
+
+/// Holds the mutable session data owned by the server's single player loop.
+public type State = record
+  /// Seed of the world and all generated areas.
+  public Seed: int;
+  /// Player column in the current area.
+  public X: int;
+  /// Player row in the current area.
+  public Y: int;
+  /// Current dungeon floor and its outdoor return location, if any.
+  public Floor: Land.Floor?;
+  /// Current settlement and its outdoor return location, if any.
+  public Settlement: Land.Village?;
+  /// Remaining player health.
+  public Health: int;
+  /// Number of completed turns.
+  public Turn: long;
+  /// Sparse set of discovered outdoor cells.
+  public OutdoorsSeen: Generic.HashSet<long>;
+  /// Persistent progress keyed by dungeon floor identity.
+  public Floors: Generic.Dictionary<long, Progress>;
+  /// Persistent progress keyed by settlement gate.
+  public Villages: Generic.Dictionary<long, VillageProgress>;
+end record;
+
+/// Returns a new world at the outdoor spawn for Seed.
+public function NewWorld(Seed: int): State;
+ensures (Created: State): Created.Seed = Seed;
+begin
+  return new State(
+    Seed, 0, 0, null, null, PlayerHealth, 0L,
+    new Generic.HashSet<long>(), new Generic.Dictionary<long, Progress>(),
+    new Generic.Dictionary<long, VillageProgress>()
+  );
+end function;
+
+/// Adds initial progress for Site in World on its first visit.
+public procedure Visit(World: State; Site: Land.Floor);
+begin
+  const Id: long := Land.FloorKey(Site);
+  if not World.Floors.ContainsKey(Id) then
+    World.Floors.Add(
+      Id,
+      new Progress(
+        Site,
+        SkeletonHealth + 2 * Site.Level,
+        RatHealth + 2 * Site.Level,
+        new Generic.HashSet<long>()
+      )
+    );
+  end if;
+end procedure;
+
+/// Adds initial discovery and meeting state for Site on its first visit.
+public procedure Visit(World: State; Site: Land.Village);
+begin
+  const Id: long := Land.Key(Site.GateX, Site.GateY);
+  if not World.Villages.ContainsKey(Id) then
+    World.Villages.Add(
+      Id,
+      new VillageProgress(Site, new Generic.HashSet<long>(), new Generic.HashSet<int>())
+    );
+  end if;
+end procedure;
+
+function VillageState(World: State; Site: Land.Village): VillageProgress;
+begin
+  return World.Villages[Land.Key(Site.GateX, Site.GateY)];
+end function;
+
+/// Records a meeting with Slot in the current settlement. Returns true on the first meeting.
+public function Meet(World: State; Slot: int): bool;
+begin
+  const Site: Land.Village? := World.Settlement;
+  if Site = null then
+    return false;
+  end if;
+
+  return VillageState(World, Site).Met.Add(Slot);
+end function;
+
+/// Returns the settlement NPC at X and Y, if any.
+public function NpcAt(World: State; X: int; Y: int): Town.Npc?;
+begin
+  const Site: Land.Village? := World.Settlement;
+  if Site = null then
+    return null;
+  end if;
+
+  return Town.At(World.Seed, Site, X, Y);
+end function;
+
+/// Returns the tile in World's current area at X and Y.
+public function TileAt(World: State; X: int; Y: int): Land.Tile;
+begin
+  const Village: Land.Village? := World.Settlement;
+  if Village <> null then
+    return Town.Tile(World.Seed, Village, X, Y);
+  end if;
+  const Site: Land.Floor? := World.Floor;
+  if Site = null then
+    return Land.Outdoors(World.Seed, X, Y);
+  end if;
+
+  return Land.Dungeon(World.Seed, Site, X, Y);
+end function;
+
+/// Returns a live enemy at X and Y in World, if one occupies that cell.
+public function EnemyAt(World: State; X: int; Y: int): Enemy;
+begin
+  const Site: Land.Floor? := World.Floor;
+  if Site = null then
+    return Enemy.None;
+  end if;
+  const Current: Progress := World.Floors[Land.FloorKey(Site)];
+  if X = SkeletonX and Y = Land.Corridor and Current.Skeleton > 0 then
+    return Enemy.Skeleton;
+  end if;
+
+  if X = RatX and Y = RatY and Current.Rat > 0 then
+    return Enemy.Rat;
+  end if;
+
+  return Enemy.None;
+end function;
+
+/// Returns the discovery set of the current area in World.
+public function Seen(World: State): Generic.HashSet<long>;
+begin
+  const Village: Land.Village? := World.Settlement;
+  if Village <> null then
+    return VillageState(World, Village).Seen;
+  end if;
+  const Site: Land.Floor? := World.Floor;
+  if Site = null then
+    return World.OutdoorsSeen;
+  end if;
+
+  return World.Floors[Land.FloorKey(Site)].Seen;
+end function;
+
+/// Encodes X and Y within World's current area.
+public function FieldKey(World: State; X: int; Y: int): long;
+begin
+  const Village: Land.Village? := World.Settlement;
+  if Village <> null then
+    return cast<long>(X) * Town.Height(World.Seed, Village) + Y;
+  end if;
+
+  if World.Floor = null then
+    return Land.Key(X, Y);
+  end if;
+
+  return cast<long>(X) * Land.Height + Y;
+end function;
+
+function ValidVillages(World: State; Villages: Generic.Dictionary<long, VillageProgress>): bool;
+begin
+  for Id: long in Villages.Keys do
+    const Current: VillageProgress? := Villages[Id];
+    if Current = null then
+      return false;
+    end if;
+
+    const Site: Land.Village? := Current.Site;
+    const Fields: Generic.HashSet<long>? := Current.Seen;
+    const Met: Generic.HashSet<int>? := Current.Met;
+    if Site = null or Fields = null or Met = null then
+      return false;
+    end if;
+
+    if Land.Outdoors(
+      World.Seed,
+      Site.GateX,
+      Site.GateY
+    ) <> Land.Tile.VillageGate or Id <> Land.Key(Site.GateX, Site.GateY)
+    then
+      return false;
+    end if;
+
+    const FieldsCount: int := Town.Width(World.Seed, Site) * Town.Height(World.Seed, Site);
+    for Field: long in Fields do
+      if Field < 0L or Field >= FieldsCount then
+        return false;
+      end if;
+    end for;
+    const Slots: int := Town.RosterSize(Site);
+    for Slot: int in Met do
+      if Slot < 0 or Slot >= Slots then
+        return false;
+      end if;
+    end for;
+  end for;
+
+  return true;
+end function;
+
+/// Checks loaded World for valid coordinates, discovery and visited area identities.
+public function CanRestore(World: State): bool;
+begin
+  const Outdoor: Generic.HashSet<long>? := World.OutdoorsSeen;
+  const Floors: Generic.Dictionary<long, Progress>? := World.Floors;
+  const Villages: Generic.Dictionary<long, VillageProgress>? := World.Villages;
+  if Outdoor = null or Floors = null or Villages = null or World.Health < 0 or World.Health >
+    PlayerHealth
+    or World.Turn < 0
+  then
+    return false;
+  end if;
+
+  if not ValidVillages(World, Villages) then
+    return false;
+  end if;
+  const Village: Land.Village? := World.Settlement;
+  if Village <> null then
+    if World.Floor <> null or not Land.OutdoorBounds(Village.GateX, Village.GateY)
+      or not Villages.ContainsKey(Land.Key(Village.GateX, Village.GateY))
+    then
+      return false;
+    end if;
+  end if;
+
+  const LastField: long := Land.Key(Land.Limit, Land.Limit);
+  for Field: long in Outdoor do
+    if Field < 0L or Field > LastField then
+      return false;
+    end if;
+  end for;
+
+  for Id: long in Floors.Keys do
+    const Current: Progress? := Floors[Id];
+    if Current = null then
+      return false;
+    end if;
+    const Site: Land.Floor? := Current.Site;
+    const Fields: Generic.HashSet<long>? := Current.Seen;
+    if Site = null or Fields = null or Site.Level < 0 or Site.Level >= Land.Depth then
+      return false;
+    end if;
+
+    if Land.Outdoors(World.Seed, Site.EntranceX, Site.EntranceY) <> Land.Tile.Entrance then
+      return false;
+    end if;
+
+    if Id <> Land.FloorKey(Site) or (Site.Level > 0 and not Floors.ContainsKey(Id - 1L)) then
+      return false;
+    end if;
+
+    if Current.Skeleton < 0 or Current.Skeleton > SkeletonHealth + 2 * Site.Level
+      or Current.Rat < 0 or Current.Rat > RatHealth + 2 * Site.Level
+    then
+      return false;
+    end if;
+
+    for Field: long in Fields do
+      if Field < 0L or Field >= Land.Width * Land.Height then
+        return false;
+      end if;
+    end for;
+  end for;
+
+  const Site: Land.Floor? := World.Floor;
+  if Site <> null then
+    if Site.Level < 0 or Site.Level >= Land.Depth or not Land.OutdoorBounds(
+      Site.EntranceX,
+      Site.EntranceY
+    )
+    then
+      return false;
+    end if;
+
+    if not Floors.ContainsKey(Land.FloorKey(Site)) then
+      return false;
+    end if;
+  end if;
+
+  return Land.Walkable(
+    TileAt(World, World.X, World.Y)
+  ) and EnemyAt(World, World.X, World.Y) = Enemy.None and NpcAt(World, World.X, World.Y) = null
+    and Seen(World).Contains(FieldKey(World, World.X, World.Y));
+end function;
+end unit;

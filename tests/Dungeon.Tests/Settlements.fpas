@@ -1,0 +1,218 @@
+// Exercises settlement visits and dialogue through the production TCP path.
+unit Dungeon.Tests.Settlements;
+
+uses
+  Dungeon.Tests.TcpGame as Game, Dungeon.Protocol.Messages as Wire, System as Sys,
+  System.IO as IO, Xunit as Test;
+
+function Conversation(Reply: Wire.Reply): Wire.Dialogue;
+begin
+  const Frame: Wire.Dialogue? := Reply.Conversation;
+  if Frame = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Frame;
+end function;
+
+function Choose(Stream: IO.Stream; Frame: Wire.Dialogue; Topic: string): Wire.Reply;
+begin
+  return Game.Send(Stream, 'dialogue_choice', Topic := Topic, FrameId := Frame.Id);
+end function;
+
+procedure EndTalk(Stream: IO.Stream; Frame: Wire.Dialogue);
+begin
+  Test.Assert.Null(Game.Send(Stream, 'end_dialogue', FrameId := Frame.Id).Conversation);
+end procedure;
+
+/// Visits authored Hearthmoor, exercises guarded topic selection, and reloads independent meetings.
+[Test.FactAttribute]
+public procedure HearthmoorDialogueSurvivesSaveAndContinue();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-hearthmoor-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Spawn: Wire.View := Game.World(Game.Send(Stream, 'create', 25));
+        Test.Assert.Equal<string>('s', Game.Glyph(Spawn, 0, 6));
+        discard Game.Walk(Stream, 'south', 6);
+        const Home: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Hearthmoor', Home.Area);
+        Test.Assert.Equal<int>(11, Home.X);
+        Test.Assert.Equal<int>(12, Home.Y);
+        const Adjacent: Wire.View := Game.Walk(Stream, 'north', 4);
+        Test.Assert.Equal<string>('n', Game.Glyph(Adjacent, 11, 7));
+        const Blocked: Wire.View := Game.World(Game.Send(Stream, 'north'));
+        Test.Assert.Equal<int>(8, Blocked.Y);
+        Test.Assert.Equal<long>(Adjacent.Turn, Blocked.Turn);
+
+        const Opened: Wire.Reply := Game.Send(Stream, 'enter');
+        const Mara: Wire.Dialogue := Conversation(Opened);
+        Test.Assert.Equal<string>('Mara', Mara.Speaker);
+        Test.Assert.Contains('I am Mara', Mara.Text);
+        Test.Assert.Equal<long>(Adjacent.Turn, Game.World(Opened).Turn);
+        Test.Assert.Equal<string>(
+          'Finish the conversation first.',
+          Game.Send(Stream, 'save').Message
+        );
+        Test.Assert.False(IO.File.Exists(Path));
+        Test.Assert.Equal<string>(
+          'That topic is not available.',
+          Choose(Stream, Mara, 'rest').Message
+        );
+
+        const Answer: Wire.Dialogue := Conversation(Choose(Stream, Mara, 'dungeon'));
+        Test.Assert.Contains('Silent Keep', Answer.Text);
+        Test.Assert.Contains('three levels', Answer.Text);
+        const Stale: Wire.Reply := Choose(Stream, Mara, 'goodbye');
+        Test.Assert.Equal<string>('That conversation has moved on.', Stale.Message);
+        Test.Assert.Equal<long>(Answer.Id, Conversation(Stale).Id);
+
+        const Topics: Wire.Dialogue := Conversation(Choose(Stream, Answer, 'back'));
+        Test.Assert.Equal<string>('identity', Topics.Topics[0].Id);
+        Test.Assert.Null(Choose(Stream, Topics, 'goodbye').Conversation);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Restored: Wire.Reply := Game.Send(Stream, 'continue');
+        Test.Assert.Equal<string>('Hearthmoor', Game.World(Restored).Area);
+        Test.Assert.Null(Restored.Conversation);
+        const Mara: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Good to see you again, traveler.', Mara.Text);
+        EndTalk(Stream, Mara);
+
+        discard Game.Walk(Stream, 'east', 5);
+        const Nora: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Nora', Nora.Speaker);
+        Test.Assert.Contains('I am Nora', Nora.Text);
+        EndTalk(Stream, Conversation(Choose(Stream, Nora, 'news')));
+
+        discard Game.Walk(Stream, 'west', 5);
+        discard Game.Walk(Stream, 'south', 5);
+        const Outside: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Outdoors', Outside.Area);
+        Test.Assert.Equal<int>(0, Outside.X);
+        Test.Assert.Equal<int>(6, Outside.Y);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+procedure Follow(Stream: IO.Stream; Legs: array of string);
+begin
+  for Leg: string in Legs do
+    const Direction: string := case Leg.Substring(0, 1) of
+      when 'E': 'east';
+      when 'W': 'west';
+      when 'S': 'south';
+      else 'north';
+    end case;
+    discard Game.Walk(Stream, Direction, int.Parse(Leg.Substring(1)));
+  end for;
+end procedure;
+
+/// Follows two ordinary outdoor routes, talks to every village role, and reloads a remembered greeting.
+[Test.FactAttribute]
+public procedure GeneratedVillagesKeepSeparateNpcMeetings();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-villages-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        discard Game.Send(Stream, 'create', 25);
+        Follow(
+          Stream,
+          [
+            'E8',
+            'S3',
+            'E14',
+            'S4',
+            'E45',
+            'S5',
+            'E1',
+            'S2',
+            'E1',
+            'S1',
+            'E17',
+            'S3',
+            'E1',
+            'S2',
+            'E1',
+            'S1',
+            'E1',
+            'S1',
+            'E19',
+            'S19'
+          ]
+        );
+        const Ashbrook: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Ashbrook', Ashbrook.Area);
+        Test.Assert.Equal<int>(13, Ashbrook.X);
+        Test.Assert.Equal<int>(16, Ashbrook.Y);
+
+        discard Game.Walk(Stream, 'east', 2);
+        const Guard: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Tess', Guard.Speaker);
+        const GuardAnswer: Wire.Dialogue := Conversation(Choose(Stream, Guard, 'identity'));
+        Test.Assert.Contains('keep watch', GuardAnswer.Text);
+        EndTalk(Stream, GuardAnswer);
+
+        Follow(Stream, ['W2', 'N8']);
+        const Resident: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Ivo', Resident.Speaker);
+        const Local: Wire.Dialogue := Conversation(Choose(Stream, Resident, 'settlement'));
+        Test.Assert.Contains('Ashbrook', Local.Text);
+        EndTalk(Stream, Local);
+
+        discard Game.Walk(Stream, 'east', 8);
+        const Innkeeper: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Oswin', Innkeeper.Speaker);
+        const InnAnswer: Wire.Dialogue := Conversation(Choose(Stream, Innkeeper, 'identity'));
+        Test.Assert.Contains('keep the inn', InnAnswer.Text);
+        EndTalk(Stream, InnAnswer);
+
+        discard Game.Walk(Stream, 'west', 16);
+        const Merchant: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Finn', Merchant.Speaker);
+        const MerchantAnswer: Wire.Dialogue := Conversation(Choose(Stream, Merchant, 'identity'));
+        Test.Assert.Contains('supply travelers', MerchantAnswer.Text);
+        EndTalk(Stream, MerchantAnswer);
+
+        Follow(Stream, ['E8', 'S9']);
+        const Outside: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Outdoors', Outside.Area);
+        Test.Assert.Equal<int>(108, Outside.X);
+        Test.Assert.Equal<int>(41, Outside.Y);
+        Follow(Stream, ['S9', 'E20', 'S1', 'E2', 'S1', 'E1', 'S52', 'E15']);
+        const Elmbridge: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Elmbridge', Elmbridge.Area);
+        discard Game.Walk(Stream, 'north', 8);
+        const Bram: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Bram', Bram.Speaker);
+        Test.Assert.Contains('I am Bram', Bram.Text);
+        EndTalk(Stream, Bram);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        Test.Assert.Equal<string>('Elmbridge', Game.World(Game.Send(Stream, 'continue')).Area);
+        const Bram: Wire.Dialogue := Conversation(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Bram', Bram.Speaker);
+        Test.Assert.Equal<string>('Good to see you again, traveler.', Bram.Text);
+        EndTalk(Stream, Bram);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+end unit;

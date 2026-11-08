@@ -1,0 +1,93 @@
+// Reads and atomically replaces the server's explicit save slot.
+unit Dungeon.Server.SaveFiles;
+
+uses Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land, System as Sys, System.IO as IO, System.Text as Text, System.Text.Json as Json;
+
+const SaveVersion: int := 3;
+
+type Envelope = record
+  public Version: int;
+  public Generator: int;
+  public World: Game.State?;
+end record;
+
+function SaveOptions(): Json.JsonSerializerOptions;
+begin
+  const Options: Json.JsonSerializerOptions := new Json.JsonSerializerOptions();
+  Options.RespectRequiredConstructorParameters := true;
+  Options.RespectNullableAnnotations := true;
+  return Options;
+end function;
+
+const ReadOptions: Json.JsonSerializerOptions := SaveOptions();
+
+function Matches(Header: Json.JsonElement; Field: string; Expected: int): bool;
+begin
+  var Value: Json.JsonElement := new Json.JsonElement();
+  var Number: int := 0;
+  return Header.TryGetProperty(Field, out Value) and Value.ValueKind = Json.JsonValueKind.Number
+    and Value.TryGetInt32(out Number) and Number = Expected;
+end function;
+
+/// Reads Path and returns a validated world. Unsupported or invalid files raise an error.
+public function Load(Path: string): Game.State;
+begin
+  using const Document: Json.JsonDocument := Json.JsonDocument.Parse(IO.File.ReadAllText(Path));
+  const Root: Json.JsonElement := Document.RootElement;
+  if Root.ValueKind <> Json.JsonValueKind.Object
+    or not Matches(Root, 'Version', SaveVersion) or not Matches(
+    Root,
+    'Generator',
+    Land.GeneratorVersion
+  )
+  then
+    raise new IO.InvalidDataException('Unsupported save or generator version.');
+  end if;
+
+  var Value: Json.JsonElement := new Json.JsonElement();
+  if not Root.TryGetProperty('World', out Value) then
+    raise new IO.InvalidDataException('Missing saved world.');
+  end if;
+
+  const World: Game.State? := Json.JsonSerializer.Deserialize<Game.State>(Value, ReadOptions);
+  if World = null or not Game.CanRestore(World) then
+    raise new IO.InvalidDataException('Invalid saved world.');
+  end if;
+
+  return World;
+end function;
+
+/// Writes World to Path using a temporary file next to the destination.
+public procedure Save(Path: string; World: Game.State);
+begin
+  const Target: string := IO.Path.GetFullPath(Path);
+  const Directory: string? := IO.Path.GetDirectoryName(Target);
+  if Directory = null then
+    raise new Sys.ArgumentException('A save file path is required.');
+  end if;
+
+  discard IO.Directory.CreateDirectory(Directory);
+
+  const Temporary: string := IO.Path.Combine(Directory, IO.Path.GetRandomFileName());
+  const Data: array of byte := Text.Encoding.UTF8.GetBytes(
+    Json.JsonSerializer.Serialize<Envelope>(new Envelope(SaveVersion, Land.GeneratorVersion, World))
+  );
+  const Stream: IO.FileStream := new IO.FileStream(
+    Temporary,
+    IO.FileMode.CreateNew,
+    IO.FileAccess.Write,
+    IO.FileShare.None
+  );
+  try
+    begin
+      using const Output: IO.FileStream := Stream;
+      Output.Write(Data, 0, Data.Length);
+      Output.Flush(true);
+    end;
+
+    IO.File.Move(Temporary, Target, true);
+  finally
+    IO.File.Delete(Temporary);
+  end try;
+end procedure;
+end unit;

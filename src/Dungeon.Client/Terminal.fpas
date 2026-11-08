@@ -1,0 +1,368 @@
+// Displays the server projection and turns keyboard input into game intentions.
+unit Dungeon.Client.Terminal;
+
+uses
+  Dungeon.Client.Connection as Connection, Dungeon.Protocol.Messages as Wire,
+  Fpas.Tui.Application as App, Fpas.Tui.Elements as E, Fpas.Tui.Themes as Themes,
+  System as Sys, System.IO as IO, System.Collections.Generic as Generic,
+  System.Threading as Threads, System.Threading.Tasks as Tasks;
+
+type Message = union
+  Action(Name: string);
+  Received(Reply: Wire.Reply; Panning: bool);
+  ToggleMap;
+  SelectTopic(Id: string);
+  MoveTopic(Offset: int);
+  DialogueAction(Id: string);
+  Disconnected(Reason: string);
+  Quit;
+end union;
+
+type Model = record
+  public World: Wire.View? := null;
+  public Status: string := 'Create a world or continue a saved game.';
+  public Busy: bool := false;
+  public Online: bool := true;
+  public MapOpen: bool := false;
+  public Panned: Wire.View? := null;
+  public Conversation: Wire.Dialogue? := null;
+  public SelectedTopic: string := '';
+end record;
+
+const Colors: Themes.Palette := Themes.Amber();
+
+function Failed(Failure: Sys.Exception): Message;
+begin
+  if Failure is Sys.OperationCanceledException then
+    return Message.Disconnected('The server did not reply in time.');
+  end if;
+
+  if Failure is IO.IOException then
+    return Message.Disconnected('The connection closed.');
+  end if;
+
+  return Message.Disconnected('The server sent an invalid reply.');
+end function;
+
+function Pan(State: Model; Name: string): Wire.Request?;
+begin
+  const View: Wire.View? := State.Panned ?? State.World;
+  if View = null then
+    return null;
+  end if;
+
+  const X: int := View.OriginX + View.Rows[0].Length div 2;
+  const Y: int := View.OriginY + View.Rows.Length div 2;
+  case Name of
+    when 'north':
+      return new Wire.Request(Wire.Version, 'map', View.Seed, X, Y - 3);
+    when 'south':
+      return new Wire.Request(Wire.Version, 'map', View.Seed, X, Y + 3);
+    when 'west':
+      return new Wire.Request(Wire.Version, 'map', View.Seed, X - 3, Y);
+    when 'east':
+      return new Wire.Request(Wire.Version, 'map', View.Seed, X + 3, Y);
+    when 'home':
+      return new Wire.Request(Wire.Version, 'map', View.Seed, View.X, View.Y);
+    else
+      return null;
+  end case;
+end function;
+
+function SendRequest(
+  State: Model; Stream: IO.Stream; Command: Wire.Request; Panning: bool
+): App.Transition<Model, Message>;
+begin
+  const Send: App.Command<Message> := App.StartBackground<Message>(
+    'request',
+    async function(Post: function(Message): Tasks.Task; Cancellation: Threads.CancellationToken): Tasks.Task begin
+      try
+        const Reply: Wire.Reply := await Connection.Exchange(Stream, Command, Cancellation);
+        await Post(Message.Received(Reply, Panning));
+      catch do
+        Stream.Dispose();
+        raise;
+      end try;
+    end function,
+    Failed
+  );
+  return new App.Transition<Model, Message>(
+    State with
+      Busy := true;
+    end with, [Send]
+  );
+end function;
+
+function TopicAt(State: Model; Offset: int): string;
+begin
+  const Talk: Wire.Dialogue? := State.Conversation;
+  if Talk = null then
+    return '';
+  end if;
+
+  for Index: int := 0 to Talk.Topics.Length - 1 do
+    if Talk.Topics[Index].Id = State.SelectedTopic then
+      return Talk.Topics[Sys.Math.Clamp(Index + Offset, 0, Talk.Topics.Length - 1)].Id;
+    end if;
+  end for;
+
+  return State.SelectedTopic;
+end function;
+
+function InitialTopic(State: Model; Talk: Wire.Dialogue?): string;
+begin
+  if Talk = null or Talk.Topics.Length = 0 then
+    return '';
+  end if;
+  const Previous: Wire.Dialogue? := State.Conversation;
+  if Previous <> null and Previous.Id = Talk.Id then
+    return State.SelectedTopic;
+  end if;
+
+  return Talk.Topics[0].Id;
+end function;
+
+function UpdateFor(Stream: IO.Stream; Seed: int): function(Model, Message): App.Transition<Model, Message>;
+  function Update(State: Model; Event: Message): App.Transition<Model, Message>;
+  begin
+    case Event of
+      when Message.Action(const Name: string):
+        if State.Busy or not State.Online or State.Conversation <> null then
+          return new App.Transition<Model, Message>(State, []);
+        end if;
+        const Panning: bool := State.MapOpen;
+        const Command: Wire.Request? := if Panning then Pan(State, Name)
+          else if Name = 'home' then null else new Wire.Request(Wire.Version, Name, Seed) end if
+          end if;
+        if Command = null then
+          return new App.Transition<Model, Message>(State, []);
+        end if;
+
+        return SendRequest(State, Stream, Command, Panning);
+      when Message.Received(const Reply: Wire.Reply, const Panning: bool):
+        if Panning then
+          const Projection: Wire.View? := if State.MapOpen then Reply.World else null end if;
+          return new App.Transition<Model, Message>(
+            State with
+              Busy := false;
+              Panned := Projection;
+            end with, []
+          );
+        end if;
+
+        return new App.Transition<Model, Message>(
+          new Model(
+            World := Reply.World, Status := Reply.Message, Conversation := Reply.Conversation,
+            SelectedTopic := InitialTopic(State, Reply.Conversation)
+          ), []
+        );
+      when Message.SelectTopic(const Id: string):
+        return new App.Transition<Model, Message>(
+          State with
+            SelectedTopic := Id;
+          end with, []
+        );
+      when Message.MoveTopic(const Offset: int):
+        return new App.Transition<Model, Message>(
+          State with
+            SelectedTopic := TopicAt(State, Offset);
+          end with, []
+        );
+      when Message.DialogueAction(const Id: string):
+        const Talk: Wire.Dialogue? := State.Conversation;
+        if Talk = null or State.Busy or not State.Online then
+          return new App.Transition<Model, Message>(State, []);
+        end if;
+        const Action: string := if Id = '' then 'end_dialogue' else 'dialogue_choice' end if;
+        const Command: Wire.Request := new Wire.Request(
+          Wire.Version,
+          Action,
+          Seed,
+          Topic := Id,
+          FrameId := Talk.Id
+        );
+        return SendRequest(State, Stream, Command, false);
+      when Message.ToggleMap:
+        if State.World = null or State.Busy or State.Conversation <> null then
+          return new App.Transition<Model, Message>(State, []);
+        end if;
+
+        return new App.Transition<Model, Message>(
+          State with
+            MapOpen := not State.MapOpen;
+            Panned := null;
+          end with, []
+        );
+      when Message.Disconnected(const Reason: string):
+        return new App.Transition<Model, Message>(
+          State with
+            Status := Reason;
+            Busy := false;
+            Online := false;
+            Conversation := null;
+          end with, []
+        );
+      when Message.Quit:
+        if State.MapOpen then
+          return new App.Transition<Model, Message>(
+            State with
+              MapOpen := false;
+              Panned := null;
+            end with, []
+          );
+        end if;
+
+        return new App.Transition<Model, Message>(State, [App.Exit<Message>()]);
+    end case;
+  end function;
+begin
+  return Update;
+end function;
+
+function Map(World: Wire.View): E.Element<Message>;
+  function Draw(Column: int; Row: int): E.Cell;
+  begin
+    const Knowledge: string := World.Knowledge[Row].Substring(Column, 1);
+    if Knowledge = 'u' then
+      return new E.Cell(' ', new E.Style(Background := Colors.Theme.Text.Background));
+    end if;
+
+    const Glyph: string := World.Rows[Row].Substring(Column, 1);
+    if Knowledge = 'r' then
+      return new E.Cell(Glyph, new E.Style($7A6B53, Colors.Theme.Text.Background));
+    end if;
+
+    const Ink: int := case Glyph of
+      when '@', '>', '<', 'x', 's', 'n': $E2C477;
+      when 'S', 'R': $DB7770;
+      when 'T': $8FBF78;
+      when '~': $7FA6BF;
+      when '^', '#', 'H': $A99D86;
+      when ':': $D1B47D;
+      else $E8DFC7;
+    end case;
+    return new E.Cell(Glyph, new E.Style(Ink, Colors.Panel.Background));
+  end function;
+begin
+  return E.CellCanvas<Message>(World.Rows[0].Length, World.Rows.Length, Draw);
+end function;
+
+function DialogueOverlay(State: Model; Talk: Wire.Dialogue; Columns: int): E.Element<Message>;
+begin
+  const Items: Generic.List<E.SelectionItem> := new Generic.List<E.SelectionItem>(
+    Talk.Topics.Length
+  );
+  for Topic: Wire.Topic in Talk.Topics do
+    Items.Add(new E.SelectionItem(Topic.Id, Topic.Label));
+  end for;
+
+  const Choices: E.Element<Message> := E.SelectionList<Message>(
+    'dialogue-topics', Items.ToArray(), State.SelectedTopic,
+    function(Id: string): Message => Message.SelectTopic(Id),
+    function(Id: string): Message => Message.DialogueAction(Id)
+  );
+  const Scroll: E.Element<Message> := E.ScrollView<Message>(
+    'dialogue-body', E.Column<Message>(new E.Flow(Gap := 1), E.Text<Message>(Talk.Text), Choices)
+  );
+  // Reserve the same panel dimensions for greetings, topic lists and answers.
+  const Body: E.Element<Message> := E.Column<Message>(
+    E.Size<Message>(E.Text<Message>(new string(#32, 64)), new E.Flex(Basis := 0, Maximum := 0)),
+    E.Size<Message>(Scroll, new E.Flex(Basis := 8))
+  );
+  const WidthPercent: int := Sys.Math.Clamp(6800 div Sys.Math.Max(1, Columns), 1, 85);
+  const EndTalk: Message := Message.DialogueAction('');
+  const Footer: E.Element<Message> := E.Row<Message>(
+    E.Size<Message>(
+      E.Text<Message>(if State.Busy then 'Waiting for the server…' else '' end if),
+      new E.Flex(Grow := 1)
+    ),
+    E.Button<Message>(
+      'dialogue-close',
+      'Esc Close',
+      EndTalk,
+      not State.Busy,
+      E.ButtonVariant.Secondary
+    )
+  );
+  const Panel: E.Element<Message> := E.Styled<Message>(
+    E.OverlayPanel<Message>(Body, Footer, Talk.Speaker, Padding := 1), new E.Style($E8DFC7, $2B241A)
+  );
+  return E.Overlay<Message>(
+    'dialogue', true, 'dialogue-topics', EndTalk, Panel,
+    [
+      E.CharacterShortcut<Message>('w', Message.MoveTopic(-1)),
+      E.CharacterShortcut<Message>('s', Message.MoveTopic(1))
+    ],
+    new E.OverlayLimits(MaxWidthPercent := WidthPercent, MaxHeightPercent := 90)
+  );
+end function;
+
+function View(State: Model; Size: App.Viewport): E.Element<Message>;
+begin
+  const World: Wire.View? := State.Panned ?? State.World;
+  const Title: string := if World = null then 'World'
+    else if World.Level = 0 then World.Area
+      else World.Area + '  ·  Level ' + World.Level.ToString() + ' of ' + World.Depth.ToString()
+      end if
+    end if;
+  const Body: E.Element<Message> := if World = null then E.Text<Message>(
+      'N  New world   C  Continue'
+    )
+    else Map(World)
+    end if;
+  const Details: string := if World = null then ''
+    else 'Health ' + World.Health.ToString() + '   Turn ' + World.Turn.ToString() + '   Seed ' +
+      World.Seed.ToString() + '   (' + World.X.ToString() + ', ' + World.Y.ToString() + ')'
+    end if;
+  const Status: string := if State.Busy then 'Waiting for the server…' else State.Status end if;
+  const Keys: string := if State.MapOpen then 'Arrows / WASD Pan  ·  Home Center  ·  M / Esc Close map'
+    else 'Arrows / WASD Move  ·  Enter Interact  ·  Space Fight  ·  Ctrl+S Save'
+    end if;
+  const Footer: string := if State.MapOpen then 'Bright visible  ·  Dim remembered  ·  Blank unexplored'
+    else 'N New  ·  C Continue  ·  M Map  ·  Esc Quit'
+    end if;
+  const Caption: string := if State.MapOpen then 'Map  ·  ' + Title else Title end if;
+  const Content: E.Element<Message> := E.Column<Message>(
+    new E.Flow(Padding := 1),
+    E.Styled<Message>(E.Text<Message>('Into the Dungeon'), Colors.Heading),
+    E.Styled<Message>(E.Border<Message>(Body, Caption), Colors.Panel),
+    E.Text<Message>(Details),
+    E.Styled<Message>(E.Text<Message>(Status), Colors.Heading),
+    E.Text<Message>(Keys),
+    E.Text<Message>(Footer)
+  );
+
+  const Talk: Wire.Dialogue? := State.Conversation;
+  const Layers: array of E.Element<Message> := if Talk = null then []
+    else [
+      DialogueOverlay(State, Talk, Size.Columns)
+    ]
+    end if;
+  return E.Screen<Message>(
+    Content, Layers, [
+      E.Shortcut<Message>(E.Key.Up, E.KeyModifiers.None, Message.Action('north')),
+      E.Shortcut<Message>(E.Key.Down, E.KeyModifiers.None, Message.Action('south')),
+      E.Shortcut<Message>(E.Key.Left, E.KeyModifiers.None, Message.Action('west')),
+      E.Shortcut<Message>(E.Key.Right, E.KeyModifiers.None, Message.Action('east')),
+      E.CharacterShortcut<Message>('w', Message.Action('north')),
+      E.CharacterShortcut<Message>('s', Message.Action('south')),
+      E.CharacterShortcut<Message>('a', Message.Action('west')),
+      E.CharacterShortcut<Message>('d', Message.Action('east')),
+      E.Shortcut<Message>(E.Key.Enter, E.KeyModifiers.None, Message.Action('enter')),
+      E.CharacterShortcut<Message>(' ', Message.Action('attack')),
+      E.CharacterShortcut<Message>('n', Message.Action('create')),
+      E.CharacterShortcut<Message>('c', Message.Action('continue')),
+      E.CharacterShortcut<Message>('m', Message.ToggleMap),
+      E.Shortcut<Message>(E.Key.Home, E.KeyModifiers.None, Message.Action('home')),
+      E.Shortcut<Message>(E.Key.S, E.KeyModifiers.Ctrl, Message.Action('save')),
+      E.Shortcut<Message>(E.Key.Escape, E.KeyModifiers.None, Message.Quit)
+    ]
+  );
+end function;
+
+/// Runs the terminal on Stream, using Seed when creating a world. The caller owns Stream.
+public procedure Run(Stream: IO.Stream; Seed: int);
+begin
+  App.Run<Model, Message>(new Model(), UpdateFor(Stream, Seed), View, Colors.Theme);
+end procedure;
+end unit;

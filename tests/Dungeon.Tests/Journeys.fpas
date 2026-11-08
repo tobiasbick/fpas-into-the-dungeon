@@ -1,0 +1,193 @@
+// Exercises exploration, combat and explicit saves through the production TCP path.
+unit Dungeon.Tests.Journeys;
+
+uses Dungeon.Tests.TcpGame as Game, Dungeon.Protocol.Messages as Wire, System.IO as IO, Xunit as Test;
+
+/// Saves a completed fight and restores it on a fresh listener, discarding an unsaved move.
+[Test.FactAttribute]
+public procedure FightAndContinueAfterServerRestart();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-journey-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Created: Wire.View := Game.World(Game.Send(Stream, 'create', 25));
+        Test.Assert.Equal<int>(25, Created.Seed);
+        Test.Assert.Equal<int>(0, Created.Level);
+        for Step: int := 1 to 3 do
+          discard Game.Send(Stream, 'east');
+        end for;
+        const Entered: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<int>(1, Entered.Level);
+        Test.Assert.Equal<string>('S', Game.Glyph(Entered, 6, 10));
+
+        for Step: int := 1 to 3 do
+          discard Game.Send(Stream, 'east');
+        end for;
+
+        discard Game.Send(Stream, 'attack');
+        const Fought: Wire.View := Game.World(Game.Send(Stream, 'attack'));
+        Test.Assert.Equal<string>('.', Game.Glyph(Fought, 6, 10));
+        Test.Assert.Equal<int>(10, Fought.Health);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+        Test.Assert.Equal<long>(10L, Game.World(Game.Send(Stream, 'east')).Turn);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Restored: Wire.View := Game.World(Game.Send(Stream, 'continue'));
+        Test.Assert.Equal<int>(1, Restored.Level);
+        Test.Assert.Equal<int>(25, Restored.Seed);
+        Test.Assert.Equal<int>(10, Restored.Health);
+        Test.Assert.Equal<long>(9L, Restored.Turn);
+        Test.Assert.Equal<int>(5, Restored.X);
+        Test.Assert.Equal<string>('.', Game.Glyph(Restored, 6, 10));
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+/// Rejects an unsupported save version and preserves the current unsaved world.
+[Test.FactAttribute]
+public procedure RejectsUnsupportedSaveWithoutReplacingWorld();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-version-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    IO.File.WriteAllText(
+      Path,
+      '{"Version":2,"Generator":2,"World":{"Seed":25,"X":5,"Y":10,"Health":10,"Turn":9}}'
+    );
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        discard Game.Send(Stream, 'create', 97);
+        const Rejected: Wire.Reply := Game.Send(Stream, 'continue');
+        Test.Assert.Equal<string>('Unsupported save or generator version.', Rejected.Message);
+        Test.Assert.Equal<int>(97, Game.World(Rejected).Seed);
+        Test.Assert.Equal<long>(1L, Game.World(Game.Send(Stream, 'east')).Turn);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+/// Hides unvisited terrain and remembers discovered fields after moving out of sight and saving.
+[Test.FactAttribute]
+public procedure FogRemembersDiscoveredFieldsAcrossRestart();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-fog-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Spawn: Wire.View := Game.World(Game.Send(Stream, 'create', -25));
+        Test.Assert.Equal<string>('v', Game.Knowledge(Spawn, 1, 0));
+        Test.Assert.Equal<string>('u', Game.Knowledge(Spawn, 9, 0));
+        Test.Assert.Equal<string>('?', Game.Glyph(Spawn, 9, 0));
+
+        const Panned: Wire.View := Game.World(Game.Send(Stream, 'map', MapX := -50, MapY := 12));
+        Test.Assert.Equal<int>(-60, Panned.OriginX);
+        Test.Assert.Equal<int>(6, Panned.OriginY);
+        Test.Assert.Equal<int>(0, Panned.X);
+        Test.Assert.Equal<long>(0L, Panned.Turn);
+        Test.Assert.Equal<string>('u', Game.Knowledge(Panned, -50, 12));
+        Test.Assert.Equal<string>('?', Game.Glyph(Panned, -50, 12));
+
+        const West: Wire.View := Game.Walk(Stream, 'west', 8);
+        Test.Assert.Equal<int>(-8, West.X);
+        Test.Assert.Equal<string>('r', Game.Knowledge(West, 1, 0));
+        Test.Assert.Equal<string>('.', Game.Glyph(West, 1, 0));
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Restored: Wire.View := Game.World(Game.Send(Stream, 'continue'));
+        Test.Assert.Equal<int>(-8, Restored.X);
+        Test.Assert.Equal<string>('r', Game.Knowledge(Restored, 1, 0));
+        const Spawn: Wire.View := Game.Walk(Stream, 'east', 8);
+        Test.Assert.Equal<int>(0, Spawn.X);
+        Test.Assert.Equal<string>('v', Game.Knowledge(Spawn, 1, 0));
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+procedure DefeatSkeleton(Stream: IO.Stream; Attacks: int);
+begin
+  discard Game.Walk(Stream, 'east', 3);
+  for Strike: int := 1 to Attacks do
+    discard Game.Send(Stream, 'attack');
+  end for;
+end procedure;
+
+/// Preserves separate floor progress and the exact outdoor return site across save and reload.
+[Test.FactAttribute]
+public procedure DescendAndReturnThroughPreviouslyVisitedFloors();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-floors-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        discard Game.Send(Stream, 'create', 25);
+        discard Game.Walk(Stream, 'east', 3);
+        const First: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Silent Keep', First.Area);
+        Test.Assert.Equal<int>(3, First.Depth);
+        Test.Assert.Equal<string>('u', Game.Knowledge(First, 9, 9));
+        Test.Assert.Equal<string>('?', Game.Glyph(First, 9, 9));
+
+        DefeatSkeleton(Stream, 2);
+        const NearRat: Wire.View := Game.Walk(Stream, 'east', 6);
+        Test.Assert.Equal<string>('R', Game.Glyph(NearRat, 11, 8));
+        const Far: Wire.View := Game.Walk(Stream, 'east', 10);
+        Test.Assert.Equal<string>('r', Game.Knowledge(Far, 11, 8));
+        Test.Assert.Equal<string>('.', Game.Glyph(Far, 11, 8));
+        Test.Assert.Equal<int>(29, Game.Walk(Stream, 'east', 8).X);
+        const Second: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>(First.Area, Second.Area);
+        Test.Assert.Equal<int>(2, Second.Level);
+        Test.Assert.Equal<string>('S', Game.Glyph(Second, 6, 10));
+        DefeatSkeleton(Stream, 3);
+        Test.Assert.Equal<int>(29, Game.Walk(Stream, 'east', 24).X);
+        const Third: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<int>(3, Third.Level);
+        Test.Assert.Equal<string>(First.Area, Third.Area);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Third: Wire.View := Game.World(Game.Send(Stream, 'continue'));
+        Test.Assert.Equal<int>(3, Third.Level);
+        Test.Assert.Equal<int>(7, Third.Health);
+        discard Game.Walk(Stream, 'west', 1);
+        const Second: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<int>(2, Second.Level);
+        Test.Assert.Equal<int>(28, Second.X);
+        Test.Assert.Equal<int>(1, Game.Walk(Stream, 'west', 27).X);
+        const First: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<int>(1, First.Level);
+        Test.Assert.Equal<int>(1, Game.Walk(Stream, 'west', 27).X);
+        const Outside: Wire.View := Game.World(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<int>(0, Outside.Level);
+        Test.Assert.Equal<int>(3, Outside.X);
+        Test.Assert.Equal<int>(0, Outside.Y);
+        Test.Assert.Equal<int>(7, Outside.Health);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+end unit;

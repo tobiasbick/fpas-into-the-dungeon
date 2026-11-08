@@ -1,0 +1,196 @@
+// Derives current sight, retains discovery and projects only known cells.
+unit Dungeon.Game.Exploration;
+
+uses
+  Dungeon.Game.Terrain as Land, Dungeon.Game.World as Game, Dungeon.Game.Settlements as Town, System as Sys,
+  System.Collections.Generic as Generic, System.Text as Text;
+
+const Radius: int := 8;
+const HalfWidth: int := 10;
+const HalfHeight: int := 6;
+
+/// Bounded map window containing static knowledge and currently visible actors.
+public type Window = record
+  /// World or local column of the top-left field.
+  public OriginX: int;
+  /// World or local row of the top-left field.
+  public OriginY: int;
+  /// Terrain or actor glyphs in row order.
+  public Rows: array of string;
+  /// Knowledge codes u, r and v for undiscovered, remembered and visible fields.
+  public Knowledge: array of string;
+end record;
+
+function Exists(World: Game.State; X: int; Y: int): bool;
+begin
+  const Village: Land.Village? := World.Settlement;
+  if Village <> null then
+    return X >= 0 and X < Town.Width(
+      World.Seed,
+      Village
+    ) and Y >= 0 and Y < Town.Height(World.Seed, Village);
+  end if;
+
+  if World.Floor = null then
+    return Land.OutdoorBounds(X, Y);
+  end if;
+
+  return Land.Inside(X, Y);
+end function;
+
+function Wall(World: Game.State; X: int; Y: int): bool;
+begin
+  return Game.TileAt(World, X, Y) = Land.Tile.Wall;
+end function;
+
+function ClearLine(World: Game.State; TargetX: int; TargetY: int): bool;
+begin
+  const Dx: int := Sys.Math.Abs(TargetX - World.X);
+  const Dy: int := Sys.Math.Abs(TargetY - World.Y);
+  const StepX: int := Sys.Math.Sign(TargetX - World.X);
+  const StepY: int := Sys.Math.Sign(TargetY - World.Y);
+  var Error: int := Dx - Dy;
+  var X: int := World.X;
+  var Y: int := World.Y;
+  while X <> TargetX or Y <> TargetY do
+    const Twice: int := Error * 2;
+    var NextX: int := X;
+    var NextY: int := Y;
+    if Twice > -Dy then
+      Error := Error - Dy;
+      NextX := X + StepX;
+    end if;
+
+    if Twice < Dx then
+      Error := Error + Dx;
+      NextY := Y + StepY;
+    end if;
+
+    if NextX <> X and NextY <> Y and Wall(World, NextX, Y) and Wall(World, X, NextY) then
+      return false;
+    end if;
+
+    X := NextX;
+    Y := NextY;
+    if (X <> TargetX or Y <> TargetY) and Wall(World, X, Y) then
+      return false;
+    end if;
+  end while;
+
+  return true;
+end function;
+
+function Visible(World: Game.State; X: int; Y: int): bool;
+begin
+  const Dx: int := X - World.X;
+  const Dy: int := Y - World.Y;
+  return Sys.Math.Abs(Dx) <= Radius and Sys.Math.Abs(Dy) <= Radius
+    and Dx * Dx + Dy * Dy <= Radius * Radius
+    and Exists(World, X, Y) and (World.Floor = null or ClearLine(World, X, Y));
+end function;
+
+/// Adds terrain currently visible to the player in World to its discovered area.
+public procedure Reveal(World: Game.State);
+begin
+  const Seen: Generic.HashSet<long> := Game.Seen(World);
+  for Y: int := World.Y - Radius to World.Y + Radius do
+    for X: int := World.X - Radius to World.X + Radius do
+      if Visible(World, X, Y) then
+        discard Seen.Add(Game.FieldKey(World, X, Y));
+      end if;
+    end for;
+  end for;
+end procedure;
+
+function Glyph(Cell: Land.Tile): string;
+begin
+  case Cell of
+    when Land.Tile.Grass, Land.Tile.Floor:
+      return '.';
+    when Land.Tile.Sand:
+      return ':';
+    when Land.Tile.Water:
+      return '~';
+    when Land.Tile.Tree:
+      return 'T';
+    when Land.Tile.Rock:
+      return '^';
+    when Land.Tile.Wall:
+      return '#';
+    when Land.Tile.House:
+      return 'H';
+    when Land.Tile.VillageGate:
+      return 's';
+    when Land.Tile.Entrance, Land.Tile.StairsDown:
+      return '>';
+    when Land.Tile.Exit:
+      return 'x';
+    when Land.Tile.StairsUp:
+      return '<';
+    else
+      return '?';
+  end case;
+end function;
+
+function VisibleGlyph(World: Game.State; X: int; Y: int): string;
+begin
+  if X = World.X and Y = World.Y then
+    return '@';
+  end if;
+
+  if Game.NpcAt(World, X, Y) <> null then
+    return 'n';
+  end if;
+
+  case Game.EnemyAt(World, X, Y) of
+    when Game.Enemy.Skeleton:
+      return 'S';
+    when Game.Enemy.Rat:
+      return 'R';
+    else
+      return Glyph(Game.TileAt(World, X, Y));
+  end case;
+end function;
+
+/// Projects a bounded window around CenterX and CenterY in the current area.
+public function Project(World: Game.State; CenterX: int; CenterY: int): Window;
+begin
+  const Village: Land.Village? := World.Settlement;
+  const Outdoors: bool := World.Floor = null and Village = null;
+  const Min: int := if Outdoors then -Land.Limit else 0 end if;
+  const MaxX: int := if Village <> null then Town.Width(World.Seed, Village) - 1
+    else if Outdoors then Land.Limit else Land.Width - 1 end if
+    end if;
+  const MaxY: int := if Village <> null then Town.Height(World.Seed, Village) - 1
+    else if Outdoors then Land.Limit else Land.Height - 1 end if
+    end if;
+  const OriginX: int := Sys.Math.Clamp(CenterX, Min, MaxX) - HalfWidth;
+  const OriginY: int := Sys.Math.Clamp(CenterY, Min, MaxY) - HalfHeight;
+  const Seen: Generic.HashSet<long> := Game.Seen(World);
+  const Rows: Generic.List<string> := new Generic.List<string>();
+  const Knowledge: Generic.List<string> := new Generic.List<string>();
+  for Y: int := OriginY to OriginY + 2 * HalfHeight do
+    const Row: Text.StringBuilder := new Text.StringBuilder();
+    const Mask: Text.StringBuilder := new Text.StringBuilder();
+    for X: int := OriginX to OriginX + 2 * HalfWidth do
+      if Visible(World, X, Y) then
+        discard Row.Append(VisibleGlyph(World, X, Y));
+        discard Mask.Append('v');
+      else
+        if Exists(World, X, Y) and Seen.Contains(Game.FieldKey(World, X, Y)) then
+          discard Row.Append(Glyph(Game.TileAt(World, X, Y)));
+          discard Mask.Append('r');
+        else
+          discard Row.Append('?');
+          discard Mask.Append('u');
+        end if;
+      end if;
+    end for;
+
+    Rows.Add(Row.ToString());
+    Knowledge.Add(Mask.ToString());
+  end for;
+
+  return new Window(OriginX, OriginY, Rows.ToArray(), Knowledge.ToArray());
+end function;
+end unit;

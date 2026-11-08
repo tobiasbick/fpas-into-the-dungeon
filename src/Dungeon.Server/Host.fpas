@@ -1,0 +1,49 @@
+// Accepts one player at a time and owns the lifetime of each TCP connection.
+unit Dungeon.Server.Host;
+
+uses
+  Dungeon.Protocol.Frames as Frames, Dungeon.Protocol.Messages as Wire,
+  Dungeon.Server.Session as Session, System as Sys, System.IO as IO, System.Net.Sockets as Sockets,
+  System.Text as Text, System.Text.Json as Json, System.Threading as Threads, System.Threading.Tasks as Tasks;
+
+async function Serve(Client: Sockets.TcpClient; Path: string; Cancellation: Threads.CancellationToken): Tasks.Task;
+begin
+  const Stream: Sockets.NetworkStream := Client.GetStream();
+  var Player: Session.State := new Session.State();
+
+  while not Cancellation.IsCancellationRequested do
+    const Payload: string := await Frames.Read(Stream, Cancellation);
+    const Request: Wire.Request? := Json.JsonSerializer.Deserialize<Wire.Request>(Payload);
+    if Request = null or Sys.String.IsNullOrEmpty(Request.Action) then
+      raise new IO.InvalidDataException('A request must have an action.');
+    end if;
+
+    const Reply: Wire.Reply := Session.Handle(Request, Path, ref Player);
+    await Frames.Write(Stream, Json.JsonSerializer.Serialize<Wire.Reply>(Reply), Cancellation);
+  end while;
+end function;
+
+/// Serves a started Listener until Cancellation. Path identifies the explicit save slot.
+/// The caller owns the listener. This loop closes each accepted connection.
+public async function Run(Listener: Sockets.TcpListener; Path: string; Cancellation: Threads.CancellationToken): Tasks.Task;
+begin
+  try
+    while not Cancellation.IsCancellationRequested do
+      using const Client: Sockets.TcpClient := await Listener.AcceptTcpClientAsync(Cancellation);
+      try
+        await Serve(Client, Path, Cancellation);
+      catch Ignored: IO.IOException do
+        // A closed or broken connection ends this session.
+      catch Ignored: IO.InvalidDataException do
+        // The next client starts with a fresh session after an invalid frame.
+      catch Ignored: Text.DecoderFallbackException do
+        // Invalid UTF-8 is a protocol violation.
+      catch Ignored: Json.JsonException do
+        // Malformed JSON ends the connection.
+      end try;
+    end while;
+  catch Ignored: Sys.OperationCanceledException when Cancellation.IsCancellationRequested do
+    // Cancellation stops the listener loop and disposes the current client.
+  end try;
+end function;
+end unit;

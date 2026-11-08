@@ -84,6 +84,4 @@ into the page. Disabled tabs use muted text.
 
 We will refine symbols, layout and other details as we review the running game.
 
-The current client interface and its behavior are described in
-[Client UI](client-ui.md); the server dashboard is described in
-[Server console](server-console.md).
+See [rewrite progress](../plans/clr-rewrite.md) for the current terminal features.

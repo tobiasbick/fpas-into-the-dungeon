@@ -1,7 +1,8 @@
 # Gamemaster: feasibility and open questions
 
-The existing LLM connection and model-selection work is accepted and complete.
-See the [connection contract](../architecture/gamemaster-connection.md).
+The Rust edition shipped LLM connection and model selection. See its
+[connection contract](https://github.com/tobiasbick/fpas-into-the-dungeon/blob/rust-backup/docs/architecture/gamemaster-connection.md)
+and the [CLR rewrite progress](clr-rewrite.md).
 This note explores possible next work. It is a starting point for discussion;
 implementation steps will be defined later.
 
