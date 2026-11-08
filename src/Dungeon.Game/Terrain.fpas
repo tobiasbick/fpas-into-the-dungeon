@@ -29,7 +29,11 @@ const NameEnd: array of string := [
 ];
 
 /// Version of the generated terrain, layouts, names and placements.
-public const GeneratorVersion: int := 3;
+public const GeneratorVersion: int := 5;
+/// Outdoor column of the start dungeon entrance.
+public const SpawnEntranceX: int := 3;
+/// Outdoor row of the start dungeon entrance.
+public const SpawnEntranceY: int := 0;
 /// Outdoor column of the Hearthmoor gate.
 public const HomeX: int := 0;
 /// Outdoor row of the Hearthmoor gate, six steps south of spawn.
@@ -97,7 +101,8 @@ begin
   return (Key * Key + 1000003L * Key + 104729L) mod Prime;
 end function;
 
-function Hash(Seed: int; X: int; Y: int; Salt: int): long;
+/// Returns a nonnegative deterministic hash of the seed, coordinates and feature salt.
+public function CoordinateHash(Seed: int; X: int; Y: int; Salt: int): long;
 begin
   return Mix(Mix(Mix(Seed) + X) + cast<long>(Y) * 73856093L + Salt);
 end function;
@@ -113,10 +118,10 @@ begin
   const Ry: int := Region(Y, Size);
   const Dx: int := X - Rx * Size;
   const Dy: int := Y - Ry * Size;
-  const A: long := Hash(Seed, Rx, Ry, Salt) mod 100;
-  const B: long := Hash(Seed, Rx + 1, Ry, Salt) mod 100;
-  const C: long := Hash(Seed, Rx, Ry + 1, Salt) mod 100;
-  const D: long := Hash(Seed, Rx + 1, Ry + 1, Salt) mod 100;
+  const A: long := CoordinateHash(Seed, Rx, Ry, Salt) mod 100;
+  const B: long := CoordinateHash(Seed, Rx + 1, Ry, Salt) mod 100;
+  const C: long := CoordinateHash(Seed, Rx, Ry + 1, Salt) mod 100;
+  const D: long := CoordinateHash(Seed, Rx + 1, Ry + 1, Salt) mod 100;
   return cast<int>(((A * (Size - Dx) + B * Dx) * (Size - Dy) + (C * (Size - Dx) + D * Dx) * Dy) div
     (Size * Size));
 end function;
@@ -140,7 +145,7 @@ begin
     return Tile.Rock;
   end if;
 
-  if Noise(Seed, X, Y, 9, 137) >= 72 and Hash(Seed, X, Y, 523) mod 5 <> 0 then
+  if Noise(Seed, X, Y, 9, 137) >= 72 and CoordinateHash(Seed, X, Y, 523) mod 5 <> 0 then
     return Tile.Tree;
   end if;
 
@@ -155,27 +160,27 @@ end function;
 
 function DungeonGate(Seed: int; X: int; Y: int): bool;
 begin
-  if X = 3 and Y = 0 then
+  if X = SpawnEntranceX and Y = SpawnEntranceY then
     return true;
   end if;
   const Rx: int := Region(X, RegionSize);
   const Ry: int := Region(Y, RegionSize);
-  if (Rx = 0 and Ry = 0) or Hash(Seed, Rx, Ry, 2953) mod 3 <> 0 then
+  if (Rx = 0 and Ry = 0) or CoordinateHash(Seed, Rx, Ry, 2953) mod 3 <> 0 then
     return false;
   end if;
-  const SiteX: int := Rx * RegionSize + 4 + cast<int>(Hash(Seed, Rx, Ry, 6197) mod 56);
-  const SiteY: int := Ry * RegionSize + 4 + cast<int>(Hash(Seed, Rx, Ry, 8101) mod 56);
+  const SiteX: int := Rx * RegionSize + 4 + cast<int>(CoordinateHash(Seed, Rx, Ry, 6197) mod 56);
+  const SiteY: int := Ry * RegionSize + 4 + cast<int>(CoordinateHash(Seed, Rx, Ry, 8101) mod 56);
   return X = SiteX and Y = SiteY;
 end function;
 
 function VillageX(Seed: int; Rx: int; Ry: int; Slot: int): int;
 begin
-  return Rx * VillageRegion + 16 + cast<int>(Hash(Seed, Rx, Ry, 1607 + Slot * 37) mod 96);
+  return Rx * VillageRegion + 16 + cast<int>(CoordinateHash(Seed, Rx, Ry, 1607 + Slot * 37) mod 96);
 end function;
 
 function VillageY(Seed: int; Rx: int; Ry: int; Slot: int): int;
 begin
-  return Ry * VillageRegion + 16 + cast<int>(Hash(Seed, Rx, Ry, 1609 + Slot * 53) mod 96);
+  return Ry * VillageRegion + 16 + cast<int>(CoordinateHash(Seed, Rx, Ry, 1609 + Slot * 53) mod 96);
 end function;
 
 function OpenGround(Seed: int; X: int; Y: int): bool;
@@ -202,7 +207,7 @@ function GeneratedGate(Seed: int; X: int; Y: int): bool;
 begin
   const Rx: int := Region(X, VillageRegion);
   const Ry: int := Region(Y, VillageRegion);
-  if Hash(Seed, Rx, Ry, 1601) mod 3 <> 0 then
+  if CoordinateHash(Seed, Rx, Ry, 1601) mod 3 <> 0 then
     return false;
   end if;
 
@@ -257,7 +262,19 @@ end function;
 public function VillageRoll(Seed: int; Site: Village; Salt: int; Count: int): int;
 requires Count > 0;
 begin
-  return cast<int>(Hash(Seed, Site.GateX, Site.GateY, Salt) mod Count);
+  return cast<int>(CoordinateHash(Seed, Site.GateX, Site.GateY, Salt) mod Count);
+end function;
+
+/// Samples a value in 0..Count-1 for one feature of Site in Seed.
+public function FloorRoll(Seed: int; Site: Floor; Salt: int; Count: int): int;
+requires Count > 0;
+begin
+  return cast<int>(CoordinateHash(
+    Seed,
+    Site.EntranceX,
+    Site.EntranceY,
+    Salt + Site.Level * 193
+  ) mod Count);
 end function;
 
 /// Returns whether X and Y are inside the finite rectangle of a dungeon floor.
@@ -294,7 +311,12 @@ begin
     return Tile.Wall;
   end if;
   const Center: int := 4 + Room * 7;
-  const Shape: long := Hash(Seed, Site.EntranceX, Site.EntranceY, Site.Level * 41 + Room * 109);
+  const Shape: long := CoordinateHash(
+    Seed,
+    Site.EntranceX,
+    Site.EntranceY,
+    Site.Level * 41 + Room * 109
+  );
   const Half: int := 2 + cast<int>(Shape mod 2);
   const North: int := Corridor - 3 - cast<int>(Shape div 7 mod 5);
   const South: int := Corridor + 3 + cast<int>(Shape div 29 mod 5);
@@ -308,8 +330,18 @@ end function;
 /// Returns the stable display name for all levels of Site in Seed.
 public function Name(Seed: int; Site: Floor): string;
 begin
-  const A: int := cast<int>(Hash(Seed, Site.EntranceX, Site.EntranceY, 1097) mod NameStart.Length);
-  const B: int := cast<int>(Hash(Seed, Site.EntranceX, Site.EntranceY, 1291) mod NameEnd.Length);
+  const A: int := cast<int>(CoordinateHash(
+    Seed,
+    Site.EntranceX,
+    Site.EntranceY,
+    1097
+  ) mod NameStart.Length);
+  const B: int := cast<int>(CoordinateHash(
+    Seed,
+    Site.EntranceX,
+    Site.EntranceY,
+    1291
+  ) mod NameEnd.Length);
   return NameStart[A] + ' ' + NameEnd[B];
 end function;
 

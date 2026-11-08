@@ -3,8 +3,9 @@ unit Dungeon.Server.Session;
 
 uses
   Dungeon.Game.Rules as Rules, Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land,
-  Dungeon.Game.Settlements as Town, Dungeon.Game.Exploration as Sight, Dungeon.Game.Dialogue as Talk,
-  Dungeon.Protocol.Messages as Wire, Dungeon.Server.SaveFiles as Files,
+  Dungeon.Game.Settlements as Town, Dungeon.Game.Exploration as Sight, Dungeon.Game.Dialogue as Talk, Dungeon.Game.Quests as Quest,
+  Dungeon.Game.Clock as Clock,
+  Dungeon.Protocol.Messages as Wire, Dungeon.Server.SaveFiles as Files, Dungeon.Server.Inventory as Bag, Dungeon.Server.Trade as Shop,
   System as Sys, System.Collections.Generic as Generic, System.IO as IO, System.Text.Json as Json;
 
 /// State owned by one accepted connection.
@@ -15,6 +16,8 @@ public type State = record
   public Conversation: Talk.Frame? := null;
   /// Last assigned dialogue revision for this connection.
   public Revision: long := 0L;
+  /// Open trade pages. The conversation is suspended until the quote closes.
+  public Trade: Shop.Pages? := null;
 end record;
 
 function Load(Path: string): Rules.Change?;
@@ -45,7 +48,7 @@ begin
         return new Rules.Change(Current, 'Game saved.');
       end if;
 
-      return Rules.Act(Current, Request.Action);
+      return Rules.Act(Current, Request.Action, Request.ItemId);
   end case;
 end function;
 
@@ -63,16 +66,18 @@ begin
   const Level: int := if Site = null then 0 else Site.Level + 1 end if;
   const Depth: int := if Site = null then 0 else Land.Depth end if;
   const Window: Sight.Window := Sight.Project(World, MapX ?? World.X, MapY ?? World.Y);
+  const Time: Clock.Conditions := Clock.At(World.Seed, World.Minutes, Site <> null);
   return new Wire.View(
     World.Seed, Area, Level, Depth, World.X, World.Y, World.Health, World.Turn,
-    Window.OriginX, Window.OriginY, Window.Rows, Window.Knowledge
+    Window.OriginX, Window.OriginY, Window.Rows, Window.Knowledge,
+    new Wire.Conditions(Time.Day, Time.MinuteOfDay, Time.Night, Time.Weather)
   );
 end function;
 
 function Dialogue(State: State): Wire.Dialogue?;
 begin
   const Current: Talk.Frame? := State.Conversation;
-  if Current = null then
+  if Current = null or State.Trade <> null then
     return null;
   end if;
 
@@ -84,9 +89,29 @@ begin
   return new Wire.Dialogue(State.Revision, Current.Speaker.Name, Current.Text, Topics.ToArray());
 end function;
 
+function Quote(State: State): Wire.Trade?;
+begin
+  const World: Game.State? := State.World;
+  const Frame: Talk.Frame? := State.Conversation;
+  const Pages: Shop.Pages? := State.Trade;
+  if World = null or Frame = null or Pages = null then
+    return null;
+  end if;
+
+  return Shop.Quote(World, Frame, Pages, State.Revision);
+end function;
+
 function Reply(State: State; Message: string; MapX: int? := null; MapY: int? := null): Wire.Reply;
 begin
-  return new Wire.Reply(Wire.Version, Message, Project(State.World, MapX, MapY), Dialogue(State));
+  return new Wire.Reply(
+    Wire.Version,
+    Message,
+    Project(State.World, MapX, MapY),
+    Dialogue(State),
+    Bag.Project(State.World),
+    Quest.Journal(State.World),
+    Quote(State)
+  );
 end function;
 
 function ConversationRequest(
@@ -116,13 +141,43 @@ begin
         Conversation := null;
       end with;
       return Reply(Player, 'You end the conversation.');
-    when Talk.Result.Answer(const Next: Talk.Frame):
-      Player := Player with
+    when Talk.Result.OpenTrade:
+      const Candidate: State := Player with
+        Trade := new Shop.Pages();
+        Revision := Player.Revision + 1L;
+      end with;
+      const Response: Wire.Reply := Reply(Candidate, 'Trade offers.');
+      Player := Candidate;
+      return Response;
+    when Talk.Result.Answer(const Next: Talk.Frame, const Updated: Game.State):
+      const Candidate: State := Player with
+        World := Updated;
         Conversation := Next;
         Revision := Player.Revision + 1L;
       end with;
-      return Reply(Player, 'You speak with ' + Next.Speaker.Name + '.');
+      const Response: Wire.Reply := Reply(Candidate, 'You speak with ' + Next.Speaker.Name + '.');
+      Player := Candidate;
+      return Response;
   end case;
+end function;
+
+function TradeRequest(
+  Request: Wire.Request; World: Game.State; Current: Talk.Frame; Pages: Shop.Pages; ref Player: State
+): Wire.Reply;
+begin
+  const Result: Shop.Change := Shop.Apply(World, Current, Pages, Player.Revision, Request);
+  if not Result.Changed then
+    return Reply(Player, Result.Message);
+  end if;
+
+  const Candidate: State := Player with
+    World := Result.World;
+    Trade := Result.Screen;
+    Revision := Player.Revision + 1L;
+  end with;
+  const Response: Wire.Reply := Reply(Candidate, Result.Message);
+  Player := Candidate;
+  return Response;
 end function;
 
 /// Applies Request to Player using Path for explicit saves and returns the current view and conversation.
@@ -138,6 +193,15 @@ begin
 
   const World: Game.State? := Player.World;
   const Current: Talk.Frame? := Player.Conversation;
+  const Pages: Shop.Pages? := Player.Trade;
+  if World <> null and Current <> null and Pages <> null then
+    return TradeRequest(Request, World, Current, Pages, ref Player);
+  end if;
+
+  if Shop.IsAction(Request.Action) then
+    return Reply(Player, 'There is no active trade.');
+  end if;
+
   if World <> null and Current <> null then
     return ConversationRequest(Request, World, Current, ref Player);
   end if;

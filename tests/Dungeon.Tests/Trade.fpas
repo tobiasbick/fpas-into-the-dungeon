@@ -1,0 +1,350 @@
+// Exercises prices, ownership, stock and quote revisions through ordinary TCP play.
+unit Dungeon.Tests.Trade;
+
+uses
+  Dungeon.Tests.TcpGame as Game, Dungeon.Tests.Routes as Routes, Dungeon.Protocol.Messages as Wire,
+  Dungeon.Game.World as Domain, Dungeon.Game.Rules as Rules, Dungeon.Game.Terrain as Land,
+  Dungeon.Game.Items as Loot, Dungeon.Server.SaveFiles as Saves,
+  System as Sys, System.IO as IO, Xunit as Test;
+
+function Dialogue(Reply: Wire.Reply): Wire.Dialogue;
+begin
+  const Current: Wire.Dialogue? := Reply.Conversation;
+  if Current = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Current;
+end function;
+
+function Quote(Reply: Wire.Reply): Wire.Trade;
+begin
+  const Current: Wire.Trade? := Reply.Trade;
+  if Current = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Current;
+end function;
+
+function Bag(Reply: Wire.Reply): Wire.Inventory;
+begin
+  const Current: Wire.Inventory? := Reply.Bag;
+  if Current = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Current;
+end function;
+
+function Price(Row: Wire.TradeRow): int;
+begin
+  const Current: int? := Row.Price;
+  if Current = null then
+    raise new Sys.InvalidOperationException('Missing quoted price.');
+  end if;
+
+  return Current.Value;
+end function;
+
+function Named(Page: Wire.TradePage; Name: string): Wire.TradeRow;
+begin
+  for Row: Wire.TradeRow in Page.Rows do
+    if Row.Name = Name then
+      return Row;
+    end if;
+  end for;
+
+  raise new Sys.InvalidOperationException('No offer for ' + Name);
+end function;
+
+function Contains(Page: Wire.TradePage; Id: long): bool;
+begin
+  for Row: Wire.TradeRow in Page.Rows do
+    if Row.Id = Id then
+      return true;
+    end if;
+  end for;
+
+  return false;
+end function;
+
+function Offer(Stream: IO.Stream; Merchant: string): Wire.Reply;
+begin
+  const Talk: Wire.Dialogue := Dialogue(Game.Send(Stream, 'enter'));
+  Test.Assert.Equal<string>(Merchant, Talk.Speaker);
+  return Game.Send(Stream, 'dialogue_choice', Topic := 'trade', FrameId := Talk.Id);
+end function;
+
+function Request(Stream: IO.Stream; Current: Wire.Trade; Action: string; Id: long := 0L): Wire.Reply;
+begin
+  return Game.Send(
+    Stream,
+    Action,
+    FrameId := Current.Revision,
+    MerchantId := Current.MerchantId,
+    ItemId := Id
+  );
+end function;
+
+procedure Close(Stream: IO.Stream; Current: Wire.Trade);
+begin
+  const Closed: Wire.Reply := Request(Stream, Current, 'end_trade');
+  Test.Assert.Null(Closed.Trade);
+  const Talk: Wire.Dialogue := Dialogue(Closed);
+  Test.Assert.Equal<string>(Current.Name, Talk.Speaker);
+  Test.Assert.Null(Game.Send(Stream, 'end_dialogue', FrameId := Talk.Id).Conversation);
+end procedure;
+
+procedure CollectAndReachElias(Stream: IO.Stream);
+begin
+  discard Game.Send(Stream, 'create', 25);
+  discard Game.Walk(Stream, 'east', 3);
+  discard Game.Send(Stream, 'enter');
+  discard Game.Walk(Stream, 'north', 2);
+  discard Game.Walk(Stream, 'east', 1);
+  discard Game.Send(Stream, 'enter');
+  discard Game.Walk(Stream, 'east', 1);
+  const Held: Wire.Inventory := Bag(Game.Send(Stream, 'enter'));
+  Test.Assert.Equal<int>(2, Held.Items.Length);
+  for Item: Wire.BagEntry in Held.Items do
+    if Item.Name = 'Rusty short sword' then
+      discard Game.Send(Stream, 'item_use', ItemId := Item.Id);
+    end if;
+  end for;
+
+  discard Game.Walk(Stream, 'south', 2);
+  discard Game.Walk(Stream, 'west', 3);
+  discard Game.Send(Stream, 'enter');
+  discard Game.Walk(Stream, 'west', 3);
+  discard Game.Walk(Stream, 'south', 6);
+  discard Game.Send(Stream, 'enter');
+  discard Game.Walk(Stream, 'north', 4);
+  discard Game.Walk(Stream, 'west', 5);
+end procedure;
+
+procedure ReachAshbrook(Stream: IO.Stream);
+begin
+  discard Game.Walk(Stream, 'east', 5);
+  discard Game.Walk(Stream, 'south', 5);
+  discard Game.Send(Stream, 'enter');
+  discard Game.Walk(Stream, 'north', 6);
+  Routes.ToAshbrook(Stream);
+  Test.Assert.Equal<string>('Ashbrook', Game.World(Game.Send(Stream, 'enter')).Area);
+  discard Game.Walk(Stream, 'north', 7);
+  discard Game.Walk(Stream, 'west', 7);
+end procedure;
+
+/// Trades at Elias and Ashbrook, then reloads each independent stock and its exact items.
+[Test.FactAttribute]
+public procedure TradesPreserveCoinsAndItemsAcrossMerchantsAndRestarts();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-trade-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  var PotionId: long := 0L;
+  var CoinId: long := 0L;
+  var HomeId: long := 0L;
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        CollectAndReachElias(Stream);
+        const Opened: Wire.Reply := Offer(Stream, 'Elias');
+        const Home: Wire.Trade := Quote(Opened);
+        HomeId := Home.MerchantId;
+        Test.Assert.Null(Opened.Conversation);
+        Test.Assert.Equal<int>(5, Home.Buy.Total);
+        Test.Assert.Equal<int>(0, Home.Coins);
+
+        const Potion: Wire.TradeRow := Named(Home.Buy, 'Healing potion');
+        PotionId := Potion.Id;
+        Test.Assert.Equal<int>(8, Price(Potion));
+        Test.Assert.Equal<string>(
+          'Not enough coins.',
+          Request(Stream, Home, 'trade_buy', Potion.Id).Message
+        );
+        const Sword: Wire.TradeRow := Named(Home.Sell, 'Rusty short sword');
+        Test.Assert.Contains('Remove', Request(Stream, Home, 'trade_sell', Sword.Id).Message);
+        Test.Assert.Equal<string>('Finish trading first.', Game.Send(Stream, 'save').Message);
+
+        const Coin: Wire.TradeRow := Named(Home.Sell, 'Ancient coin');
+        CoinId := Coin.Id;
+        Test.Assert.Equal<int>(10, Price(Coin));
+        const Forged: Wire.Reply := Game.Send(
+          Stream,
+          'trade_sell',
+          FrameId := Home.Revision,
+          MerchantId := Home.MerchantId + 1L,
+          ItemId := Coin.Id
+        );
+        Test.Assert.Equal<string>('That trade quote has moved on.', Forged.Message);
+        const Sold: Wire.Trade := Quote(Request(Stream, Home, 'trade_sell', Coin.Id));
+        Test.Assert.Equal<int>(10, Sold.Coins);
+        Test.Assert.True(Contains(Sold.Buy, Coin.Id));
+        Test.Assert.Equal<int>(20, Price(Named(Sold.Buy, 'Ancient coin')));
+        const Stale: Wire.Reply := Request(Stream, Home, 'trade_sell', Coin.Id);
+        Test.Assert.Equal<long>(Sold.Revision, Quote(Stale).Revision);
+        Test.Assert.Equal<int>(10, Quote(Stale).Coins);
+
+        const Bought: Wire.Reply := Request(Stream, Sold, 'trade_buy', Potion.Id);
+        const Current: Wire.Trade := Quote(Bought);
+        Test.Assert.Equal<int>(2, Current.Coins);
+        Test.Assert.Equal<int>(5, Current.Buy.Total);
+        Test.Assert.False(Contains(Current.Buy, Potion.Id));
+        Test.Assert.True(Contains(Current.Sell, Potion.Id));
+        Test.Assert.Equal<long>(Game.World(Opened).Turn, Game.World(Bought).Turn);
+        Close(Stream, Current);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Loaded: Wire.Reply := Game.Send(Stream, 'continue');
+        Test.Assert.Null(Loaded.Trade);
+        Test.Assert.Equal<int>(2, Bag(Loaded).Coins);
+        const Home: Wire.Trade := Quote(Offer(Stream, 'Elias'));
+        Test.Assert.Equal<long>(HomeId, Home.MerchantId);
+        Test.Assert.True(Contains(Home.Buy, CoinId));
+        Test.Assert.False(Contains(Home.Buy, PotionId));
+        Close(Stream, Home);
+
+        ReachAshbrook(Stream);
+        const Village: Wire.Trade := Quote(Offer(Stream, 'Finn'));
+        Test.Assert.NotEqual<long>(HomeId, Village.MerchantId);
+        Test.Assert.Equal<int>(5, Village.Buy.Total);
+        Test.Assert.False(Contains(Village.Buy, CoinId));
+        Test.Assert.Equal<int>(3, Price(Named(Village.Sell, 'Healing potion')));
+        const Sold: Wire.Trade := Quote(Request(Stream, Village, 'trade_sell', PotionId));
+        Test.Assert.Equal<int>(5, Sold.Coins);
+        Test.Assert.Equal<int>(6, Sold.Buy.Total);
+        Test.Assert.True(Contains(Sold.Buy, PotionId));
+        Close(Stream, Sold);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        Test.Assert.Equal<string>('Ashbrook', Game.World(Game.Send(Stream, 'continue')).Area);
+        const Village: Wire.Trade := Quote(Offer(Stream, 'Finn'));
+        Test.Assert.Equal<int>(5, Village.Coins);
+        Test.Assert.Equal<int>(6, Village.Buy.Total);
+        Test.Assert.True(Contains(Village.Buy, PotionId));
+        Close(Stream, Village);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+procedure PreparePagedShop(Path: string);
+begin
+  var World: Domain.State := Rules.Create(25);
+  for Step: int := 1 to 6 do
+    World := Rules.Act(World, 'south').World;
+  end for;
+
+  World := Rules.Act(World, 'enter').World;
+  for Step: int := 1 to 4 do
+    World := Rules.Act(World, 'north').World;
+  end for;
+
+  for Step: int := 1 to 5 do
+    World := Rules.Act(World, 'west').World;
+  end for;
+
+  const Shop: long := Land.Key(Land.HomeX, Land.HomeY);
+  var Extra: int := 0;
+  var HasCoin: bool := false;
+  for Gate: Land.Floor in [new Land.Floor(3, 0, 0), new Land.Floor(184, -266, 0)] do
+    for Level: int := 0 to Land.Depth - 1 do
+      const Site: Land.Floor := Gate with
+        Level := Level;
+      end with;
+      Domain.Visit(World, Site);
+      for Original: Loot.Item in Loot.Finds(World.Seed, Site) do
+        if not HasCoin and Original.Kind = Loot.Kind.Coin then
+          World.Items[Original.Id] := Original with
+            Location := Loot.Location.Carried;
+            Ground := null;
+          end with;
+          HasCoin := true;
+        else
+          if Original.Kind <> Loot.Kind.Compass and Extra < 12 then
+            World.Items[Original.Id] := Original with
+              Location := Loot.Location.Merchant;
+              Ground := null;
+              Merchant := Shop;
+            end with;
+            Extra := Extra + 1;
+          end if;
+        end if;
+      end for;
+    end for;
+  end for;
+  const Ready: Domain.State := World with
+    Coins := Domain.MaximumCoins;
+  end with;
+  Test.Assert.True(Domain.CanRestore(Ready));
+  Saves.Save(Path, Ready);
+end procedure;
+
+function BuyPage(Stream: IO.Stream; Current: Wire.Trade; Number: int): Wire.Trade;
+begin
+  return Quote(
+    Game.Send(
+      Stream,
+      'trade_page',
+      FrameId := Current.Revision,
+      MerchantId := Current.MerchantId,
+      Side := 'buy',
+      Page := Number
+    )
+  );
+end function;
+
+/// Enforces the quoted page, clamps it after a purchase, and refuses overflowing the wallet.
+[Test.FactAttribute]
+public procedure TradesRequireAnOfferedPageAndBoundedWallet();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-trade-pages-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    PreparePagedShop(Path);
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        discard Game.Send(Stream, 'continue');
+        const First: Wire.Trade := Quote(Offer(Stream, 'Elias'));
+        Test.Assert.Equal<int>(17, First.Buy.Total);
+        Test.Assert.Equal<int>(16, First.Buy.Rows.Length);
+        Test.Assert.Equal<int>(2, First.Buy.Pages);
+
+        const Coin: Wire.TradeRow := Named(First.Sell, 'Ancient coin');
+        const FullWallet: Wire.Reply := Request(Stream, First, 'trade_sell', Coin.Id);
+        Test.Assert.Contains('exceed its limit', FullWallet.Message);
+        Test.Assert.Equal<long>(First.Revision, Quote(FullWallet).Revision);
+        Test.Assert.Equal<int>(1000000000, Quote(FullWallet).Coins);
+
+        const Second: Wire.Trade := BuyPage(Stream, First, 1);
+        Test.Assert.Equal<int>(1, Second.Buy.Rows.Length);
+        const Item: Wire.TradeRow := Second.Buy.Rows[0];
+        const Back: Wire.Trade := BuyPage(Stream, Second, 0);
+        const Hidden: Wire.Reply := Request(Stream, Back, 'trade_buy', Item.Id);
+        Test.Assert.Equal<string>('That item is unavailable on this page.', Hidden.Message);
+        Test.Assert.Equal<long>(Back.Revision, Quote(Hidden).Revision);
+
+        const Again: Wire.Trade := BuyPage(Stream, Back, 1);
+        const Bought: Wire.Trade := Quote(Request(Stream, Again, 'trade_buy', Item.Id));
+        Test.Assert.Equal<int>(0, Bought.Buy.Index);
+        Test.Assert.Equal<int>(16, Bought.Buy.Total);
+        Test.Assert.Equal<int>(1000000000 - Price(Item), Bought.Coins);
+        Test.Assert.True(Contains(Bought.Sell, Item.Id));
+        Close(Stream, Bought);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+end unit;

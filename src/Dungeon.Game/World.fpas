@@ -1,9 +1,16 @@
 // Owns authoritative player state and sparse progress for explored areas.
 unit Dungeon.Game.World;
 
-uses Dungeon.Game.Terrain as Land, Dungeon.Game.Settlements as Town, System.Collections.Generic as Generic;
+uses
+  Dungeon.Game.Terrain as Land, Dungeon.Game.Settlements as Town, Dungeon.Game.Items as Loot,
+  Dungeon.Game.ItemValidation as ItemChecks, Dungeon.Game.Clock as Clock, Dungeon.Game.Skills as Skills,
+  System.Collections.Generic as Generic;
 
-const PlayerHealth: int := 12;
+/// Base maximum health of the player.
+public const MaximumHealth: int := 12;
+/// Maximum balance in the player wallet.
+public const MaximumCoins: int := 1000000000;
+
 const SkeletonX: int := 6;
 const SkeletonHealth: int := 4;
 const RatHealth: int := 2;
@@ -39,6 +46,13 @@ public type VillageProgress = record
   public Met: Generic.HashSet<int>;
 end record;
 
+/// Persisted phase of Mara's compass quest.
+public type QuestPhase = enum: byte
+  NotAccepted;
+  Active;
+  Rewarded;
+end enum;
+
 /// Holds the mutable session data owned by the server's single player loop.
 public type State = record
   /// Seed of the world and all generated areas.
@@ -61,6 +75,16 @@ public type State = record
   public Floors: Generic.Dictionary<long, Progress>;
   /// Persistent progress keyed by settlement gate.
   public Villages: Generic.Dictionary<long, VillageProgress>;
+  /// Every materialized item, including consumed potions.
+  public Items: Generic.Dictionary<long, Loot.Item>;
+  /// Accepted or rewarded quest state. Readiness is derived from item ownership.
+  public Quest: QuestPhase;
+  /// Spendable coins, separate from Ancient coin items.
+  public Coins: int;
+  /// Canonical game minutes since midnight on day 1.
+  public Minutes: int;
+  /// Cumulative experience with and without a weapon.
+  public Training: Skills.Training;
 end record;
 
 /// Returns a new world at the outdoor spawn for Seed.
@@ -68,10 +92,32 @@ public function NewWorld(Seed: int): State;
 ensures (Created: State): Created.Seed = Seed;
 begin
   return new State(
-    Seed, 0, 0, null, null, PlayerHealth, 0L,
-    new Generic.HashSet<long>(), new Generic.Dictionary<long, Progress>(),
-    new Generic.Dictionary<long, VillageProgress>()
+    Seed,
+    0,
+    0,
+    null,
+    null,
+    MaximumHealth,
+    0L,
+    new Generic.HashSet<long>(),
+    new Generic.Dictionary<long, Progress>(),
+    new Generic.Dictionary<long, VillageProgress>(),
+    new Generic.Dictionary<long, Loot.Item>(),
+    QuestPhase.NotAccepted, 0, Clock.Start, new Skills.Training(0, 0)
   );
+end function;
+
+/// Returns whether the player in World is fighting with a worn sword.
+public function Armed(World: State): bool;
+begin
+  return Loot.Worn(World.Items, Loot.Kind.Sword) <> null;
+end function;
+
+/// Returns the player's base weapon damage plus the bonus of the active skill.
+public function Damage(World: State): int;
+begin
+  const Rank: int := Skills.Level(Skills.Active(World.Training, Armed(World)));
+  return Loot.Damage(World.Items) + Skills.DamageBonus(Rank);
 end function;
 
 /// Adds initial progress for Site in World on its first visit.
@@ -88,6 +134,9 @@ begin
         new Generic.HashSet<long>()
       )
     );
+    for Original: Loot.Item in Loot.Finds(World.Seed, Site) do
+      World.Items.Add(Original.Id, Original);
+    end for;
   end if;
 end procedure;
 
@@ -100,6 +149,10 @@ begin
       Id,
       new VillageProgress(Site, new Generic.HashSet<long>(), new Generic.HashSet<int>())
     );
+    for Slot: int := 0 to Loot.StartingStock - 1 do
+      const Stock: Loot.Item := Loot.StockItem(Id, Slot);
+      World.Items.Add(Stock.Id, Stock);
+    end for;
   end if;
 end procedure;
 
@@ -218,6 +271,11 @@ begin
       return false;
     end if;
 
+    for Slot: int := 0 to Loot.StartingStock - 1 do
+      if not World.Items.ContainsKey(Loot.StockItem(Id, Slot).Id) then
+        return false;
+      end if;
+    end for;
     const FieldsCount: int := Town.Width(World.Seed, Site) * Town.Height(World.Seed, Site);
     for Field: long in Fields do
       if Field < 0L or Field >= FieldsCount then
@@ -235,20 +293,38 @@ begin
   return true;
 end function;
 
+function ValidQuest(World: State): bool;
+begin
+  case World.Quest of
+    when QuestPhase.NotAccepted:
+      return true;
+    when QuestPhase.Active, QuestPhase.Rewarded:
+      const Home: long := Land.Key(Land.HomeX, Land.HomeY);
+      return World.Villages.ContainsKey(Home) and World.Villages[Home].Met.Contains(Town.MaraSlot)
+        and Loot.CompassReachable(World.Seed);
+    else
+      return false;
+  end case;
+end function;
+
 /// Checks loaded World for valid coordinates, discovery and visited area identities.
 public function CanRestore(World: State): bool;
 begin
   const Outdoor: Generic.HashSet<long>? := World.OutdoorsSeen;
   const Floors: Generic.Dictionary<long, Progress>? := World.Floors;
   const Villages: Generic.Dictionary<long, VillageProgress>? := World.Villages;
-  if Outdoor = null or Floors = null or Villages = null or World.Health < 0 or World.Health >
-    PlayerHealth
-    or World.Turn < 0
+  const Items: Generic.Dictionary<long, Loot.Item>? := World.Items;
+  const Training: Skills.Training? := World.Training;
+  if Outdoor = null or Floors = null or Villages = null or Items = null or World.Health < 0
+    or World.Health >
+    MaximumHealth
+    or World.Turn < 0 or World.Coins < 0 or World.Coins > MaximumCoins
+    or not Clock.CanAdvance(World.Minutes, 0) or Training = null or not Skills.Valid(Training)
   then
     return false;
   end if;
 
-  if not ValidVillages(World, Villages) then
+  if not ValidVillages(World, Villages) or not ValidQuest(World) then
     return false;
   end if;
   const Village: Land.Village? := World.Settlement;
@@ -297,6 +373,12 @@ begin
         return false;
       end if;
     end for;
+
+    for Find: Loot.Item in Loot.Finds(World.Seed, Site) do
+      if not Items.ContainsKey(Find.Id) then
+        return false;
+      end if;
+    end for;
   end for;
 
   const Site: Land.Floor? := World.Floor;
@@ -312,6 +394,17 @@ begin
     if not Floors.ContainsKey(Land.FloorKey(Site)) then
       return false;
     end if;
+  end if;
+
+  if not ItemChecks.Valid(
+    World.Seed,
+    Items,
+    new Generic.HashSet<long>(Floors.Keys),
+    new Generic.HashSet<long>(Villages.Keys),
+    World.Quest = QuestPhase.Rewarded
+  )
+  then
+    return false;
   end if;
 
   return Land.Walkable(

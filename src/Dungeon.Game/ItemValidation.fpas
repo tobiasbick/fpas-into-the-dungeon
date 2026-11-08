@@ -1,0 +1,160 @@
+// Validates item origins and mutually exclusive locations when a save is loaded.
+unit Dungeon.Game.ItemValidation;
+
+uses Dungeon.Game.Terrain as Land, Dungeon.Game.Items as Loot, System.Collections.Generic as Generic;
+
+function Known(Site: Land.Floor; Floors: Generic.HashSet<long>): bool;
+begin
+  return Site.Level >= 0 and Site.Level < Land.Depth and Land.OutdoorBounds(
+    Site.EntranceX,
+    Site.EntranceY
+  )
+    and Floors.Contains(Land.FloorKey(Site));
+end function;
+
+function ValidOrigin(
+  Seed: int; Value: Loot.Item; Floors: Generic.HashSet<long>; Shops: Generic.HashSet<long>; Rewarded: bool
+): bool;
+begin
+  const Origin: Land.Floor? := Value.Origin;
+  const Shop: long? := Value.StockOrigin;
+  if Shop <> null then
+    if Origin <> null or not Shops.Contains(
+      Shop.Value
+    ) or Value.Slot < 0 or Value.Slot >= Loot.StartingStock
+    then
+      return false;
+    end if;
+    const Original: Loot.Item := Loot.StockItem(Shop.Value, Value.Slot);
+    return Original.Id = Value.Id and Original.Kind = Value.Kind;
+  end if;
+
+  if Origin = null then
+    return Rewarded and Value.Kind = Loot.Kind.Potion and (Value.Slot = 0 or Value.Slot = 1)
+      and Value.Id = Loot.RewardPotion(Value.Slot).Id;
+  end if;
+
+  if not Known(Origin, Floors) then
+    return false;
+  end if;
+  const Original: Loot.Item? := Loot.Placement(Seed, Origin, Value.Slot);
+  return Original <> null and Original.Id = Value.Id and Original.Kind = Value.Kind;
+end function;
+
+function RegisterGround(
+  Seed: int; Field: Loot.Ground?; Floors: Generic.HashSet<long>; Occupied: Generic.HashSet<long>
+): bool;
+begin
+  if Field = null then
+    return false;
+  end if;
+  const Site: Land.Floor? := Field.Site;
+  if Site = null or not Known(Site, Floors) or Land.Dungeon(
+    Seed,
+    Site,
+    Field.X,
+    Field.Y
+  ) <> Land.Tile.Floor
+  then
+    return false;
+  end if;
+  const Key: long := Land.FloorKey(Site) * Land.Width * Land.Height + Loot.CellKey(
+    Field.X,
+    Field.Y
+  );
+  return Occupied.Add(Key);
+end function;
+
+function RegisterStock(Value: Loot.Item; Shops: Generic.HashSet<long>; Counts: Generic.Dictionary<long, int>): bool;
+begin
+  const Shop: long? := Value.Merchant;
+  if Shop = null or not Shops.Contains(Shop.Value) or Value.Kind = Loot.Kind.Compass then
+    return false;
+  end if;
+  const Id: long := Shop.Value;
+  const Count: int := if Counts.ContainsKey(Id) then Counts[Id] + 1 else 1 end if;
+  if Count > Loot.StockCapacity then
+    return false;
+  end if;
+
+  Counts[Id] := Count;
+  return true;
+end function;
+
+/// Validates Ledger against visited Floors and Shops and the quest reward phase.
+public function Valid(
+  Seed: int; Ledger: Generic.Dictionary<long, Loot.Item>; Floors: Generic.HashSet<long>;
+  Shops: Generic.HashSet<long>; Rewarded: bool
+): bool;
+begin
+  const Compass: long := Loot.CompassId();
+  if Rewarded and (not Ledger.ContainsKey(Compass) or not Ledger.ContainsKey(
+    Loot.RewardPotion(0).Id
+  )
+    or not Ledger.ContainsKey(Loot.RewardPotion(1).Id))
+  then
+    return false;
+  end if;
+
+  const Equipped: Generic.HashSet<Loot.Kind> := new Generic.HashSet<Loot.Kind>();
+  const Occupied: Generic.HashSet<long> := new Generic.HashSet<long>();
+  const Counts: Generic.Dictionary<long, int> := new Generic.Dictionary<long, int>();
+  var Held: int := 0;
+  for Id: long in Ledger.Keys do
+    const Value: Loot.Item? := Ledger[Id];
+    if Value = null or Value.Id <> Id or not ValidOrigin(Seed, Value, Floors, Shops, Rewarded) then
+      return false;
+    end if;
+
+    if Id = Compass and Rewarded and Value.Location <> Loot.Location.Returned then
+      return false;
+    end if;
+
+    if Value.Location <> Loot.Location.Floor and Value.Ground <> null then
+      return false;
+    end if;
+
+    if Value.Location <> Loot.Location.Merchant and Value.Merchant <> null then
+      return false;
+    end if;
+
+    case Value.Location of
+      when Loot.Location.Floor:
+        if not RegisterGround(Seed, Value.Ground, Floors, Occupied) then
+          return false;
+        end if;
+      when Loot.Location.Merchant:
+        if not RegisterStock(Value, Shops, Counts) then
+          return false;
+        end if;
+      when Loot.Location.Carried:
+        Held := Held + 1;
+      when Loot.Location.Worn:
+        if (Value.Kind <> Loot.Kind.Sword and Value.Kind <> Loot.Kind.Jerkin) or not Equipped.Add(
+          Value.Kind
+        )
+        then
+          return false;
+        end if;
+
+        Held := Held + 1;
+      when Loot.Location.Consumed:
+        if Value.Kind <> Loot.Kind.Potion then
+          return false;
+        end if;
+      when Loot.Location.Returned:
+        if not Rewarded or Id <> Compass then
+          return false;
+        end if;
+      else
+        return false;
+    end case;
+
+    if Held > Loot.Capacity then
+      return false;
+    end if;
+  end for;
+
+  return true;
+end function;
+end unit;

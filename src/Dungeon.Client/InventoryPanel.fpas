@@ -1,0 +1,133 @@
+// Presents inventory selections and the authoritative character values.
+unit Dungeon.Client.InventoryPanel;
+
+uses
+  Dungeon.Client.Panels as Panels, Dungeon.Protocol.Messages as Wire,
+  Fpas.Tui.Elements as E, System as Sys, System.Collections.Generic as Generic;
+
+function Position(Bag: Wire.Inventory; Id: long): int;
+begin
+  for Index: int := 0 to Bag.Items.Length - 1 do
+    if Bag.Items[Index].Id = Id then
+      return Index;
+    end if;
+  end for;
+
+  return -1;
+end function;
+
+/// Retains Selected when possible, otherwise selects its nearest remaining row in Next.
+public function Keep(Previous: Wire.Inventory?; Next: Wire.Inventory?; Selected: long): long;
+begin
+  if Next = null or Next.Items.Length = 0 then
+    return 0L;
+  end if;
+
+  if Position(Next, Selected) >= 0 then
+    return Selected;
+  end if;
+  const Index: int := if Previous = null then 0 else Position(Previous, Selected) end if;
+  return Next.Items[Sys.Math.Clamp(Index, 0, Next.Items.Length - 1)].Id;
+end function;
+
+/// Returns the item Offset rows from Selected, wrapping at the ends.
+public function Move(Bag: Wire.Inventory; Selected: long; Offset: int): long;
+begin
+  const Count: int := Bag.Items.Length;
+  if Count = 0 then
+    return 0L;
+  end if;
+  const Index: int := Sys.Math.Max(0, Position(Bag, Selected));
+  const Next: int := ((Index + Offset) mod Count + Count) mod Count;
+  return Bag.Items[Next].Id;
+end function;
+
+function Health(Bag: Wire.Inventory): string;
+begin
+  return 'Health ' + Bag.Health.ToString() + ' / ' + Bag.MaxHealth.ToString() + '   ·   Coins ' +
+    Bag.Coins.ToString();
+end function;
+
+/// Draws the player's Bag and binds Select, Use, Drop, Browse and Close to terminal controls.
+public function Draw<TMsg>(
+  Bag: Wire.Inventory; Selected: long; Status: string; Columns: int; Close: TMsg;
+  Select: function(long): TMsg; Use: function(long): TMsg; Drop: TMsg; Browse: function(int): TMsg
+): E.Element<TMsg>;
+begin
+  const Items: Generic.List<E.SelectionItem> := new Generic.List<E.SelectionItem>(Bag.Items.Length);
+  for Entry: Wire.BagEntry in Bag.Items do
+    const Label: string := if Entry.Equipped then Entry.Name + '  (worn)' else Entry.Name end if;
+    Items.Add(new E.SelectionItem(Entry.Id.ToString(), Label, Entry.Action <> ''));
+  end for;
+
+  const Index: int := Position(Bag, Selected);
+  const Description: string := if Index < 0 then 'Empty' else Bag.Items[Index].Description end if;
+  const Action: string := if Index < 0 or Bag.Items[Index].Action = '' then ''
+    else 'Enter ' + Bag.Items[Index].Action
+    end if;
+  const Hint: string := if Index < 0 or Bag.Items[Index].Equipped then Action
+    else if Action = '' then 'D Drop' else Action + '  ·  D Drop' end if
+    end if;
+  const List: E.Element<TMsg> := E.SelectionList<TMsg>(
+    'inventory-items', Items.ToArray(), Selected.ToString(),
+    function(Key: string): TMsg => Select(long.Parse(Key)),
+    function(Key: string): TMsg => Use(long.Parse(Key))
+  );
+  const Body: E.Element<TMsg> := E.Column<TMsg>(
+    E.Text<TMsg>(
+      Health(
+        Bag
+      ) + '   ·   ' + Bag.Items.Length.ToString() + ' / ' + Bag.Capacity.ToString() + ' items'
+    ),
+    E.Size<TMsg>(List, new E.Flex(Basis := 5, Minimum := 1, Grow := 1)),
+    E.Text<TMsg>(Description),
+    E.Text<TMsg>(Status)
+  );
+  const Footer: E.Element<TMsg> := E.Row<TMsg>(
+    E.Size<TMsg>(E.Text<TMsg>(Hint), new E.Flex(Grow := 1)),
+    E.Button<TMsg>('inventory-close', 'Esc Close', Close, Variant := E.ButtonVariant.Secondary)
+  );
+  return Panels.Modal<TMsg>(
+    'inventory', 'Inventory', 'inventory-items', Close, Body, Footer,
+    [
+      E.CharacterShortcut<TMsg>('d', Drop), E.CharacterShortcut<TMsg>('i', Close),
+      E.CharacterShortcut<TMsg>('w', Browse(-1)), E.CharacterShortcut<TMsg>('s', Browse(1))
+    ],
+    Columns, 10
+  );
+end function;
+
+function Skill(Name: string; Value: Wire.Skill; Active: bool): string;
+begin
+  const Status: string := if Active then '  ·  Active' else '' end if;
+  return Name + '  L' + Value.Level.ToString() + '  XP ' + Value.Experience.ToString() +
+    '/' + Value.Threshold.ToString() + Status;
+end function;
+
+/// Displays health, attack, armor, equipment and both fighting skills.
+public function Character<TMsg>(Bag: Wire.Inventory; Columns: int; Close: TMsg): E.Element<TMsg>;
+begin
+  const Worn: Generic.List<string> := new Generic.List<string>();
+  for Entry: Wire.BagEntry in Bag.Items do
+    if Entry.Equipped then
+      Worn.Add(Entry.Name);
+    end if;
+  end for;
+  const Gear: string := if Worn.Count = 0 then 'None' else Sys.String.Join(', ', Worn) end if;
+  const Body: E.Element<TMsg> := E.Column<TMsg>(
+    new E.Flow(Gap := 1), E.Text<TMsg>(Health(Bag)),
+    E.Text<TMsg>('Attack damage ' + Bag.Damage.ToString() + '   ·   Armor ' + Bag.Armor.ToString()),
+    E.Text<TMsg>('Equipped: ' + Gear),
+    E.Text<TMsg>(Skill('Unarmed', Bag.Unarmed, not Bag.Armed)),
+    E.Text<TMsg>(Skill('Blades', Bag.Blades, Bag.Armed))
+  );
+  const Footer: E.Element<TMsg> := E.Row<TMsg>(
+    E.Size<TMsg>(E.Text<TMsg>(''), new E.Flex(Grow := 1)),
+    E.Button<TMsg>('character-close', 'Esc Close', Close, Variant := E.ButtonVariant.Secondary)
+  );
+  return Panels.Modal<TMsg>(
+    'character', 'Character', 'character-close', Close, Body, Footer,
+    [E.CharacterShortcut<TMsg>('c', Close)], Columns, 9
+  );
+end function;
+end unit;

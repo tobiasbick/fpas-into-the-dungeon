@@ -1,0 +1,193 @@
+// Exercises item identity, equipment, potion use and explicit persistence through TCP.
+unit Dungeon.Tests.Inventory;
+
+uses
+  Dungeon.Tests.TcpGame as Game, Dungeon.Protocol.Messages as Wire, System as Sys,
+  System.IO as IO, System.Text.Json.Nodes as Json, Xunit as Test;
+
+function Bag(Reply: Wire.Reply): Wire.Inventory;
+begin
+  const Inventory: Wire.Inventory? := Reply.Bag;
+  if Inventory = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Inventory;
+end function;
+
+function Named(Inventory: Wire.Inventory; Name: string): Wire.BagEntry;
+begin
+  for Value: Wire.BagEntry in Inventory.Items do
+    if Value.Name = Name then
+      return Value;
+    end if;
+  end for;
+
+  raise new Sys.InvalidOperationException('Missing item: ' + Name);
+end function;
+
+procedure EnterDungeon(Stream: IO.Stream);
+begin
+  discard Game.Send(Stream, 'create', 25);
+  discard Game.Walk(Stream, 'east', 3);
+  Test.Assert.Equal<int>(1, Game.World(Game.Send(Stream, 'enter')).Level);
+end procedure;
+
+function Use(Stream: IO.Stream; Id: long): Wire.Reply;
+begin
+  return Game.Send(Stream, 'item_use', ItemId := Id);
+end function;
+
+function Drop(Stream: IO.Stream; Id: long): Wire.Reply;
+begin
+  return Game.Send(Stream, 'item_drop', ItemId := Id);
+end function;
+
+/// Uses the original dungeon finds, then reloads equipped, consumed and dropped items.
+[Test.FactAttribute]
+public procedure FindsHaveOneLocationAcrossCombatAndReload();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-items-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  var CoinId: long := 0L;
+  var SwordId: long := 0L;
+  var PotionId: long := 0L;
+  var JerkinId: long := 0L;
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        EnterDungeon(Stream);
+        const Nearby: Wire.View := Game.Walk(Stream, 'north', 2);
+        Test.Assert.Equal<string>('i', Game.Glyph(Nearby, 3, 8));
+        const Inspected: Wire.Reply := Game.Send(Stream, 'enter');
+        Test.Assert.Contains('crescent', Inspected.Message);
+        Test.Assert.Equal<long>(Nearby.Turn, Game.World(Inspected).Turn);
+        Test.Assert.Equal<int>(0, Bag(Inspected).Items.Length);
+        discard Game.Walk(Stream, 'east', 1);
+        const Coin: Wire.BagEntry := Named(Bag(Game.Send(Stream, 'enter')), 'Ancient coin');
+        CoinId := Coin.Id;
+        discard Game.Walk(Stream, 'east', 1);
+        const Sword: Wire.BagEntry := Named(Bag(Game.Send(Stream, 'enter')), 'Rusty short sword');
+        SwordId := Sword.Id;
+        discard Game.Walk(Stream, 'south', 4);
+        const Potion: Wire.BagEntry := Named(Bag(Game.Send(Stream, 'enter')), 'Healing potion');
+        PotionId := Potion.Id;
+        const NearJerkin: Wire.View := Game.Walk(Stream, 'west', 1);
+        const Jerkin: Wire.BagEntry := Named(Bag(Game.Send(Stream, 'enter')), 'Leather jerkin');
+        JerkinId := Jerkin.Id;
+
+        const Full: Wire.Reply := Use(Stream, Potion.Id);
+        Test.Assert.Equal<string>('You are already at full health.', Full.Message);
+        Test.Assert.Equal<long>(NearJerkin.Turn, Game.World(Full).Turn);
+        Test.Assert.Equal<long>(Potion.Id, Named(Bag(Full), 'Healing potion').Id);
+        const Equipped: Wire.Reply := Use(Stream, Sword.Id);
+        Test.Assert.Equal<int>(4, Bag(Equipped).Damage);
+        Test.Assert.True(Named(Bag(Equipped), 'Rusty short sword').Equipped);
+        const WornDrop: Wire.Reply := Drop(Stream, Sword.Id);
+        Test.Assert.Contains('Remove', WornDrop.Message);
+        Test.Assert.Equal<long>(Game.World(Equipped).Turn, Game.World(WornDrop).Turn);
+
+        const Dropped: Wire.Reply := Drop(Stream, Coin.Id);
+        Test.Assert.Contains('At your feet: Ancient coin', Bag(Dropped).Hint);
+        const Occupied: Wire.Reply := Drop(Stream, Potion.Id);
+        Test.Assert.Contains('already an item', Occupied.Message);
+        Test.Assert.Equal<long>(Game.World(Dropped).Turn, Game.World(Occupied).Turn);
+        Test.Assert.Equal<long>(Coin.Id, Named(Bag(Game.Send(Stream, 'enter')), 'Ancient coin').Id);
+
+        discard Game.Walk(Stream, 'north', 2);
+        const Wounded: Wire.View := Game.Walk(Stream, 'east', 2);
+        Test.Assert.Equal<int>(11, Wounded.Health);
+        Test.Assert.Equal<int>(2, Bag(Use(Stream, Jerkin.Id)).Armor);
+        const Absorbed: Wire.Reply := Use(Stream, Sword.Id);
+        Test.Assert.Contains('armor absorbs', Absorbed.Message);
+        Test.Assert.Equal<int>(2, Bag(Absorbed).Damage);
+        discard Use(Stream, Sword.Id);
+        const Defeated: Wire.Reply := Game.Send(Stream, 'attack');
+        Test.Assert.Contains('skeleton collapses', Defeated.Message);
+
+        const Healed: Wire.Reply := Use(Stream, Potion.Id);
+        Test.Assert.Equal<int>(Bag(Healed).MaxHealth, Bag(Healed).Health);
+        Test.Assert.Equal<int>(3, Bag(Healed).Items.Length);
+        discard Drop(Stream, Coin.Id);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Continued: Wire.Reply := Game.Send(Stream, 'continue');
+        const Restored: Wire.Inventory := Bag(Continued);
+        Test.Assert.Equal<string>('.', Game.Glyph(Game.World(Continued), 4, 12));
+        Test.Assert.Equal<int>(2, Restored.Items.Length);
+        Test.Assert.Equal<int>(4, Restored.Damage);
+        Test.Assert.Equal<int>(2, Restored.Armor);
+        Test.Assert.Equal<long>(SwordId, Named(Restored, 'Rusty short sword').Id);
+        Test.Assert.Equal<string>('You do not have that item.', Use(Stream, PotionId).Message);
+        Test.Assert.Equal<long>(CoinId, Named(Bag(Game.Send(Stream, 'enter')), 'Ancient coin').Id);
+
+        discard Game.Walk(Stream, 'east', 7);
+        discard Game.Walk(Stream, 'south', 2);
+        const TwoJerkins: Wire.Inventory := Bag(Game.Send(Stream, 'enter'));
+        var SecondId: long := 0L;
+        for Entry: Wire.BagEntry in TwoJerkins.Items do
+          if Entry.Name = 'Leather jerkin' and Entry.Id <> JerkinId then
+            SecondId := Entry.Id;
+          end if;
+        end for;
+
+        Test.Assert.True(SecondId > 0L);
+        const Swapped: Wire.Inventory := Bag(Use(Stream, SecondId));
+        for Entry: Wire.BagEntry in Swapped.Items do
+          if Entry.Name = 'Leather jerkin' then
+            Test.Assert.Equal<bool>(Entry.Id = SecondId, Entry.Equipped);
+          end if;
+        end for;
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+/// Refuses a save that lost its original finds, without replacing the active game.
+[Test.FactAttribute]
+public procedure ContinueRejectsMissingOriginalFinds();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory(
+    'dungeon-item-validation-'
+  );
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        EnterDungeon(Stream);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    const Saved: Json.JsonNode? := Json.JsonNode.Parse(IO.File.ReadAllText(Path));
+    if Saved = null then
+      raise new Sys.InvalidOperationException('Missing save data.');
+    end if;
+    const World: Json.JsonNode? := Saved['World'];
+    if World = null then
+      raise new Sys.InvalidOperationException('Missing world data.');
+    end if;
+
+    World['Items'] := new Json.JsonObject();
+    IO.File.WriteAllText(Path, Saved.ToJsonString());
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        discard Game.Send(Stream, 'create', 97);
+        const Rejected: Wire.Reply := Game.Send(Stream, 'continue');
+        Test.Assert.Equal<string>('Invalid saved world.', Rejected.Message);
+        Test.Assert.Equal<int>(97, Game.World(Rejected).Seed);
+        Test.Assert.Equal<int>(0, Bag(Rejected).Items.Length);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+end unit;

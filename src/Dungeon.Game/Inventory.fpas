@@ -1,0 +1,171 @@
+// Resolves inspection, pickup, equipment changes, drops and potion use.
+unit Dungeon.Game.Inventory;
+
+uses
+  Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land, Dungeon.Game.Items as Loot,
+  System as Sys, System.Collections.Generic as Generic;
+
+/// Result of one inventory or floor interaction.
+public type Change = record
+  /// Authoritative state after resolving the action.
+  public World: Game.State;
+  /// Outcome or reason for rejecting the action.
+  public Message: string;
+  /// Whether the caller must run one turn and its opponent phase.
+  public TookTurn: bool;
+end record;
+
+function OnPlayer(World: Game.State; Value: Loot.Item): bool;
+begin
+  const Field: Loot.Ground? := Value.Ground;
+  return Field <> null and Field.X = World.X and Field.Y = World.Y;
+end function;
+
+function Target(World: Game.State): Loot.Item?;
+begin
+  const Site: Land.Floor? := World.Floor;
+  if Site = null then
+    return null;
+  end if;
+
+  const Floor: Generic.Dictionary<int, Loot.Item> := Loot.OnFloor(World.Items, Site);
+  const Keys: array of int := [
+    Loot.CellKey(World.X, World.Y),
+    Loot.CellKey(World.X, World.Y - 1),
+    Loot.CellKey(World.X + 1, World.Y),
+    Loot.CellKey(World.X, World.Y + 1),
+    Loot.CellKey(World.X - 1, World.Y)
+  ];
+  for Id: int in Keys do
+    if Floor.ContainsKey(Id) then
+      return Floor[Id];
+    end if;
+  end for;
+
+  return null;
+end function;
+
+function InBag(World: Game.State; Id: long): Loot.Item?;
+begin
+  if not World.Items.ContainsKey(Id) then
+    return null;
+  end if;
+  const Value: Loot.Item := World.Items[Id];
+  return if Loot.Held(Value) then Value else null end if;
+end function;
+
+procedure Relocate(World: Game.State; Value: Loot.Item; Where: Loot.Location; Field: Loot.Ground? := null);
+begin
+  World.Items[Value.Id] := Value with
+    Location := Where;
+    Ground := Field;
+  end with;
+end procedure;
+
+/// Returns the contextual hint for the nearest item in the current dungeon.
+public function Hint(World: Game.State): string;
+begin
+  const Value: Loot.Item? := Target(World);
+  if Value = null then
+    return '';
+  end if;
+
+  if OnPlayer(World, Value) then
+    const Action: string := if Loot.HeldCount(
+        World.Items
+      ) >= Loot.Capacity then 'inventory full.'
+      else 'Enter to pick up.'
+      end if;
+    return 'At your feet: ' + Loot.Name(Value.Kind) + ' · ' + Action;
+  end if;
+
+  return Loot.Name(Value.Kind) + ' nearby · Enter to examine.';
+end function;
+
+/// Picks up the item at the player's feet or inspects an adjacent find.
+public function Interact(World: Game.State): Change;
+begin
+  const Value: Loot.Item? := Target(World);
+  if Value = null then
+    return new Change(World, 'Nothing is within reach.', false);
+  end if;
+
+  if not OnPlayer(World, Value) then
+    return new Change(World, Loot.Description(Value.Kind), false);
+  end if;
+
+  if Loot.HeldCount(World.Items) >= Loot.Capacity then
+    return new Change(World, 'Your inventory is full.', false);
+  end if;
+
+  Relocate(World, Value, Loot.Location.Carried);
+  return new Change(World, 'You pick up the ' + Loot.Name(Value.Kind) + '.', false);
+end function;
+
+function Drink(World: Game.State; Value: Loot.Item): Change;
+begin
+  if World.Health = Game.MaximumHealth then
+    return new Change(World, 'You are already at full health.', false);
+  end if;
+  const Healed: int := Sys.Math.Min(6, Game.MaximumHealth - World.Health);
+  Relocate(World, Value, Loot.Location.Consumed);
+  const Next: Game.State := World with
+    Health := World.Health + Healed;
+  end with;
+  return new Change(Next, 'You recover ' + Healed.ToString() + ' health.', true);
+end function;
+
+/// Uses carried Id, or toggles it between carried and worn if it is equipment.
+public function Use(World: Game.State; Id: long): Change;
+begin
+  const Value: Loot.Item? := InBag(World, Id);
+  if Value = null then
+    return new Change(World, 'You do not have that item.', false);
+  end if;
+
+  if Value.Kind = Loot.Kind.Potion then
+    return Drink(World, Value);
+  end if;
+
+  if Value.Kind <> Loot.Kind.Sword and Value.Kind <> Loot.Kind.Jerkin then
+    return new Change(World, 'That item cannot be used.', false);
+  end if;
+
+  if Value.Location = Loot.Location.Worn then
+    Relocate(World, Value, Loot.Location.Carried);
+    return new Change(World, 'You remove the ' + Loot.Name(Value.Kind) + '.', true);
+  end if;
+  const Previous: Loot.Item? := Loot.Worn(World.Items, Value.Kind);
+  if Previous <> null then
+    Relocate(World, Previous, Loot.Location.Carried);
+  end if;
+
+  Relocate(World, Value, Loot.Location.Worn);
+  return new Change(World, 'You equip the ' + Loot.Name(Value.Kind) + '.', true);
+end function;
+
+/// Drops carried Id on the occupied ordinary dungeon field when it is empty.
+public function Drop(World: Game.State; Id: long): Change;
+begin
+  const Value: Loot.Item? := InBag(World, Id);
+  if Value = null then
+    return new Change(World, 'You do not have that item.', false);
+  end if;
+
+  if Value.Location = Loot.Location.Worn then
+    return new Change(World, 'Remove that equipment before dropping it.', false);
+  end if;
+
+  const Site: Land.Floor? := World.Floor;
+  if Site = null or Game.TileAt(World, World.X, World.Y) <> Land.Tile.Floor then
+    return new Change(World, 'You can drop items only on ordinary dungeon floor.', false);
+  end if;
+
+  if Loot.OnFloor(World.Items, Site).ContainsKey(Loot.CellKey(World.X, World.Y)) then
+    return new Change(World, 'There is already an item on this field.', false);
+  end if;
+
+  Relocate(World, Value, Loot.Location.Floor, new Loot.Ground(Site, World.X, World.Y));
+  return new Change(World, 'You drop the ' + Loot.Name(Value.Kind) + '.', true);
+end function;
+end unit;

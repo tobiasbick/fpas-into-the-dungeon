@@ -3,7 +3,8 @@ unit Dungeon.Game.Rules;
 
 uses
   Dungeon.Game.Terrain as Land, Dungeon.Game.World as Game, Dungeon.Game.Exploration as Sight,
-  Dungeon.Game.Settlements as Town, System as Sys;
+  Dungeon.Game.Settlements as Town, Dungeon.Game.Items as Loot, Dungeon.Game.Inventory as Bag,
+  Dungeon.Game.Clock as Clock, Dungeon.Game.Skills as Skills, System as Sys;
 
 /// The result of resolving one player intention.
 public type Change = record
@@ -35,11 +36,17 @@ begin
   return Game.Enemy.None;
 end function;
 
-function Advance(World: Game.State; Message: string; Retaliate: bool): Change;
+function ClockFull(World: Game.State): Change;
+begin
+  return new Change(World, 'The world clock cannot advance that far.');
+end function;
+
+function Advance(World: Game.State; Message: string; Retaliate: bool; Minutes: int := 1): Change;
 begin
   const Turn: long := if World.Turn = long.MaxValue then World.Turn else World.Turn + 1L end if;
   const Turned: Game.State := World with
     Turn := Turn;
+    Minutes := World.Minutes + Minutes;
   end with;
   if not Retaliate then
     return new Change(Turned, Message);
@@ -48,6 +55,15 @@ begin
   const Enemy: Game.Enemy := Nearby(Turned);
   if Enemy = Game.Enemy.None then
     return new Change(Turned, Message);
+  end if;
+
+  const Armor: int := Loot.Armor(Turned.Items);
+  const Site: Land.Floor? := Turned.Floor;
+  if Armor > 0 and Site <> null then
+    const Strike: int := cast<int>(Turn mod 1000000000L);
+    if Land.FloorRoll(Turned.Seed, Site, 4139 + Strike, 8) < Armor then
+      return new Change(Turned, Message + ' Your armor absorbs the blow.');
+    end if;
   end if;
 
   const Hit: Game.State := Turned with
@@ -71,16 +87,25 @@ begin
     return new Change(World, 'The way is blocked.');
   end if;
 
+  const Minutes: int := if World.Floor = null and World.Settlement = null then 5 else 1 end if;
+  if not Clock.CanAdvance(World.Minutes, Minutes) then
+    return ClockFull(World);
+  end if;
+
   const Next: Game.State := World with
     X := X;
     Y := Y;
   end with;
   Sight.Reveal(Next);
-  return Advance(Next, 'You move.', true);
+  return Advance(Next, 'You move.', true, Minutes);
 end function;
 
 function Arrive(World: Game.State; Site: Land.Floor; X: int; Message: string): Change;
 begin
+  if not Clock.CanAdvance(World.Minutes, 1) then
+    return ClockFull(World);
+  end if;
+
   Game.Visit(World, Site);
   const Next: Game.State := World with
     Floor := Site;
@@ -93,6 +118,10 @@ end function;
 
 function ArriveVillage(World: Game.State): Change;
 begin
+  if not Clock.CanAdvance(World.Minutes, 1) then
+    return ClockFull(World);
+  end if;
+
   const Site: Land.Village := new Land.Village(World.X, World.Y);
   const X: int := Town.Width(World.Seed, Site) div 2;
   const Y: int := Town.Height(World.Seed, Site) - 3;
@@ -108,6 +137,10 @@ end function;
 
 function ReturnOutdoors(World: Game.State; X: int; Y: int): Change;
 begin
+  if not Clock.CanAdvance(World.Minutes, 1) then
+    return ClockFull(World);
+  end if;
+
   const Next: Game.State := World with
     Floor := null;
     Settlement := null;
@@ -156,49 +189,79 @@ begin
       end with;
       return Arrive(World, Next, Land.Down - 1, 'You take the stairs up.');
     else
-      return new Change(World, 'There is no stair or exit here.');
+      return ItemResult(Bag.Interact(World));
   end case;
 end function;
 
 function Attack(World: Game.State): Change;
 begin
   const Site: Land.Floor? := World.Floor;
-  if Site = null then
+  const Enemy: Game.Enemy := Nearby(World);
+  if Site = null or Enemy = Game.Enemy.None then
     return new Change(World, 'No opponent is within reach.');
+  end if;
+
+  if not Clock.CanAdvance(World.Minutes, 1) then
+    return ClockFull(World);
   end if;
 
   const Id: long := Land.FloorKey(Site);
   const Current: Game.Progress := World.Floors[Id];
-  case Nearby(World) of
-    when Game.Enemy.Skeleton:
-      const Health: int := Sys.Math.Max(0, Current.Skeleton - 2);
-      World.Floors[Id] := Current with
-        Skeleton := Health;
-      end with;
-      const Message: string := if Health = 0 then 'The skeleton collapses.'
-        else 'You strike the skeleton.'
-        end if;
-      return Advance(World, Message, true);
-    when Game.Enemy.Rat:
-      const Health: int := Sys.Math.Max(0, Current.Rat - 2);
-      World.Floors[Id] := Current with
-        Rat := Health;
-      end with;
-      const Message: string := if Health = 0 then 'The giant rat falls.'
-        else 'You strike the giant rat.'
-        end if;
-      return Advance(World, Message, true);
-    else
-      return new Change(World, 'No opponent is within reach.');
-  end case;
+  const Skeleton: bool := Enemy = Game.Enemy.Skeleton;
+  const Before: int := if Skeleton then Current.Skeleton else Current.Rat end if;
+  const Health: int := Sys.Math.Max(0, Before - Game.Damage(World));
+  World.Floors[Id] := if Skeleton then Current with
+      Skeleton := Health;
+    end with
+    else Current with
+      Rat := Health;
+    end with
+    end if;
+
+  const Armed: bool := Game.Armed(World);
+  const Training: Skills.Training := Skills.Award(World.Training, Armed, Before - Health);
+  const Previous: int := Skills.Level(Skills.Active(World.Training, Armed));
+  const Rank: int := Skills.Level(Skills.Active(Training, Armed));
+  const Name: string := if Armed then 'Blades' else 'Unarmed' end if;
+  const Promotion: string := if Rank > Previous then ' ' + Name + ' reached level ' +
+      Rank.ToString() + '.'
+    else ''
+    end if;
+  const Message: string := if Skeleton then if Health = 0 then 'The skeleton collapses.'
+      else 'You strike the skeleton.'
+      end if
+    else if Health = 0 then 'The giant rat falls.' else 'You strike the giant rat.' end if
+    end if;
+  return Advance(
+    World with
+      Training := Training;
+    end with, Message + Promotion, true
+  );
 end function;
 
-/// Applies Action to World and returns the resulting state and message.
-public function Act(World: Game.State; Action: string): Change;
+function ItemResult(Result: Bag.Change): Change;
+begin
+  if Result.TookTurn then
+    return Advance(Result.World, Result.Message, true);
+  end if;
+
+  return new Change(Result.World, Result.Message);
+end function;
+
+/// Applies Action to World, resolving ItemId for an inventory action.
+public function Act(World: Game.State; Action: string; ItemId: long := 0L): Change;
 requires Action.Length > 0;
 begin
   if World.Health = 0 then
     return new Change(World, 'You have fallen. Create or continue a world.');
+  end if;
+
+  if (Action = 'wait' or Action = 'item_use' or Action = 'item_drop') and not Clock.CanAdvance(
+    World.Minutes,
+    1
+  )
+  then
+    return ClockFull(World);
   end if;
 
   case Action of
@@ -214,6 +277,12 @@ begin
       return Enter(World);
     when 'attack':
       return Attack(World);
+    when 'wait':
+      return Advance(World, 'You wait.', true);
+    when 'item_use':
+      return ItemResult(Bag.Use(World, ItemId));
+    when 'item_drop':
+      return ItemResult(Bag.Drop(World, ItemId));
     else
       return new Change(World, 'Unknown action.');
   end case;

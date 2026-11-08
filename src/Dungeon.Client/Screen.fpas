@@ -1,0 +1,181 @@
+// Renders the game map, status and modal panels.
+unit Dungeon.Client.Screen;
+
+uses
+  Dungeon.Client.UiState as Ui, Dungeon.Client.TradePanel as Trades,
+  Dungeon.Client.DialoguePanel as Dialogue, Dungeon.Client.JournalPanel as Journal,
+  Dungeon.Client.InventoryPanel as Pack, Dungeon.Protocol.Messages as Wire,
+  Fpas.Tui.Application as App, Fpas.Tui.Elements as E, Fpas.Tui.Themes as Themes;
+
+/// Shared palette of the game terminal.
+public const Colors: Themes.Palette := Themes.Amber();
+
+function Map(World: Wire.View): E.Element<Ui.Message>;
+  function Draw(Column: int; Row: int): E.Cell;
+  begin
+    const Knowledge: string := World.Knowledge[Row].Substring(Column, 1);
+    if Knowledge = 'u' then
+      return new E.Cell(' ', new E.Style(Background := Colors.Theme.Text.Background));
+    end if;
+
+    const Glyph: string := World.Rows[Row].Substring(Column, 1);
+    if Knowledge = 'r' then
+      return new E.Cell(Glyph, new E.Style($7A6B53, Colors.Theme.Text.Background));
+    end if;
+
+    const Ink: int := case Glyph of
+      when '@', '>', '<', 'x', 's', 'n', 'i', 'w', 'a': $E2C477;
+      when 'S', 'R': $DB7770;
+      when 'T': $8FBF78;
+      when '~': $7FA6BF;
+      when '^', '#', 'H': $A99D86;
+      when ':': $D1B47D;
+      else $E8DFC7;
+    end case;
+    return new E.Cell(Glyph, new E.Style(Ink, Background));
+  end function;
+begin
+  const Background: int := if World.Level > 0 then Colors.Panel.Background
+    else if World.Time.Weather = 'Rain' then if World.Time.Night then $140E0E else $1F1516 end if
+      else if World.Time.Night then $1C1309 else Colors.Panel.Background end if
+      end if
+    end if;
+  return E.CellCanvas<Ui.Message>(World.Rows[0].Length, World.Rows.Length, Draw);
+end function;
+
+function ClockLabel(Time: Wire.Conditions): string;
+begin
+  const Hour: int := Time.MinuteOfDay div 60;
+  const Minute: int := Time.MinuteOfDay mod 60;
+  return 'Day ' + Time.Day.ToString() + ' ' + Hour.ToString('D2') + ':' +
+    Minute.ToString('D2') + '  ·  ' + Time.Weather;
+end function;
+
+function Overlays(State: Ui.Model; Columns: int; Status: string): array of E.Element<Ui.Message>;
+begin
+  const Quote: Wire.Trade? := State.Trade;
+  if Quote <> null then
+    return [
+      Trades.Draw<Ui.Message>(
+        Quote, State.TradeBuy, State.SelectedOffer, Status, Columns, Ui.Message.CloseTrade,
+        function(Buy: bool): Ui.Message => Ui.Message.TradeSide(Buy),
+        function(Offset: int): Ui.Message => Ui.Message.TradePage(Offset),
+        function(Id: long): Ui.Message => Ui.Message.SelectOffer(Id),
+        function(Id: long): Ui.Message => Ui.Message.Transfer(Id)
+      )
+    ];
+  end if;
+  const Talk: Wire.Dialogue? := State.Conversation;
+  if Talk <> null then
+    return [
+      Dialogue.Draw<Ui.Message>(
+        Talk, State.SelectedTopic, State.Busy, Columns, Ui.Message.DialogueAction(''),
+        function(Id: string): Ui.Message => Ui.Message.SelectTopic(Id),
+        function(Id: string): Ui.Message => Ui.Message.DialogueAction(Id),
+        function(Offset: int): Ui.Message => Ui.Message.MoveTopic(Offset)
+      )
+    ];
+  end if;
+  const Bag: Wire.Inventory? := State.Bag;
+  if Bag = null then
+    return [];
+  end if;
+
+  case State.Sheet of
+    when Ui.Sheet.Inventory:
+      return [
+        Pack.Draw<Ui.Message>(
+          Bag, State.SelectedItem, Status, Columns, Ui.Message.CloseSheet,
+          function(Id: long): Ui.Message => Ui.Message.SelectItem(Id),
+          function(Id: long): Ui.Message => Ui.Message.UseItem(Id), Ui.Message.DropItem,
+          function(Offset: int): Ui.Message => Ui.Message.MoveItem(Offset)
+        )
+      ];
+    when Ui.Sheet.Character:
+      return [Pack.Character<Ui.Message>(Bag, Columns, Ui.Message.CloseSheet)];
+    when Ui.Sheet.Journal:
+      return [
+        Journal.Draw<Ui.Message>(
+          State.JournalLines,
+          State.JournalPosition,
+          function(Change: E.ScrollChange): Ui.Message => Ui.Message.ScrollJournal(Change),
+          Ui.Message.CloseSheet,
+          Columns
+        )
+      ];
+    else
+      return [];
+  end case;
+end function;
+
+/// Draws the authoritative view with any active local or server-owned overlay.
+public function View(State: Ui.Model; Size: App.Viewport): E.Element<Ui.Message>;
+begin
+  const World: Wire.View? := State.Panned ?? State.World;
+  const Title: string := if World = null then 'World'
+    else if World.Level = 0 then World.Area
+      else World.Area + '  ·  Level ' + World.Level.ToString() + ' of ' + World.Depth.ToString()
+      end if
+    end if;
+  const Body: E.Element<Ui.Message> := if World = null then E.Text<Ui.Message>(
+      'N  New world   C  Continue'
+    )
+    else Map(World)
+    end if;
+  const Details: string := if World = null then ''
+    else 'Health ' + World.Health.ToString() + '   Turn ' + World.Turn.ToString() + '   Seed ' +
+      World.Seed.ToString() + '   (' + World.X.ToString() + ', ' + World.Y.ToString() + ')'
+    end if;
+  const Status: string := if State.Busy then 'Waiting for the server…' else State.Status end if;
+  const Keys: string := if State.MapOpen then 'Arrows / WASD Pan  ·  Home Center  ·  M / Esc Close map'
+    else 'Arrows / WASD Move  ·  Enter Interact  ·  Space Fight  ·  Ctrl+S Save'
+    end if;
+  const Footer: string := if State.MapOpen then 'Bright visible  ·  Dim remembered  ·  Blank unexplored'
+    else if World = null then 'N New  ·  C Continue  ·  Esc Quit'
+      else 'I Inventory  ·  C Character  ·  J Journal  ·  M Map  ·  . Wait  ·  Esc Quit'
+      end if
+    end if;
+  const Area: string := if State.MapOpen then 'Map  ·  ' + Title else Title end if;
+  const Caption: string := if World = null then Area
+    else ClockLabel(
+      World.Time
+    ) + '  ·  ' + Area
+    end if;
+  const Bag: Wire.Inventory? := State.Bag;
+  const Hint: string := if Bag = null or State.MapOpen then '' else Bag.Hint end if;
+  const Content: E.Element<Ui.Message> := E.Column<Ui.Message>(
+    new E.Flow(Padding := 1),
+    E.Styled<Ui.Message>(E.Text<Ui.Message>('Into the Dungeon'), Colors.Heading),
+    E.Styled<Ui.Message>(E.Border<Ui.Message>(Body, Caption), Colors.Panel),
+    E.Text<Ui.Message>(Details),
+    E.Text<Ui.Message>(Hint),
+    E.Styled<Ui.Message>(E.Text<Ui.Message>(Status), Colors.Heading),
+    E.Text<Ui.Message>(Keys),
+    E.Text<Ui.Message>(Footer)
+  );
+
+  return E.Screen<Ui.Message>(
+    Content, Overlays(State, Size.Columns, Status), [
+      E.Shortcut<Ui.Message>(E.Key.Up, E.KeyModifiers.None, Ui.Message.Action('north')),
+      E.Shortcut<Ui.Message>(E.Key.Down, E.KeyModifiers.None, Ui.Message.Action('south')),
+      E.Shortcut<Ui.Message>(E.Key.Left, E.KeyModifiers.None, Ui.Message.Action('west')),
+      E.Shortcut<Ui.Message>(E.Key.Right, E.KeyModifiers.None, Ui.Message.Action('east')),
+      E.CharacterShortcut<Ui.Message>('w', Ui.Message.Action('north')),
+      E.CharacterShortcut<Ui.Message>('s', Ui.Message.Action('south')),
+      E.CharacterShortcut<Ui.Message>('a', Ui.Message.Action('west')),
+      E.CharacterShortcut<Ui.Message>('d', Ui.Message.Action('east')),
+      E.Shortcut<Ui.Message>(E.Key.Enter, E.KeyModifiers.None, Ui.Message.Action('enter')),
+      E.CharacterShortcut<Ui.Message>(' ', Ui.Message.Action('attack')),
+      E.CharacterShortcut<Ui.Message>('.', Ui.Message.Action('wait')),
+      E.CharacterShortcut<Ui.Message>('n', Ui.Message.Action('create')),
+      E.CharacterShortcut<Ui.Message>('c', Ui.Message.OpenSheet(Ui.Sheet.Character)),
+      E.CharacterShortcut<Ui.Message>('i', Ui.Message.OpenSheet(Ui.Sheet.Inventory)),
+      E.CharacterShortcut<Ui.Message>('j', Ui.Message.OpenSheet(Ui.Sheet.Journal)),
+      E.CharacterShortcut<Ui.Message>('m', Ui.Message.ToggleMap),
+      E.Shortcut<Ui.Message>(E.Key.Home, E.KeyModifiers.None, Ui.Message.Action('home')),
+      E.Shortcut<Ui.Message>(E.Key.S, E.KeyModifiers.Ctrl, Ui.Message.Action('save')),
+      E.Shortcut<Ui.Message>(E.Key.Escape, E.KeyModifiers.None, Ui.Message.Quit)
+    ]
+  );
+end function;
+end unit;

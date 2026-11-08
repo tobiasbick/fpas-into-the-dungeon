@@ -1,0 +1,198 @@
+// Prices offers and changes item ownership and the wallet in one trade.
+unit Dungeon.Game.Trade;
+
+uses Dungeon.Game.World as Game, Dungeon.Game.Items as Loot, System.Collections.Generic as Generic;
+
+/// One priced item from a shop or the player's bag.
+public type Offer = record
+  /// Exact item identity.
+  public Id: long;
+  /// Display name.
+  public Name: string;
+  /// Price in coins, or null for a non-tradable item.
+  public Price: int?;
+  /// Empty when enabled, otherwise the reason this trade is unavailable.
+  public Refusal: string;
+end record;
+
+/// Full ordered quotes on both sides of one shop.
+public type Offers = record
+  /// Items owned by the merchant.
+  public Buy: array of Offer;
+  /// Items carried or worn by the player.
+  public Sell: array of Offer;
+end record;
+
+/// The candidate state and message resulting from a transfer.
+public type Result = record
+  /// Updated world on success, or null on refusal.
+  public World: Game.State?;
+  /// Player-facing result.
+  public Message: string;
+end record;
+
+function Price(Value: Loot.Kind; Buy: bool): int?;
+begin
+  case Value of
+    when Loot.Kind.Coin:
+      return if Buy then 20 else 10 end if;
+    when Loot.Kind.Potion:
+      return if Buy then 8 else 3 end if;
+    when Loot.Kind.Sword, Loot.Kind.Jerkin:
+      return if Buy then 12 else 5 end if;
+    else
+      return null;
+  end case;
+end function;
+
+function Owned(Value: Loot.Item; Merchant: long): bool;
+begin
+  const Owner: long? := Value.Merchant;
+  return Value.Location = Loot.Location.Merchant and Owner <> null and Owner.Value = Merchant;
+end function;
+
+function Stock(World: Game.State; Merchant: long): Generic.List<Loot.Item>;
+begin
+  const Items: Generic.List<Loot.Item> := new Generic.List<Loot.Item>();
+  for Value: Loot.Item in World.Items.Values do
+    if Owned(Value, Merchant) then
+      Items.Add(Value);
+    end if;
+  end for;
+
+  Items.Sort(function(Left: Loot.Item; Right: Loot.Item): int => Right.Id.CompareTo(Left.Id));
+  return Items;
+end function;
+
+function BuyRefusal(Coins: int; Held: int; Price: int?): string;
+begin
+  if Price = null then
+    return 'This item cannot be traded.';
+  end if;
+
+  if Coins < Price.Value then
+    return 'Not enough coins.';
+  end if;
+
+  if Held >= Loot.Capacity then
+    return 'Your inventory is full.';
+  end if;
+
+  return '';
+end function;
+
+function SellRefusal(Coins: int; StockCount: int; Value: Loot.Item; Price: int?): string;
+begin
+  if Price = null then
+    return 'This item cannot be traded.';
+  end if;
+
+  if Value.Location = Loot.Location.Worn then
+    return 'Remove this equipment before selling it.';
+  end if;
+
+  if StockCount >= Loot.StockCapacity then
+    return 'The merchant has no room for this item.';
+  end if;
+
+  if Coins > Game.MaximumCoins - Price.Value then
+    return 'Your coin balance would exceed its limit.';
+  end if;
+
+  return '';
+end function;
+
+/// Builds both sides of the authoritative quote for Merchant in World.
+public function Quote(World: Game.State; Merchant: long): Offers;
+begin
+  const Held: array of Loot.Item := Loot.Inventory(World.Items);
+  const Current: Generic.List<Loot.Item> := Stock(World, Merchant);
+  const Buy: Generic.List<Offer> := new Generic.List<Offer>(Current.Count);
+  const Sell: Generic.List<Offer> := new Generic.List<Offer>(Held.Length);
+  for Value: Loot.Item in Current do
+    const Coins: int? := Price(Value.Kind, true);
+    Buy.Add(
+      new Offer(Value.Id, Loot.Name(Value.Kind), Coins, BuyRefusal(World.Coins, Held.Length, Coins))
+    );
+  end for;
+
+  for Value: Loot.Item in Held do
+    const Coins: int? := Price(Value.Kind, false);
+    Sell.Add(
+      new Offer(
+        Value.Id,
+        Loot.Name(Value.Kind),
+        Coins,
+        SellRefusal(World.Coins, Current.Count, Value, Coins)
+      )
+    );
+  end for;
+
+  return new Offers(Buy.ToArray(), Sell.ToArray());
+end function;
+
+function StockCount(World: Game.State; Merchant: long): int;
+begin
+  var Count: int := 0;
+  for Value: Loot.Item in World.Items.Values do
+    if Owned(Value, Merchant) then
+      Count := Count + 1;
+    end if;
+  end for;
+
+  return Count;
+end function;
+
+/// Transfers ItemId between the player and Merchant using the server price for Buy or Sell.
+public function Transfer(World: Game.State; Merchant: long; Buy: bool; ItemId: long): Result;
+begin
+  if not World.Items.ContainsKey(ItemId) then
+    return new Result(null, 'That item is unavailable.');
+  end if;
+  const Value: Loot.Item := World.Items[ItemId];
+  const Available: bool := if Buy then Owned(Value, Merchant) else Loot.Held(Value) end if;
+  if not Available then
+    return new Result(null, 'That item is unavailable.');
+  end if;
+
+  const Cost: int? := Price(Value.Kind, Buy);
+  const Refusal: string := if Buy then BuyRefusal(World.Coins, Loot.HeldCount(World.Items), Cost)
+    else SellRefusal(World.Coins, StockCount(World, Merchant), Value, Cost)
+    end if;
+  if Refusal <> '' or Cost = null then
+    return new Result(null, Refusal);
+  end if;
+
+  const Ledger: Generic.Dictionary<long, Loot.Item> := new Generic.Dictionary<long, Loot.Item>(
+    World.Items
+  );
+  const Next: Game.State := if Buy then World with
+      Items := Ledger;
+      Coins := World.Coins - Cost.Value;
+    end with
+    else World with
+      Items := Ledger;
+      Coins := World.Coins + Cost.Value;
+    end with
+    end if;
+  if Buy then
+    Ledger[ItemId] := Value with
+      Location := Loot.Location.Carried;
+      Merchant := null;
+    end with;
+    return new Result(
+      Next,
+      'You buy the ' + Loot.Name(Value.Kind) + ' for ' + Cost.Value.ToString() + ' coins.'
+    );
+  end if;
+
+  Ledger[ItemId] := Value with
+    Location := Loot.Location.Merchant;
+    Merchant := Merchant;
+  end with;
+  return new Result(
+    Next,
+    'You sell the ' + Loot.Name(Value.Kind) + ' for ' + Cost.Value.ToString() + ' coins.'
+  );
+end function;
+end unit;

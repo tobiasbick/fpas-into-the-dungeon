@@ -1,0 +1,342 @@
+// Plays Mara's compass quest through save, continue, retrieval and hand-in.
+unit Dungeon.Tests.Quests;
+
+uses
+  Dungeon.Tests.TcpGame as Game, Dungeon.Protocol.Messages as Wire,
+  Dungeon.Game.World as Domain, Dungeon.Game.Rules as Rules, Dungeon.Game.Terrain as Land,
+  Dungeon.Game.Items as Loot, Dungeon.Game.Quests as QuestRules, Dungeon.Game.Dialogue as TalkRules,
+  System as Sys, System.IO as IO, System.Text.Json.Nodes as Json, Xunit as Test;
+
+function Talk(Reply: Wire.Reply): Wire.Dialogue;
+begin
+  const Current: Wire.Dialogue? := Reply.Conversation;
+  if Current = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Current;
+end function;
+
+function Bag(Reply: Wire.Reply): Wire.Inventory;
+begin
+  const Current: Wire.Inventory? := Reply.Bag;
+  if Current = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Current;
+end function;
+
+function Journal(Reply: Wire.Reply): array of string;
+begin
+  const Lines: (array of string)? := Reply.Journal;
+  if Lines = null then
+    raise new Sys.InvalidOperationException('Missing quest journal.');
+  end if;
+
+  return Lines;
+end function;
+
+function Choose(Stream: IO.Stream; Frame: Wire.Dialogue; Topic: string): Wire.Reply;
+begin
+  return Game.Send(Stream, 'dialogue_choice', Topic := Topic, FrameId := Frame.Id);
+end function;
+
+procedure CloseTalk(Stream: IO.Stream; Frame: Wire.Dialogue);
+begin
+  Test.Assert.Null(Game.Send(Stream, 'end_dialogue', FrameId := Frame.Id).Conversation);
+end procedure;
+
+function Find(Reply: Wire.Reply; Name: string): Wire.BagEntry;
+begin
+  for Item: Wire.BagEntry in Bag(Reply).Items do
+    if Item.Name = Name then
+      return Item;
+    end if;
+  end for;
+
+  raise new Sys.InvalidOperationException('Missing item: ' + Name);
+end function;
+
+function Mara(Stream: IO.Stream): Wire.Reply;
+begin
+  discard Game.Walk(Stream, 'south', 6);
+  Test.Assert.Equal<string>('Hearthmoor', Game.World(Game.Send(Stream, 'enter')).Area);
+  discard Game.Walk(Stream, 'north', 4);
+  const Reply: Wire.Reply := Game.Send(Stream, 'enter');
+  Test.Assert.Equal<string>('Mara', Talk(Reply).Speaker);
+  return Reply;
+end function;
+
+procedure CollectSword(Stream: IO.Stream);
+begin
+  discard Game.Walk(Stream, 'north', 2);
+  discard Game.Walk(Stream, 'east', 2);
+  const Sword: Wire.BagEntry := Find(Game.Send(Stream, 'enter'), 'Rusty short sword');
+  Test.Assert.Equal<int>(4, Bag(Game.Send(Stream, 'item_use', ItemId := Sword.Id)).Damage);
+  discard Game.Walk(Stream, 'south', 2);
+  discard Game.Walk(Stream, 'east', 1);
+  Test.Assert.Contains('skeleton collapses', Game.Send(Stream, 'attack').Message);
+end procedure;
+
+procedure Descend(Stream: IO.Stream; Level: int);
+begin
+  discard Game.Walk(Stream, 'east', 24);
+  Test.Assert.Equal<int>(Level, Game.World(Game.Send(Stream, 'enter')).Level);
+  discard Game.Walk(Stream, 'east', 3);
+  const Hit: Wire.Reply := Game.Send(Stream, 'attack');
+  const Defeated: Wire.Reply := Game.Send(Stream, 'attack');
+  Test.Assert.Contains('skeleton collapses', Defeated.Message);
+  if Level = 3 then
+    Test.Assert.Contains('Blades reached level 2', Hit.Message);
+    Test.Assert.Equal<int>(5, Bag(Defeated).Damage);
+  end if;
+end procedure;
+
+function Retrieve(Stream: IO.Stream): long;
+begin
+  discard Game.Walk(Stream, 'south', 5);
+  discard Game.Send(Stream, 'enter');
+  discard Game.Walk(Stream, 'north', 6);
+  discard Game.Walk(Stream, 'east', 3);
+  Test.Assert.Equal<int>(1, Game.World(Game.Send(Stream, 'enter')).Level);
+  CollectSword(Stream);
+  Descend(Stream, 2);
+  Descend(Stream, 3);
+
+  discard Game.Walk(Stream, 'east', 20);
+  const Nearby: Wire.View := Game.Walk(Stream, 'south', 1);
+  Test.Assert.Equal<string>('i', Game.Glyph(Nearby, 25, 12));
+  discard Game.Walk(Stream, 'south', 1);
+  const Collected: Wire.Reply := Game.Send(Stream, 'enter');
+  const Compass: Wire.BagEntry := Find(Collected, 'Mara''s compass');
+  Test.Assert.Equal<string>('Ready to return', Journal(Collected)[1]);
+  Test.Assert.Equal<string>('', Compass.Action);
+  const Dropped: Wire.Reply := Game.Send(Stream, 'item_drop', ItemId := Compass.Id);
+  Test.Assert.Equal<string>('Active', Journal(Dropped)[1]);
+  const Again: Wire.Reply := Game.Send(Stream, 'enter');
+  Test.Assert.Equal<long>(Compass.Id, Find(Again, 'Mara''s compass').Id);
+  Test.Assert.Equal<string>('Ready to return', Journal(Again)[1]);
+  return Compass.Id;
+end function;
+
+function ReturnToMara(Stream: IO.Stream): Wire.Reply;
+begin
+  discard Game.Walk(Stream, 'north', 2);
+  discard Game.Walk(Stream, 'west', 24);
+  Test.Assert.Equal<int>(2, Game.World(Game.Send(Stream, 'enter')).Level);
+  discard Game.Walk(Stream, 'west', 27);
+  Test.Assert.Equal<int>(1, Game.World(Game.Send(Stream, 'enter')).Level);
+  discard Game.Walk(Stream, 'west', 27);
+  discard Game.Send(Stream, 'enter');
+  discard Game.Walk(Stream, 'west', 3);
+  return Mara(Stream);
+end function;
+
+function Rewards(Reply: Wire.Reply): array of long;
+begin
+  var First: long := 0L;
+  var Second: long := 0L;
+  for Item: Wire.BagEntry in Bag(Reply).Items do
+    Test.Assert.NotEqual<string>('Mara''s compass', Item.Name);
+    if Item.Name = 'Healing potion' then
+      if First = 0L then
+        First := Item.Id;
+      else
+        Test.Assert.Equal<long>(0L, Second);
+        Second := Item.Id;
+      end if;
+    end if;
+  end for;
+
+  Test.Assert.NotEqual<long>(0L, First);
+  Test.Assert.NotEqual<long>(0L, Second);
+  Test.Assert.NotEqual<long>(First, Second);
+  return [First, Second];
+end function;
+
+/// Accepts, retrieves and rewards the quest across four connection lifetimes.
+[Test.FactAttribute]
+public procedure CompassJourneyRemembersProgressAndRewardsExactlyOnce();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-compass-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  var CompassId: long := 0L;
+  var RewardIds: array of long := [];
+  try
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        discard Game.Send(Stream, 'create', 25);
+        const Greeted: Wire.Reply := Mara(Stream);
+        const Offer: Wire.Reply := Choose(Stream, Talk(Greeted), 'quest');
+        Test.Assert.Contains('deepest level of Silent Keep', Talk(Offer).Text);
+        Test.Assert.Equal<int>(0, Journal(Offer).Length);
+        Test.Assert.Equal<long>(Game.World(Greeted).Turn, Game.World(Offer).Turn);
+        const Accepted: Wire.Reply := Choose(Stream, Talk(Offer), 'quest_accept');
+        Test.Assert.Equal<string>('Active', Journal(Accepted)[1]);
+        Test.Assert.Equal<long>(Game.World(Greeted).Turn, Game.World(Accepted).Turn);
+        CloseTalk(Stream, Talk(Accepted));
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        Test.Assert.Equal<string>('Active', Journal(Game.Send(Stream, 'continue'))[1]);
+        CompassId := Retrieve(Stream);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Loaded: Wire.Reply := Game.Send(Stream, 'continue');
+        Test.Assert.Equal<string>('Ready to return', Journal(Loaded)[1]);
+        Test.Assert.Equal<int>(18, Bag(Loaded).Blades.Experience);
+        Test.Assert.Equal<int>(2, Bag(Loaded).Blades.Level);
+        Test.Assert.Equal<int>(36, Bag(Loaded).Blades.Threshold);
+        Test.Assert.Equal<int>(0, Bag(Loaded).Unarmed.Experience);
+        Test.Assert.Equal<long>(CompassId, Find(Loaded, 'Mara''s compass').Id);
+        const Report: Wire.Reply := Choose(Stream, Talk(ReturnToMara(Stream)), 'quest');
+        const Frame: Wire.Dialogue := Talk(Report);
+        const Rewarded: Wire.Reply := Choose(Stream, Frame, 'quest_report');
+        Test.Assert.Equal<string>('Completed', Journal(Rewarded)[1]);
+        Test.Assert.Equal<long>(Game.World(Report).Turn, Game.World(Rewarded).Turn);
+        RewardIds := Rewards(Rewarded);
+        const Duplicate: Wire.Reply := Choose(Stream, Frame, 'quest_report');
+        Test.Assert.Equal<string>('That conversation has moved on.', Duplicate.Message);
+        Test.Assert.Equal<long>(RewardIds[0], Rewards(Duplicate)[0]);
+        CloseTalk(Stream, Talk(Rewarded));
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Loaded: Wire.Reply := Game.Send(Stream, 'continue');
+        Test.Assert.Equal<string>('Hearthmoor remembers your help.', Journal(Loaded)[4]);
+        Test.Assert.Equal<long>(RewardIds[0], Rewards(Loaded)[0]);
+        Test.Assert.Equal<long>(RewardIds[1], Rewards(Loaded)[1]);
+        const Remembered: Wire.Dialogue := Talk(Game.Send(Stream, 'enter'));
+        Test.Assert.Contains('bringing my compass home', Remembered.Text);
+        const Complete: Wire.Dialogue := Talk(Choose(Stream, Remembered, 'quest'));
+        Test.Assert.Equal<string>(
+          'That topic is not available.',
+          Choose(Stream, Complete, 'quest_report').Message
+        );
+        CloseTalk(Stream, Complete);
+        discard Game.Walk(Stream, 'east', 5);
+        const Nora: Wire.Dialogue := Talk(Game.Send(Stream, 'enter'));
+        Test.Assert.Equal<string>('Nora', Nora.Speaker);
+        Test.Assert.Contains('Mara told me', Nora.Text);
+        const News: Wire.Dialogue := Talk(Choose(Stream, Nora, 'news'));
+        Test.Assert.Contains('glad to have her compass back', News.Text);
+        CloseTalk(Stream, News);
+      end procedure
+    );
+
+    const Save: Json.JsonNode? := Json.JsonNode.Parse(IO.File.ReadAllText(Path));
+    if Save = null then
+      raise new Sys.InvalidOperationException('Missing quest save.');
+    end if;
+    const World: Json.JsonNode? := Save['World'];
+    if World = null then
+      raise new Sys.InvalidOperationException('Missing quest world.');
+    end if;
+
+    World['Quest'] := Json.JsonValue.Create<int>(1);
+    IO.File.WriteAllText(Path, Save.ToJsonString());
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        Test.Assert.Equal<string>('Invalid saved world.', Game.Send(Stream, 'continue').Message);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+/// Counts the carried compass on acceptance and exchanges it only when both potions fit.
+[Test.FactAttribute]
+public procedure EarlierRetrievalAndInventoryCapacity();
+begin
+  var World: Domain.State := Rules.Create(25);
+  for Step: int := 1 to 6 do
+    World := Rules.Act(World, 'south').World;
+  end for;
+
+  World := Rules.Act(World, 'enter').World;
+  for Step: int := 1 to 4 do
+    World := Rules.Act(World, 'north').World;
+  end for;
+
+  Test.Assert.NotNull(TalkRules.Open(World));
+
+  const Gates: array of Land.Floor := [
+    new Land.Floor(3, 0, 0), new Land.Floor(184, -266, 0), new Land.Floor(291, -314, 0),
+    new Land.Floor(-286, -250, 0), new Land.Floor(371, -204, 0), new Land.Floor(-233, -167, 0),
+    new Land.Floor(-167, -186, 0)
+  ];
+  for Gate: Land.Floor in Gates do
+    for Level: int := 0 to Land.Depth - 1 do
+      Domain.Visit(
+        World, Gate with
+          Level := Level;
+        end with
+      );
+    end for;
+  end for;
+
+  const Compass: long := Loot.CompassId();
+  World.Items[Compass] := World.Items[Compass] with
+    Location := Loot.Location.Carried;
+    Ground := null;
+  end with;
+  var Freeable: Loot.Item? := null;
+  var Held: int := 1;
+  const Ids: array of long := new long[World.Items.Count];
+  World.Items.Keys.CopyTo(Ids, 0);
+  for Id: long in Ids do
+    if Id <> Compass and Held < Loot.Capacity and World.Items[
+      Id
+    ].Location = Loot.Location.Floor
+    then
+      const Original: Loot.Item := World.Items[Id];
+      World.Items[Id] := Original with
+        Location := Loot.Location.Carried;
+        Ground := null;
+      end with;
+      Freeable := Original;
+      Held := Held + 1;
+    end if;
+  end for;
+
+  Test.Assert.True(Domain.CanRestore(World));
+
+  const Accepted: Domain.State? := QuestRules.Accept(World);
+  if Accepted = null then
+    raise new Sys.InvalidOperationException('Quest unavailable.');
+  end if;
+
+  Test.Assert.True(QuestRules.Ready(Accepted));
+  Test.Assert.Equal<int>(64, Loot.HeldCount(Accepted.Items));
+  Test.Assert.Null(QuestRules.Claim(Accepted));
+  Test.Assert.Equal<Loot.Location>(Loot.Location.Carried, Accepted.Items[Compass].Location);
+
+  const Original: Loot.Item? := Freeable;
+  if Original = null then
+    raise new Sys.InvalidOperationException('No item to put down.');
+  end if;
+
+  Accepted.Items[Original.Id] := Original;
+  const Rewarded: Domain.State? := QuestRules.Claim(Accepted);
+  if Rewarded = null then
+    raise new Sys.InvalidOperationException('Reward did not fit.');
+  end if;
+
+  Test.Assert.True(Domain.CanRestore(Rewarded));
+  Test.Assert.Equal<int>(64, Loot.HeldCount(Rewarded.Items));
+  Test.Assert.Equal<Loot.Location>(Loot.Location.Returned, Rewarded.Items[Compass].Location);
+  Test.Assert.Equal<Loot.Location>(Loot.Location.Carried, Accepted.Items[Compass].Location);
+end procedure;
+end unit;

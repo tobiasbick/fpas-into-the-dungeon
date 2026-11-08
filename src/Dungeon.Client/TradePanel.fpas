@@ -1,0 +1,120 @@
+// Presents paged offers without deriving any prices or eligibility locally.
+unit Dungeon.Client.TradePanel;
+
+uses
+  Dungeon.Client.Panels as Panels, Dungeon.Protocol.Messages as Wire,
+  Fpas.Tui.Elements as E, System as Sys, System.Collections.Generic as Generic;
+
+/// Selects the side of Quote shown by the trade window.
+public function Side(Quote: Wire.Trade; Buy: bool): Wire.TradePage;
+begin
+  return if Buy then Quote.Buy else Quote.Sell end if;
+end function;
+
+function Position(Page: Wire.TradePage; Id: long): int;
+begin
+  for Index: int := 0 to Page.Rows.Length - 1 do
+    if Page.Rows[Index].Id = Id then
+      return Index;
+    end if;
+  end for;
+
+  return -1;
+end function;
+
+/// Retains a selected offer on refresh, or selects the first offer when the page changes.
+public function Keep(Previous: Wire.Trade?; Next: Wire.Trade?; Buy: bool; Selected: long): long;
+begin
+  if Next = null then
+    return 0L;
+  end if;
+  const Page: Wire.TradePage := Side(Next, Buy);
+  if Page.Rows.Length = 0 then
+    return 0L;
+  end if;
+
+  if Previous = null or Previous.MerchantId <> Next.MerchantId then
+    return Page.Rows[0].Id;
+  end if;
+
+  const Before: Wire.TradePage := Side(Previous, Buy);
+  if Before.Index <> Page.Index then
+    return Page.Rows[0].Id;
+  end if;
+
+  if Position(Page, Selected) >= 0 then
+    return Selected;
+  end if;
+
+  return Page.Rows[Sys.Math.Clamp(Position(Before, Selected), 0, Page.Rows.Length - 1)].Id;
+end function;
+
+/// Renders Quote and binds side changes, pages, selection, activation and closing.
+public function Draw<TMsg>(
+  Quote: Wire.Trade; Buy: bool; Selected: long; Status: string; Columns: int; Close: TMsg;
+  ShowSide: function(bool): TMsg; PageChange: function(int): TMsg;
+  Select: function(long): TMsg; Execute: function(long): TMsg
+): E.Element<TMsg>;
+begin
+  const Page: Wire.TradePage := Side(Quote, Buy);
+  const Items: Generic.List<E.SelectionItem> := new Generic.List<E.SelectionItem>(Page.Rows.Length);
+  for Row: Wire.TradeRow in Page.Rows do
+    const Price: int? := Row.Price;
+    const Label: string := if Price = null then Row.Name
+      else Row.Name + '  ·  ' + Price.Value.ToString() + ' coins'
+      end if;
+    Items.Add(new E.SelectionItem(Row.Id.ToString(), Label, Row.Refusal = ''));
+  end for;
+  const List: E.Element<TMsg> := E.SelectionList<TMsg>(
+    'trade-items', Items.ToArray(), Selected.ToString(),
+    function(Key: string): TMsg => Select(long.Parse(Key)),
+    function(Key: string): TMsg => Execute(long.Parse(Key))
+  );
+
+  const Index: int := Position(Page, Selected);
+  const Reason: string := if Index < 0 then 'No offers on this side.'
+    else Page.Rows[
+      Index
+    ].Refusal
+    end if;
+  const BuyStyle: E.ButtonVariant := if Buy then E.ButtonVariant.Active
+    else E.ButtonVariant.Secondary
+    end if;
+  const SellStyle: E.ButtonVariant := if Buy then E.ButtonVariant.Secondary
+    else E.ButtonVariant.Active
+    end if;
+  const Header: E.Element<TMsg> := E.Row<TMsg>(
+    new E.Flow(Gap := 2),
+    E.Button<TMsg>('trade-buy', 'Buy', ShowSide(true), Variant := BuyStyle),
+    E.Button<TMsg>('trade-sell', 'Sell', ShowSide(false), Variant := SellStyle),
+    E.Text<TMsg>(
+      'Coins ' + Quote.Coins.ToString() + '   ·   Stock ' + Quote.Buy.Total.ToString() + ' / ' +
+      Quote.Capacity.ToString()
+    )
+  );
+  const Body: E.Element<TMsg> := E.Column<TMsg>(
+    Header,
+    E.Text<TMsg>('Page ' + (Page.Index + 1).ToString() + ' of ' + Page.Pages.ToString()),
+    E.Size<TMsg>(List, new E.Flex(Basis := 5, Minimum := 1, Grow := 1)),
+    E.Text<TMsg>(Reason),
+    E.Text<TMsg>(Status)
+  );
+  const Footer: E.Element<TMsg> := E.Row<TMsg>(
+    E.Size<TMsg>(
+      E.Text<TMsg>('Left / Right Side  ·  Ctrl+PgUp / PgDn Page'),
+      new E.Flex(Grow := 1)
+    ),
+    E.Button<TMsg>('trade-close', 'Esc Back', Close, Variant := E.ButtonVariant.Secondary)
+  );
+  return Panels.Modal<TMsg>(
+    'trade', Quote.Name + '  ·  Trade', 'trade-items', Close, Body, Footer,
+    [
+      E.Shortcut<TMsg>(E.Key.Left, E.KeyModifiers.None, ShowSide(true)),
+      E.Shortcut<TMsg>(E.Key.Right, E.KeyModifiers.None, ShowSide(false)),
+      E.Shortcut<TMsg>(E.Key.PageUp, E.KeyModifiers.Ctrl, PageChange(-1)),
+      E.Shortcut<TMsg>(E.Key.PageDown, E.KeyModifiers.Ctrl, PageChange(1))
+    ],
+    Columns, 10
+  );
+end function;
+end unit;

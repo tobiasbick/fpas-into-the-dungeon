@@ -1,0 +1,143 @@
+// Owns bounded merchant quotes and resolves requests against the exact offered page.
+unit Dungeon.Server.Trade;
+
+uses
+  Dungeon.Game.Trade as Rules, Dungeon.Game.World as Game, Dungeon.Game.Items as Loot,
+  Dungeon.Game.Dialogue as Talk, Dungeon.Game.Terrain as Land, Dungeon.Protocol.Messages as Wire,
+  System as Sys, System.Collections.Generic as Generic;
+
+const PageSize: int := 16;
+
+/// Server-owned page positions for an open trade.
+public type Pages = record
+  /// Current purchase page.
+  public Buy: int := 0;
+  /// Current sale page.
+  public Sell: int := 0;
+end record;
+
+/// The world and quote state after handling one request.
+public type Change = record
+  /// World to retain or install.
+  public World: Game.State;
+  /// Pages to retain, or null to return to the dialogue.
+  public Screen: Pages?;
+  /// Status or reason for refusing the request.
+  public Message: string;
+  /// Whether the server should advance the quote revision.
+  public Changed: bool;
+end record;
+
+/// Returns whether Action belongs to an open trade.
+public function IsAction(Action: string): bool;
+begin
+  return Action = 'trade_buy' or Action = 'trade_sell' or Action = 'trade_page' or Action =
+    'end_trade';
+end function;
+
+function Merchant(Frame: Talk.Frame): long;
+begin
+  return Land.Key(Frame.Site.GateX, Frame.Site.GateY);
+end function;
+
+function Page(Offers: array of Rules.Offer; Requested: int): Wire.TradePage;
+begin
+  const Count: int := Sys.Math.Max(1, (Offers.Length + PageSize - 1) div PageSize);
+  const Index: int := Sys.Math.Clamp(Requested, 0, Count - 1);
+  const First: int := Index * PageSize;
+  const Last: int := Sys.Math.Min(Offers.Length, First + PageSize);
+  const Rows: Generic.List<Wire.TradeRow> := new Generic.List<Wire.TradeRow>(Last - First);
+  for At: int := First to Last - 1 do
+    const Value: Rules.Offer := Offers[At];
+    Rows.Add(new Wire.TradeRow(Value.Id, Value.Name, Value.Price, Value.Refusal));
+  end for;
+
+  return new Wire.TradePage(Index, Count, Offers.Length, Rows.ToArray());
+end function;
+
+/// Projects both current pages for the merchant in Frame at Revision.
+public function Quote(World: Game.State; Frame: Talk.Frame; Screen: Pages; Revision: long): Wire.Trade;
+begin
+  const Owner: long := Merchant(Frame);
+  const Offers: Rules.Offers := Rules.Quote(World, Owner);
+  return new Wire.Trade(
+    Owner, Revision, Frame.Speaker.Name, World.Coins, Loot.StockCapacity,
+    Page(Offers.Buy, Screen.Buy), Page(Offers.Sell, Screen.Sell)
+  );
+end function;
+
+function TurnPage(
+  World: Game.State; Screen: Pages; Current: Wire.Trade; Request: Wire.Request
+): Change;
+begin
+  if Request.Side <> 'buy' and Request.Side <> 'sell' then
+    return new Change(World, Screen, 'Unknown trade side.', false);
+  end if;
+  const Buy: bool := Request.Side = 'buy';
+  const Shown: Wire.TradePage := if Buy then Current.Buy else Current.Sell end if;
+  if Request.Page < 0 or Request.Page >= Shown.Pages then
+    return new Change(World, Screen, 'That page is unavailable.', false);
+  end if;
+  const Next: Pages := if Buy then new Pages(Request.Page, Current.Sell.Index)
+    else new Pages(Current.Buy.Index, Request.Page)
+    end if;
+  return new Change(World, Next, 'Trade offers.', true);
+end function;
+
+function Selected(Page: Wire.TradePage; Id: long): Wire.TradeRow?;
+begin
+  for Offer: Wire.TradeRow in Page.Rows do
+    if Offer.Id = Id then
+      return Offer;
+    end if;
+  end for;
+
+  return null;
+end function;
+
+/// Handles Request only for the current merchant, revision and offered item.
+public function Apply(
+  World: Game.State; Frame: Talk.Frame; Screen: Pages; Revision: long; Request: Wire.Request
+): Change;
+begin
+  if not IsAction(Request.Action) then
+    return new Change(World, Screen, 'Finish trading first.', false);
+  end if;
+  const Owner: long? := Request.MerchantId;
+  if Owner = null or Owner.Value <> Merchant(Frame) or Request.FrameId <> Revision then
+    return new Change(World, Screen, 'That trade quote has moved on.', false);
+  end if;
+
+  if not Talk.InReach(World, Frame) then
+    return new Change(World, Screen, 'The merchant is out of reach.', false);
+  end if;
+
+  if Request.Action = 'end_trade' then
+    return new Change(World, null, 'You return to the conversation.', true);
+  end if;
+
+  const Current: Wire.Trade := Quote(World, Frame, Screen, Revision);
+  if Request.Action = 'trade_page' then
+    return TurnPage(World, Screen, Current, Request);
+  end if;
+  const Buy: bool := Request.Action = 'trade_buy';
+  const Shown: Wire.TradePage := if Buy then Current.Buy else Current.Sell end if;
+  const Offer: Wire.TradeRow? := Selected(Shown, Request.ItemId);
+  if Offer = null then
+    return new Change(World, Screen, 'That item is unavailable on this page.', false);
+  end if;
+
+  if Offer.Refusal <> '' then
+    return new Change(World, Screen, Offer.Refusal, false);
+  end if;
+
+  const Result: Rules.Result := Rules.Transfer(World, Current.MerchantId, Buy, Request.ItemId);
+  const Next: Game.State? := Result.World;
+  if Next = null then
+    return new Change(World, Screen, Result.Message, false);
+  end if;
+
+  const Updated: Wire.Trade := Quote(Next, Frame, Screen, Revision);
+  return new Change(Next, new Pages(Updated.Buy.Index, Updated.Sell.Index), Result.Message, true);
+end function;
+end unit;

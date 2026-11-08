@@ -1,7 +1,9 @@
 // Owns settlement conversation topics and per-NPC first meetings.
 unit Dungeon.Game.Dialogue;
 
-uses Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land, Dungeon.Game.Settlements as Town, System as Sys;
+uses
+  Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land, Dungeon.Game.Settlements as Town,
+  Dungeon.Game.Quests as Quest, Dungeon.Game.Items as Loot, Dungeon.Game.Rest as Inn, System as Sys;
 
 /// A selectable topic and its display label.
 public type Topic = record
@@ -29,23 +31,73 @@ public type Result = union
   Rejected;
   /// The player chose to end the conversation.
   Closed;
-  /// The new frame to display for the same speaker.
-  Answer(Value: Frame);
+  /// The next frame for the same speaker and the resulting world state.
+  Answer(Value: Frame; World: Game.State);
+  /// Opens a quote from the current merchant conversation.
+  OpenTrade;
 end union;
 
 const Who: Topic := new Topic('identity', 'Who are you?');
 const Village: Topic := new Topic('settlement', 'Tell me about this place.');
 const Dungeon: Topic := new Topic('dungeon', 'Tell me about the nearby dungeon.');
+const QuestTopic: Topic := new Topic('quest', 'Ask about the lost compass.');
+const QuestAccept: Topic := new Topic('quest_accept', 'I will look for it.');
+const QuestReport: Topic := new Topic('quest_report', 'Return the compass.');
+const QuestBack: Topic := new Topic('quest_back', 'Back to other questions.');
+const TradeTopic: Topic := new Topic('trade', 'Show me your goods.');
+const RestTopic: Topic := new Topic('rest', 'Ask about a room.');
+const RestConfirm: Topic := new Topic('rest_confirm', 'Pay and rest.');
+const RestBack: Topic := new Topic('rest_back', 'Back to other questions.');
 const News: Topic := new Topic('news', 'Any news from Hearthmoor?');
 const Back: Topic := new Topic('back', 'Ask something else.');
 const Bye: Topic := new Topic('goodbye', 'Goodbye.');
 
 function Root(Site: Land.Village; Npc: Town.Npc; Text: string): Frame;
 begin
-  const Topics: array of Topic := if Npc.Kind = Town.Role.Mara then [Who, Dungeon, Bye]
-    else if Land.IsHome(Site) then [Who, Village, News, Bye] else [Who, Village, Bye] end if
-    end if;
+  const Home: bool := Land.IsHome(Site);
+  const Topics: array of Topic := case Npc.Kind of
+    when Town.Role.Mara: [Who, Dungeon, QuestTopic, Bye];
+    when Town.Role.Merchant: if Home then [Who, Village, News, TradeTopic, Bye]
+      else [Who, Village, TradeTopic, Bye]
+      end if;
+    when Town.Role.Innkeeper: if Home then [Who, Village, News, RestTopic, Bye]
+      else [Who, Village, RestTopic, Bye]
+      end if;
+    else [Who, Village, Bye];
+  end case;
   return new Frame(Site, Npc, Text, Topics);
+end function;
+
+function ChooseRest(World: Game.State; Current: Frame; Id: string): Result;
+begin
+  if Current.Speaker.Kind <> Town.Role.Innkeeper then
+    return Result.Rejected;
+  end if;
+
+  if Id = 'rest_confirm' then
+    const Rested: Game.State? := Inn.Pay(World);
+    if Rested = null then
+      return Result.Rejected;
+    end if;
+
+    return Result.Answer(
+      Root(Current.Site, Current.Speaker, 'You slept for eight hours and recovered fully.'),
+      Rested
+    );
+  end if;
+
+  const Refusal: string := Inn.Refusal(World);
+  const Terms: string := 'Eight hours of rest and full recovery cost ' + Inn.Price.ToString() +
+    ' coins. You have ' + World.Coins.ToString() + '.';
+  const Topics: array of Topic := if Refusal = '' then [
+      RestConfirm,
+      RestBack,
+      Bye
+    ]
+    else [RestBack, Bye]
+    end if;
+  const Text: string := if Refusal = '' then Terms else Terms + ' ' + Refusal end if;
+  return Result.Answer(new Frame(Current.Site, Current.Speaker, Text, Topics), World);
 end function;
 
 function Adjacent(World: Game.State): Town.Npc?;
@@ -79,7 +131,15 @@ begin
   const Greeting: string := if First then 'Welcome to ' + Place + '. I am ' + Npc.Name + '.'
     else 'Good to see you again, traveler.'
     end if;
-  return Root(Site, Npc, Greeting);
+  const Recognition: string := if Land.IsHome(
+      Site
+    ) and World.Quest = Game.QuestPhase.Rewarded then if Npc.Kind =
+        Town.Role.Mara then ' Thank you for bringing my compass home.'
+      else ' Mara told me what you did for her.'
+      end if
+    else ''
+    end if;
+  return Root(Site, Npc, Greeting + Recognition);
 end function;
 
 function Identity(Npc: Town.Npc; Place: string): string;
@@ -131,41 +191,146 @@ begin
   return false;
 end function;
 
+function QuestPage(World: Game.State; Current: Frame): Frame;
+begin
+  case World.Quest of
+    when Game.QuestPhase.NotAccepted:
+      if not Quest.CanOffer(World) then
+        return new Frame(
+          Current.Site,
+          Current.Speaker,
+          'I cannot give you a reliable route to the compass.',
+          [QuestBack, Bye]
+        );
+      end if;
+
+      return new Frame(
+        Current.Site, Current.Speaker,
+        'I lost my brass compass on the deepest level of ' + Quest.DungeonName(World) +
+        '. Bring it back and I will give you two Healing potions.', [QuestAccept, QuestBack, Bye]
+      );
+    when Game.QuestPhase.Active:
+      if Quest.Ready(World) then
+        const Text: string := if Loot.HeldCount(
+            World.Items
+          ) >=
+            Loot.Capacity then 'You found it. Make room for both potions and then we can make the exchange.'
+          else 'That is my compass. I have the two Healing potions ready.'
+          end if;
+        return new Frame(Current.Site, Current.Speaker, Text, [QuestReport, QuestBack, Bye]);
+      end if;
+
+      return new Frame(
+        Current.Site, Current.Speaker,
+        'My compass is still on level ' + Land.Depth.ToString() + ' of ' + Quest.DungeonName(
+          World
+        ) + '.',
+        [QuestBack, Bye]
+      );
+    else
+      return new Frame(
+        Current.Site,
+        Current.Speaker,
+        'Thank you for returning my compass. The two potions are yours.',
+        [QuestBack, Bye]
+      );
+  end case;
+end function;
+
+function ChooseQuest(World: Game.State; Current: Frame; Id: string): Result;
+begin
+  if not Land.IsHome(Current.Site) or Current.Speaker.Kind <> Town.Role.Mara
+    or Current.Speaker.Slot <> Town.MaraSlot
+  then
+    return Result.Rejected;
+  end if;
+
+  case Id of
+    when 'quest':
+      return Result.Answer(QuestPage(World, Current), World);
+    when 'quest_accept':
+      const Next: Game.State? := Quest.Accept(World);
+      if Next = null then
+        return Result.Rejected;
+      end if;
+
+      return Result.Answer(QuestPage(Next, Current), Next);
+    when 'quest_report':
+      const Next: Game.State := Quest.Claim(World) ?? World;
+      return Result.Answer(QuestPage(Next, Current), Next);
+    else
+      return Result.Rejected;
+  end case;
+end function;
+
+function LocalNews(World: Game.State; Npc: Town.Npc): string;
+begin
+  if World.Quest = Game.QuestPhase.Rewarded then
+    return if Npc.Kind =
+        Town.Role.Innkeeper then 'Mara was glad to have her compass back. We were all talking about it at the inn.'
+      else 'Mara told me how you brought her compass back. Word travels quickly in Hearthmoor.'
+      end if;
+  end if;
+
+  return if Npc.Kind =
+      Town.Role.Innkeeper then 'The fire is lit. Most of the travelers are talking about the old dungeon.'
+    else 'I have seen more adventurers than carts lately. Mara knows the paths they use.'
+    end if;
+end function;
+
+/// Checks whether Current's exact speaker is still adjacent in the same settlement.
+public function InReach(World: Game.State; Current: Frame): bool;
+begin
+  const Site: Land.Village? := World.Settlement;
+  const Npc: Town.Npc := Current.Speaker;
+  if Site = null or Site.GateX <> Current.Site.GateX or Site.GateY <> Current.Site.GateY
+    or World.Health = 0 or Sys.Math.Abs(World.X - Npc.X) + Sys.Math.Abs(World.Y - Npc.Y) <> 1
+  then
+    return false;
+  end if;
+  const Actual: Town.Npc? := Game.NpcAt(World, Npc.X, Npc.Y);
+  return Actual <> null and Actual.Slot = Npc.Slot and Actual.Kind = Npc.Kind;
+end function;
+
 /// Resolves Id against Current's offered choices for the adjacent speaker in World.
 public function Choose(World: Game.State; Current: Frame; Id: string): Result;
 begin
   const Site: Land.Village? := World.Settlement;
   const Npc: Town.Npc := Current.Speaker;
-  if Site = null or Site.GateX <> Current.Site.GateX or Site.GateY <> Current.Site.GateY
-    or Sys.Math.Abs(
-    World.X - Npc.X
-  ) + Sys.Math.Abs(World.Y - Npc.Y) <> 1 or not Offered(Current, Id)
-  then
+  if Site = null or not InReach(World, Current) or not Offered(Current, Id) then
     return Result.Rejected;
+  end if;
+
+  if Id = 'trade' and Npc.Kind = Town.Role.Merchant then
+    return Result.OpenTrade;
   end if;
 
   if Id = 'goodbye' then
     return Result.Closed;
   end if;
 
-  if Id = 'back' then
-    return Result.Answer(Root(Site, Npc, 'What else would you like to know?'));
+  if Id = 'back' or Id = 'quest_back' or Id = 'rest_back' then
+    return Result.Answer(Root(Site, Npc, 'What else would you like to know?'), World);
+  end if;
+
+  if Id = 'rest' or Id = 'rest_confirm' then
+    return ChooseRest(World, Current, Id);
+  end if;
+
+  if Id = 'quest' or Id = 'quest_accept' or Id = 'quest_report' then
+    return ChooseQuest(World, Current, Id);
   end if;
 
   const Place: string := Town.Name(World.Seed, Site);
   const Text: string := case Id of
     when 'identity': Identity(Npc, Place);
     when 'settlement': LocalInfo(Npc, Place);
-    when 'dungeon': 'The entrance near spawn leads to ' + Land.Name(
-      World.Seed,
-      new Land.Floor(3, 0, 0)
+    when 'dungeon': 'The entrance near spawn leads to ' + Quest.DungeonName(
+      World
     ) + '. It has three levels.';
-    when 'news': if Npc.Kind =
-        Town.Role.Innkeeper then 'The fire is lit. Most of the travelers are talking about the old dungeon.'
-      else 'I have seen more adventurers than carts lately. Mara knows the paths they use.'
-      end if;
+    when 'news': LocalNews(World, Npc);
     else '';
   end case;
-  return Result.Answer(new Frame(Site, Npc, Text, [Back, Bye]));
+  return Result.Answer(new Frame(Site, Npc, Text, [Back, Bye]), World);
 end function;
 end unit;

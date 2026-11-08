@@ -1,0 +1,95 @@
+// Resolves Mara's compass quest and derives its journal from item ownership.
+unit Dungeon.Game.Quests;
+
+uses
+  Dungeon.Game.World as Game, Dungeon.Game.Terrain as Land, Dungeon.Game.Items as Loot,
+  System.Collections.Generic as Generic;
+
+/// Names the start dungeon in World without exposing any unseen geometry.
+public function DungeonName(World: Game.State): string;
+begin
+  return Land.Name(World.Seed, new Land.Floor(Land.SpawnEntranceX, Land.SpawnEntranceY, 0));
+end function;
+
+/// Returns whether the authored quest can be offered in World.
+public function CanOffer(World: Game.State): bool;
+begin
+  return World.Quest = Game.QuestPhase.NotAccepted and Loot.CompassReachable(World.Seed);
+end function;
+
+/// Accepts the fixed quest, or returns null if it cannot be offered.
+public function Accept(World: Game.State): Game.State?;
+begin
+  if not CanOffer(World) then
+    return null;
+  end if;
+
+  return World with
+    Quest := Game.QuestPhase.Active;
+  end with;
+end function;
+
+/// Returns whether the accepted quest's compass is in the player's inventory.
+public function Ready(World: Game.State): bool;
+begin
+  const Id: long := Loot.CompassId();
+  return World.Quest = Game.QuestPhase.Active and World.Items.ContainsKey(Id)
+    and World.Items[Id].Location = Loot.Location.Carried;
+end function;
+
+/// Exchanges the carried compass for two potions in one state change, or returns null.
+public function Claim(World: Game.State): Game.State?;
+begin
+  if not Ready(World) or Loot.HeldCount(World.Items) >= Loot.Capacity then
+    return null;
+  end if;
+
+  const Ledger: Generic.Dictionary<long, Loot.Item> := new Generic.Dictionary<long, Loot.Item>(
+    World.Items
+  );
+  const Id: long := Loot.CompassId();
+  Ledger[Id] := Ledger[Id] with
+    Location := Loot.Location.Returned;
+  end with;
+  for Slot: int := 0 to 1 do
+    const Reward: Loot.Item := Loot.RewardPotion(Slot);
+    Ledger.Add(Reward.Id, Reward);
+  end for;
+
+  return World with
+    Items := Ledger;
+    Quest := Game.QuestPhase.Rewarded;
+  end with;
+end function;
+
+/// Projects the accepted quest's read-only journal, or an empty list before acceptance.
+public function Journal(World: Game.State?): array of string;
+begin
+  if World = null or World.Quest = Game.QuestPhase.NotAccepted then
+    return [];
+  end if;
+
+  const Name: string := DungeonName(World);
+  if World.Quest = Game.QuestPhase.Rewarded then
+    return [
+      'Mara''s compass', 'Completed', 'You returned the compass from ' + Name + '.',
+      'Mara gave you two Healing potions.', 'Hearthmoor remembers your help.'
+    ];
+  end if;
+
+  if Ready(World) then
+    return [
+      'Mara''s compass', 'Ready to return', 'The compass is in your inventory.',
+      'Bring it to Mara in Hearthmoor.', 'Reward: two Healing potions.'
+    ];
+  end if;
+
+  return [
+    'Mara''s compass',
+    'Active',
+    'Find the compass on level ' + Land.Depth.ToString() + ' of ' + Name + '.',
+    'Return it to Mara in Hearthmoor.',
+    'Reward: two Healing potions.'
+  ];
+end function;
+end unit;

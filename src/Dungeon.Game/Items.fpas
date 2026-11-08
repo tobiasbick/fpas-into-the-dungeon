@@ -1,0 +1,330 @@
+// Defines dungeon finds, item identity and the authoritative ownership ledger.
+unit Dungeon.Game.Items;
+
+uses Dungeon.Game.Terrain as Land, System.Collections.Generic as Generic;
+
+const OriginSlots: int := 8;
+const CompassSlot: int := 6;
+const CompassX: int := 25;
+const CompassY: int := 12;
+
+/// Maximum carried and worn item count combined.
+public const Capacity: int := 64;
+/// Maximum number of distinct items in one shop.
+public const StockCapacity: int := 64;
+/// Number of original items in each shop.
+public const StartingStock: int := 5;
+
+/// Kinds of items that can exist in the ledger.
+public type Kind = enum: byte
+  Coin;
+  Sword;
+  Jerkin;
+  Potion;
+  Compass;
+end enum;
+
+/// Exactly one owner or location for each item.
+public type Location = enum: byte
+  Floor;
+  Carried;
+  Worn;
+  Consumed;
+  Returned;
+  Merchant;
+end enum;
+
+/// Current placement of an item on ordinary dungeon floor.
+public type Ground = record
+  /// Floor on which the item now lies.
+  public Site: Land.Floor;
+  /// Local column.
+  public X: int;
+  /// Local row.
+  public Y: int;
+end record;
+
+/// An item with stable origin and kind, and one current location.
+public type Item = record
+  /// Numeric identity derived from Origin and Slot.
+  public Id: long;
+  /// Original floor, if the item was found in a dungeon.
+  public Origin: Land.Floor?;
+  /// Original slot in the dungeon, shop or quest reward.
+  public Slot: int;
+  /// Item kind, fixed by the generator.
+  public Kind: Kind;
+  /// Current location.
+  public Location: Location;
+  /// Coordinates when Location is Floor, otherwise null.
+  public Ground: Ground?;
+  /// Originating shop, if this was one of its initial goods.
+  public StockOrigin: long? := null;
+  /// Current shop owner when Location is Merchant.
+  public Merchant: long? := null;
+end record;
+
+/// Returns the display name of a find of the given kind.
+public function Name(Value: Kind): string;
+begin
+  return case Value of
+    when Kind.Coin: 'Ancient coin';
+    when Kind.Sword: 'Rusty short sword';
+    when Kind.Jerkin: 'Leather jerkin';
+    when Kind.Potion: 'Healing potion';
+    when Kind.Compass: 'Mara''s compass';
+    else 'Unknown item';
+  end case;
+end function;
+
+/// Returns a short description of a find of the given kind.
+public function Description(Value: Kind): string;
+begin
+  return case Value of
+    when Kind.Coin: 'A worn coin bears a faint crescent mark.';
+    when Kind.Sword: 'A rusty blade, still sharp enough to fight with.';
+    when Kind.Jerkin: 'Layers of leather soften an occasional blow.';
+    when Kind.Potion: 'A crimson flask restores up to six health.';
+    when Kind.Compass: 'A brass compass with Mara''s initials scratched into the lid.';
+    else '';
+  end case;
+end function;
+
+function OriginId(Site: Land.Floor; Slot: int): long;
+begin
+  return Land.FloorKey(Site) * OriginSlots + Slot + 1L;
+end function;
+
+function CompassFloor(): Land.Floor;
+begin
+  return new Land.Floor(Land.SpawnEntranceX, Land.SpawnEntranceY, Land.Depth - 1);
+end function;
+
+/// Returns the unique item ID of Mara's compass.
+public function CompassId(): long;
+begin
+  return OriginId(CompassFloor(), CompassSlot);
+end function;
+
+function RewardId(Slot: int): long;
+begin
+  return -1L - Slot;
+end function;
+
+/// Creates one of the two potions granted on returning Mara's compass.
+public function RewardPotion(Slot: int): Item;
+requires Slot = 0 or Slot = 1;
+begin
+  return new Item(RewardId(Slot), null, Slot, Kind.Potion, Location.Carried, null);
+end function;
+
+/// Creates one original stock item for Shop and Slot.
+public function StockItem(Shop: long; Slot: int): Item;
+requires Shop >= 0L and Slot >= 0 and Slot < 5;
+begin
+  const Id: long := -3L - Shop * StartingStock - Slot;
+  const Value: Kind := if Slot < 3 then Kind.Potion
+    else if Slot = 3 then Kind.Sword
+      else Kind.Jerkin
+      end if
+    end if;
+  return new Item(Id, null, Slot, Value, Location.Merchant, null, Shop, Shop);
+end function;
+
+/// Returns the original item in Slot on Site, or null for an unused slot.
+public function Placement(Seed: int; Site: Land.Floor; Slot: int): Item?;
+begin
+  if Slot < 0 or Slot >= OriginSlots then
+    return null;
+  end if;
+
+  if Slot = CompassSlot then
+    if Land.FloorKey(Site) <> Land.FloorKey(CompassFloor()) then
+      return null;
+    end if;
+
+    return new Item(
+      CompassId(),
+      Site,
+      Slot,
+      Kind.Compass,
+      Location.Floor,
+      new Ground(Site, CompassX, CompassY)
+    );
+  end if;
+  const Near: int := if Land.FloorRoll(Seed, Site, 1901, 2) = 0 then 8 else 12 end if;
+  const Far: int := 20 - Near;
+  var Value: Kind := Kind.Potion;
+  var X: int := 3;
+  var Y: int := Near;
+  if Site.Level = 0 and Slot < 4 then
+    Value := cast<Kind>(Slot);
+    X := 3 + Slot mod 2;
+    Y := if Slot < 2 then Near else Far end if;
+  else
+    if Site.Level = 0 or Slot <> 0 then
+      const Optional: int := if Site.Level = 0 then Slot - 4 else Slot - 1 end if;
+      if Optional < 0 or Optional >= 2 or Land.FloorRoll(Seed, Site, 1987 + Slot * 41, 2) <> 0 then
+        return null;
+      end if;
+
+      Value := cast<Kind>(Land.FloorRoll(Seed, Site, 2293 + Slot * 67, 4));
+      X := 10 + Optional * 2;
+      Y := Far;
+    end if;
+  end if;
+
+  return new Item(OriginId(Site, Slot), Site, Slot, Value, Location.Floor, new Ground(Site, X, Y));
+end function;
+
+/// Generates the original finds for Site in Seed with stable placement slots.
+public function Finds(Seed: int; Site: Land.Floor): array of Item;
+begin
+  const Items: Generic.List<Item> := new Generic.List<Item>();
+  const Last: int := if Site.Level = 0 then 5 else 2 end if;
+  for Slot: int := 0 to Last do
+    const Original: Item? := Placement(Seed, Site, Slot);
+    if Original <> null then
+      Items.Add(Original);
+    end if;
+  end for;
+
+  const Compass: Item? := Placement(Seed, Site, CompassSlot);
+  if Compass <> null then
+    Items.Add(Compass);
+  end if;
+
+  return Items.ToArray();
+end function;
+
+/// Checks a reversible static route from spawn to the compass without materializing floors.
+public function CompassReachable(Seed: int): bool;
+begin
+  if Land.Outdoors(Seed, Land.SpawnEntranceX, Land.SpawnEntranceY) <> Land.Tile.Entrance then
+    return false;
+  end if;
+
+  for X: int := 0 to Land.SpawnEntranceX do
+    if not Land.Walkable(Land.Outdoors(Seed, X, Land.SpawnEntranceY)) then
+      return false;
+    end if;
+  end for;
+
+  for Level: int := 0 to Land.Depth - 1 do
+    const Site: Land.Floor := new Land.Floor(Land.SpawnEntranceX, Land.SpawnEntranceY, Level);
+    const Exit: Land.Tile := if Level = 0 then Land.Tile.Exit else Land.Tile.StairsUp end if;
+    if Land.Dungeon(Seed, Site, Land.Up, Land.Corridor) <> Exit then
+      return false;
+    end if;
+    const EndX: int := if Level = Land.Depth - 1 then CompassX else Land.Down end if;
+    for X: int := Land.Up + 1 to EndX do
+      if not Land.Walkable(Land.Dungeon(Seed, Site, X, Land.Corridor)) then
+        return false;
+      end if;
+    end for;
+
+    if Level < Land.Depth - 1 and Land.Dungeon(
+      Seed,
+      Site,
+      Land.Down,
+      Land.Corridor
+    ) <> Land.Tile.StairsDown
+    then
+      return false;
+    end if;
+  end for;
+
+  const Target: Land.Floor := CompassFloor();
+  for Y: int := Land.Corridor + 1 to CompassY do
+    if Land.Dungeon(Seed, Target, CompassX, Y) <> Land.Tile.Floor then
+      return false;
+    end if;
+  end for;
+
+  return Placement(Seed, Target, CompassSlot) <> null;
+end function;
+
+/// Returns whether the item is carried or worn by the player.
+public function Held(Value: Item): bool;
+begin
+  return Value.Location = Location.Carried or Value.Location = Location.Worn;
+end function;
+
+/// Counts carried and worn items without building an inventory projection.
+public function HeldCount(Ledger: Generic.Dictionary<long, Item>): int;
+begin
+  var Count: int := 0;
+  for Value: Item in Ledger.Values do
+    if Held(Value) then
+      Count := Count + 1;
+    end if;
+  end for;
+
+  return Count;
+end function;
+
+/// Returns the ID-ordered carried and worn items in Ledger.
+public function Inventory(Ledger: Generic.Dictionary<long, Item>): array of Item;
+begin
+  const Ids: Generic.List<long> := new Generic.List<long>();
+  for Value: Item in Ledger.Values do
+    if Held(Value) then
+      Ids.Add(Value.Id);
+    end if;
+  end for;
+
+  Ids.Sort();
+
+  const Items: Generic.List<Item> := new Generic.List<Item>(Ids.Count);
+  for Id: long in Ids do
+    Items.Add(Ledger[Id]);
+  end for;
+
+  return Items.ToArray();
+end function;
+
+/// Returns the item of the given kind currently worn by the player, if any.
+public function Worn(Ledger: Generic.Dictionary<long, Item>; Value: Kind): Item?;
+begin
+  for Entry: Item in Ledger.Values do
+    if Entry.Kind = Value and Entry.Location = Location.Worn then
+      return Entry;
+    end if;
+  end for;
+
+  return null;
+end function;
+
+/// Returns the player's attack damage from the currently worn weapon.
+public function Damage(Ledger: Generic.Dictionary<long, Item>): int;
+begin
+  return if Worn(Ledger, Kind.Sword) = null then 2 else 4 end if;
+end function;
+
+/// Returns the armor rating from the currently worn body armor.
+public function Armor(Ledger: Generic.Dictionary<long, Item>): int;
+begin
+  return if Worn(Ledger, Kind.Jerkin) = null then 0 else 2 end if;
+end function;
+
+/// Returns the key of a valid local dungeon cell.
+public function CellKey(X: int; Y: int): int;
+begin
+  return X * Land.Height + Y;
+end function;
+
+/// Returns ground items in Site keyed by local cell.
+public function OnFloor(Ledger: Generic.Dictionary<long, Item>; Site: Land.Floor): Generic.Dictionary<int, Item>;
+begin
+  const FieldItems: Generic.Dictionary<int, Item> := new Generic.Dictionary<int, Item>();
+  const FloorId: long := Land.FloorKey(Site);
+  for Value: Item in Ledger.Values do
+    const Ground: Ground? := Value.Ground;
+    if Ground <> null and Land.FloorKey(Ground.Site) = FloorId then
+      FieldItems.Add(CellKey(Ground.X, Ground.Y), Value);
+    end if;
+  end for;
+
+  return FieldItems;
+end function;
+end unit;

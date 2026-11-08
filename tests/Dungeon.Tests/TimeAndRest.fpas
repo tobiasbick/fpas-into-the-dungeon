@@ -1,0 +1,151 @@
+// Verifies clock boundaries, weather and paid inn stays at their owning interfaces.
+unit Dungeon.Tests.TimeAndRest;
+
+uses
+  Dungeon.Tests.TcpGame as Game, Dungeon.Game.World as Domain, Dungeon.Game.Rules as Rules,
+  Dungeon.Game.Clock as Clock, Dungeon.Protocol.Messages as Wire, Dungeon.Server.SaveFiles as Saves,
+  System as Sys, System.IO as IO, Xunit as Test;
+
+function Talk(Reply: Wire.Reply): Wire.Dialogue;
+begin
+  const Frame: Wire.Dialogue? := Reply.Conversation;
+  if Frame = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  return Frame;
+end function;
+
+function Choose(Stream: IO.Stream; Reply: Wire.Reply; Topic: string): Wire.Reply;
+begin
+  return Game.Send(Stream, 'dialogue_choice', Topic := Topic, FrameId := Talk(Reply).Id);
+end function;
+
+procedure AtTime(Reply: Wire.Reply; Day: int; Minute: int; Night: bool);
+begin
+  const Time: Wire.Conditions := Game.World(Reply).Time;
+  Test.Assert.Equal<int>(Day, Time.Day);
+  Test.Assert.Equal<int>(Minute, Time.MinuteOfDay);
+  Test.Assert.Equal<bool>(Night, Time.Night);
+end procedure;
+
+procedure Player(Reply: Wire.Reply; Coins: int; Health: int);
+begin
+  const Bag: Wire.Inventory? := Reply.Bag;
+  if Bag = null then
+    raise new Sys.InvalidOperationException(Reply.Message);
+  end if;
+
+  Test.Assert.Equal<int>(Coins, Bag.Coins);
+  Test.Assert.Equal<int>(Health, Bag.Health);
+end procedure;
+
+procedure Prepare(Path: string);
+begin
+  var World: Domain.State := Rules.Create(25);
+  for Step: int := 1 to 6 do
+    World := Rules.Act(World, 'south').World;
+  end for;
+
+  World := Rules.Act(World, 'enter').World;
+  for Step: int := 1 to 4 do
+    World := Rules.Act(World, 'north').World;
+  end for;
+
+  for Step: int := 1 to 5 do
+    World := Rules.Act(World, 'east').World;
+  end for;
+
+  Saves.Save(
+    Path, World with
+      Minutes := 1199;
+      Health := 8;
+      Coins := 10;
+    end with
+  );
+end procedure;
+
+/// Rest charges once, heals and advances eight hours across midnight, with exact reload.
+[Test.FactAttribute]
+public procedure RestChangesTheWorldOnlyAfterConfirmation();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-rest-');
+  const Path: string := IO.Path.Combine(Directory.FullName, 'save.json');
+  try
+    Prepare(Path);
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Started: Wire.Reply := Game.Send(Stream, 'continue');
+        AtTime(Started, 1, 1199, false);
+        const Opened: Wire.Reply := Game.Send(Stream, 'enter');
+        Test.Assert.Equal<string>('Nora', Talk(Opened).Speaker);
+        const Offer: Wire.Reply := Choose(Stream, Opened, 'rest');
+        Test.Assert.Contains('cost 5 coins', Talk(Offer).Text);
+        AtTime(Offer, 1, 1199, false);
+        const Back: Wire.Reply := Choose(Stream, Offer, 'rest_back');
+        AtTime(Back, 1, 1199, false);
+        Player(Back, 10, 8);
+        const Ready: Wire.Reply := Choose(Stream, Back, 'rest');
+        const Rested: Wire.Reply := Choose(Stream, Ready, 'rest_confirm');
+        AtTime(Rested, 2, 239, true);
+        Player(Rested, 5, 12);
+        Test.Assert.Equal<long>(Game.World(Started).Turn, Game.World(Rested).Turn);
+        Test.Assert.Equal<string>(
+          'That conversation has moved on.',
+          Choose(Stream, Ready, 'rest_confirm').Message
+        );
+        Test.Assert.Equal<string>(
+          'That topic is not available.',
+          Choose(Stream, Rested, 'rest_confirm').Message
+        );
+        discard Game.Send(Stream, 'end_dialogue', FrameId := Talk(Rested).Id);
+        Test.Assert.Equal<string>('Game saved.', Game.Send(Stream, 'save').Message);
+      end procedure
+    );
+
+    Game.VisitServer(
+      Path, procedure(Stream: IO.Stream) begin
+        const Continued: Wire.Reply := Game.Send(Stream, 'continue');
+        AtTime(Continued, 2, 239, true);
+        Player(Continued, 5, 12);
+        const Offer: Wire.Reply := Choose(Stream, Game.Send(Stream, 'enter'), 'rest');
+        const Rested: Wire.Reply := Choose(Stream, Offer, 'rest_confirm');
+        AtTime(Rested, 2, 719, false);
+        Player(Rested, 0, 12);
+      end procedure
+    );
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+/// Weather changes at the seeded window boundary, with dungeons sheltered throughout.
+[Test.FactAttribute]
+public procedure SignedSeedSelectsOneRainWindowPerDay();
+begin
+  Test.Assert.Equal<string>('Clear', Clock.At(-25, 1440 + 719, false).Weather);
+  Test.Assert.Equal<string>('Rain', Clock.At(-25, 1440 + 720, false).Weather);
+  Test.Assert.Equal<string>('Rain', Clock.At(-25, 1440 + 1079, false).Weather);
+  Test.Assert.Equal<string>('Clear', Clock.At(-25, 1440 + 1080, false).Weather);
+  Test.Assert.Equal<string>('Sheltered', Clock.At(-25, 1440 + 720, true).Weather);
+end procedure;
+
+/// A timed entry at the clock limit cannot materialize a dungeon or its finds.
+[Test.FactAttribute]
+public procedure ClockLimitRejectsEntryBeforeWorldChanges();
+begin
+  var World: Domain.State := Rules.Create(25);
+  for Step: int := 1 to 3 do
+    World := Rules.Act(World, 'east').World;
+  end for;
+  const Late: Domain.State := World with
+    Minutes := Clock.Maximum;
+  end with;
+  const Rejected: Rules.Change := Rules.Act(Late, 'enter');
+  Test.Assert.Contains('clock', Rejected.Message);
+  Test.Assert.Null(Rejected.World.Floor);
+  Test.Assert.Equal<int>(0, Rejected.World.Floors.Count);
+  Test.Assert.Equal<int>(0, Rejected.World.Items.Count);
+  Test.Assert.Equal<int>(Clock.Maximum, Rejected.World.Minutes);
+end procedure;
+end unit;
