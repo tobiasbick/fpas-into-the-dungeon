@@ -1,5 +1,9 @@
 # Into the Dungeon
 
+> [!IMPORTANT]
+> We've put development of Into the Dungeon on hold. We don't know if or when
+> we'll pick it back up.
+
 Explore a generated world, enter dungeons, and fight skeletons and giant rats — all in
 your terminal. Into the Dungeon is a client-server role-playing game written in
 [Functional Pascal](https://github.com/tobiasbick/functional-pascal).
