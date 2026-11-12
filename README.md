@@ -1,5 +1,9 @@
 # Into the Dungeon
 
+> [!IMPORTANT]
+> We've put development of Into the Dungeon on hold. We don't know if or when
+> we'll pick it back up.
+
 A client-server terminal RPG written in Functional Pascal for .NET 10. The server
 owns the world and resolves player actions. The terminal client renders the
 server's view with Fpas.Tui.
