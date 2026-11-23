@@ -1,0 +1,194 @@
+// Composes the framed start screen with a stationary scene and fading margins.
+unit Dungeon.StartScreen;
+
+uses
+  Dungeon.EmberArt as Art, Dungeon.StartMenu as Menu, Dungeon.Resources.Strings as Strings,
+  Fpas.Ui.Elements as E, Fpas.Ui.Graphics as Graphics,
+  Fpas.Ui.TerminalExtensions.CellGrids as Grid, Fpas.Ui.TerminalExtensions.Input as Key,
+  Fpas.Ui.TerminalExtensions.Views as Views, Fpas.Ui.Widgets.Developer.Terminal as T,
+  Fpas.Ui.Widgets.Theming.Themes as Themes, System as Sys, System.Collections.Generic as Collections;
+
+const Background: int := Art.Background;
+const Gold: int := $F5CA73;
+const Title: string := 'I N T O   T H E   D U N G E O N';
+const MenuWidth: int := 22;
+const Empty: T.Cell := new T.Cell(' ', new T.Style(Background := Background));
+
+type Layout = record
+  public Width: int;
+  public Height: int;
+  public Scene: Art.Scene?;
+  public SceneLeft: int;
+  public SceneTop: int;
+  public Entries: array of string;
+  public MenuLeft: int;
+  public MenuTop: int;
+  public VisibleRows: int;
+  public FirstEntry: int;
+end record;
+
+function Shortcuts(): array of Key.ShortcutBinding<Menu.Message>;
+begin
+  return [
+    Key.Shortcut<Menu.Message>(Key.Key.Up, Key.KeyModifiers.None, Menu.Message.Move(-1)),
+    Key.Shortcut<Menu.Message>(Key.Key.Down, Key.KeyModifiers.None, Menu.Message.Move(1)),
+    Key.Shortcut<Menu.Message>(Key.Key.Enter, Key.KeyModifiers.None, Menu.Message.Activate)
+  ];
+end function;
+
+function Arrange(State: Menu.Model; Size: T.Viewport): Layout;
+begin
+  const Width: int := Sys.Math.Max(0, Size.Columns - 2);
+  const Height: int := Sys.Math.Max(0, Size.Rows - 2);
+  const FullSize: bool := Size.Columns >= 80 and Size.Rows >= 25;
+  const Scene: Art.Scene? := if FullSize then
+    Art.Full
+  elsif Size.Columns >= 60 and Size.Rows >= 18 then
+    Art.Compact
+  else
+    null
+  end if;
+  const SceneLeft: int := if Scene = null then
+    0
+  else
+    (Width - Scene.Columns) div 2
+  end if;
+  const SceneTop: int := if Scene = null then
+    0
+  else
+    (Height - Scene.Rows) div 2
+  end if;
+  const Entries: array of string := Sys.Array.ConvertAll<string, string>(
+    Menu.EntryKeys(State.HasSave),
+    Strings.Get
+  );
+  const VisibleRows: int := Sys.Math.Min(Entries.Length, Height);
+  const FirstEntry: int := Sys.Math.Max(0, State.Selected - VisibleRows + 1);
+  const Left: int := if FullSize then
+    SceneLeft + 43
+  else
+    Sys.Math.Max(0, (Width - MenuWidth) div 2)
+  end if;
+  const Top: int := if FullSize then
+    SceneTop + 10
+  elsif Scene = null then
+    (Height - VisibleRows) div 2
+  else
+    SceneTop + 8
+  end if;
+  return new Layout(
+    Width,
+    Height,
+    Scene,
+    SceneLeft,
+    SceneTop,
+    Entries,
+    Left,
+    Top,
+    VisibleRows,
+    FirstEntry
+  );
+end function;
+
+function IsMenuCell(Box: Layout; X: int; Y: int): bool;
+begin
+  return X >= Box.MenuLeft and X < Box.MenuLeft + MenuWidth
+    and Y >= Box.MenuTop and Y < Box.MenuTop + Box.VisibleRows;
+end function;
+
+function OnGrid(Box: Layout; Input: Grid.Event): Menu.Message;
+begin
+  case Input of
+    when Grid.Event.Clicked(const X: int, const Y: int, const Button: Key.MouseButton):
+      if Button = Key.MouseButton.Left and IsMenuCell(Box, X, Y) then
+        return Menu.Message.Click(Box.FirstEntry + Y - Box.MenuTop);
+      end if;
+    else
+      return Menu.Message.Ignore;
+  end case;
+
+  return Menu.Message.Ignore;
+end function;
+
+function Paint(Box: Layout; Selected: int; X: int; Y: int): T.Cell;
+begin
+  if IsMenuCell(Box, X, Y) then
+    const Index: int := Box.FirstEntry + Y - Box.MenuTop;
+    const Active: bool := Selected = Index;
+    const Label: string := (if Active then
+      ' > '
+    else
+      '   '
+    end if) + Box.Entries[Index];
+    const Position: int := X - Box.MenuLeft;
+    const Ch: string := if Position < Label.Length then
+      Label[Position].ToString()
+    else
+      ' '
+    end if;
+    const Paper: int := if Active then
+      $962B13
+    else
+      Background
+    end if;
+    return new T.Cell(Ch, new T.Style(Gold, Paper));
+  end if;
+
+  const TitleLeft: int := (Box.Width - Title.Length) div 2;
+  if Y = Box.SceneTop and Box.MenuTop > Box.SceneTop and TitleLeft >= 0
+    and X >= TitleLeft and X < TitleLeft + Title.Length
+  then
+    return new T.Cell(Title[X - TitleLeft].ToString(), new T.Style(Gold, Background));
+  end if;
+
+  const Scene: Art.Scene? := Box.Scene;
+  if Scene <> null then
+    return Art.CellAt(Scene, X - Box.SceneLeft, Y - Box.SceneTop);
+  end if;
+
+  return Empty;
+end function;
+
+function Canvas(State: Menu.Model; Size: T.Viewport): E.Element<Menu.Message>;
+begin
+  const Box: Layout := Arrange(State, Size);
+  const Cells: Collections.List<T.Cell> := new Collections.List<T.Cell>(Box.Width * Box.Height);
+  for Y: int := 0 to Box.Height - 1 do
+    for X: int := 0 to Box.Width - 1 do
+      Cells.Add(Paint(Box, State.Selected, X, Y));
+    end for;
+  end for;
+
+  return E.Border<Menu.Message>(
+    Grid.CellGrid<Menu.Message>(
+      'start-menu', Grid.Image.Create(Box.Width, Box.Height, Cells.ToArray()),
+      function(Input: Grid.Event): Menu.Message => OnGrid(Box, Input)
+    )
+  );
+end function;
+
+// Uses the warm border and near-black backdrop of the ember artwork.
+public function Theme(): Themes.Theme;
+begin
+  const Base: Themes.Theme := Themes.Dark(Themes.Accent.Amber);
+  return Base with
+    Colors := Base.Colors with
+      Background := new Graphics.Color(13, 6, 5, 255);
+      Foreground := new Graphics.Color(245, 202, 115, 255);
+      Border := new Graphics.Color(193, 141, 65, 255);
+    end with;
+  end with;
+end function;
+
+// Lets the terminal host resolve the canvas at its current cell dimensions.
+public function View(State: Menu.Model): E.Element<Menu.Message>;
+begin
+  return Views.Screen<Menu.Message>(
+    Views.Viewport<Menu.Message>(
+      'start-screen', function(Size: T.Viewport): E.Element<Menu.Message> => Canvas(State, Size)
+    ),
+    [], Shortcuts()
+  );
+end function;
+
+end unit;

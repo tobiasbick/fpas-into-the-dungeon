@@ -1,0 +1,124 @@
+// Loads the ember forest artwork and packs it into truecolor terminal cells.
+unit Dungeon.EmberArt;
+
+uses
+  Fpas.Ui.Widgets.Developer.Terminal as T,
+  System as Sys, System.IO as IO, System.Reflection as Reflection;
+
+// Near-black canvas shared by the artwork, menu and outer margins.
+public const Background: int := $0D0605;
+
+const FogReach: int := 18;
+const Feather: int := 5;
+const Empty: T.Cell := new T.Cell(' ', new T.Style(Background := Background));
+
+// A row-major RGB image with two pixel rows per terminal row.
+public type Scene = record
+  // Image width in pixels and terminal columns.
+  public Columns: int;
+  // Image height in terminal rows.
+  public Rows: int;
+  Pixels: array of byte;
+
+  // Loads exactly one three-byte RGB triplet per pixel from the assembly.
+  public static function Load(Name: string; Columns: int; Rows: int): Scene;
+  requires Columns > 0 and Rows > 0;
+  begin
+    const Resource: IO.Stream? := Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(
+      Name
+    );
+    if Resource = null then
+      raise new Sys.InvalidOperationException('Missing artwork resource ' + Name);
+    end if;
+
+    using const Source: IO.Stream := Resource;
+    const Data: array of byte := new byte[Columns * Rows * 2 * 3];
+    Source.ReadExactly(Data, 0, Data.Length);
+    if Source.ReadByte() <> -1 then
+      raise new Sys.InvalidOperationException('Unexpected artwork size for ' + Name);
+    end if;
+
+    return new Scene(Columns, Rows, Data);
+  end function;
+
+  // Reads a packed RGB value at a pixel coordinate inside the image.
+  public function Pixel(X: int; Y: int): int;
+  requires X >= 0 and X < self.Columns and Y >= 0 and Y < self.Rows * 2;
+  begin
+    const Index: int := (Y * self.Columns + X) * 3;
+    return (cast<int>(self.Pixels[Index]) shl 16)
+      or (cast<int>(self.Pixels[Index + 1]) shl 8) or cast<int>(self.Pixels[Index + 2]);
+  end function;
+end record;
+
+// Artwork for the 80 by 25 terminal layout, inside the frame.
+public const Full: Scene := Scene.Load('Dungeon.EmberForest.Full', 78, 23);
+// Artwork for the 60 by 18 terminal layout, inside the frame.
+public const Compact: Scene := Scene.Load('Dungeon.EmberForest.Compact', 58, 16);
+
+function Mix(BaseColor: int; TargetColor: int; Amount: int; Scale: int): int;
+  function Channel(Shift: int): int;
+  begin
+    const Base: int := (BaseColor shr Shift) and 255;
+    const Target: int := (TargetColor shr Shift) and 255;
+    return (Base + (Target - Base) * Amount div Scale) shl Shift;
+  end function;
+begin
+  return Channel(16) or Channel(8) or Channel(0);
+end function;
+
+function Sample(SceneImage: Scene; X: int; Y: int): int;
+begin
+  const Right: int := SceneImage.Columns - 1;
+  const Bottom: int := SceneImage.Rows * 2 - 1;
+  const NearX: int := Sys.Math.Clamp(X, 0, Right);
+  const NearY: int := Sys.Math.Clamp(Y, 0, Bottom);
+  const DX: int := Sys.Math.Abs(X - NearX);
+  const DY: int := Sys.Math.Abs(Y - NearY);
+  const Outside: int := Sys.Math.Max(DX, DY) + Sys.Math.Min(DX, DY) div 2;
+  if Outside >= FogReach then
+    return Background;
+  end if;
+
+  const Inside: int := Sys.Math.Min(Sys.Math.Min(X, Right - X), Sys.Math.Min(Y, Bottom - Y));
+  if Inside >= Feather then
+    return SceneImage.Pixel(X, Y);
+  end if;
+
+  // Sample just inside the artwork for the hue of the surrounding haze.
+  const InsetX: int := Sys.Math.Min(2, Right div 2);
+  const InsetY: int := Sys.Math.Min(2, Bottom div 2);
+  const Rim: int := SceneImage.Pixel(
+    Sys.Math.Clamp(NearX, InsetX, Right - InsetX),
+    Sys.Math.Clamp(NearY, InsetY, Bottom - InsetY)
+  );
+  const Mist: int := Mix($472014, Rim, 1, 4);
+  // Coordinates are relative to the artwork so the haze stays in place on resize.
+  const Grain: int := unchecked(((X * 73856093) xor (Y * 19349663)) and 31);
+  const Reach: int := FogReach - Outside;
+  const Haze: int := Mix(Background, Mist, Reach * Reach * (60 + Grain), FogReach * FogReach * 100);
+  if Outside > 0 then
+    return Haze;
+  end if;
+
+  return Mix(Haze, SceneImage.Pixel(X, Y), Inside, Feather);
+end function;
+
+// Paints a terminal cell at scene-relative coordinates, including fading margins.
+public function CellAt(SceneImage: Scene; X: int; Row: int): T.Cell;
+begin
+  const Upper: int := Sample(SceneImage, X, Row * 2);
+  const Lower: int := Sample(SceneImage, X, Row * 2 + 1);
+  if Upper = Background and Lower = Background then
+    return Empty;
+  end if;
+
+  const Glyph: string := if Upper = Lower then
+    ' '
+  else
+    '▀'
+  end if;
+  return new T.Cell(Glyph, new T.Style(Upper, Lower));
+end function;
+
+end unit;
