@@ -1,0 +1,151 @@
+// Runs the selected local ACP launcher for the lifetime of one client connection.
+unit Dungeon.Acp.Processes;
+
+uses
+  dotacp.client as Client, dotacp.@protocol as Protocol, System as Sys,
+  System.Diagnostics as Diagnostics, System.IO as IO, System.Threading as Threading,
+  System.Threading.Tasks as Tasks;
+
+// A supported local ACP launch command.
+public type Agent = record
+  public Id: string;
+  public Name: string;
+  public Command: string;
+  public Argument: string := '';
+end record;
+
+// Launchers offered by the settings page, in keyboard navigation order.
+public const Agents: array of Agent := [
+  new Agent('codex', 'Codex', 'codex-acp'),
+  new Agent('claude', 'Claude Code', 'claude-agent-acp'),
+  new Agent('cursor', 'Cursor', 'agent', 'acp'),
+  new Agent('antigravity', 'Antigravity', 'agy', 'acp')
+];
+
+// Finds the provider associated with a saved agent ID, or returns -1.
+public function AgentIndex(Id: string): int;
+begin
+  return Sys.Array.FindIndex<Agent>(Agents, function(Value: Agent): bool => Value.Id = Id);
+end function;
+
+// Resolves a configured launcher on absolute PATH entries.
+function Executable(Provider: Agent): string;
+begin
+  const Path: string := Sys.Environment.GetEnvironmentVariable('PATH') ?? '';
+  const Names: array of string := if Sys.OperatingSystem.IsWindows() then
+    [Provider.Command + '.exe', Provider.Command + '.cmd']
+  else
+    [Provider.Command]
+  end if;
+  for Directory: string in Path.Split(IO.Path.PathSeparator) do
+    if IO.Path.IsPathFullyQualified(Directory) then
+      for Name: string in Names do
+        const Candidate: string := IO.Path.Combine(Directory, Name);
+        if IO.File.Exists(Candidate) then
+          return Candidate;
+        end if;
+      end for;
+    end if;
+  end for;
+
+  return '';
+end function;
+
+function Launch(ExecutablePath: string; Provider: Agent; Directory: string): Diagnostics.ProcessStartInfo;
+begin
+  const Start: Diagnostics.ProcessStartInfo := new Diagnostics.ProcessStartInfo();
+  Start.FileName := ExecutablePath;
+  Start.WorkingDirectory := Directory;
+  Start.UseShellExecute := false;
+  Start.CreateNoWindow := true;
+  Start.RedirectStandardInput := true;
+  Start.RedirectStandardOutput := true;
+  Start.RedirectStandardError := true;
+  if Sys.OperatingSystem.IsWindows() and ExecutablePath.EndsWith(
+    '.cmd',
+    Sys.StringComparison.OrdinalIgnoreCase
+  )
+  then
+    // npm and Cursor may install batch shims on Windows. Only pass fixed launcher arguments.
+    if ExecutablePath.Contains('%') or ExecutablePath.Contains('"') then
+      raise new IO.IOException('Unsupported ACP launcher path.');
+    end if;
+
+    Start.FileName := IO.Path.Combine(Sys.Environment.SystemDirectory, 'cmd.exe');
+    Start.Arguments := '/d /v:off /s /c ""' + ExecutablePath + '" ' + Provider.Argument + '"';
+  elsif Provider.Argument <> '' then
+    Start.ArgumentList.Add(Provider.Argument);
+  end if;
+
+  return Start;
+end function;
+
+// Returns the resolved launcher path, or empty if the agent is unavailable.
+public function Resolve(Id: string): string;
+begin
+  const Index: int := AgentIndex(Id);
+  return if Index < 0 then
+    ''
+  else
+    Executable(Agents[Index])
+  end if;
+end function;
+
+// Owns the agent process and its SDK connection until the supplied work finishes.
+public async function Run<T>(
+  AgentId: string; Exe: string; Directory: string; Callbacks: Client.IAcpClient;
+  Work: function(Client.Connection): Tasks.Task<T>
+): Tasks.Task<T>;
+begin
+  using const Process: Diagnostics.Process := new Diagnostics.Process();
+  Process.StartInfo := Launch(Exe, Agents[AgentIndex(AgentId)], Directory);
+  if not Process.Start() then
+    raise new IO.IOException('Could not start the ACP agent.');
+  end if;
+
+  try
+    Process.BeginErrorReadLine();
+    const OpenConnection: Client.Connection? := Client.Connection.RunClient(
+      Callbacks, Process.StandardInput.BaseStream, Process.StandardOutput.BaseStream
+    );
+    if OpenConnection = null then
+      raise new IO.IOException('Could not open the ACP connection.');
+    end if;
+
+    using const Connection: Client.Connection := OpenConnection;
+    return await Work(Connection);
+  finally
+    try
+      if not Process.WaitForExit(750) then
+        Process.Kill(true);
+        discard Process.WaitForExit(750);
+      end if;
+    catch Race: Sys.InvalidOperationException when Process.HasExited do
+    end try;
+  end try;
+end function;
+
+// Negotiates ACP v1 without exposing filesystem or terminal capabilities.
+public async function Initialize(
+  Connection: Client.Connection; Token: Threading.CancellationToken
+): Tasks.Task<Protocol.InitializeResponse>;
+begin
+  const Initialize: Protocol.InitializeRequest := new Protocol.InitializeRequest();
+  Initialize.ProtocolVersion := new Protocol.ProtocolVersion(Protocol.ProtocolMeta.Version);
+  Initialize.ClientCapabilities := new Protocol.ClientCapabilities();
+  const Identity: Protocol.Implementation := new Protocol.Implementation();
+  Identity.Name := 'into-the-dungeon';
+  Identity.Version := '0.1.0';
+  Initialize.ClientInfo := Identity;
+  const Initialized: Protocol.InitializeResponse := await Connection.InitializeAsync(
+    Initialize,
+    Token
+  );
+  if not Initialized.ProtocolVersion.Equals(Initialize.ProtocolVersion) then
+    raise new IO.IOException('The agent does not support ACP version 1.');
+  end if;
+
+  return Initialized;
+end function;
+
+end unit;

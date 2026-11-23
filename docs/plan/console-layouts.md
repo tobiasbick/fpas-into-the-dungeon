@@ -1,95 +1,60 @@
-# Console layouts
+# Console game screen
 
-The FPAS TUI keeps the command input and status bar fixed at the bottom. The LLM game master replies above them. While a reply is pending, the status bar reads `Game master is writing` and still shows `F10 Exit`.
+The first playable version is a small text adventure in the style of classic
+terminal games. The player types commands, and the LLM game master describes
+what happens. A single framed screen in the FPAS TUI keeps the scene, the
+conversation and the current command in view.
 
-All four mockups show the same moment. The player has taken an axe and is typing `go left`.
+## Layout at 80 × 25
 
-## 1. Full-width scene
-
-A large room illustration sits above the latest exchange, with the room name in the frame. Leaving the room replaces the illustration.
-
-```text
-+- Brass Pump Room --------------------------------------------------+
-|                                                                    |
-|          .---------.                 ___||___                      |
-|         /           \          =====|   ()   |                     |
-|        |             |              |  PUMP  |                     |
-|        |             |              |________|       j             |
-|   _____|             |______________________________               |
-|          LEFT ARCH                                                 |
-|                                                                    |
-+--------------------------------------------------------------------+
-| > take the axe                                                     |
-| You lift the axe from its hook. Water drips beyond the arch        |
-| to your left.                                                      |
-+--------------------------------------------------------------------+
-| > go left_                                                         |
-+--------------------------------------------------------------------+
-| Ready                                                     F10 Exit |
-+--------------------------------------------------------------------+
-```
-
-## 2. Room and adventure log
-
-The current room stays in view on the left while recent commands and replies scroll on the right.
+- The left pane takes about two thirds of the upper area and shows the current
+  surroundings. The first version shows a placeholder for the ASCII room art.
+- The right pane takes the remaining third and shows player commands and game
+  master replies in order. Text wraps to the pane width, and the player can
+  scroll back through the conversation with Tab and Page Up or Page Down.
+- The command input spans the full width below both panes. Three rows are
+  visible at a time. Longer input wraps and scrolls inside the field. Enter
+  inserts a line break, and F2 sends the command.
+- The status bar sits below the input and shows `F10 Exit` in the first version.
 
 ```text
-+- Brass Pump Room ------------+- Adventure log ---------------------+
-|                              |  > look                             |
-|      .---.     ___||___      |  A brass pump shudders. An axe      |
-|     /     \===|   ()   |     |  hangs on the far wall.             |
-|    |       |  |__PUMP__|     |                                     |
-|  __|       |_____________    |  > take the axe                     |
-|    Left arch                 |  You lift the axe from its hook.    |
-|                              |  Water drips beyond the left arch.  |
-+--------------------------------------------------------------------+
-| > go left_                                                         |
-+--------------------------------------------------------------------+
-| Ready                                                     F10 Exit |
-+--------------------------------------------------------------------+
++- Room view ---------------------------------------+- Adventure log ----------+
+|                                                   | > look                   |
+|                                                   | A stone passage leads    |
+|                                                   | north.                   |
+|                                                   |                          |
+|              [Room art placeholder]               |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
+|                                                   |                          |
++- F2 Send command ------------------------------------------------------------+
+| go north                                                                     |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+|                                                                     F10 Exit |
++------------------------------------------------------------------------------+
 ```
 
-## 3. Map and narration
+## Starting and continuing
 
-A compact ASCII map at the top marks your location and shows known routes. The narration below still has the full width.
+- **Start** or **Restart** creates a new ACP session using the current game
+  master settings. Once the new session is ready, it becomes the game's sole
+  resumable session and begins with the game master's opening scene.
+- **Continue** is available when the game has a saved session. It resumes that
+  session using its saved agent and session ID and restores the conversation
+  so the player can enter the next command.
 
-```text
-+- Brass Pump Room --------------------------------------------------+
-|                       [Storage]                                    |
-|                           |                                        |
-|  Left arch  [?]--------- [@]--------- [Stairs]                     |
-|                                                                    |
-|  @ You    ? Unexplored                                             |
-+--------------------------------------------------------------------+
-| > take the axe                                                     |
-| You lift the axe from its hook. The pump rattles behind you.       |
-| Water drips beyond the unexplored arch to your left.               |
-+--------------------------------------------------------------------+
-| > go left_                                                         |
-+--------------------------------------------------------------------+
-| Ready                                                     F10 Exit |
-+--------------------------------------------------------------------+
-```
-
-## 4. Illustrated transcript
-
-Commands, replies and room sketches scroll together. A sketch appears when you enter a room and stays with that turn in the log.
-
-```text
-+- Adventure log ----------------------------------------------------+
-| > go down the stairs                                               |
-| You enter the Brass Pump Room. Pipes shake above your head.        |
-|                                                                    |
-|         /-----\      ___||___                                      |
-|        |       |====|   ()   |       j                             |
-|   _____|       |____|__PUMP__|_______                              |
-|                                                                    |
-| > take the axe                                                     |
-| You lift the axe from its hook. Water drips beyond the arch        |
-| to your left.                                                      |
-+--------------------------------------------------------------------+
-| > go left_                                                         |
-+--------------------------------------------------------------------+
-| Ready                                                     F10 Exit |
-+--------------------------------------------------------------------+
-```
+The game stores the session ID, the game master selection and each completed
+turn in `adventure.json` beside `settings.json`. F10 exits the game. A turn
+in progress when the player exits may be interrupted. Continuing requires
+the saved agent to support loading or resuming ACP sessions.

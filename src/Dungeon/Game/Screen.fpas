@@ -1,0 +1,177 @@
+// Draws the adventure using FPAS terminal controls.
+unit Dungeon.Game.Screen;
+
+uses
+  Dungeon.Game.Saves as Saves, Dungeon.Resources.Strings as Strings, Dungeon.StartScreen as Start,
+  Fpas.Ui.Elements as E, Fpas.Ui.Graphics as G, Fpas.Ui.Layout as L, Fpas.Ui.Styles as S,
+  Fpas.Ui.Widgets.Desktop.StatusBars as Bars, Fpas.Ui.Widgets.Inputs.TextAreas as Areas,
+  Fpas.Ui.Widgets.Theming.Themes as Themes, Fpas.Ui.Widgets.Developer.Terminal as T,
+  Fpas.Ui.TerminalExtensions.Input as Keys,
+  Fpas.Ui.TerminalExtensions.Views as Views, Fpas.Ui.Tui.Internal.Widgets.Inputs.TextAreaRows as Lines,
+  System as Sys, System.Collections.Generic as Collections;
+
+public type Input = variant
+  Edit(Text: string);
+  Scroll(Position: L.ScrollPosition);
+  Send;
+  Menu;
+  Exit;
+end variant;
+
+public type Model = record
+  public History: array of Saves.Turn := [];
+  public Draft: string := '';
+  public Pending: string := '';
+  public Status: string := 'Game.Opening';
+  public Failed: bool := false;
+  public Scroll: L.ScrollPosition := L.ScrollPosition.End;
+end record;
+
+public const CommandId: string := 'game-command';
+
+const Fill: L.Flex := new L.Flex(Basis := L.Extent.Fill, Grow := 1.0F);
+
+function Fixed(Cells: int): L.Flex;
+begin
+  return new L.Flex(Basis := L.Extent.Fixed(L.Measure.Cells(Cells)));
+end function;
+
+function Heading(Text: string): E.Element<Input>;
+begin
+  return E.Styled<Input>(E.Text<Input>(Text), S.Role.Heading);
+end function;
+
+function Divider(Height: int): E.Element<Input>;
+begin
+  const Row: E.Element<Input> := Heading('│');
+  const Rows: Collections.List<E.Element<Input>> := new Collections.List<E.Element<Input>>(Height);
+  for Index: int := 1 to Height do
+    Rows.Add(Row);
+  end for;
+
+  return E.Column<Input>(Rows.ToArray());
+end function;
+
+function Log(Value: Model; Width: int): E.Element<Input>;
+begin
+  const Turns: Collections.List<string> := new Collections.List<string>();
+  for Entry: Saves.Turn in Value.History do
+    Turns.Add(
+      if Entry.Command = '' then
+        Entry.Reply
+      else
+        '> ' + Entry.Command + #10 + Entry.Reply
+      end if
+    );
+  end for;
+
+  if Value.Pending <> '' then
+    Turns.Add('> ' + Value.Pending);
+  end if;
+  const Text: string := string.Join('' + #10 + #10, Turns);
+  const Rows: array of E.Element<Input> := Sys.Array.ConvertAll<Lines.Line, E.Element<Input>>(
+    Lines.Wrap(Text, Sys.Math.Max(1, Width - 1)),
+    function(Row: Lines.Line): E.Element<Input> => E.Text<Input>(
+      if Row.Start = Row.Stop then
+        ' '
+      else
+        Text.Substring(Row.Start, Row.Stop - Row.Start)
+      end if
+    )
+  );
+  return E.ScrollView<Input>(
+    'game-log', E.Column<Input>(Rows), Value.Scroll,
+    function(Change: L.ScrollChange): Input => Input.Scroll(Change.Position)
+  );
+end function;
+
+function Canvas(Value: Model; Size: T.Viewport): E.Element<Input>;
+begin
+  const Inner: int := Sys.Math.Max(3, Size.Columns - 2);
+  const Left: int := (Inner - 1) * 2 div 3;
+  const Right: int := Inner - Left - 1;
+  const Room: E.Element<Input> := E.Column<Input>(
+    Heading(' ' + Strings.Get('Game.Room')),
+    E.Size<Input>(
+      E.Column<Input>(
+        new L.Flow(Align := L.Alignment.Center),
+        E.Size<Input>(E.Text<Input>(' '), Fill),
+        E.Text<Input>(Strings.Get('Game.RoomPlaceholder')),
+        E.Size<Input>(E.Text<Input>(' '), Fill)
+      ), Fill
+    )
+  );
+  const Play: E.Element<Input> := E.Row<Input>(
+    new L.Flow(Align := L.Alignment.Stretch),
+    E.Size<Input>(Room, Fixed(Left)),
+    E.Size<Input>(Divider(Sys.Math.Max(1, Size.Rows - 8)), Fixed(1)),
+    E.Size<Input>(
+      E.Column<Input>(
+        Heading(' ' + Strings.Get('Game.Log')),
+        E.Size<Input>(Log(Value, Right), Fill)
+      ), Fill
+    )
+  );
+  const Send: string := '─ ' + Strings.Get('Game.Send') + ' ';
+  const Line: string := '─';
+  const Rule: string := Send + new string(Line[0], Sys.Math.Max(0, Inner - Send.Length));
+  const Editor: E.Element<Input> := Areas.TextArea<Input>(
+    CommandId, Value.Draft, Input.Edit, new Areas.Options(Height := 48)
+  );
+  const Status: string := if Value.Status = '' then
+    ''
+  else
+    Strings.Get(Value.Status) + (if Value.Failed then
+      ' · ' + Strings.Get('Game.Back')
+    else
+      ''
+    end if)
+  end if;
+  const Bar: E.Element<Input> := Bars.StatusBar<Input>(
+    'game-status',
+    [
+      Bars.Item<Input>.Text(new Bars.Label(Status)),
+      Bars.Item<Input>.Spacer,
+      Bars.Item<Input>.Text(new Bars.Label(Strings.Get('Game.Exit')))
+    ]
+  );
+  return E.Border<Input>(
+    E.Column<Input>(
+      E.Size<Input>(Play, Fill),
+      E.Size<Input>(E.Styled<Input>(E.Text<Input>(Rule), S.Role.Heading), Fixed(1)),
+      Editor,
+      Bar
+    )
+  );
+end function;
+
+// Adds terminal shortcuts outside the editor's own navigation and editing keys.
+public function View(Value: Model): E.Element<Input>;
+begin
+  return Views.Screen<Input>(
+    Views.Viewport<Input>(
+      'game-screen', function(Size: T.Viewport): E.Element<Input> => Canvas(Value, Size)
+    ), [],
+    [
+      Keys.Shortcut<Input>(Keys.Key.F2, Keys.KeyModifiers.None, Input.Send),
+      Keys.Shortcut<Input>(Keys.Key.F10, Keys.KeyModifiers.None, Input.Exit),
+      Keys.Shortcut<Input>(Keys.Key.Escape, Keys.KeyModifiers.None, Input.Menu)
+    ]
+  );
+end function;
+
+// Keeps the adventure in the start screen's palette and gives the editor a distinct surface.
+public function Theme(): Themes.Theme;
+begin
+  const Base: Themes.Theme := Start.Theme();
+  return Base with
+    Colors := Base.Colors with
+      Surface := new G.Color(13, 6, 5, 255);
+      SurfaceMuted := new G.Color(30, 15, 11, 255);
+      BorderSubtle := Base.Colors.Border;
+      FocusRing := Base.Colors.Foreground;
+    end with;
+  end with;
+end function;
+
+end unit;
