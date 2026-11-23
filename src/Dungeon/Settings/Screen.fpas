@@ -1,0 +1,154 @@
+// Renders the game master settings as a keyboard-operated terminal dialog.
+unit Dungeon.SettingsScreen;
+
+uses
+  Dungeon.Acp.Discovery as Acp, Dungeon.Settings as Store, Dungeon.Resources.Strings as Strings,
+  Dungeon.StartScreen as Start, Fpas.Ui.Elements as E, Fpas.Ui.Graphics as Graphics,
+  Fpas.Ui.Layout as L, Fpas.Ui.Styles as S, Fpas.Ui.Widgets.Actions.Buttons as Buttons,
+  Fpas.Ui.Widgets.Inputs.RadioGroups as Radio, Fpas.Ui.Widgets.Inputs.Selects as Select,
+  Fpas.Ui.Widgets.Overlays.Dialogs as Dialog, Fpas.Ui.Widgets.Theming.Themes as Themes, System as Sys;
+
+// Messages produced by the settings controls and their dismissal.
+public type Input = variant
+  Agent(Index: int);
+  Model(Index: int);
+  Thinking(Index: int);
+  Retry;
+  Save;
+  Back;
+end variant;
+
+const One: L.Spacing := L.Spacing.Fixed(L.Measure.Cells(1));
+const Fill: L.Flex := new L.Flex(Basis := L.Extent.Fill, Grow := 1.0F);
+const AgentId: string := 'settings-agent';
+const AgentItems: array of Radio.Item := Sys.Array.ConvertAll<Acp.Agent, Radio.Item>(
+  Acp.Agents, function(Provider: Acp.Agent): Radio.Item => new Radio.Item(Provider.Name)
+);
+
+function Muted<TMsg>(Text: string): E.Element<TMsg>;
+begin
+  return E.Styled<TMsg>(E.Text<TMsg>(Text), S.Role.Muted);
+end function;
+
+function Picker<TMsg>(
+  Id: string; Label: string; Options: array of Acp.Option; Selected: string;
+  Change: function(int): TMsg; Empty: string; Searchable: bool := false
+): E.Element<TMsg>;
+begin
+  if Options.Length = 0 then
+    return E.Column<TMsg>(E.Text<TMsg>(Label), Muted<TMsg>(Empty));
+  end if;
+
+  const Items: array of Select.Item := Sys.Array.ConvertAll<Acp.Option, Select.Item>(
+    Options, function(Value: Acp.Option): Select.Item => new Select.Item(Value.Name)
+  );
+  return Select.Select<TMsg>(
+    Id, Items, Acp.OptionIndex(Options, Selected), Change,
+    new Select.Options(Label, Searchable := Searchable)
+  );
+end function;
+
+// Shows the native agent list, agent-provided selectors and actions over the start screen.
+public function View<TMsg>(
+  Underneath: E.Element<TMsg>; Draft: Store.Choice; Options: Acp.Catalog?;
+  Status: string; Loading: bool; Failed: bool; Change: function(Input): TMsg
+): E.Element<TMsg>;
+begin
+  const Agent: int := Acp.AgentIndex(Draft.Agent);
+  const Agents: E.Element<TMsg> := E.Border<TMsg>(
+    E.Column<TMsg>(
+      E.Text<TMsg>(Strings.Get('Settings.Agent')),
+      Radio.RadioGroup<TMsg>(
+        AgentId, AgentItems, Agent,
+        function(Index: int): TMsg => Change(Input.Agent(Index)), Gap := L.Spacing.None
+      )
+    )
+  );
+  const Models: array of Acp.Option := if Options = null then
+    []
+  else
+    Options.Models
+  end if;
+  const Thinking: array of Acp.Option := if Options = null or Loading then
+    []
+  else
+    Options.Thinking
+  end if;
+  const Empty: string := Strings.Get(
+    if Loading then
+      'Settings.Loading'
+    else
+      'Settings.Unavailable'
+    end if
+  );
+  const Fields: array of E.Element<TMsg> := [
+    Picker<TMsg>(
+      'settings-model', Strings.Get('Settings.Model'), Models, Draft.Model,
+      function(Index: int): TMsg => Change(Input.Model(Index)), Empty, true
+    ),
+    Picker<TMsg>(
+      'settings-thinking', Strings.Get('Settings.Thinking'), Thinking, Draft.ThinkingLevel,
+      function(Index: int): TMsg => Change(Input.Thinking(Index)), Empty
+    )
+  ];
+  const Content: E.Element<TMsg> := E.Row<TMsg>(
+    new L.Flow(Gap := One, Align := L.Alignment.Start),
+    E.Size<TMsg>(Agents, new L.Flex(Basis := L.Extent.Fixed(L.Measure.Cells(20)))),
+    E.Size<TMsg>(E.Column<TMsg>(new L.Flow(Gap := One), Fields), Fill)
+  );
+
+  const StatusText: string := if Status = '' then
+    Strings.Get('Settings.Keys')
+  else
+    Strings.Get(Status)
+  end if;
+  const StatusControl: E.Element<TMsg> := if Failed then
+    E.Row<TMsg>(
+      new L.Flow(Gap := One), Muted<TMsg>(StatusText),
+      Buttons.Button<TMsg>('settings-retry', Strings.Get('Settings.Retry'), Change(Input.Retry))
+    )
+  else
+    Muted<TMsg>(StatusText)
+  end if;
+  const Actions: E.Element<TMsg> := E.Row<TMsg>(
+    new L.Flow(Gap := One, Align := L.Alignment.Center),
+    E.Size<TMsg>(StatusControl, Fill),
+    Buttons.Button<TMsg>(
+      'settings-save', Strings.Get('Settings.Save'), Change(Input.Save),
+      new Buttons.Options(
+        Variant := S.ButtonVariant.Primary,
+        Enabled := Options <> null and not Loading
+      )
+    ),
+    Buttons.Button<TMsg>('settings-back', Strings.Get('Settings.Back'), Change(Input.Back))
+  );
+  return Dialog.Dialog<TMsg>(
+    'game-settings', Underneath,
+    E.Column<TMsg>(new L.Flow(Padding := One, Gap := One), Content, Actions),
+    true, new Dialog.Options(
+      Strings.Get('Settings.Title'), Width := 536,
+      CloseButton := false, InitialFocus := Radio.ItemId(AgentId, Agent)
+    ), Change(Input.Back)
+  );
+end function;
+
+// Continues the start screen's ember colors across the modal and its widgets.
+public function Theme(): Themes.Theme;
+begin
+  const Base: Themes.Theme := Start.Theme();
+  return Base with
+    Colors := Base.Colors with
+      Surface := new Graphics.Color(27, 13, 9, 255);
+      SurfaceRaised := new Graphics.Color(37, 18, 12, 255);
+      SurfaceMuted := new Graphics.Color(46, 24, 15, 255);
+      Accent := new Graphics.Color(150, 43, 19, 255);
+      AccentStrong := new Graphics.Color(160, 51, 22, 255);
+      AccentForeground := Base.Colors.Foreground;
+      FocusRing := Base.Colors.Foreground;
+      TextMuted := new Graphics.Color(190, 151, 109, 255);
+      Scrim := new Graphics.Color(13, 6, 5, 93);
+    end with;
+  end with;
+end function;
+
+end unit;

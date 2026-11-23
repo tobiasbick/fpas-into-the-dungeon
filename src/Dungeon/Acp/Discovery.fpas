@@ -1,0 +1,336 @@
+// Discovers session selectors from a locally installed ACP agent using dotacp.
+unit Dungeon.Acp.Discovery;
+
+uses
+  Dungeon.Settings as Settings, Dungeon.Acp.OptionsClients as Callbacks,
+  dotacp.client as Client, dotacp.@protocol as Protocol, StreamJsonRpc as Rpc, System as Sys,
+  System.Diagnostics as Diagnostics, System.IO as IO, System.Threading as Threading,
+  System.Threading.Tasks as Tasks, System.Collections.Generic as Collections;
+
+// A supported local ACP launch command.
+public type Agent = record
+  // Identifier persisted in the game settings.
+  public Id: string;
+  // Name shown in the provider list.
+  public Name: string;
+  // Executable basename to resolve on PATH.
+  public Command: string;
+  // Fixed argument to enter ACP mode, when required.
+  public Argument: string := '';
+end record;
+
+// The agents offered by the settings page, in keyboard navigation order.
+public const Agents: array of Agent := [
+  new Agent('codex', 'Codex', 'codex-acp'),
+  new Agent('claude', 'Claude Code', 'claude-agent-acp'),
+  new Agent('cursor', 'Cursor', 'agent', 'acp'),
+  new Agent('antigravity', 'Antigravity', 'agy', 'acp')
+];
+
+// A value named by an ACP configuration selector.
+public type Option = record
+  // The stable wire value.
+  public Id: string;
+  // The agent's display name for the value.
+  public Name: string;
+end record;
+
+// Model options and thinking levels for the active model.
+public type Catalog = record
+  // Available values of the model selector.
+  public Models: array of Option;
+  // Available thinking values for the active model.
+  public Thinking: array of Option;
+  // Active model ID, or empty when no selector exists.
+  public ModelId: string;
+  // Active thinking ID, or empty when no selector exists.
+  public ThinkingId: string;
+end record;
+
+// Failure categories safe to display without exposing agent logs.
+public type Problem = enum
+  MissingAgent;
+  SignInRequired;
+  Timeout;
+  Unavailable;
+end enum;
+
+// Outcome of asking an agent for its session configuration.
+public type Result = variant
+  Ready(Value: Catalog);
+  Failed(Reason: Problem);
+end variant;
+
+// Finds the provider associated with a saved agent ID, or returns -1.
+public function AgentIndex(Id: string): int;
+begin
+  return Sys.Array.FindIndex<Agent>(Agents, function(Value: Agent): bool => Value.Id = Id);
+end function;
+
+// Finds an ACP option by wire value, or returns -1.
+public function OptionIndex(Values: array of Option; Id: string): int;
+begin
+  return Sys.Array.FindIndex<Option>(Values, function(Value: Option): bool => Value.Id = Id);
+end function;
+
+function Selector(Options: (array of Protocol.SessionConfigOption?)?; Category: string): Protocol.SessionConfigSelect?;
+begin
+  if Options = null then
+    return null;
+  end if;
+
+  for OptionItem: Protocol.SessionConfigOption? in Options do
+    if OptionItem is Protocol.SessionConfigSelect then
+      const Select: Protocol.SessionConfigSelect := cast<Protocol.SessionConfigSelect>(OptionItem);
+      const Id: string := Select.Id.ToString() ?? '';
+      if Select.Category.ToString() = Category or Id = Category
+        or (Category = 'thought_level' and (Id = 'reasoning_effort' or Id = 'thinking_level' or Id =
+        'thinking'))
+      then
+        return Select;
+      end if;
+    end if;
+  end for;
+
+  return null;
+end function;
+
+procedure AddOptions(Items: (array of Protocol.SessionConfigSelectOption?)?; Values: Collections.List<Option>);
+begin
+  if Items = null then
+    return;
+  end if;
+
+  for Entry: Protocol.SessionConfigSelectOption? in Items do
+    if Entry <> null then
+      const Id: string := Entry.Value.ToString() ?? '';
+      if Id <> '' then
+        Values.Add(new Option(Id, Entry.Name ?? Id));
+      end if;
+    end if;
+  end for;
+end procedure;
+
+function Values(Select: Protocol.SessionConfigSelect?): array of Option;
+begin
+  if Select = null then
+    return [];
+  end if;
+
+  const Result: Collections.List<Option> := new Collections.List<Option>();
+  var Items: (array of Protocol.SessionConfigSelectOption?)? := null;
+  var Groups: (array of Protocol.SessionConfigSelectGroup?)? := null;
+  if Select.Options.TryGetSessionConfigSelectOption(out Items) then
+    AddOptions(Items, Result);
+  elsif Select.Options.TryGetSessionConfigSelectGroup(out Groups) and Groups <> null then
+    for Group: Protocol.SessionConfigSelectGroup? in Groups do
+      if Group <> null then
+        AddOptions(Group.Options, Result);
+      end if;
+    end for;
+  end if;
+
+  return Result.ToArray();
+end function;
+
+function Selected(Select: Protocol.SessionConfigSelect?; Options: array of Option): string;
+begin
+  const Current: string := if Select = null then
+    ''
+  else
+    Select.CurrentValue.ToString() ?? ''
+  end if;
+  if OptionIndex(Options, Current) >= 0 then
+    return Current;
+  end if;
+
+  return if Options.Length = 0 then
+    ''
+  else
+    Options[0].Id
+  end if;
+end function;
+
+function Executable(Provider: Agent): string;
+begin
+  const Path: string := Sys.Environment.GetEnvironmentVariable('PATH') ?? '';
+  const Names: array of string := if Sys.OperatingSystem.IsWindows() then
+    [Provider.Command + '.exe', Provider.Command + '.cmd']
+  else
+    [Provider.Command]
+  end if;
+  for Directory: string in Path.Split(IO.Path.PathSeparator) do
+    if IO.Path.IsPathFullyQualified(Directory) then
+      for Name: string in Names do
+        const Candidate: string := IO.Path.Combine(Directory, Name);
+        if IO.File.Exists(Candidate) then
+          return Candidate;
+        end if;
+      end for;
+    end if;
+  end for;
+
+  return '';
+end function;
+
+function Launch(ExecutablePath: string; Provider: Agent; Directory: string): Diagnostics.ProcessStartInfo;
+begin
+  const Start: Diagnostics.ProcessStartInfo := new Diagnostics.ProcessStartInfo();
+  Start.FileName := ExecutablePath;
+  Start.WorkingDirectory := Directory;
+  Start.UseShellExecute := false;
+  Start.CreateNoWindow := true;
+  Start.RedirectStandardInput := true;
+  Start.RedirectStandardOutput := true;
+  Start.RedirectStandardError := true;
+  if Sys.OperatingSystem.IsWindows() and ExecutablePath.EndsWith(
+    '.cmd',
+    Sys.StringComparison.OrdinalIgnoreCase
+  )
+  then
+    // npm and Cursor may install batch shims on Windows. Only pass fixed launcher arguments.
+    if ExecutablePath.Contains('%') or ExecutablePath.Contains('"') then
+      raise new IO.IOException('Unsupported ACP launcher path.');
+    end if;
+
+    Start.FileName := IO.Path.Combine(Sys.Environment.SystemDirectory, 'cmd.exe');
+    Start.Arguments := '/d /v:off /s /c ""' + ExecutablePath + '" ' + Provider.Argument + '"';
+  elsif Provider.Argument <> '' then
+    Start.ArgumentList.Add(Provider.Argument);
+  end if;
+
+  return Start;
+end function;
+
+procedure RemoveWorkspace(Directory: IO.DirectoryInfo);
+begin
+  // Windows can still hold the working directory briefly after a process tree exits.
+  for Attempt: int := 1 to 5 do
+    try
+      Directory.Delete(true);
+      return;
+    catch Failure: IO.IOException do
+      Threading.Thread.Sleep(100);
+    end try;
+  end for;
+end procedure;
+
+async function ReadCatalog(
+  Connection: Client.Connection; Directory: string; Desired: Settings.Choice; Token: Threading.CancellationToken
+): Tasks.Task<Catalog>;
+begin
+  const Initialize: Protocol.InitializeRequest := new Protocol.InitializeRequest();
+  Initialize.ProtocolVersion := new Protocol.ProtocolVersion(Protocol.ProtocolMeta.Version);
+  Initialize.ClientCapabilities := new Protocol.ClientCapabilities();
+  const Identity: Protocol.Implementation := new Protocol.Implementation();
+  Identity.Name := 'into-the-dungeon';
+  Identity.Version := '0.1.0';
+  Initialize.ClientInfo := Identity;
+  const Initialized: Protocol.InitializeResponse := await Connection.InitializeAsync(
+    Initialize,
+    Token
+  );
+  if not Initialized.ProtocolVersion.Equals(Initialize.ProtocolVersion) then
+    raise new IO.IOException('The agent does not support ACP version 1.');
+  end if;
+
+  const Start: Protocol.NewSessionRequest := new Protocol.NewSessionRequest();
+  Start.Cwd := Directory;
+  Start.McpServers := [];
+  const Session: Protocol.NewSessionResponse := await Connection.NewSessionAsync(Start, Token);
+  var Options: (array of Protocol.SessionConfigOption?)? := Session.ConfigOptions;
+  var Model: Protocol.SessionConfigSelect? := Selector(Options, 'model');
+  var ModelValues: array of Option := Values(Model);
+  if Model <> null and OptionIndex(ModelValues, Desired.Model) >= 0
+    and Desired.Model <> Model.CurrentValue.ToString()
+  then
+    const SelectModel: Protocol.SetSessionConfigOptionRequest := new Protocol.SetSessionConfigOptionRequest();
+    SelectModel.SessionId := Session.SessionId;
+    SelectModel.ConfigId := Model.Id;
+    SelectModel.Value := new Protocol.SetSessionConfigOptionRequestValue(
+      new Protocol.SessionConfigValueId(Desired.Model)
+    );
+    const Changed: Protocol.SetSessionConfigOptionResponse := await Connection.SetSessionConfigOptionAsync(
+      SelectModel,
+      Token
+    );
+    Options := Changed.ConfigOptions;
+    Model := Selector(Options, 'model');
+    ModelValues := Values(Model);
+  end if;
+
+  const Thinking: Protocol.SessionConfigSelect? := Selector(Options, 'thought_level');
+  const ThinkingValues: array of Option := Values(Thinking);
+  const ThinkingId: string := if OptionIndex(ThinkingValues, Desired.ThinkingLevel) >= 0 then
+    Desired.ThinkingLevel
+  else
+    Selected(Thinking, ThinkingValues)
+  end if;
+  return new Catalog(ModelValues, ThinkingValues, Selected(Model, ModelValues), ThinkingId);
+end function;
+
+// Discovers current options in a cancellable, temporary ACP session.
+public async function Discover(
+  Desired: Settings.Choice; Token: Threading.CancellationToken
+): Tasks.Task<Result>;
+begin
+  const Index: int := AgentIndex(Desired.Agent);
+  if Index < 0 then
+    return Result.Failed(Problem.MissingAgent);
+  end if;
+  const Provider: Agent := Agents[Index];
+  const Exe: string := Executable(Provider);
+  if Exe = '' then
+    return Result.Failed(Problem.MissingAgent);
+  end if;
+
+  using const Deadline: Threading.CancellationTokenSource := Threading.CancellationTokenSource.CreateLinkedTokenSource(
+    Token
+  );
+  Deadline.CancelAfter(Sys.TimeSpan.FromSeconds(20));
+  try
+    const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-acp-');
+    try
+      using const Process: Diagnostics.Process := new Diagnostics.Process();
+      Process.StartInfo := Launch(Exe, Provider, Directory.FullName);
+      if not Process.Start() then
+        return Result.Failed(Problem.Unavailable);
+      end if;
+
+      try
+        Process.BeginErrorReadLine();
+        const OpenConnection: Client.Connection? := Client.Connection.RunClient(
+          new Callbacks.OptionsClient(),
+          Process.StandardInput.BaseStream,
+          Process.StandardOutput.BaseStream
+        );
+        if OpenConnection = null then
+          return Result.Failed(Problem.Unavailable);
+        end if;
+
+        using const Connection: Client.Connection := OpenConnection;
+        return Result.Ready(
+          await ReadCatalog(Connection, Directory.FullName, Desired, Deadline.Token)
+        );
+      finally
+        try
+          if not Process.WaitForExit(750) then
+            Process.Kill(true);
+            discard Process.WaitForExit(750);
+          end if;
+        catch Race: Sys.InvalidOperationException when Process.HasExited do
+        end try;
+      end try;
+    finally
+      RemoveWorkspace(Directory);
+    end try;
+  catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
+    return Result.Failed(Problem.Timeout);
+  catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
+    return Result.Failed(Problem.SignInRequired);
+  catch Failure: Sys.Exception when not (Failure is Sys.OperationCanceledException) do
+    return Result.Failed(Problem.Unavailable);
+  end try;
+end function;
+
+end unit;

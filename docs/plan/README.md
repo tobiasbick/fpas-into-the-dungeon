@@ -23,3 +23,36 @@ fallback in `Resources/Strings.resx` and the German translation in
 
 The local feed in `.tmp/feed` needs matching packages for `Fpas.NET.Sdk`,
 `Fpas.Ui`, `Fpas.Ui.Mvu`, and `Fpas.Ui.Tui`.
+
+## Game settings
+
+The `Dungeon.Settings` project creates `settings.json` with an empty JSON object
+on first launch. The game loads the saved agent, model and thinking-level IDs
+at startup. The base directory comes from .NET's
+`Environment.SpecialFolder.ApplicationData`.
+
+- Windows uses `%APPDATA%\into-the-dungeon\settings.json`.
+- Linux uses `$XDG_CONFIG_HOME/into-the-dungeon/settings.json` when
+  `XDG_CONFIG_HOME` is an absolute path, otherwise
+  `~/.config/into-the-dungeon/settings.json`.
+
+Open **Settings** from the start menu. At 80 × 25, the provider list is on the
+left and the model and thinking selectors are on the right. Use the arrow keys
+to choose the provider, Tab to move among fields and actions, and Enter to open
+a selector or activate a button. Save writes the selection and returns to the
+start menu. Back or Escape discards edits. Escape closes an open picker first.
+
+The game uses [dotacp.client](https://www.nuget.org/packages/dotacp.client/)
+to read ACP session configuration from locally installed agents. Install and
+sign in to the agents with their own tools. The game looks for these commands
+on `PATH`:
+
+- Codex: [`codex-acp`](https://github.com/agentclientprotocol/codex-acp)
+- Claude Code: [`claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp)
+- Cursor: [`agent acp`](https://cursor.com/docs/cli/acp)
+- Antigravity: [`agy acp`](https://antigravity.google/docs/cli/acp)
+
+Loading runs in the background. The model list and thinking levels come from
+the selected agent's current session. Changing the model requests its updated
+thinking options. When an agent omits a selector, the corresponding field shows
+**Unavailable**.
