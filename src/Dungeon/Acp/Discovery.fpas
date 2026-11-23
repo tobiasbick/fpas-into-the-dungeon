@@ -1,0 +1,249 @@
+// Discovers session selectors from a locally installed ACP agent using dotacp.
+unit Dungeon.Acp.Discovery;
+
+uses
+  Dungeon.Settings as Settings, Dungeon.Acp.ClientCallbacks as Callbacks, Dungeon.Acp.Processes as Processes,
+  dotacp.client as Client, dotacp.@protocol as Protocol, StreamJsonRpc as Rpc, System as Sys,
+  System.IO as IO, System.Threading as Threading,
+  System.Threading.Tasks as Tasks, System.Collections.Generic as Collections;
+
+// A value named by an ACP configuration selector.
+public type Option = record
+  // The stable wire value.
+  public Id: string;
+  // The agent's display name for the value.
+  public Name: string;
+end record;
+
+// Model options and thinking levels for the active model.
+public type Catalog = record
+  // Available values of the model selector.
+  public Models: array of Option;
+  // Available thinking values for the active model.
+  public Thinking: array of Option;
+  // Active model ID, or empty when no selector exists.
+  public ModelId: string;
+  // Active thinking ID, or empty when no selector exists.
+  public ThinkingId: string;
+end record;
+
+// Failure categories safe to display without exposing agent logs.
+public type Problem = enum
+  MissingAgent;
+  SignInRequired;
+  Timeout;
+  Unavailable;
+end enum;
+
+// Outcome of asking an agent for its session configuration.
+public type Result = variant
+  Ready(Value: Catalog);
+  Failed(Reason: Problem);
+end variant;
+
+// Finds an ACP option by wire value, or returns -1.
+public function OptionIndex(Values: array of Option; Id: string): int;
+begin
+  return Sys.Array.FindIndex<Option>(Values, function(Value: Option): bool => Value.Id = Id);
+end function;
+
+function Selector(Options: (array of Protocol.SessionConfigOption?)?; Category: string): Protocol.SessionConfigSelect?;
+begin
+  if Options = null then
+    return null;
+  end if;
+
+  for OptionItem: Protocol.SessionConfigOption? in Options do
+    if OptionItem is Protocol.SessionConfigSelect then
+      const Select: Protocol.SessionConfigSelect := cast<Protocol.SessionConfigSelect>(OptionItem);
+      const Id: string := Select.Id.ToString() ?? '';
+      if Select.Category.ToString() = Category or Id = Category
+        or (Category = 'thought_level' and (Id = 'reasoning_effort' or Id = 'thinking_level' or Id =
+        'thinking'))
+      then
+        return Select;
+      end if;
+    end if;
+  end for;
+
+  return null;
+end function;
+
+procedure AddOptions(Items: (array of Protocol.SessionConfigSelectOption?)?; Values: Collections.List<Option>);
+begin
+  if Items = null then
+    return;
+  end if;
+
+  for Entry: Protocol.SessionConfigSelectOption? in Items do
+    if Entry <> null then
+      const Id: string := Entry.Value.ToString() ?? '';
+      if Id <> '' then
+        Values.Add(new Option(Id, Entry.Name ?? Id));
+      end if;
+    end if;
+  end for;
+end procedure;
+
+function Values(Select: Protocol.SessionConfigSelect?): array of Option;
+begin
+  if Select = null then
+    return [];
+  end if;
+
+  const Result: Collections.List<Option> := new Collections.List<Option>();
+  var Items: (array of Protocol.SessionConfigSelectOption?)? := null;
+  var Groups: (array of Protocol.SessionConfigSelectGroup?)? := null;
+  if Select.Options.TryGetSessionConfigSelectOption(out Items) then
+    AddOptions(Items, Result);
+  elsif Select.Options.TryGetSessionConfigSelectGroup(out Groups) and Groups <> null then
+    for Group: Protocol.SessionConfigSelectGroup? in Groups do
+      if Group <> null then
+        AddOptions(Group.Options, Result);
+      end if;
+    end for;
+  end if;
+
+  return Result.ToArray();
+end function;
+
+function Selected(Select: Protocol.SessionConfigSelect?; Options: array of Option): string;
+begin
+  const Current: string := if Select = null then
+    ''
+  else
+    Select.CurrentValue.ToString() ?? ''
+  end if;
+  if OptionIndex(Options, Current) >= 0 then
+    return Current;
+  end if;
+
+  return if Options.Length = 0 then
+    ''
+  else
+    Options[0].Id
+  end if;
+end function;
+
+procedure RemoveWorkspace(Directory: IO.DirectoryInfo);
+begin
+  // Windows can still hold the working directory briefly after a process tree exits.
+  for Attempt: int := 1 to 5 do
+    try
+      Directory.Delete(true);
+      return;
+    catch Failure: IO.IOException do
+      Threading.Thread.Sleep(100);
+    end try;
+  end for;
+end procedure;
+
+// Applies the saved model and, for gameplay, the thinking level reported by the agent.
+public async function Configure(
+  Connection: Client.Connection; Id: Protocol.SessionId; Initial: (array of Protocol.SessionConfigOption?)?;
+  Desired: Settings.Choice; ApplyThinking: bool; Token: Threading.CancellationToken
+): Tasks.Task<Catalog>;
+begin
+  var Options: (array of Protocol.SessionConfigOption?)? := Initial;
+  var Model: Protocol.SessionConfigSelect? := Selector(Options, 'model');
+  var ModelValues: array of Option := Values(Model);
+  if Model <> null and OptionIndex(ModelValues, Desired.Model) >= 0
+    and Desired.Model <> Model.CurrentValue.ToString()
+  then
+    const SelectModel: Protocol.SetSessionConfigOptionRequest := new Protocol.SetSessionConfigOptionRequest();
+    SelectModel.SessionId := Id;
+    SelectModel.ConfigId := Model.Id;
+    SelectModel.Value := new Protocol.SetSessionConfigOptionRequestValue(
+      new Protocol.SessionConfigValueId(Desired.Model)
+    );
+    const Changed: Protocol.SetSessionConfigOptionResponse := await Connection.SetSessionConfigOptionAsync(
+      SelectModel,
+      Token
+    );
+    Options := Changed.ConfigOptions;
+    Model := Selector(Options, 'model');
+    ModelValues := Values(Model);
+  end if;
+
+  const Thinking: Protocol.SessionConfigSelect? := Selector(Options, 'thought_level');
+  const ThinkingValues: array of Option := Values(Thinking);
+  const ThinkingId: string := if OptionIndex(ThinkingValues, Desired.ThinkingLevel) >= 0 then
+    Desired.ThinkingLevel
+  else
+    Selected(Thinking, ThinkingValues)
+  end if;
+  if ApplyThinking and Thinking <> null and ThinkingId <> ''
+    and ThinkingId <> Thinking.CurrentValue.ToString()
+  then
+    const SelectThinking: Protocol.SetSessionConfigOptionRequest := new Protocol.SetSessionConfigOptionRequest();
+    SelectThinking.SessionId := Id;
+    SelectThinking.ConfigId := Thinking.Id;
+    SelectThinking.Value := new Protocol.SetSessionConfigOptionRequestValue(
+      new Protocol.SessionConfigValueId(ThinkingId)
+    );
+    discard await Connection.SetSessionConfigOptionAsync(SelectThinking, Token);
+  end if;
+
+  return new Catalog(ModelValues, ThinkingValues, Selected(Model, ModelValues), ThinkingId);
+end function;
+
+async function ReadCatalog(
+  Connection: Client.Connection; Directory: string; Desired: Settings.Choice; Token: Threading.CancellationToken
+): Tasks.Task<Catalog>;
+begin
+  discard await Processes.Initialize(Connection, Token);
+  const Start: Protocol.NewSessionRequest := new Protocol.NewSessionRequest();
+  Start.Cwd := Directory;
+  Start.McpServers := [];
+  const Session: Protocol.NewSessionResponse := await Connection.NewSessionAsync(Start, Token);
+  return await Configure(
+    Connection,
+    Session.SessionId,
+    Session.ConfigOptions,
+    Desired,
+    false,
+    Token
+  );
+end function;
+
+// Discovers current options in a cancellable, temporary ACP session.
+public async function Discover(
+  Desired: Settings.Choice; Token: Threading.CancellationToken
+): Tasks.Task<Result>;
+begin
+  const Exe: string := Processes.Resolve(Desired.Agent);
+  if Exe = '' then
+    return Result.Failed(Problem.MissingAgent);
+  end if;
+
+  using const Deadline: Threading.CancellationTokenSource := Threading.CancellationTokenSource.CreateLinkedTokenSource(
+    Token
+  );
+  Deadline.CancelAfter(Sys.TimeSpan.FromSeconds(20));
+  try
+    const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-acp-');
+    try
+      return Result.Ready(
+        await Processes.Run<Catalog>(
+          Desired.Agent, Exe, Directory.FullName, Callbacks.SettingsOnly(),
+          function(Connection: Client.Connection): Tasks.Task<Catalog> => ReadCatalog(
+            Connection,
+            Directory.FullName,
+            Desired,
+            Deadline.Token
+          )
+        )
+      );
+    finally
+      RemoveWorkspace(Directory);
+    end try;
+  catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
+    return Result.Failed(Problem.Timeout);
+  catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
+    return Result.Failed(Problem.SignInRequired);
+  catch Failure: Sys.Exception when not (Failure is Sys.OperationCanceledException) do
+    return Result.Failed(Problem.Unavailable);
+  end try;
+end function;
+
+end unit;

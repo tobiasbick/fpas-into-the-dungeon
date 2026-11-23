@@ -13,7 +13,7 @@ game takes shape, so keep contributions small, focused, and easy to review.
 - Follow the
   [Functional Pascal documentation](https://github.com/tobiasbick/functional-pascal/tree/main/docs/pascal)
   for implemented language behavior.
-- Keep authoritative game rules in `libs/game` and out of the client and shared
+- Keep authoritative game rules in `src/Dungeon.Game` and out of the client and shared
   protocol types.
 - Add or update tests for meaningful behavior.
 - Use English for code, identifiers, comments, documentation, and commit
@@ -26,9 +26,8 @@ lacks a required capability, create a reproducible
 
 ## Verification
 
-Once the Functional Pascal project manifests exist, format and check every
-changed `.fpas` project and run its relevant tests. Include the commands and
-results in the pull request.
+Format and check changed FPAS projects and run the relevant tests in
+`Dungeon.slnx`. Include the commands and results in the pull request.
 
 ## AI-assisted contributions
 

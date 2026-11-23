@@ -1,0 +1,397 @@
+// Routes input and background results to the active terminal screen.
+unit Dungeon.App;
+
+uses
+  Dungeon.Acp.Processes as Agents, Dungeon.Acp.Discovery as Acp, Dungeon.Settings as Store, Dungeon.SettingsScreen as Settings,
+  Dungeon.StartMenu as Menu, Dungeon.StartScreen as Start,
+  Dungeon.Game.Screen as Game, Dungeon.Game.Session as Session, Dungeon.Game.Saves as Saves,
+  Fpas.Ui.Elements as E, Fpas.Ui.Composition as Views, Fpas.Ui.Mvu.Application as Mvu,
+  Fpas.Ui.Mvu.Composition as Commands, Fpas.Ui.Widgets.Theming.Themes as Themes,
+  System as Sys, System.IO as IO, System.Threading as Threads,
+  System.Threading.Tasks as Tasks, System.Threading.Channels as Channels, Fpas.Ui.Layout as Layout;
+
+// All input and effect replies for the terminal application.
+public type Message = variant
+  StartInput(Value: Menu.Message);
+  SettingsInput(Value: Settings.Input);
+  OptionsLoaded(Value: Acp.Result);
+  GameInput(Value: Game.Input);
+  GameEvent(Value: Session.Event);
+end variant;
+
+// The application's persisted selection and its transient settings draft.
+public type Model = record
+  // Absolute settings file path.
+  public SettingsPath: string;
+  // Last selection successfully read or saved.
+  public Saved: Store.Choice;
+  // Main menu state, retained when opening the dialog.
+  public MenuState: Menu.Model;
+  // Editable selection. Null means the start menu is active.
+  public Draft: Store.Choice? := null;
+  // The last options for the selected agent.
+  public Catalog: Acp.Catalog? := null;
+  // Whether a new catalog is still being discovered.
+  public Loading: bool := false;
+  // Localized status key, or empty for the usual keyboard hints.
+  public Status: string := '';
+  public Adventure: Game.Model? := null;
+  public Commands: Channels.Channel<string>? := null;
+end record;
+
+const Discovery: string := 'acp-settings';
+const Adventure: string := 'acp-adventure';
+
+// Loads settings before drawing the start menu.
+public function Open(Path: string): Model;
+begin
+  const Saved: Store.Choice := Store.Load(Path);
+  if Agents.AgentIndex(Saved.Agent) < 0 then
+    raise new IO.InvalidDataException(
+      'Unknown ACP agent in settings.json. Delete the file to recreate the defaults.'
+    );
+  end if;
+
+  return new Model(Path, Saved, new Menu.Model(IO.File.Exists(Saves.PathFor(Path))));
+end function;
+
+function Commit(Value: Model): Mvu.Transition<Model, Message>;
+begin
+  return new Mvu.Transition<Model, Message>(Value, []);
+end function;
+
+function Load(Value: Model; Draft: Store.Choice; KeepCatalog: bool := false): Mvu.Transition<Model, Message>;
+  async function Discover(Post: function(Message): Tasks.Task; Token: Threads.CancellationToken): Tasks.Task;
+  begin
+    const Result: Acp.Result := await Acp.Discover(Draft, Token);
+    await Post(Message.OptionsLoaded(Result));
+  end function;
+begin
+  return new Mvu.Transition<Model, Message>(
+    Value with
+      Draft := Draft;
+      Catalog := if KeepCatalog then
+        Value.Catalog
+      else
+        null
+      end if;
+      Loading := true;
+      Status := '';
+    end with,
+    [
+      Mvu.StartBackground<Message>(
+        Discovery, Discover,
+        function(Failure: Sys.Exception): Message => Message.OptionsLoaded(
+          Acp.Result.Failed(Acp.Problem.Unavailable)
+        )
+      )
+    ]
+  );
+end function;
+
+function Back(Value: Model): Mvu.Transition<Model, Message>;
+begin
+  return new Mvu.Transition<Model, Message>(
+    Value with
+      Draft := null;
+      Catalog := null;
+      Loading := false;
+      Status := '';
+    end with,
+    [Mvu.CancelBackground<Message>(Discovery)]
+  );
+end function;
+
+function StartGame(Value: Model; ContinueGame: bool; Queue: Channels.Channel<string>): Mvu.Transition<Model, Message>;
+  async function Run(Post: function(Message): Tasks.Task; Token: Threads.CancellationToken): Tasks.Task;
+    function Report(Event: Session.Event): Tasks.Task;
+    begin
+      return Post(Message.GameEvent(Event));
+    end function;
+  begin
+    await Session.Run(
+      Saves.PathFor(Value.SettingsPath),
+      Value.Saved,
+      ContinueGame,
+      Queue,
+      Report,
+      Token
+    );
+  end function;
+begin
+  return new Mvu.Transition<Model, Message>(
+    Value with
+      Adventure := new Game.Model();
+      Commands := Queue;
+    end with,
+    [
+      Mvu.StartBackground<Message>(
+        Adventure, Run,
+        function(Failure: Sys.Exception): Message => Message.GameEvent(Session.Event.Failed(''))
+      ),
+      Mvu.Focus<Message>(Game.CommandId)
+    ]
+  );
+end function;
+
+function UpdateGame(Value: Model; State: Game.Model; Input: Message): Mvu.Transition<Model, Message>;
+begin
+  var Next: Game.Model := State;
+  case Input of
+    when Message.GameInput(Game.Input.Exit):
+      return new Mvu.Transition<Model, Message>(Value, [Mvu.Exit<Message>()]);
+    when Message.GameInput(Game.Input.Menu):
+      if State.Failed then
+        return new Mvu.Transition<Model, Message>(
+          Value with
+            Adventure := null;
+            Commands := null;
+            MenuState := new Menu.Model(IO.File.Exists(Saves.PathFor(Value.SettingsPath)));
+          end with,
+          [Mvu.CancelBackground<Message>(Adventure)]
+        );
+      end if;
+    when Message.GameInput(Game.Input.Edit(const Text: string)):
+      Next := State with
+        Draft := Text;
+      end with;
+    when Message.GameInput(Game.Input.Scroll(const Position: Layout.ScrollPosition)):
+      Next := State with
+        Scroll := Position;
+      end with;
+    when Message.GameInput(Game.Input.Send):
+      const Text: string := State.Draft.Trim();
+      const Queue: Channels.Channel<string>? := Value.Commands;
+      if Text <> '' and (State.Status = '' or State.Status = 'Game.TurnRejected')
+        and Queue <> null and Queue.Writer.TryWrite(Text)
+      then
+        Next := State with
+          Draft := '';
+          Pending := Text;
+          Status := 'Game.Waiting';
+          Scroll := Layout.ScrollPosition.End;
+        end with;
+      end if;
+    when Message.GameEvent(Session.Event.Restored(const Frame: Session.Presentation)):
+      Next := State with
+        History := Frame.History;
+        RoomId := Frame.RoomId;
+        Image := Frame.Image;
+      end with;
+    when Message.GameEvent(Session.Event.Ready(const Frame: Session.Presentation)):
+      Next := State with
+        History := Frame.History;
+        RoomId := Frame.RoomId;
+        Image := Frame.Image;
+        Pending := '';
+        Status := '';
+        Scroll := Layout.ScrollPosition.End;
+      end with;
+    when Message.GameEvent(Session.Event.TurnRejected):
+      Next := State with
+        Draft := if State.Draft = '' then
+          State.Pending
+        else
+          State.Draft
+        end if;
+        Pending := '';
+        Status := 'Game.TurnRejected';
+      end with;
+    when Message.GameEvent(Session.Event.Failed(const Status: string)):
+      Next := State with
+        Failed := true;
+        Status := if Status <> '' then
+          Status
+        elsif State.Pending <> '' then
+          'Game.TurnFailed'
+        else
+          'Game.ConnectionFailed'
+        end if;
+      end with;
+    else
+  end case;
+
+  return Commit(
+    Value with
+      Adventure := Next;
+    end with
+  );
+end function;
+
+function UpdateMenu(Value: Model; Input: Menu.Message): Mvu.Transition<Model, Message>;
+begin
+  const Updated: Mvu.Transition<Menu.Model, Menu.Message> := Menu.Update(Value.MenuState, Input);
+  const Next: Model := Value with
+    MenuState := Updated.Model;
+  end with;
+  const Activates: bool := case Input of
+    when Menu.Message.Activate, Menu.Message.Click(_): true;
+    else false;
+  end case;
+  if Activates then
+    const Entry: string := Menu.EntryKeys(Updated.Model.HasSave)[Updated.Model.Selected];
+    if Entry = 'Menu.Settings' then
+      return Load(Next, Value.Saved);
+    end if;
+
+    if Entry = 'Menu.Start' or Entry = 'Menu.Restart' or Entry = 'Menu.Continue' then
+      return StartGame(Next, Entry = 'Menu.Continue', Channels.Channel.CreateUnbounded<string>());
+    end if;
+  end if;
+  const Mapped: Mvu.Transition<Menu.Model, Message> := Commands.MapTransition<Menu.Model, Menu.Message, Message>(
+    Updated, Message.StartInput
+  );
+  return new Mvu.Transition<Model, Message>(Next, Mapped.Commands);
+end function;
+
+function UpdateSettings(Value: Model; Draft: Store.Choice; Input: Settings.Input): Mvu.Transition<Model, Message>;
+begin
+  const Catalog: Acp.Catalog? := Value.Catalog;
+  case Input of
+    when Settings.Input.Agent(const Index: int):
+      const Agent: string := Agents.Agents[Index].Id;
+      return Load(
+        Value, if Agent = Value.Saved.Agent then
+          Value.Saved
+        else
+          new Store.Choice(Agent)
+        end if
+      );
+    when Settings.Input.Model(const Index: int):
+      if Catalog <> null and Draft.Model <> Catalog.Models[Index].Id then
+        return Load(
+          Value, Draft with
+            Model := Catalog.Models[Index].Id;
+          end with, true
+        );
+      end if;
+    when Settings.Input.Thinking(const Index: int):
+      if Catalog <> null and not Value.Loading then
+        return Commit(
+          Value with
+            Draft := Draft with
+              ThinkingLevel := Catalog.Thinking[Index].Id;
+            end with;
+          end with
+        );
+      end if;
+    when Settings.Input.Retry:
+      return Load(Value, Draft);
+    when Settings.Input.Back:
+      return Back(Value);
+    when Settings.Input.Save:
+      if Catalog <> null and not Value.Loading then
+        try
+          Store.Save(Value.SettingsPath, Draft);
+          return Back(
+            Value with
+              Saved := Draft;
+            end with
+          );
+        catch Failure: Sys.Exception when Failure is IO.IOException or Failure is
+          Sys.UnauthorizedAccessException do
+          return Commit(
+            Value with
+              Status := 'Settings.SaveFailed';
+            end with
+          );
+        end try;
+      end if;
+  end case;
+
+  return Commit(Value);
+end function;
+
+// Applies keyboard actions and ACP replies. Leaving the dialog cancels obsolete discovery.
+public function Update(Value: Model; Input: Message): Mvu.Transition<Model, Message>;
+begin
+  const State: Game.Model? := Value.Adventure;
+  if State <> null then
+    return UpdateGame(Value, State, Input);
+  end if;
+
+  const Draft: Store.Choice? := Value.Draft;
+  if Draft = null then
+    case Input of
+      when Message.StartInput(const MenuInput: Menu.Message):
+        return UpdateMenu(Value, MenuInput);
+      else
+        return Commit(Value);
+    end case;
+  end if;
+
+  case Input of
+    when Message.SettingsInput(const Action: Settings.Input):
+      return UpdateSettings(Value, Draft, Action);
+    when Message.OptionsLoaded(const Result: Acp.Result):
+      case Result of
+        when Acp.Result.Ready(const Catalog: Acp.Catalog):
+          const Replaced: bool := (Draft.Model <> '' and Draft.Model <> Catalog.ModelId)
+            or (Draft.ThinkingLevel <> '' and Draft.ThinkingLevel <> Catalog.ThinkingId);
+          return Commit(
+            Value with
+              Catalog := Catalog;
+              Draft := new Store.Choice(Draft.Agent, Catalog.ModelId, Catalog.ThinkingId);
+              Loading := false;
+              Status := if Replaced then
+                'Settings.Changed'
+              else
+                ''
+              end if;
+            end with
+          );
+        when Acp.Result.Failed(const Reason: Acp.Problem):
+          return Commit(
+            Value with
+              Catalog := null;
+              Loading := false;
+              Status := case Reason of
+                when Acp.Problem.MissingAgent: 'Settings.AgentMissing';
+                when Acp.Problem.SignInRequired: 'Settings.SignIn';
+                when Acp.Problem.Timeout: 'Settings.Timeout';
+                else 'Settings.AgentFailed';
+              end case;
+            end with
+          );
+      end case;
+    else
+      return Commit(Value);
+  end case;
+end function;
+
+// Displays the game menu or the settings dialog over the same terminal scene.
+public function View(Value: Model): E.Element<Message>;
+begin
+  const State: Game.Model? := Value.Adventure;
+  if State <> null then
+    return Views.Map<Game.Input, Message>(Game.View(State), Message.GameInput);
+  end if;
+
+  const Backdrop: E.Element<Message> := Views.Map<Menu.Message, Message>(
+    Start.View(Value.MenuState),
+    Message.StartInput
+  );
+  const Draft: Store.Choice? := Value.Draft;
+  if Draft = null then
+    return Backdrop;
+  end if;
+
+  return Settings.View<Message>(
+    Backdrop, Draft, Value.Catalog, Value.Status, Value.Loading,
+    Value.Catalog = null and not Value.Loading, Message.SettingsInput
+  );
+end function;
+
+// Resolves the theme for the active screen.
+public function Theme(Value: Model): Themes.Theme;
+begin
+  return if Value.Adventure <> null then
+    Game.Theme()
+  elsif Value.Draft = null then
+    Start.Theme()
+  else
+    Settings.Theme()
+  end if;
+end function;
+
+end unit;

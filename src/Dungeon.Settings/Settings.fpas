@@ -1,0 +1,84 @@
+// Loads and atomically writes the per-user game settings.
+unit Dungeon.Settings;
+
+uses Dungeon.DataFiles as Files, System as Sys, System.IO as IO, System.Text.Json as Json;
+
+// The stable identifiers selected for the game master's ACP session.
+public type Choice = record
+  // The agent's launcher identifier.
+  public Agent: string := 'codex';
+  // The ACP model value, or empty when the agent has no model selector.
+  public Model: string := '';
+  // The ACP thinking value, or empty when it cannot be configured.
+  public ThinkingLevel: string := '';
+end record;
+
+// Resolves the settings path even when the application data directory is new.
+public function DefaultPath(): string;
+begin
+  const Root: string := Sys.Environment.GetFolderPath(
+    Sys.Environment.SpecialFolder.ApplicationData,
+    Sys.Environment.SpecialFolderOption.DoNotVerify
+  );
+  if not IO.Path.IsPathFullyQualified(Root) then
+    raise new IO.IOException('The user configuration directory is unavailable.');
+  end if;
+
+  return IO.Path.Combine(Root, 'into-the-dungeon', 'settings.json');
+end function;
+
+// Creates the empty settings file, preserving any settings already on disk.
+public procedure EnsureExists(Path: string);
+begin
+  if not IO.Path.IsPathFullyQualified(Path) or not IO.File.Exists(Path) then
+    Files.Write(Path, '{}', false);
+  end if;
+end procedure;
+
+function Required(Root: Json.JsonElement; Key: string): string;
+begin
+  var Property: Json.JsonElement := new Json.JsonElement();
+  if Root.TryGetProperty(Key, out Property) and Property.ValueKind = Json.JsonValueKind.String then
+    return Property.GetString() ?? '';
+  end if;
+
+  raise new Json.JsonException('Missing settings field: ' + Key);
+end function;
+
+// Loads saved identifiers, using the default agent for the empty first-run file.
+public function Load(Path: string): Choice;
+begin
+  EnsureExists(Path);
+  try
+    const Root: Json.JsonElement := Json.JsonElement.Parse(IO.File.ReadAllText(Path));
+    if Root.ValueKind <> Json.JsonValueKind.Object then
+      raise new Json.JsonException('Expected a JSON object.');
+    end if;
+
+    if Root.GetPropertyCount() = 0 then
+      return new Choice();
+    end if;
+
+    return new Choice(
+      Required(Root, 'agent'),
+      Required(Root, 'model'),
+      Required(Root, 'thinkingLevel')
+    );
+  catch Failure: Json.JsonException do
+    raise new IO.InvalidDataException(
+      'Invalid settings.json. Delete it to recreate the default settings.',
+      Failure
+    );
+  end try;
+end function;
+
+// Replaces the file only after all three identifiers have been written.
+public procedure Save(Path: string; Selection: Choice);
+begin
+  const Options: Json.JsonSerializerOptions := new Json.JsonSerializerOptions();
+  Options.PropertyNamingPolicy := Json.JsonNamingPolicy.CamelCase;
+  Options.WriteIndented := true;
+  Files.Write(Path, Json.JsonSerializer.Serialize<Choice>(Selection, Options), true);
+end procedure;
+
+end unit;

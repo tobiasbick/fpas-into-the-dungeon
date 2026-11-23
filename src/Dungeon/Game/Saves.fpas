@@ -1,0 +1,69 @@
+// Stores the game's single continue slot next to the player settings.
+unit Dungeon.Game.Saves;
+
+uses
+  Dungeon.DataFiles as Files, Dungeon.Settings as Settings, Dungeon.Game.World as World,
+  System as Sys, System.IO as IO, System.Text.Json as Json;
+
+// A completed exchange. The opening scene has an empty command.
+public type Turn = record
+  public Command: string;
+  public Reply: string;
+  public RoomId: string := '';
+  public Action: string := '';
+  public Target: string := '';
+end record;
+
+// Identifies the ACP session and its player-visible conversation.
+public type Save = record
+  public GameMaster: Settings.Choice;
+  public SessionId: string;
+  public History: array of Turn;
+  // Absent in saves written before the two-room adventure.
+  public WorldState: World.State? := null;
+end record;
+
+// Locates the one resumable adventure.
+public function PathFor(SettingsPath: string): string;
+begin
+  return IO.Path.Combine(IO.Path.GetDirectoryName(SettingsPath) ?? '', 'adventure.json');
+end function;
+
+function Options(): Json.JsonSerializerOptions;
+begin
+  const Value: Json.JsonSerializerOptions := new Json.JsonSerializerOptions();
+  Value.PropertyNamingPolicy := Json.JsonNamingPolicy.CamelCase;
+  Value.WriteIndented := true;
+  return Value;
+end function;
+
+// Reads the exact ACP session and conversation stored by the client.
+public function Load(Path: string): Save;
+begin
+  const Value: Save? := Json.JsonSerializer.Deserialize<Save>(IO.File.ReadAllText(Path), Options());
+  if Value = null or Value.GameMaster = null or Value.GameMaster.Agent = ''
+    or Sys.String.IsNullOrWhiteSpace(Value.SessionId) or Value.History = null
+  then
+    raise new IO.InvalidDataException('Invalid adventure.json.');
+  end if;
+
+  for Entry: Turn in Value.History do
+    if Entry = null or Entry.Command = null or Entry.Reply = null then
+      raise new IO.InvalidDataException('Invalid adventure transcript.');
+    end if;
+  end for;
+  const State: World.State? := Value.WorldState;
+  if State <> null and not World.Valid(State) then
+    raise new IO.InvalidDataException('Invalid saved world.');
+  end if;
+
+  return Value;
+end function;
+
+// Replaces the slot atomically so a partial write cannot erase saved play.
+public procedure Write(Path: string; Value: Save);
+begin
+  Files.Write(Path, Json.JsonSerializer.Serialize<Save>(Value, Options()), true);
+end procedure;
+
+end unit;

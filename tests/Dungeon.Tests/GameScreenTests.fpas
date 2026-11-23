@@ -1,0 +1,91 @@
+// Exercises the framed game view with the production terminal keyboard bindings.
+unit Dungeon.Tests.GameScreenTests;
+
+uses
+  Dungeon.App as App, Dungeon.Game.Screen as Screen, Dungeon.Game.Saves as Saves,
+  Dungeon.Settings as Settings, Dungeon.StartMenu as Menu, Fpas.Ui.Tui.Application as Tui,
+  Fpas.Ui.TerminalExtensions.Input as Keys, Dungeon.Resources.Strings as Strings,
+  System as Sys, System.Collections.Generic as Collections, Xunit as X;
+
+procedure Key(Session: Tui.HeadlessSession; Pressed: Keys.Key);
+begin
+  discard Session.Send(Tui.Input.KeyPress(Pressed, Keys.KeyModifiers.None));
+  discard Session.Step();
+end procedure;
+
+function Contains(Frame: Tui.Frame; Text: string): bool;
+begin
+  return Sys.Array.Exists<string>(Frame.Lines, function(Line: string): bool => Line.Contains(Text));
+end function;
+
+[X.FactAttribute]
+public procedure PlaysAtEightyByTwentyFiveWithKeyboard();
+begin
+  const History: Collections.List<Saves.Turn> := new Collections.List<Saves.Turn>();
+  for Index: int := 1 to 22 do
+    History.Add(new Saves.Turn('Look ' + Index.ToString(), 'A passage appears.'));
+  end for;
+  const State: App.Model := new App.Model(
+    '', new Settings.Choice(), new Menu.Model(true),
+    Adventure := new Screen.Model(History.ToArray(), Status := '')
+  );
+  using const Session: Tui.HeadlessSession := Tui.StartHeadless<App.Model, App.Message>(
+    State, App.Update, App.View, 80, 25, App.Theme(State)
+  );
+  const Initial: Tui.Frame := Session.Snapshot();
+  const Editor: Tui.ControlSnapshot? := Sys.Array.Find<Tui.ControlSnapshot>(
+    Initial.Controls, function(Control: Tui.ControlSnapshot): bool => Control.Id = Screen.CommandId
+  );
+  X.Assert.NotNull(Editor);
+  if Editor <> null then
+    X.Assert.Equal<int>(3, Editor.Height);
+    X.Assert.Equal<int>(78, Editor.Width);
+  end if;
+
+  X.Assert.True(
+    Contains(Initial, Strings.Get('Game.RoomPlaceholder')),
+    string.Join(#10.ToString(), Initial.Lines)
+  );
+  X.Assert.True(Initial.Lines[23].Contains(Strings.Get('Game.Exit')));
+  X.Assert.True(Contains(Initial, '> Look 22'));
+  X.Assert.False(Contains(Initial, '> Look 1 '));
+
+  // Tab reaches the transcript and Home returns to its first turn.
+  const Log: Tui.ControlSnapshot? := Sys.Array.Find<Tui.ControlSnapshot>(
+    Initial.Controls, function(Control: Tui.ControlSnapshot): bool => Control.Id = 'game-log'
+  );
+  X.Assert.NotNull(Log);
+  if Log <> null and not Log.Focused then
+    Key(Session, Keys.Key.Tab);
+  end if;
+
+  Key(Session, Keys.Key.Home);
+  X.Assert.True(Contains(Session.Snapshot(), '> Look 1 '));
+  Key(Session, Keys.Key.End);
+  X.Assert.True(Contains(Session.Snapshot(), '> Look 22'));
+
+  Key(Session, Keys.Key.Tab);
+  const Draft: string := 'first' + #10 + 'second' + #10 + 'third' + #10 + 'fourth';
+  discard Session.Send(Tui.Input.Paste(Draft));
+  discard Session.Step();
+  const Editing: Tui.Frame := Session.Snapshot();
+  const Filled: Tui.ControlSnapshot? := Sys.Array.Find<Tui.ControlSnapshot>(
+    Editing.Controls, function(Control: Tui.ControlSnapshot): bool => Control.Id = Screen.CommandId
+  );
+  if Filled <> null then
+    X.Assert.Equal<string>(Draft, Filled.Value);
+  end if;
+
+  X.Assert.True(Contains(Editing, 'fourth'));
+  X.Assert.False(Contains(Editing, 'first'));
+
+  discard Session.Send(Tui.Input.Resize(120, 34));
+  discard Session.Step();
+  const Resized: Tui.Frame := Session.Snapshot();
+  X.Assert.Equal<int>(120, Resized.Columns);
+  X.Assert.True(Resized.Lines[32].Contains(Strings.Get('Game.Exit')));
+  Key(Session, Keys.Key.F10);
+  X.Assert.False(Session.IsOpen());
+end procedure;
+
+end unit;

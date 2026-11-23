@@ -1,0 +1,84 @@
+// Covers the on-disk continue slot across application starts.
+unit Dungeon.Tests.AdventureSaveTests;
+
+uses
+  Dungeon.App as App, Dungeon.Game.Saves as Saves, Dungeon.Settings as Settings,
+  Dungeon.Game.World as World, Dungeon.Game.Art as Art, Dungeon.EmberArt as Ember,
+  System as Sys, System.IO as IO, Xunit as X;
+
+[X.FactAttribute]
+public procedure RestoresOneAdventureAndItsTranscript();
+begin
+  const Temporary: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-adventure-');
+  try
+    const SettingsPath: string := IO.Path.Combine(Temporary.FullName, 'settings.json');
+    const Path: string := Saves.PathFor(SettingsPath);
+    X.Assert.False(App.Open(SettingsPath).MenuState.HasSave);
+    const GameMaster: Settings.Choice := new Settings.Choice('claude', 'model', 'high');
+    const Opening: Saves.Turn := new Saves.Turn('', 'A stone arch stands ahead.');
+    const Turn: Saves.Turn := new Saves.Turn('listen' + #10 + 'look', 'Water drips from the arch.');
+    const Started: World.State := World.NewAdventure();
+    discard X.Assert.Throws<Sys.ArgumentException>(
+      procedure() begin
+        discard World.Apply(Started, 'move', World.Grotto);
+      end procedure
+    );
+    const WithKey: World.State := World.Apply(Started, 'take_key', World.BrassKey);
+    const Opened: World.State := World.Apply(WithKey, 'open_grate', 'north-grate');
+    const Arrived: World.State := World.Apply(Opened, 'move', World.Grotto);
+    Saves.Write(Path, new Saves.Save(GameMaster, 'first-session', [Opening, Turn], Arrived));
+
+    X.Assert.True(App.Open(SettingsPath).MenuState.HasSave);
+    const Loaded: Saves.Save := Saves.Load(Path);
+    X.Assert.Equal<string>('first-session', Loaded.SessionId);
+    X.Assert.Equal<Settings.Choice>(GameMaster, Loaded.GameMaster);
+    X.Assert.Equal<Saves.Turn>([Opening, Turn], Loaded.History);
+    X.Assert.Equal<World.State?>(Arrived, Loaded.WorldState);
+
+    Saves.Write(Path, new Saves.Save(new Settings.Choice(), 'new-session', [Opening]));
+    const Replacement: Saves.Save := Saves.Load(Path);
+    X.Assert.Equal<string>('new-session', Replacement.SessionId);
+    X.Assert.Equal<Saves.Turn>(Opening, X.Assert.Single<Saves.Turn>(Replacement.History));
+  finally
+    Temporary.Delete(true);
+  end try;
+end procedure;
+
+[X.FactAttribute]
+public procedure ReusesTheSavedIllustrationAfterReturning();
+begin
+  const Temporary: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-art-');
+  try
+    const Path: string := IO.Path.Combine(Temporary.FullName, 'adventure.json');
+    const Started: World.State := World.NewAdventure();
+    const Pump: Ember.Scene? := Art.Load(Path, Started);
+    X.Assert.NotNull(Pump);
+    const WithKey: World.State := World.Apply(Started, 'take_key', World.BrassKey);
+    const Opened: World.State := World.Apply(WithKey, 'open_grate', 'north-grate');
+    const Arrived: World.State := World.Apply(Opened, 'move', World.Grotto);
+    X.Assert.NotNull(Art.Load(Path, Arrived));
+    const Back: World.State := World.Apply(Arrived, 'move', World.Entrance);
+    const SavedArt: string := IO.Path.Combine(
+      Temporary.FullName, 'art', Started.AdventureId, 'pump-room-ember-v1.png'
+    );
+    const Marker: Sys.DateTime := new Sys.DateTime(2020, 1, 1);
+    IO.File.SetLastWriteTimeUtc(SavedArt, Marker);
+    const Returned: Ember.Scene? := Art.Load(Path, Back);
+    X.Assert.NotNull(Returned);
+    if Pump <> null and Returned <> null then
+      X.Assert.Equal<int>(Pump.Columns, Returned.Columns);
+      X.Assert.Equal<int>(Pump.Rows, Returned.Rows);
+      for Row: int := 0 to Pump.Rows * 2 - 1 do
+        for Column: int := 0 to Pump.Columns - 1 do
+          X.Assert.Equal<int>(Pump.Pixel(Column, Row), Returned.Pixel(Column, Row));
+        end for;
+      end for;
+    end if;
+
+    X.Assert.Equal<Sys.DateTime>(Marker, IO.File.GetLastWriteTimeUtc(SavedArt));
+  finally
+    Temporary.Delete(true);
+  end try;
+end procedure;
+
+end unit;

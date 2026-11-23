@@ -1,0 +1,379 @@
+// Runs the adventure, ACP session and the single-writer turn loop.
+unit Dungeon.Game.Session;
+
+uses
+  Dungeon.Acp.Processes as Agents, Dungeon.Acp.Discovery as Acp, Dungeon.Acp.ClientCallbacks as Callbacks,
+  Dungeon.Game.Saves as Saves, Dungeon.Game.World as World, Dungeon.Game.Art as Art,
+  Dungeon.Game.TurnTools as Tools, Dungeon.Mcp.Transport as Mcp, Dungeon.EmberArt as Ember,
+  Dungeon.Settings as Settings, dotacp.client as Client, dotacp.@protocol as P, StreamJsonRpc as Rpc,
+  System as Sys, System.IO as IO, System.Globalization as Global, System.Text.Json as Json,
+  System.Collections.Concurrent as Collections, System.Collections.Generic as Lists, System.Text as Buffers,
+  System.Threading as Threads, System.Threading.Channels as Channels, System.Threading.Tasks as Tasks;
+
+// A complete frame of player-visible adventure data.
+public type Presentation = record
+  public History: array of Saves.Turn;
+  public RoomId: string;
+  public Image: Ember.Scene?;
+end record;
+
+public type Event = variant
+  Restored(Value: Presentation);
+  Ready(Value: Presentation);
+  TurnRejected;
+  Failed(Status: string);
+end variant;
+
+async function Prompt(
+  Connection: Client.Connection; Id: P.SessionId; Text: string; Token: Threads.CancellationToken
+): Tasks.Task<bool>;
+begin
+  const Content: P.TextContent := new P.TextContent();
+  Content.Text := Text;
+  const Request: P.PromptRequest := new P.PromptRequest();
+  Request.SessionId := Id;
+  Request.Prompt := [Content];
+  using const Deadline: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
+    Token
+  );
+  Deadline.CancelAfter(Sys.TimeSpan.FromMinutes(3));
+  try
+    const Result: P.PromptResponse := await Connection.PromptAsync(Request, Deadline.Token);
+    return Result.StopReason = P.StopReason.EndTurn;
+  finally
+    if Deadline.IsCancellationRequested then
+      const Cancel: P.CancelNotification := new P.CancelNotification();
+      Cancel.SessionId := Id;
+      try
+        using const CancelDeadline: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(
+          750
+        );
+        await Connection.CancelAsync(Cancel, CancelDeadline.Token).WaitAsync(CancelDeadline.Token);
+      catch Failure: Sys.Exception do
+        // Connection disposal closes the transport if the agent no longer responds.
+      end try;
+    end if;
+  end try;
+end function;
+
+async function NewSession(
+  Connection: Client.Connection; Directory: string; Choice: Settings.Choice;
+  Servers: array of P.McpServer?; Token: Threads.CancellationToken
+): Tasks.Task<P.SessionId>;
+begin
+  const Request: P.NewSessionRequest := new P.NewSessionRequest();
+  Request.Cwd := Directory;
+  Request.McpServers := Servers;
+  const Started: P.NewSessionResponse := await Connection.NewSessionAsync(Request, Token);
+  discard await Acp.Configure(
+    Connection,
+    Started.SessionId,
+    Started.ConfigOptions,
+    Choice,
+    true,
+    Token
+  );
+  return Started.SessionId;
+end function;
+
+async function OpenSession(
+  Connection: Client.Connection; Directory: string; Choice: Settings.Choice;
+  Saved: Saves.Save?; Servers: array of P.McpServer?; Token: Threads.CancellationToken
+): Tasks.Task<P.SessionId>;
+begin
+  const Initialized: P.InitializeResponse := await Agents.Initialize(Connection, Token);
+  const Caps: P.AgentCapabilities? := Initialized.AgentCapabilities;
+  if Saved <> null and Caps <> null then
+    const Id: P.SessionId := new P.SessionId(Saved.SessionId);
+    const Sessions: P.SessionCapabilities? := Caps.SessionCapabilities;
+    try
+      if Caps.LoadSession then
+        const Load: P.LoadSessionRequest := new P.LoadSessionRequest();
+        Load.SessionId := Id;
+        Load.Cwd := Directory;
+        Load.McpServers := Servers;
+        const Loaded: P.LoadSessionResponse := await Connection.LoadSessionAsync(Load, Token);
+        discard await Acp.Configure(Connection, Id, Loaded.ConfigOptions, Choice, true, Token);
+        return Id;
+      elsif Sessions <> null and Sessions.Resume <> null then
+        const Resume: P.ResumeSessionRequest := new P.ResumeSessionRequest();
+        Resume.SessionId := Id;
+        Resume.Cwd := Directory;
+        Resume.McpServers := Servers;
+        const Resumed: P.ResumeSessionResponse := await Connection.ResumeSessionAsync(
+          Resume,
+          Token
+        );
+        discard await Acp.Configure(Connection, Id, Resumed.ConfigOptions, Choice, true, Token);
+        return Id;
+      end if;
+    catch Failure: Rpc.RemoteInvocationException do
+      // The authoritative game state still allows play with a replacement ACP conversation.
+    end try;
+  end if;
+
+  return await NewSession(Connection, Directory, Choice, Servers, Token);
+end function;
+
+function TurnPrompt(Id: string; Value: Tools.Context; Command: string): string;
+begin
+  const Message: Buffers.StringBuilder := new Buffers.StringBuilder();
+  discard Message.AppendLine(
+    'You are the game master of Into the Dungeon. Treat the saved world facts below as authoritative.'
+  );
+  discard Message.AppendLine(
+    'Use only the dungeon MCP tools. Read get_room with the supplied turnId and current roomId. Use get_history for older turns if useful.'
+  );
+  discard Message.AppendLine(
+    'Call submit_turn exactly once for the result. Supply turnId, action, target, and short plain-text reply in the player language.'
+  );
+  discard Message.AppendLine(
+    'Use one action per turn. To describe a blocked attempt or look around use none with an empty target.'
+  );
+  discard Message.AppendLine(
+    'Use take_key with brass-key, open_grate with north-grate, or move with the adjacent room ID. Only claim a change the world allows.'
+  );
+  discard Message.AppendLine(
+    'If a tool rejects an action, correct it. Finish after submit_turn succeeds.'
+  );
+  discard Message.AppendLine('turnId: ' + Id);
+  discard Message.AppendLine('World brief: ' + Value.WorldState.WorldBrief);
+  discard Message.AppendLine('Current room ID: ' + Value.WorldState.RoomId);
+  discard Message.AppendLine(
+    'Inventory: ' + (if Value.WorldState.HasKey then
+      World.BrassKey
+    else
+      'empty'
+    end if)
+  );
+  discard Message.AppendLine('Grate open: ' + Value.WorldState.GrateOpen.ToString());
+  discard Message.AppendLine('Recent completed turns:');
+  for Index: int := Sys.Math.Max(0, Value.History.Length - 4) to Value.History.Length - 1 do
+    discard Message.AppendLine(Json.JsonSerializer.Serialize<Saves.Turn>(Value.History[Index]));
+  end for;
+
+  if Value.Opening then
+    discard Message.AppendLine(
+      'Describe the opening scene. Use action none. Language: ' +
+      Global.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
+    );
+  else
+    discard Message.AppendLine(
+      'Player command as JSON: ' + Json.JsonSerializer.Serialize<string>(Command)
+    );
+  end if;
+
+  return Message.ToString();
+end function;
+
+async function Propose(
+  Connection: Client.Connection; Id: P.SessionId; Current: Saves.Save; Path: string; State: World.State;
+  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Command: string; Opening: bool;
+  Token: Threads.CancellationToken
+): Tasks.Task<Tools.Proposal?>;
+begin
+  const TurnId: string := Sys.Guid.NewGuid().ToString('N');
+  const Submissions: Collections.ConcurrentDictionary<string, Tools.Proposal?> := new Collections.ConcurrentDictionary<string, Tools.Proposal?>();
+  const Context: Tools.Context := new Tools.Context(
+    Path,
+    State,
+    Current.History,
+    Opening,
+    Submissions
+  );
+  discard Active.TryAdd(TurnId, Context);
+  try
+    if not await Prompt(Connection, Id, TurnPrompt(TurnId, Context, Command), Token) then
+      return null;
+    end if;
+
+    Token.ThrowIfCancellationRequested();
+    var Proposal: Tools.Proposal? := null;
+    discard Submissions.TryGetValue('turn', out Proposal);
+    return Proposal;
+  finally
+    var Removed: Tools.Context? := null;
+    discard Active.TryRemove(TurnId, out Removed);
+  end try;
+end function;
+
+function Commit(Path: string; Current: Saves.Save; State: World.State; Command: string; Value: Tools.Proposal): Saves.Save;
+begin
+  const History: Lists.List<Saves.Turn> := new Lists.List<Saves.Turn>(Current.History);
+  History.Add(new Saves.Turn(Command, Value.Reply, State.RoomId, Value.Action, Value.Target));
+  const Next: Saves.Save := Current with
+    History := History.ToArray();
+    WorldState := Value.WorldState;
+  end with;
+  Saves.Write(Path, Next);
+  return Next;
+end function;
+
+function Present(Path: string; History: array of Saves.Turn; State: World.State): Presentation;
+begin
+  return new Presentation(History, State.RoomId, Art.Load(Path, State));
+end function;
+
+async function Play(
+  Connection: Client.Connection; Directory: string; Path: string; Choice: Settings.Choice;
+  Saved: Saves.Save?; Initial: World.State; Servers: array of P.McpServer?;
+  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: Channels.Channel<string>;
+  Post: function(Event): Tasks.Task; Token: Threads.CancellationToken
+): Tasks.Task<bool>;
+begin
+  using const Deadline: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
+    Token
+  );
+  Deadline.CancelAfter(Sys.TimeSpan.FromSeconds(30));
+  const Id: P.SessionId := await OpenSession(
+    Connection,
+    Directory,
+    Choice,
+    Saved,
+    Servers,
+    Deadline.Token
+  );
+  Deadline.CancelAfter(Threads.Timeout.Infinite);
+  var Current: Saves.Save := new Saves.Save(
+    Choice, Id.ToString() ?? '', if Saved = null then
+      []
+    else
+      Saved.History
+    end if, Initial
+  );
+  var State: World.State := Initial;
+  if Saved = null then
+    const Opening: Tools.Proposal? := await Propose(
+      Connection,
+      Id,
+      Current,
+      Path,
+      State,
+      Active,
+      '',
+      true,
+      Token
+    );
+    if Opening = null then
+      await Post(Event.Failed('Game.ToolsFailed'));
+      return false;
+    end if;
+
+    Current := Commit(Path, Current, State, '', Opening);
+  elsif Saved.SessionId <> Current.SessionId or Saved.WorldState = null then
+    Saves.Write(Path, Current);
+  end if;
+  var Frame: Presentation := Present(Path, Current.History, State);
+  await Post(Event.Ready(Frame));
+
+  while true do
+    const Command: string := await Queue.Reader.ReadAsync(Token);
+    const Next: Tools.Proposal? := await Propose(
+      Connection,
+      Id,
+      Current,
+      Path,
+      State,
+      Active,
+      Command,
+      false,
+      Token
+    );
+    if Next = null then
+      await Post(Event.TurnRejected);
+    else
+      Current := Commit(Path, Current, State, Command, Next);
+      State := Next.WorldState;
+      Frame := if Frame.RoomId = State.RoomId and Frame.Image <> null then
+        Frame with
+          History := Current.History;
+        end with
+      else
+        Present(Path, Current.History, State)
+      end if;
+      await Post(Event.Ready(Frame));
+    end if;
+  end while;
+end function;
+
+// Owns the save slot and the MCP listener for one active adventure.
+public async function Run(
+  Path: string; Choice: Settings.Choice; ContinueGame: bool; Queue: Channels.Channel<string>;
+  Post: function(Event): Tasks.Task; Token: Threads.CancellationToken
+): Tasks.Task;
+begin
+  try
+    using const Lease: IO.FileStream := new IO.FileStream(
+      Path + '.lock', IO.FileMode.OpenOrCreate, IO.FileAccess.ReadWrite, IO.FileShare.None
+    );
+    const Saved: Saves.Save? := if ContinueGame then
+      Saves.Load(Path)
+    else
+      null
+    end if;
+    const Initial: World.State := if Saved = null then
+      World.NewAdventure()
+    else
+      Saved.WorldState ?? World.NewAdventure()
+    end if;
+    if Saved <> null then
+      await Post(Event.Restored(Present(Path, Saved.History, Initial)));
+    end if;
+    const Selected: Settings.Choice := if Saved = null then
+      Choice
+    else
+      Saved.GameMaster
+    end if;
+    const Exe: string := Agents.Resolve(Selected.Agent);
+    if Exe = '' then
+      await Post(Event.Failed('Settings.AgentMissing'));
+      return;
+    end if;
+
+    const Directory: string := IO.Directory.CreateDirectory(
+      IO.Path.Combine(IO.Path.GetDirectoryName(Path) ?? '', 'game-master')
+    ).FullName;
+    const Active: Collections.ConcurrentDictionary<string, Tools.Context?> := new Collections.ConcurrentDictionary<string, Tools.Context?>();
+    const PipeName: string := 'dungeon-' + Sys.Guid.NewGuid().ToString('N');
+    const Servers: array of P.McpServer? := [Mcp.AgentConfig(PipeName)];
+    using const Stop: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
+      Token
+    );
+    const Listener: Tasks.Task := Mcp.Listen(PipeName, Tools.Register(Active), Stop.Token);
+    const Peer: Callbacks.Callbacks := new Callbacks.Callbacks(
+      procedure(Notification: P.SessionNotification) begin end procedure,
+      procedure() begin
+        discard Queue.Writer.TryComplete();
+      end procedure
+    );
+    try
+      discard await Agents.Run<bool>(
+        Selected.Agent, Exe, Directory, Peer,
+        function(Connection: Client.Connection): Tasks.Task<bool> => Play(
+          Connection,
+          Directory,
+          Path,
+          Selected,
+          Saved,
+          Initial,
+          Servers,
+          Active,
+          Queue,
+          Post,
+          Token
+        )
+      );
+    finally
+      Stop.Cancel();
+      await Listener;
+    end try;
+  catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
+    await Post(Event.Failed('Settings.Timeout'));
+  catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
+    await Post(Event.Failed('Settings.SignIn'));
+  finally
+    discard Queue.Writer.TryComplete();
+  end try;
+end function;
+
+end unit;

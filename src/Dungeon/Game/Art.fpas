@@ -1,0 +1,90 @@
+// Materializes and loads the two versioned room illustrations.
+unit Dungeon.Game.Art;
+
+uses
+  Dungeon.Game.World as World, Dungeon.EmberArt as Ember, StbImageSharp as Png,
+  System as Sys, System.IO as IO, System.Reflection as Reflection;
+
+const StyleVersion: string := 'ember-v1';
+
+function Name(RoomId: string): string;
+begin
+  if not World.KnownRoom(RoomId) then
+    raise new Sys.ArgumentException('Unknown room art ID.');
+  end if;
+
+  return RoomId + '-' + StyleVersion + '.png';
+end function;
+
+function PathFor(SavePath: string; State: World.State; RoomId: string): string;
+begin
+  return IO.Path.Combine(
+    IO.Path.GetDirectoryName(SavePath) ?? '', 'art', State.AdventureId, Name(RoomId)
+  );
+end function;
+
+public function Exists(SavePath: string; State: World.State; RoomId: string): bool;
+begin
+  return IO.File.Exists(PathFor(SavePath, State, RoomId));
+end function;
+
+procedure Publish(Path: string; RoomId: string);
+begin
+  discard IO.Directory.CreateDirectory(IO.Path.GetDirectoryName(Path) ?? '');
+  const Input: IO.Stream? := Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(
+    'Dungeon.Rooms.' + Name(RoomId)
+  );
+  if Input = null then
+    raise new IO.FileNotFoundException('The packaged room illustration is missing.');
+  end if;
+
+  using const Source: IO.Stream := Input;
+  const Temp: string := Path + '.' + Sys.Guid.NewGuid().ToString('N') + '.tmp';
+  try
+    using const Output: IO.FileStream := IO.File.Create(Temp);
+    Source.CopyTo(Output);
+  catch Failure: Sys.Exception do
+    IO.File.Delete(Temp);
+    raise;
+  end try;
+
+  try
+    IO.File.Move(Temp, Path, false);
+  catch Failure: IO.IOException when IO.File.Exists(Path) do
+    // A concurrent request already published this illustration.
+  finally
+    IO.File.Delete(Temp);
+  end try;
+end procedure;
+
+// The adventure worker calls this after committing the current room.
+public function Load(SavePath: string; State: World.State): Ember.Scene?;
+begin
+  const Path: string := PathFor(SavePath, State, State.RoomId);
+  try
+    if not IO.File.Exists(Path) then
+      Publish(Path, State.RoomId);
+    end if;
+
+    using const Source: IO.FileStream := IO.File.OpenRead(Path);
+    const Image: Png.ImageResult? := Png.ImageResult.FromStream(
+      Source,
+      Png.ColorComponents.RedGreenBlue
+    );
+    if Image = null or Image.Width <= 0 or Image.Height <= 0 or Image.Height mod 2 <> 0 then
+      return null;
+    end if;
+    const Pixels: array of byte := Image.Data ?? Sys.Array.Empty<byte>();
+    if cast<long>(Image.Width) * Image.Height * 3 <> Pixels.Length then
+      return null;
+    end if;
+
+    return Ember.Scene.FromPixels(Image.Width, Image.Height div 2, Pixels);
+  catch Failure: Sys.Exception when Failure is IO.IOException or Failure is
+    Sys.UnauthorizedAccessException
+    or Failure is Sys.InvalidOperationException do
+    return null;
+  end try;
+end function;
+
+end unit;
