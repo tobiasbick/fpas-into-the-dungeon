@@ -1,0 +1,132 @@
+// Verifies room and turn rules through the production MCP server.
+unit Dungeon.Tests.McpTurnTests;
+
+uses
+  Dungeon.Mcp.Transport as Transport, Dungeon.Game.World as World, Dungeon.Game.TurnTools as Tools,
+  Dungeon.Game.Saves as Saves,
+  ModelContextProtocol.Client as Client, ModelContextProtocol.Protocol as P,
+  System as Sys, System.IO.Pipes as Pipes, System.Collections.Concurrent as Concurrent,
+  System.Collections.Generic as Lists, System.Threading as Threads, System.Threading.Tasks as Tasks,
+  Xunit as X;
+
+async function Exercise(): Tasks.Task;
+begin
+  const Name: string := 'dungeon-' + Sys.Guid.NewGuid().ToString('N');
+  using const Stop: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(10000);
+  const Pending: Concurrent.ConcurrentDictionary<string, Tools.Proposal?> := new Concurrent.ConcurrentDictionary<string, Tools.Proposal?>();
+  const Active: Concurrent.ConcurrentDictionary<string, Tools.Context?> := new Concurrent.ConcurrentDictionary<string, Tools.Context?>();
+  const Initial: World.State := World.NewAdventure();
+  const History: array of Saves.Turn := [
+    new Saves.Turn('listen at the arch', 'You hear water.', World.Entrance),
+    new Saves.Turn('look at the pump', 'The pipe drips.', World.Entrance),
+    new Saves.Turn('old transcript', 'The ruins are dark.')
+  ];
+  discard Active.TryAdd(
+    'active',
+    new Tools.Context('adventure.json', Initial, History, false, Pending)
+  );
+  const Server: Tasks.Task := Transport.Listen(Name, Tools.Register(Active), Stop.Token);
+  try
+    using const Pipe: Pipes.NamedPipeClientStream := new Pipes.NamedPipeClientStream(
+      '.', Name, Pipes.PipeDirection.InOut, Pipes.PipeOptions.Asynchronous
+    );
+    await Pipe.ConnectAsync(Stop.Token);
+    const Options: Client.McpClientOptions := new Client.McpClientOptions();
+    Options.ProtocolVersion := '2025-11-25';
+    await using const Peer: Client.McpClient := await Client.McpClient.CreateAsync(
+      new P.StreamClientTransport(Pipe, Pipe), Options, null, Stop.Token
+    );
+    const Args: Lists.Dictionary<string, object?> := new Lists.Dictionary<string, object?>();
+    Args['turnId'] := 'active';
+    Args['roomId'] := World.Entrance;
+    const Room: P.CallToolResult := await Peer.CallToolAsync(
+      'get_room',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.False(Room.IsError ?? false);
+
+    Args['limit'] := 1;
+    const Recent: P.CallToolResult := await Peer.CallToolAsync(
+      'get_history',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.False(Recent.IsError ?? false);
+    const Block: P.ContentBlock? := X.Assert.Single<P.ContentBlock>(Recent.Content);
+    if Block <> null and Block is P.TextContentBlock then
+      const Text: string := cast<P.TextContentBlock>(Block).Text;
+      X.Assert.Contains('look at the pump', Text);
+      X.Assert.DoesNotContain('listen at the arch', Text);
+      X.Assert.DoesNotContain('old transcript', Text);
+    else
+      X.Assert.Fail('Expected the filtered history as text.');
+    end if;
+
+    discard Args.Remove('limit');
+    discard Args.Remove('roomId');
+    Args['action'] := 'move';
+    Args['target'] := World.Grotto;
+    Args['reply'] := 'You go north.';
+    const Blocked: P.CallToolResult := await Peer.CallToolAsync(
+      'submit_turn',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.True(Blocked.IsError ?? false);
+    X.Assert.True(Pending.IsEmpty);
+
+    Args['action'] := 'take_key';
+    Args['target'] := World.BrassKey;
+    Args['reply'] := 'You take the brass key.';
+    const Accepted: P.CallToolResult := await Peer.CallToolAsync(
+      'submit_turn',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.False(Accepted.IsError ?? false);
+    const Replay: P.CallToolResult := await Peer.CallToolAsync(
+      'submit_turn',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.False(Replay.IsError ?? false);
+    const Proposal: Tools.Proposal? := Pending['turn'];
+    X.Assert.NotNull(Proposal);
+    if Proposal <> null then
+      X.Assert.True(Proposal.WorldState.HasKey);
+      X.Assert.False(Initial.HasKey);
+    end if;
+
+    Args['turnId'] := 'expired';
+    const Expired: P.CallToolResult := await Peer.CallToolAsync(
+      'submit_turn',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.True(Expired.IsError ?? false);
+  finally
+    Stop.Cancel();
+    await Server;
+  end try;
+end function;
+
+[X.FactAttribute]
+public procedure ValidatesAndStagesOneProposalPerTurn();
+begin
+  Exercise().GetAwaiter().GetResult();
+end procedure;
+
+end unit;

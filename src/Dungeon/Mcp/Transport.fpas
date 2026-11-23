@@ -1,0 +1,104 @@
+// Connects the ACP agent's stdio subprocess to the in-process MCP server.
+unit Dungeon.Mcp.Transport;
+
+uses
+  dotacp.@protocol as Acp, ModelContextProtocol.Server as Mcp,
+  System as Sys, System.IO as IO, System.IO.Pipes as Pipes,
+  System.Reflection as Reflection, System.Console as Console,
+  System.Collections.Generic as Lists, System.Threading as Threads, System.Threading.Tasks as Tasks;
+
+const Mode: string := '--mcp-stdio';
+
+public function AgentConfig(PipeName: string): Acp.McpServerStdio;
+begin
+  const Executable: string := Sys.Environment.ProcessPath ?? '';
+  if not IO.Path.IsPathFullyQualified(Executable) then
+    raise new IO.IOException('Unable to locate the game executable for MCP.');
+  end if;
+  const Config: Acp.McpServerStdio := new Acp.McpServerStdio();
+  Config.Command := Executable;
+  Config.Args := if IO.Path.GetFileNameWithoutExtension(Executable) = 'dotnet' then
+    [Reflection.Assembly.GetExecutingAssembly().Location, Mode, PipeName]
+  else
+    [Mode, PipeName]
+  end if;
+  Config.Env := [];
+  Config.Name := 'dungeon';
+  return Config;
+end function;
+
+async function Serve(Pipe: Pipes.NamedPipeServerStream; Options: Mcp.McpServerOptions; Token: Threads.CancellationToken): Tasks.Task;
+begin
+  using const Owned: Pipes.NamedPipeServerStream := Pipe;
+  await using const Server: Mcp.McpServer := Mcp.McpServer.Create(
+    new Mcp.StreamServerTransport(Owned, Owned), Options
+  );
+  try
+    await Server.RunAsync(Token);
+  catch Failure: Sys.OperationCanceledException when Token.IsCancellationRequested do
+  catch Failure: IO.IOException do
+    // The ACP agent can close a bridge before starting another one.
+  end try;
+end function;
+
+// Every connection shares the live game's turn context.
+public async function Listen(Name: string; Options: Mcp.McpServerOptions; Token: Threads.CancellationToken): Tasks.Task;
+begin
+  const Sessions: Lists.List<Tasks.Task> := new Lists.List<Tasks.Task>();
+  try
+    while not Token.IsCancellationRequested do
+      const Pipe: Pipes.NamedPipeServerStream := new Pipes.NamedPipeServerStream(
+        Name,
+        Pipes.PipeDirection.InOut,
+        Pipes.NamedPipeServerStream.MaxAllowedServerInstances,
+        Pipes.PipeTransmissionMode.Byte,
+        Pipes.PipeOptions.Asynchronous or Pipes.PipeOptions.CurrentUserOnly
+      );
+      try
+        await Pipe.WaitForConnectionAsync(Token);
+      catch Failure: Sys.Exception do
+        Pipe.Dispose();
+        raise;
+      end try;
+
+      discard Sessions.RemoveAll(function(Work: Tasks.Task): bool => Work.IsCompletedSuccessfully);
+      Sessions.Add(Serve(Pipe, Options, Token));
+    end while;
+  catch Failure: Sys.OperationCanceledException when Token.IsCancellationRequested do
+  finally
+    await Tasks.Task.WhenAll(Sessions);
+  end try;
+end function;
+
+async function Relay(Name: string): Tasks.Task;
+begin
+  using const Pipe: Pipes.NamedPipeClientStream := new Pipes.NamedPipeClientStream(
+    '.', Name, Pipes.PipeDirection.InOut, Pipes.PipeOptions.Asynchronous
+  );
+  await Pipe.ConnectAsync(5000);
+  using const Stop: Threads.CancellationTokenSource := new Threads.CancellationTokenSource();
+  using const Input: IO.Stream := Console.OpenStandardInput();
+  using const Output: IO.Stream := Console.OpenStandardOutput();
+  const Inbound: Tasks.Task := Input.CopyToAsync(Pipe, Stop.Token);
+  const Outbound: Tasks.Task := Pipe.CopyToAsync(Output, Stop.Token);
+  const Completed: Tasks.Task := await Tasks.Task.WhenAny([Inbound, Outbound]);
+  Stop.Cancel();
+  await Completed;
+end function;
+
+// The subprocess relays bytes only. The SDK in the game owns all MCP messages.
+public function RunIfRequested(Args: array of string): bool;
+begin
+  if Args.Length < 2 or Args[1] <> Mode then
+    return false;
+  end if;
+
+  if Args.Length <> 3 or not Args[2].StartsWith('dungeon-') then
+    raise new Sys.ArgumentException('Expected the local MCP pipe name.');
+  end if;
+
+  Relay(Args[2]).GetAwaiter().GetResult();
+  return true;
+end function;
+
+end unit;

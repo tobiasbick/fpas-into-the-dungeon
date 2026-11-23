@@ -28,6 +28,8 @@ The local feed in `.tmp/feed` needs matching packages for `Fpas.NET.Sdk`,
 
 The [console game screen](console-layouts.md) defines the first playable layout
 and how the start menu creates or resumes the single saved adventure.
+The [world state and room art](world-state.md) describe the two-room adventure,
+the game master tools, and the data that survives a restart.
 
 ## Game settings
 
