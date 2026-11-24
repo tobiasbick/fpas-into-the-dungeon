@@ -58,6 +58,24 @@ begin
   end case;
 end function;
 
+// Directions use only the obstruction. Local inspection can also offer the authored hint.
+public function PassageObstacle(Value: State; Edge: Catalog.Route; IncludeHint: bool): string;
+begin
+  if Matches(Value, Edge.Condition) then
+    return '';
+  end if;
+
+  if Value.Ending <> '' and (Edge.Condition = 'high' or Edge.Condition = 'low') then
+    return 'The gates are pinned. The lake level permanently closes this passage.';
+  end if;
+  const Reason: string := Edge.Obstacle ?? 'This passage is closed.';
+  if IncludeHint and not Sys.String.IsNullOrEmpty(Edge.Hint) then
+    return Reason + ' ' + Edge.Hint;
+  end if;
+
+  return Reason;
+end function;
+
 public function Visible(Value: State; Entry: Catalog.Encounter): bool;
 begin
   if Entry.Effect = 'remember' and (Entry.Action = 'operate' or Entry.Action = 'tell')
@@ -180,6 +198,30 @@ begin
   end case;
 end function;
 
+public function Outcome(Value: State; Entry: Catalog.Encounter): string;
+begin
+  for Reply: Catalog.Change in Entry.Replies ?? Sys.Array.Empty<Catalog.Change>() do
+    if Matches(Value, Reply.Condition) then
+      return Reply.Text;
+    end if;
+  end for;
+
+  return Entry.Result;
+end function;
+
+public function LocalEncounter(Value: State; Action: string; Target: string): Catalog.Encounter?;
+begin
+  for Entry: Catalog.Encounter in Catalog.At(
+    Value.RoomId
+  ).Room.Encounters ?? Sys.Array.Empty<Catalog.Encounter>() do
+    if Entry.Action = Action and Entry.Target = Target and Available(Value, Entry) then
+      return Entry;
+    end if;
+  end for;
+
+  return null;
+end function;
+
 // Applies only the actions offered by the current location.
 public function Apply(Value: State; Action: string; Target: string): State;
 begin
@@ -191,13 +233,10 @@ begin
     end with;
   end if;
 
-  for Entry: Catalog.Encounter in Catalog.At(
-    Value.RoomId
-  ).Room.Encounters ?? Sys.Array.Empty<Catalog.Encounter>() do
-    if Entry.Action = Action and Entry.Target = Target and Available(Value, Entry) then
-      return Resolve(Value, Entry);
-    end if;
-  end for;
+  const Entry: Catalog.Encounter? := LocalEncounter(Value, Action, Target);
+  if Entry <> null then
+    return Resolve(Value, Entry);
+  end if;
 
   raise new Sys.ArgumentException(
     'That action is unavailable here. Read get_room for exits, local actions and obstacles.'

@@ -1,0 +1,134 @@
+// Give directions over passages the player has actually crossed.
+unit Dungeon.Game.Navigation;
+
+uses
+  Dungeon.Game.Catalog as Catalog, Dungeon.Game.World as World, Dungeon.Game.Saves as Saves,
+  Dungeon.Game.Journal as Journal, System as Sys, System.Collections.Generic as Lists;
+
+public type Step = record
+  public FromId: string;
+  public Direction: string;
+  public ToId: string;
+  public ToName: string;
+  public Obstacle: string;
+end record;
+
+public type Directions = record
+  public Status: string;
+  public DestinationId: string;
+  public DestinationName: string;
+  public LastMetTurn: int;
+  public Steps: array of Step;
+end record;
+
+// A second search may include closed edges to explain where a known journey stops.
+function Path(State: World.State; Destination: string; Edges: Lists.HashSet<string>; IncludeClosed: bool): array of Step;
+begin
+  const Parents: Lists.Dictionary<string, Step> := new Lists.Dictionary<string, Step>();
+  const Queue: Lists.Queue<string> := new Lists.Queue<string>();
+  Queue.Enqueue(State.RoomId);
+  while Queue.Count > 0 do
+    const Here: string := Queue.Dequeue();
+    for Edge: Catalog.Route in Catalog.At(Here).Routes do
+      const NextId: string := Edge.Destination;
+      if NextId = State.RoomId or Parents.ContainsKey(NextId) or not Edges.Contains(
+        Here + '/' + NextId
+      )
+      then
+        continue;
+      end if;
+
+      const Obstacle: string := World.PassageObstacle(State, Edge, false);
+      if Obstacle <> '' and not IncludeClosed then
+        continue;
+      end if;
+
+      Parents.Add(
+        NextId,
+        new Step(Here, Edge.Direction, NextId, Catalog.DisplayName(NextId), Obstacle)
+      );
+      if NextId = Destination then
+        const Trail: Lists.Stack<Step> := new Lists.Stack<Step>();
+        var Id: string := NextId;
+        while Id <> State.RoomId do
+          const Leg: Step := Parents[Id];
+          Trail.Push(Leg);
+          Id := Leg.FromId;
+        end while;
+
+        return Trail.ToArray();
+      end if;
+
+      Queue.Enqueue(NextId);
+    end for;
+  end while;
+
+  return [];
+end function;
+
+public function Find(State: World.State; History: array of Saves.Turn; Destination: string): Directions;
+begin
+  const Visited: Lists.HashSet<string> := new Lists.HashSet<string>();
+  const Edges: Lists.HashSet<string> := new Lists.HashSet<string>();
+  discard Visited.Add(State.RoomId);
+  const Query: string := Destination.Trim();
+  var ToId: string := '';
+  var LastMet: int := 0;
+  for Index: int := 0 to History.Length - 1 do
+    const Entry: Saves.Turn := History[Index];
+    if not Catalog.Contains(Entry.RoomId) then
+      continue;
+    end if;
+
+    discard Visited.Add(Entry.RoomId);
+    if Entry.Action = 'move' and Catalog.Contains(Entry.Target) then
+      discard Visited.Add(Entry.Target);
+      discard Edges.Add(Entry.RoomId + '/' + Entry.Target);
+      discard Edges.Add(Entry.Target + '/' + Entry.RoomId);
+    elsif Query <> '' and string.Equals(
+      Journal.Speaker(Entry),
+      Query,
+      Sys.StringComparison.OrdinalIgnoreCase
+    )
+    then
+      ToId := Entry.RoomId;
+      LastMet := Index + 1;
+    end if;
+  end for;
+
+  if ToId = '' then
+    for Id: string in Visited do
+      const Room: Catalog.Location := Catalog.At(Id).Room;
+      if string.Equals(Id, Query, Sys.StringComparison.OrdinalIgnoreCase)
+        or string.Equals(Room.Name, Query, Sys.StringComparison.OrdinalIgnoreCase)
+        or string.Equals(Room.German, Query, Sys.StringComparison.OrdinalIgnoreCase)
+      then
+        ToId := Id;
+        break;
+      end if;
+    end for;
+  end if;
+
+  if ToId = '' then
+    return new Directions('unknown', '', '', 0, []);
+  end if;
+  const Name: string := Catalog.DisplayName(ToId);
+  if ToId = State.RoomId then
+    return new Directions('here', ToId, Name, LastMet, []);
+  end if;
+  const Open: array of Step := Path(State, ToId, Edges, false);
+  if Open.Length > 0 then
+    return new Directions('route', ToId, Name, LastMet, Open);
+  end if;
+  const Attempt: Lists.List<Step> := new Lists.List<Step>();
+  for Leg: Step in Path(State, ToId, Edges, true) do
+    Attempt.Add(Leg);
+    if Leg.Obstacle <> '' then
+      return new Directions('blocked', ToId, Name, LastMet, Attempt.ToArray());
+    end if;
+  end for;
+
+  return new Directions('unmapped', ToId, Name, LastMet, []);
+end function;
+
+end unit;

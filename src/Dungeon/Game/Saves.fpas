@@ -2,7 +2,7 @@
 unit Dungeon.Game.Saves;
 
 uses
-  Dungeon.DataFiles as Files, Dungeon.Settings as Settings, Dungeon.Game.World as World,
+  Dungeon.DataFiles as Files, Dungeon.Settings as Settings, Dungeon.Game.World as World, Dungeon.Game.Catalog as Catalog,
   System as Sys, System.IO as IO, System.Text.Json as Json;
 
 // A completed exchange. The opening scene has an empty command.
@@ -12,6 +12,8 @@ public type Turn = record
   public RoomId: string := '';
   public Action: string := '';
   public Target: string := '';
+  public Fact: string := '';
+  public Person: string := '';
 end record;
 
 // Identifies the ACP session and its player-visible conversation.
@@ -22,6 +24,24 @@ public type Save = record
   // Absent in saves written before the two-room adventure.
   public WorldState: World.State? := null;
 end record;
+
+// Freeze the encounter as it was when the command was accepted.
+public function Completed(Before: World.State; Command: string; Reply: string; Action: string; Target: string): Turn;
+begin
+  const Entry: Catalog.Encounter? := World.LocalEncounter(Before, Action, Target);
+  if Entry = null then
+    return new Turn(Command, Reply, Before.RoomId, Action, Target);
+  end if;
+
+  return new Turn(
+    Command, Reply, Before.RoomId, Action, Target, World.Outcome(Before, Entry),
+    if Action = 'talk' then
+      Target
+    else
+      Entry.Person ?? ''
+    end if
+  );
+end function;
 
 // Locates the one resumable adventure.
 public function PathFor(SettingsPath: string): string;
@@ -37,6 +57,11 @@ begin
   return Value;
 end function;
 
+function SavedText(Value: string?): string;
+begin
+  return Value ?? '';
+end function;
+
 // Reads the exact ACP session and conversation stored by the client.
 public function Load(Path: string): Save;
 begin
@@ -47,9 +72,20 @@ begin
     raise new IO.InvalidDataException('Invalid adventure.json.');
   end if;
 
-  for Entry: Turn in Value.History do
+  for Index: int := 0 to Value.History.Length - 1 do
+    const Entry: Turn := Value.History[Index];
     if Entry = null or Entry.Command = null or Entry.Reply = null then
       raise new IO.InvalidDataException('Invalid adventure transcript.');
+    end if;
+
+    // JSON from earlier releases can supply null for omitted constructor fields.
+    if Entry.RoomId = null or Entry.Action = null or Entry.Target = null or Entry.Fact = null
+      or Entry.Person = null
+    then
+      Value.History[Index] := new Turn(
+        Entry.Command, Entry.Reply, SavedText(Entry.RoomId), SavedText(Entry.Action),
+        SavedText(Entry.Target), SavedText(Entry.Fact), SavedText(Entry.Person)
+      );
     end if;
   end for;
   const State: World.State? := Value.WorldState;

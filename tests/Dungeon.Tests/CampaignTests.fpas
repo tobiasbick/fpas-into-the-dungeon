@@ -3,7 +3,7 @@ unit Dungeon.Tests.CampaignTests;
 
 uses
   Dungeon.Game.Catalog as Catalog, Dungeon.Game.World as World, Dungeon.Game.RoomView as Rooms,
-  Dungeon.Game.Saves as Saves, System as Sys, System.IO as IO,
+  Dungeon.Game.Navigation as Nav, Dungeon.Game.Saves as Saves, System as Sys, System.IO as IO,
   System.Collections.Generic as Lists, Xunit as X;
 
 function Unlocked(): World.State;
@@ -111,11 +111,15 @@ begin
     X.Assert.True(Wet.ContainsKey(Id) or Dry.ContainsKey(Id), Id);
     X.Assert.False(Sys.String.IsNullOrWhiteSpace(Place.Room.Description));
     X.Assert.False(Sys.String.IsNullOrWhiteSpace(Place.Room.German));
+    X.Assert.NotEmpty(Place.Room.Encounters ?? Sys.Array.Empty<Catalog.Encounter>());
     const Ways: Lists.HashSet<string> := new Lists.HashSet<string>();
     for Edge: Catalog.Route in Place.Routes do
       X.Assert.True(Ways.Add(Edge.Direction), Id + ' ' + Edge.Direction);
       X.Assert.True(Catalog.Contains(Edge.Destination));
       CheckCondition(Edge.Condition);
+      if Edge.Condition <> null then
+        X.Assert.False(Sys.String.IsNullOrWhiteSpace(Edge.Obstacle));
+      end if;
     end for;
 
     for Encounter: Catalog.Encounter in Place.Room.Encounters ??
@@ -140,6 +144,36 @@ begin
   X.Assert.False(World.CanMove(Walk(Low, 'ferry-steps'), 'far-pier'));
   const Afloat: World.State := World.Apply(Low, 'operate', 'fill-wheel');
   X.Assert.True(World.CanMove(Walk(Afloat, 'ferry-steps'), 'far-pier'));
+end procedure;
+
+[X.FactAttribute]
+public procedure RoutePrefersAnExploredDryDetourToTheGroundedFerry();
+begin
+  const Low: World.State := Walk(
+    DoAt(Unlocked(), 'trial-weir', 'operate', 'draw-wheel'),
+    'ferry-steps'
+  );
+  const Parents: Lists.Dictionary<string, string> := Paths(Low);
+  const History: Lists.List<Saves.Turn> := new Lists.List<Saves.Turn>();
+  History.Add(new Saves.Turn('cross', 'On the far bank.', 'ferry-steps', 'move', 'far-pier'));
+  var Id: string := 'far-pier';
+  while Id <> Low.RoomId do
+    const Next: string := Parents[Id];
+    History.Add(new Saves.Turn('walk back', 'On dry ground.', Id, 'move', Next));
+    Id := Next;
+  end while;
+
+  const Route: Nav.Directions := Nav.Find(Low, History.ToArray(), 'Far Pier');
+  X.Assert.Equal<string>('route', Route.Status);
+  X.Assert.True(Route.Steps.Length > 1);
+  var Replay: World.State := Low;
+  for Leg: Nav.Step in Route.Steps do
+    X.Assert.Equal<string>(Replay.RoomId, Leg.FromId);
+    X.Assert.Equal<string>('', Leg.Obstacle);
+    Replay := World.Apply(Replay, 'move', Leg.ToId);
+  end for;
+
+  X.Assert.Equal<string>('far-pier', Replay.RoomId);
 end procedure;
 
 function Summon(): World.State;
@@ -218,8 +252,8 @@ begin
     );
     const Loaded: World.State := Saves.Load(Path).WorldState ?? World.NewAdventure();
     X.Assert.Equivalent(Value, Loaded, true);
-    X.Assert.Equal<int>(2, Rooms.Journal(Loaded).Length);
-    X.Assert.Contains('four teeth', Rooms.Journal(Loaded)[1]);
+    X.Assert.Equal<int>(2, Loaded.Discoveries.Length);
+    X.Assert.True(World.Matches(Loaded, 'trim-scale'));
     Refused(Loaded, 'talk', 'edda');
     const Ending: World.State := DoAt(Summon(), 'master-seat', 'resolve', 'drawdown');
     Saves.Write(

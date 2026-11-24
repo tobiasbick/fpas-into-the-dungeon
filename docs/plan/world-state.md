@@ -9,14 +9,19 @@ levels and the final gate decision. [The Last Shift](the-last-shift.md)
 
 `adventure.json` holds the current room, key and grate state, lake level, discoveries,
 ending, world brief and transcript. The brief captures the premise, tone, and objective. Each
-completed turn records the command, narration, room of origin, and accepted
-action. The game validates the action and replaces the save atomically after
-the ACP prompt completes. An interrupted or rejected turn leaves the previous
+completed turn records the command, player-facing narration, room of origin, action
+and target. For a local interaction it also stores the authored outcome selected
+before the action changed the world, and the person addressed, if any. A second
+conversation with Iven at low water therefore preserves a different answer from
+the first conversation at high water. The game validates the action and replaces
+the save atomically after the ACP prompt completes. An interrupted or rejected turn leaves the previous
 save intact.
 
-The game sends the brief, current facts, and the last four turns with each
-prompt. Continue restores the save and displays its current room and
-conversation. It reopens the saved ACP session when the agent can load it and
+Each prompt includes the premise, the last four turns and the current scene. The
+scene supplies local details, people, available actions and their outcomes,
+inventory, exits and obstacles. Rooms and exits have stable IDs and display names
+in the player's UI language. Continue restores the save and displays its current
+room and conversation. It reopens the saved ACP session when the agent can load it and
 starts a replacement conversation when the agent cannot restore it. An older
 transcript-only save keeps its transcript and begins with the new adventure's
 initial world state. Version 1 two-room saves keep their adventure ID, room, key,
@@ -34,7 +39,9 @@ one player command at a time.
 | Tool | Purpose |
 | --- | --- |
 | `get_room` | Read the current scene, open and blocked routes, and local characters and actions. An open adjacent room can be previewed for arrival narration. |
-| `get_journal` | Recall discoveries recorded in this adventure, including earlier sessions. |
+| `get_journal` | Read the latest 20 completed encounters with their original narration, fact, turn number, location and person. |
+| `search_memories` | Search the entire committed transcript, including previous sessions. Filter by text, person and room ID. |
+| `find_route` | Find a walk over previously crossed passages to a visited place or a person's last recorded meeting place. |
 | `get_history` | Read up to 20 completed turns, optionally filtered by room. |
 | `submit_turn` | Stage narration and one validated action for the current turn. |
 | `submit_room_art` | Submit a drawing for an active illustration request and its exact dimensions. |
@@ -47,6 +54,28 @@ with an open destination ID. Talking, examining a clue, operating a device
 and choosing an ending use the action and target supplied by the room.
 Only a present character can be addressed. A single-use mechanism disappears
 from the available actions after the change commits.
+
+### Recollection and directions
+
+`search_memories` searches the player's words, the GM's original reply, the
+recorded fact, the interaction target, and the room and person names. Empty
+filters match everything. Results are newest first. Start with `beforeTurn = 0`
+and a `limit` of 1–20. Pass the returned `nextBeforeTurn` to continue with
+older matches. Zero marks the end. Turn numbers start at one, including the
+opening scene. A legacy entry keeps its original narration and any recorded
+action and location. Missing facts stay empty.
+
+`find_route` accepts a room ID, an English or German display name, or a person
+the player has addressed. For a person, `lastMetTurn` identifies the meeting
+that supplied the location. A later meeting updates that location. The route
+uses the shortest currently open path among the passages this adventure has
+already crossed in either direction. Each step names its direction and
+destination. The result is `here` at the destination or `route` for an open
+walk. If every known path is blocked, `blocked` includes the steps up to the
+first obstruction and its cause. An unrecognised destination returns `unknown`.
+A recorded place with no connecting movement history returns `unmapped`.
+Asking for directions uses the ordinary narration action and leaves the player
+where they are.
 
 ## Room illustrations
 

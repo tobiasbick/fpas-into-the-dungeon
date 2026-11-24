@@ -1,0 +1,193 @@
+// Exercise long-running and resumed adventures using the same facts and edges as the GM tools.
+unit Dungeon.Tests.AdventureKnowledgeTests;
+
+uses
+  Dungeon.Game.World as World, Dungeon.Game.RoomView as Rooms, Dungeon.Game.Saves as Saves,
+  Dungeon.Game.Journal as Journal, Dungeon.Game.Navigation as Nav, Dungeon.Settings as Settings,
+  System.Collections.Generic as Lists, System.Globalization as Global, System.IO as IO, Xunit as X;
+
+[X.FactAttribute]
+public procedure IvenRemembersBothConversationsAfterContinue();
+begin
+  const Temporary: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-memories-');
+  try
+    const High: World.State := World.NewAdventure() with
+      RoomId := 'ferry-steps';
+      HasKey := true;
+      GrateOpen := true;
+    end with;
+    const First: Saves.Turn := Saves.Completed(
+      High,
+      'Talk to Iven.',
+      'Iven promises boats.',
+      'talk',
+      'iven'
+    );
+    const Low: World.State := World.Apply(High, 'talk', 'iven') with
+      Lake := 'low';
+    end with;
+    const Turns: Lists.List<Saves.Turn> := new Lists.List<Saves.Turn>();
+    Turns.Add(First);
+    for Index: int := 1 to 25 do
+      Turns.Add(new Saves.Turn('wait', 'Water drips.', 'ferry-steps', 'none'));
+    end for;
+
+    Turns.Add(Saves.Completed(Low, 'And now?', 'Iven taps the mud with his pole.', 'talk', 'iven'));
+    const Path: string := IO.Path.Combine(Temporary.FullName, 'adventure.json');
+    Saves.Write(
+      Path,
+      new Saves.Save(new Settings.Choice('offline'), 'session', Turns.ToArray(), Low)
+    );
+    const History: array of Saves.Turn := Saves.Load(Path).History;
+    const Latest: Journal.Page := Journal.Search(History, '', 'IVEN', 'ferry-steps', 0, 1);
+    const Recent: Journal.Memory := X.Assert.Single<Journal.Memory>(Latest.Entries);
+    X.Assert.Equal<int>(27, Recent.TurnNumber);
+    X.Assert.Contains('bare mud', Recent.Fact);
+    X.Assert.Equal<string>('Iven taps the mud with his pole.', Recent.Reply);
+    X.Assert.Equal<int>(Recent.TurnNumber, Latest.NextBeforeTurn);
+    const Older: Journal.Page := Journal.Search(
+      History,
+      '',
+      'IVEN',
+      'ferry-steps',
+      Latest.NextBeforeTurn,
+      1
+    );
+    const Original: Journal.Memory := X.Assert.Single<Journal.Memory>(Older.Entries);
+    X.Assert.Equal<int>(1, Original.TurnNumber);
+    X.Assert.Contains('promises boats', Original.Fact);
+    X.Assert.DoesNotContain('bare mud', Original.Fact);
+    X.Assert.Equal<int>(0, Older.NextBeforeTurn);
+    X.Assert.Empty(Journal.Search(History, 'new fare card', '', '', 0, 20).Entries);
+    X.Assert.Equal<int>(2, Journal.Search(History, 'Fährstufen', 'iven', '', 0, 20).Entries.Length);
+  finally
+    Temporary.Delete(true);
+  end try;
+end procedure;
+
+[X.FactAttribute]
+public procedure OlderSlotsKeepOnlyTheEvidenceTheyRecorded();
+begin
+  const Temporary: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-legacy-');
+  try
+    const Path: string := IO.Path.Combine(Temporary.FullName, 'adventure.json');
+    IO.File.WriteAllText(
+      Path, '{"gameMaster":{"agent":"offline"},"sessionId":"old","history":[' +
+        '{"command":"talk","reply":"My boat is stuck.","roomId":"ferry-steps","action":"talk","target":"iven"},' +
+        '{"command":"listen","reply":"A familiar voice."}]}'
+    );
+    const History: array of Saves.Turn := Saves.Load(Path).History;
+    const Conversation: Journal.Memory := X.Assert.Single<Journal.Memory>(
+      Journal.Search(History, 'BOAT', 'iven', '', 0, 20).Entries
+    );
+    X.Assert.Equal<string>('My boat is stuck.', Conversation.Reply);
+    X.Assert.Equal<string>('', Conversation.Fact);
+    const Legacy: Journal.Memory := X.Assert.Single<Journal.Memory>(
+      Journal.Search(History, 'voice', '', '', 0, 20).Entries
+    );
+    X.Assert.Equal<string>('', Legacy.RoomId);
+    X.Assert.Equal<string>('', Legacy.Person);
+    X.Assert.Equal<string>('unmapped', Nav.Find(World.NewAdventure(), History, 'Iven').Status);
+  finally
+    Temporary.Delete(true);
+  end try;
+end procedure;
+
+[X.FactAttribute]
+public procedure AShortcutBetweenVisitedRoomsMustFirstBeCrossed();
+begin
+  const Here: World.State := World.NewAdventure() with
+    RoomId := 'boot-rack';
+  end with;
+  const History: array of Saves.Turn := [
+    new Saves.Turn('talk', 'Mara speaks.', 'bell-landing', 'talk', 'mara'),
+    new Saves.Turn('go', 'At the well.', 'bell-landing', 'move', 'flywheel-well'),
+    new Saves.Turn('go', 'By the oil.', 'flywheel-well', 'move', 'oil-niche'),
+    new Saves.Turn('go', 'By the boots.', 'oil-niche', 'move', 'boot-rack')
+  ];
+  const Route: Nav.Directions := Nav.Find(Here, History, 'Mara');
+  X.Assert.Equal<string>('route', Route.Status);
+  X.Assert.Equal<int>(3, Route.Steps.Length);
+  X.Assert.Equal<int>(1, Route.LastMetTurn);
+  X.Assert.Equal<string>('oil-niche', Route.Steps[0].ToId);
+  X.Assert.Equal<string>('bell-landing', Route.Steps[2].ToId);
+  X.Assert.Equal<string>('bell-landing', Nav.Find(Here, History, 'Glockenabsatz').DestinationId);
+  X.Assert.Equal<string>('unknown', Nav.Find(Here, History, 'Ada').Status);
+  X.Assert.Equivalent(
+    Nav.Find(Here, History, 'master-seat'),
+    Nav.Find(Here, History, 'made-up'),
+    true
+  );
+end procedure;
+
+[X.FactAttribute]
+public procedure DirectionsStopAtTheFirstClosedPassage();
+begin
+  const High: World.State := World.NewAdventure() with
+    RoomId := 'rope-market';
+  end with;
+  const History: array of Saves.Turn := [
+    new Saves.Turn('cross', 'At the steps.', 'far-pier', 'move', 'ferry-steps'),
+    new Saves.Turn('go', 'At the market.', 'ferry-steps', 'move', 'rope-market')
+  ];
+  const Low: World.State := High with
+    Lake := 'low';
+  end with;
+  X.Assert.Equal<string>('route', Nav.Find(High, History, 'far-pier').Status);
+  const Blocked: Nav.Directions := Nav.Find(Low, History, 'far-pier');
+  X.Assert.Equal<string>('blocked', Blocked.Status);
+  X.Assert.Equal<string>('', Blocked.Steps[0].Obstacle);
+  X.Assert.Contains('too low', Blocked.Steps[1].Obstacle);
+  X.Assert.DoesNotContain('works', Blocked.Steps[1].Obstacle);
+  const Ended: World.State := Low with
+    Ending := 'drawdown';
+  end with;
+  X.Assert.Contains('permanently', Nav.Find(Ended, History, 'far-pier').Steps[1].Obstacle);
+end procedure;
+
+[X.FactAttribute]
+public procedure PersonDirectionsOnlyChangeAfterTheNextMeeting();
+begin
+  const Here: World.State := World.NewAdventure() with
+    RoomId := 'high-landing';
+    Discoveries := ['evacuation-roster'];
+  end with;
+  const First: Saves.Turn := new Saves.Turn('talk', 'Ada remembers.', 'adas-window', 'talk', 'ada');
+  const Before: Nav.Directions := Nav.Find(Here, [First], 'Ada');
+  X.Assert.Equal<string>('adas-window', Before.DestinationId);
+  X.Assert.Equal<int>(1, Before.LastMetTurn);
+  const Later: Saves.Turn := Saves.Completed(Here, 'speak to Ada', 'Ada nods.', 'talk', 'ada');
+  const After: Nav.Directions := Nav.Find(Here, [First, Later], 'Ada');
+  X.Assert.Equal<string>('here', After.Status);
+  X.Assert.Equal<string>('high-landing', After.DestinationId);
+  X.Assert.Equal<int>(2, After.LastMetTurn);
+end procedure;
+
+[X.FactAttribute]
+public procedure BootSolesAreALocalDiscoveryWithLocalisedRoomNames();
+begin
+  const Previous: Global.CultureInfo := Global.CultureInfo.CurrentUICulture;
+  try
+    Global.CultureInfo.CurrentUICulture := Global.CultureInfo.GetCultureInfo('de-DE');
+    const Landing: World.State := World.NewAdventure() with
+      RoomId := 'bell-landing';
+    end with;
+    const Preview: Rooms.Scene := Rooms.Describe(Landing, 'boot-rack', false);
+    X.Assert.Empty(Preview.Interactions);
+    X.Assert.DoesNotContain('ferry sail', Preview.Description);
+    const Boots: World.State := World.Apply(Landing, 'move', 'boot-rack');
+    const Scene: Rooms.Scene := Rooms.Describe(Boots, Boots.RoomId, false);
+    X.Assert.Equal<string>('Stiefelregal', Scene.Name);
+    X.Assert.Equal<string>('Glockenabsatz', Scene.Exits[0].Name);
+    const Offer: Rooms.Interaction := X.Assert.Single<Rooms.Interaction>(Scene.Interactions);
+    X.Assert.False(Offer.AlreadyLearned);
+    X.Assert.Contains('ferry sail', Offer.OutcomeOrHint);
+    const Read: World.State := World.Apply(Boots, Offer.Action, Offer.Target);
+    X.Assert.True(World.Matches(Read, 'boot-soles'));
+    X.Assert.True(Rooms.Describe(Read, Read.RoomId, false).Interactions[0].AlreadyLearned);
+  finally
+    Global.CultureInfo.CurrentUICulture := Previous;
+  end try;
+end procedure;
+
+end unit;

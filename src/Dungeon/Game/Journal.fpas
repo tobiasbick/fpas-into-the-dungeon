@@ -1,0 +1,109 @@
+// Recall what was actually said or discovered in this adventure.
+unit Dungeon.Game.Journal;
+
+uses
+  Dungeon.Game.Catalog as Catalog, Dungeon.Game.Saves as Saves,
+  System as Sys, System.Collections.Generic as Lists;
+
+public type Memory = record
+  public TurnNumber: int;
+  public RoomId: string;
+  public RoomName: string;
+  public Person: string;
+  public Action: string;
+  public Target: string;
+  public Command: string;
+  public Reply: string;
+  public Fact: string;
+end record;
+
+public type Page = record
+  public Entries: array of Memory;
+  public NextBeforeTurn: int;
+end record;
+
+// Older saves recorded the target of a talk but no separate person field.
+public function Speaker(Entry: Saves.Turn): string;
+begin
+  if Entry.Action = 'talk' then
+    return Entry.Target;
+  end if;
+
+  return Entry.Person;
+end function;
+
+function ContainsText(Value: string; Query: string): bool;
+begin
+  return Value.Contains(Query, Sys.StringComparison.OrdinalIgnoreCase);
+end function;
+
+function Matches(Entry: Saves.Turn; Query: string; Person: string; RoomId: string): bool;
+begin
+  if RoomId <> '' and RoomId <> Entry.RoomId then
+    return false;
+  end if;
+  const Who: string := Speaker(Entry);
+  if Person <> '' and not string.Equals(Who, Person, Sys.StringComparison.OrdinalIgnoreCase) then
+    return false;
+  end if;
+
+  if Query = '' or ContainsText(Entry.Target, Query) or ContainsText(Who, Query)
+    or ContainsText(Entry.Fact, Query) or ContainsText(Entry.Reply, Query)
+    or ContainsText(Entry.Command, Query) or ContainsText(Entry.RoomId, Query)
+  then
+    return true;
+  end if;
+
+  if Catalog.Contains(Entry.RoomId) then
+    const Room: Catalog.Location := Catalog.At(Entry.RoomId).Room;
+    return ContainsText(Room.Name, Query) or ContainsText(Room.German, Query);
+  end if;
+
+  return false;
+end function;
+
+public function Search(
+  History: array of Saves.Turn; Query: string; Person: string; RoomId: string;
+  BeforeTurn: int; Limit: int; EncountersOnly: bool := false
+): Page;
+begin
+  if Limit < 1 or Limit > 20 or BeforeTurn < 0 then
+    raise new Sys.ArgumentException('Use a limit from 1 to 20 and a nonnegative beforeTurn.');
+  end if;
+
+  const Entries: Lists.List<Memory> := new Lists.List<Memory>();
+  var Number: int := History.Length;
+  if BeforeTurn > 0 then
+    Number := Sys.Math.Min(Number, BeforeTurn - 1);
+  end if;
+  var NextCursor: int := 0;
+  while Number > 0 do
+    const Entry: Saves.Turn := History[Number - 1];
+    if (not EncountersOnly or (Entry.Action <> '' and Entry.Action <> 'move' and Entry.Action <>
+      'none'))
+      and Matches(Entry, Query, Person, RoomId)
+    then
+      if Entries.Count = Limit then
+        NextCursor := Entries[Limit - 1].TurnNumber;
+        break;
+      end if;
+      const Name: string := if Catalog.Contains(Entry.RoomId) then
+        Catalog.DisplayName(Entry.RoomId)
+      else
+        ''
+      end if;
+      Entries.Add(
+        new Memory(
+          Number, Entry.RoomId, Name, Speaker(Entry), Entry.Action, Entry.Target,
+          Entry.Command, Entry.Reply, Entry.Fact
+        )
+      );
+    end if;
+
+    Number := Number - 1;
+  end while;
+
+  return new Page(Entries.ToArray(), NextCursor);
+end function;
+
+end unit;

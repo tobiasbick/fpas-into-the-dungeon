@@ -41,7 +41,13 @@ and the player's final choice.
 
 Each district contains twenty individually described places. Rooms have stable
 IDs, English and German display names, and passages that can be followed in
-both directions. The map includes loops and connections between districts.
+both directions. Each of the 200 locations has an authored interaction. In
+the quieter rooms, close inspection reveals how the residents lived and worked.
+For example, the smallest boots on the boot rack have blue stitching. Turning
+them over reveals that the soles are made from ferry sail. Examining them
+records a discovery the player can ask about later. These incidental finds are
+optional throughout the campaign. The map includes loops and connections
+between districts.
 
 | District | Landmarks and connections |
 | --- | --- |

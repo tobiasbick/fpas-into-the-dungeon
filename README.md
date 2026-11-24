@@ -16,7 +16,10 @@ the ember forest. Find the keeper who recognises its signal, follow the ferry
 and the flooded railway, and decide what happens to the people below the dam.
 The game master narrates the journey through 200 places in ten districts and
 draws each room in two sizes of coloured Unicode art. **Continue** restores
-your adventure and its drawings.
+your adventure and its drawings. Try “Turn over the smallest boots”, “What did
+Iven tell me about the ferry?” or “How do I get back to Mara?” The game master
+can look up what happened in your adventure and give directions along passages
+you have explored.
 
 ![Earlier 80 × 25 layout preview with the pump room, adventure log and command prompt](docs/images/pump-room.png)
 
