@@ -24,11 +24,11 @@ public type Model = record
   // Absolute settings file path.
   public SettingsPath: string;
   // Last selection successfully read or saved.
-  public Saved: Store.Choice;
+  public Saved: Store.Preferences;
   // Main menu state, retained when opening the dialog.
   public MenuState: Menu.Model;
   // Editable selection. Null means the start menu is active.
-  public Draft: Store.Choice? := null;
+  public Draft: Store.Preferences? := null;
   // The last options for the selected agent.
   public Catalog: Acp.Catalog? := null;
   // Whether a new catalog is still being discovered.
@@ -45,7 +45,7 @@ const Adventure: string := 'acp-adventure';
 // Loads settings before drawing the start menu.
 public function Open(Path: string): Model;
 begin
-  const Saved: Store.Choice := Store.Load(Path);
+  const Saved: Store.Preferences := Store.Load(Path);
   if Agents.AgentIndex(Saved.Agent) < 0 then
     raise new IO.InvalidDataException(
       'Unknown ACP agent in settings.json. Delete the file to recreate the defaults.'
@@ -60,10 +60,10 @@ begin
   return new Mvu.Transition<Model, Message>(Value, []);
 end function;
 
-function Load(Value: Model; Draft: Store.Choice; KeepCatalog: bool := false): Mvu.Transition<Model, Message>;
+function Load(Value: Model; Draft: Store.Preferences; KeepCatalog: bool := false): Mvu.Transition<Model, Message>;
   async function Discover(Post: function(Message): Tasks.Task; Token: Threads.CancellationToken): Tasks.Task;
   begin
-    const Result: Acp.Result := await Acp.Discover(Draft, Token);
+    const Result: Acp.Result := await Acp.Discover(Draft.AgentChoice(), Token);
     await Post(Message.OptionsLoaded(Result));
   end function;
 begin
@@ -111,17 +111,18 @@ function StartGame(Value: Model; ContinueGame: bool; Queue: Channels.Channel<str
   begin
     await Session.Run(
       Saves.PathFor(Value.SettingsPath),
-      Value.Saved,
+      Value.Saved.AgentChoice(),
       ContinueGame,
       Queue,
       Report,
-      Token
+      Token,
+      Value.Saved.GenerateRoomArt
     );
   end function;
 begin
   return new Mvu.Transition<Model, Message>(
     Value with
-      Adventure := new Game.Model();
+      Adventure := new Game.Model(GenerateRoomArt := Value.Saved.GenerateRoomArt);
       Commands := Queue;
     end with,
     [
@@ -270,18 +271,28 @@ begin
   return new Mvu.Transition<Model, Message>(Next, Mapped.Commands);
 end function;
 
-function UpdateSettings(Value: Model; Draft: Store.Choice; Input: Settings.Input): Mvu.Transition<Model, Message>;
+function CanSave(Value: Model; Draft: Store.Preferences): bool;
+begin
+  return (Value.Catalog <> null and not Value.Loading)
+    or (Draft.GenerateRoomArt <> Value.Saved.GenerateRoomArt
+    and Draft.AgentChoice() = Value.Saved.AgentChoice());
+end function;
+
+function UpdateSettings(Value: Model; Draft: Store.Preferences; Input: Settings.Input): Mvu.Transition<Model, Message>;
 begin
   const Catalog: Acp.Catalog? := Value.Catalog;
   case Input of
     when Settings.Input.Agent(const Index: int):
       const Agent: string := Agents.Agents[Index].Id;
+      const Selection: Store.Preferences := if Agent = Value.Saved.Agent then
+        Value.Saved
+      else
+        new Store.Preferences(Agent)
+      end if;
       return Load(
-        Value, if Agent = Value.Saved.Agent then
-          Value.Saved
-        else
-          new Store.Choice(Agent)
-        end if
+        Value, Selection with
+          GenerateRoomArt := Draft.GenerateRoomArt;
+        end with
       );
     when Settings.Input.Model(const Index: int):
       if Catalog <> null and Draft.Model <> Catalog.Models[Index].Id then
@@ -301,12 +312,20 @@ begin
           end with
         );
       end if;
+    when Settings.Input.GenerateRoomArt(const Enabled: bool):
+      return Commit(
+        Value with
+          Draft := Draft with
+            GenerateRoomArt := Enabled;
+          end with;
+        end with
+      );
     when Settings.Input.Retry:
       return Load(Value, Draft);
     when Settings.Input.Back:
       return Back(Value);
     when Settings.Input.Save:
-      if Catalog <> null and not Value.Loading then
+      if CanSave(Value, Draft) then
         try
           Store.Save(Value.SettingsPath, Draft);
           return Back(
@@ -336,7 +355,7 @@ begin
     return UpdateGame(Value, State, Input);
   end if;
 
-  const Draft: Store.Choice? := Value.Draft;
+  const Draft: Store.Preferences? := Value.Draft;
   if Draft = null then
     case Input of
       when Message.StartInput(const MenuInput: Menu.Message):
@@ -357,7 +376,10 @@ begin
           return Commit(
             Value with
               Catalog := Catalog;
-              Draft := new Store.Choice(Draft.Agent, Catalog.ModelId, Catalog.ThinkingId);
+              Draft := Draft with
+                Model := Catalog.ModelId;
+                ThinkingLevel := Catalog.ThinkingId;
+              end with;
               Loading := false;
               Status := if Replaced then
                 'Settings.Changed'
@@ -397,14 +419,14 @@ begin
     Start.View(Value.MenuState),
     Message.StartInput
   );
-  const Draft: Store.Choice? := Value.Draft;
+  const Draft: Store.Preferences? := Value.Draft;
   if Draft = null then
     return Backdrop;
   end if;
 
   return Settings.View<Message>(
     Backdrop, Draft, Value.Catalog, Value.Status, Value.Loading,
-    Value.Catalog = null and not Value.Loading, Message.SettingsInput
+    Value.Catalog = null and not Value.Loading, CanSave(Value, Draft), Message.SettingsInput
   );
 end function;
 

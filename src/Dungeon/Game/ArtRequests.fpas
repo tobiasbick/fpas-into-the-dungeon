@@ -8,6 +8,7 @@ uses
 
 public type Request = record
   public Width: int;
+  public Palette: array of string;
   public Result: Tasks.TaskCompletionSource<Art.Picture>;
 end record;
 
@@ -27,7 +28,7 @@ begin
   end if;
 
   try
-    const Image: Art.Picture := Art.Decode(Drawing, Pending.Width);
+    const Image: Art.Picture := Art.Decode(Drawing, Pending.Width, Pending.Palette);
     if not Pending.Result.TrySetResult(Image) and Art.Encode(
       Pending.Result.Task.Result
     ) <> Art.Encode(Image)
@@ -41,28 +42,48 @@ begin
   return 'Drawing accepted. End the prompt.';
 end function;
 
-function Instructions(Id: string; Room: Visit; Width: int; Sibling: Art.Picture?): string;
+function Instructions(Id: string; Place: Catalog.Place; Narration: string; Width: int; Sibling: Art.Picture?): string;
 begin
-  const Place: Catalog.Place := Catalog.At(Room.State.RoomId);
-  const Guide: string := if Sibling = null then
-    'Choose an original composition and palette for this adventure.'
+  const Rows: int := Art.Height(Width);
+  const SampleColor: string := Place.ArtPalette[0];
+  const AccentColor: string := if Place.ArtPalette.Length > 1 then
+    Place.ArtPalette[1]
   else
-    'Match the subject, viewpoint, light, palette and focus of the saved companion drawing. Adapt its detail to this size. Companion JSON: ' +
+    SampleColor
+  end if;
+  const Guide: string := if Sibling = null then
+    'Choose an original composition for this room.'
+  else
+    'Match the subject, viewpoint, light and focus of the saved companion drawing. Adapt its detail to this size and choose the closest colors from the district palette. Companion JSON: ' +
     Art.Encode(
       Sibling
     )
   end if;
-  return 'Illustrate a room for a Unicode terminal adventure. Use only submit_room_art with requestId ' +
+  return 'Illustrate a room for a Unicode terminal adventure. If submit_room_art is hidden, use tool discovery to load it. Call submit_room_art with requestId ' +
     Id +
-    '. Draw a landscape of ' + Width.ToString() + ' columns and ' + Art.Height(Width).ToString() +
-    ' rows. Set drawing.columns and zero-based focusX/focusY on the main landmark. Build a palette of tiles ' +
-    'with glyph, foreground and background (#RRGGBB). Use single-cell printable Unicode glyphs such as box lines, blocks and shades. ' +
-    'Rows contain palette indexes 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ, one per cell. Trailing 0 cells may be omitted. ' +
-    'Make tile 0 the ambient background. Compose architecture with depth, texture, and a strong silhouette; omit titles and text. ' +
+    '. Only the tool submission is used; end the prompt immediately after acceptance.' + #10 +
+    'Draw a landscape of ' + Width.ToString() + ' columns and ' + Rows.ToString() +
+    ' rows. Set drawing.columns to ' + Width.ToString() + ' and zero-based focusX (0..' +
+    (Width - 1).ToString() + ') and focusY (0..' + (Rows - 1).ToString() +
+    ') on the main landmark.' + #10 +
+    'Build drawing.palette with 1 to 36 tiles, each having glyph, foreground, and background (#RRGGBB). Use only these district colors for both foreground and background: ' +
+    Sys.String.Join(', ', Place.ArtPalette) +
+    '. Use single-cell printable Unicode glyphs such as space, box lines, blocks and shades. Make tile 0 the ambient background.' +
+    #10 +
+    'Provide drawing.rows as an array of exactly ' + Rows.ToString() +
+    ' strings (never fewer), each at most ' + Width.ToString() +
+    ' characters of palette indexes 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ, one per cell. Trailing 0 cells may be omitted (an empty string means all tile 0).' +
+    #10 +
+    'Example drawing JSON shape: {"columns":' + Width.ToString() + ',"focusX":' +
+    (Width div 2).ToString() + ',"focusY":' + (Rows div 2).ToString() +
+    ',"palette":[{"glyph":" ","foreground":"' + AccentColor + '","background":"' + SampleColor +
+    '"},{"glyph":"▒","foreground":"' + AccentColor + '","background":"' + SampleColor +
+    '"}],"rows":["0011...", "..."]}.' + #10 +
+    'Compose architecture with depth, texture, and a strong silhouette; omit titles and text. ' +
     'Prefer lasting scenery. Correct validation errors and finish after acceptance.' + #10 + Guide +
     #10 +
     'Room: ' + Place.Room.Name + ', ' + Place.DistrictName + '. ' + Place.Room.Description + #10 +
-    'Scene narration for visual context: ' + Room.Narration;
+    'Scene narration for visual context: ' + Narration;
 end function;
 
 // Check disk again on dequeue. Each accepted variant is published before the next prompt.
@@ -73,6 +94,7 @@ public async function Fill(
 ): Tasks.Task;
 begin
   var Images: Art.Pair := Art.Load(Path, Room.State, Room.State.RoomId);
+  const Place: Catalog.Place := Catalog.At(Room.State.RoomId);
   const Widths: array of int := [Art.Small, Art.Large];
   for Width: int in Widths do
     if (Width = Art.Small and Images.Compact <> null) or (Width = Art.Large and Images.Full <>
@@ -83,14 +105,18 @@ begin
 
     Token.ThrowIfCancellationRequested();
     const Id: string := Sys.Guid.NewGuid().ToString('N');
-    const Request: Request := new Request(Width, new Tasks.TaskCompletionSource<Art.Picture>());
+    const Request: Request := new Request(
+      Width,
+      Place.ArtPalette,
+      new Tasks.TaskCompletionSource<Art.Picture>()
+    );
     if not Active.TryAdd(Id, Request) then
       raise new Sys.InvalidOperationException('Duplicate art request ID.');
     end if;
 
     try
       const Finished: bool := await Ask(
-        Instructions(Id, Room, Width, Images.Compact ?? Images.Full)
+        Instructions(Id, Place, Room.Narration, Width, Images.Compact ?? Images.Full)
       );
       if not Finished or not Request.Result.Task.IsCompletedSuccessfully then
         return;

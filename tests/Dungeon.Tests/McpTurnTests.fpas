@@ -3,9 +3,9 @@ unit Dungeon.Tests.McpTurnTests;
 
 uses
   Dungeon.Mcp.Transport as Transport, Dungeon.Game.World as World, Dungeon.Game.TurnTools as Tools,
-  Dungeon.Game.Saves as Saves,
+  Dungeon.Game.Saves as Saves, Dungeon.Game.Session as Session,
   ModelContextProtocol.Client as Client, ModelContextProtocol.Protocol as P,
-  System as Sys, System.IO.Pipes as Pipes, System.Collections.Concurrent as Concurrent,
+  System as Sys, System.Globalization as Global, System.IO.Pipes as Pipes, System.Collections.Concurrent as Concurrent,
   System.Collections.Generic as Lists, System.Threading as Threads, System.Threading.Tasks as Tasks,
   Xunit as X;
 
@@ -47,6 +47,23 @@ begin
     await using const Peer: Client.McpClient := await Client.McpClient.CreateAsync(
       new P.StreamClientTransport(Pipe, Pipe), Options, null, Stop.Token
     );
+    const Offered: Lists.IList<Client.McpClientTool> := await Peer.ListToolsAsync(
+      cancellationToken := Stop.Token
+    );
+    X.Assert.Equal<int>(6, Offered.Count);
+    for Entry: Client.McpClientTool in Offered do
+      X.Assert.NotEqual<string>('submit_room_art', Entry.Name);
+      const Schema: string := Entry.JsonSchema.GetRawText();
+      X.Assert.Contains('Active turnId', Schema);
+      if Entry.Name = 'submit_turn' then
+        X.Assert.Contains('1 to 800 characters', Schema);
+        X.Assert.Contains('no Markdown', Schema);
+      elsif Entry.Name = 'search_memories' then
+        X.Assert.Contains('Exact internal speaker ID', Schema);
+      elsif Entry.Name = 'find_route' then
+        X.Assert.Contains('Exact visited room ID', Schema);
+      end if;
+    end for;
     const Args: Lists.Dictionary<string, object?> := new Lists.Dictionary<string, object?>();
     Args['turnId'] := 'active';
     Args['roomId'] := World.Entrance;
@@ -61,6 +78,7 @@ begin
     X.Assert.Contains('brass-key', Opening);
     X.Assert.Contains('north-grate', Opening);
     X.Assert.DoesNotContain('evacuation-roster', Opening);
+    X.Assert.DoesNotContain('imageReady', Opening);
     Args['roomId'] := 'master-seat';
     const Far: P.CallToolResult := await Peer.CallToolAsync(
       'get_room',
@@ -257,6 +275,66 @@ end function;
 public procedure ValidatesAndStagesOneProposalPerTurn();
 begin
   Exercise().GetAwaiter().GetResult();
+end procedure;
+
+[X.FactAttribute]
+public procedure BuildsConsistentTurnPromptForOpeningAndPlay();
+begin
+  const Previous: Global.CultureInfo := Global.CultureInfo.CurrentUICulture;
+  try
+    Global.CultureInfo.CurrentUICulture := Global.CultureInfo.GetCultureInfo('de-DE');
+    const Submissions: Concurrent.ConcurrentDictionary<string, Tools.Proposal?> := new Concurrent.ConcurrentDictionary<string, Tools.Proposal?>();
+    const OpeningContext: Tools.Context := new Tools.Context(
+      'adventure.json',
+      World.NewAdventure(),
+      [],
+      true,
+      Submissions
+    );
+    const Opening: string := Session.TurnPrompt('turn-open', OpeningContext, '');
+    X.Assert.Contains('get_room(turnId, destinationRoomId)', Opening);
+    X.Assert.Contains('1 to 800 characters of plain text', Opening);
+    X.Assert.Contains('without Markdown', Opening);
+    X.Assert.Contains('without internal IDs', Opening);
+    X.Assert.Contains('ONLY the reply passed to submit_turn', Opening);
+    X.Assert.Contains('outcomeOrHint with available=true', Opening);
+    X.Assert.Contains('outcomeOrHint with available=false', Opening);
+    X.Assert.Contains('alreadyLearned', Opening);
+    X.Assert.Contains('Recorded discoveries: []', Opening);
+    X.Assert.Contains('"roomId":"grotto"', Opening);
+    X.Assert.Contains('"outcomeOrHint":', Opening);
+    X.Assert.Contains('"alreadyLearned":false', Opening);
+    X.Assert.Contains('"name":"Pumpenkammer"', Opening);
+    X.Assert.DoesNotContain('Grate open:', Opening);
+    X.Assert.DoesNotContain('imageReady', Opening);
+    X.Assert.DoesNotContain('Recent completed turns:', Opening);
+    X.Assert.Equal<int>(
+      Opening.IndexOf('Player language:', Sys.StringComparison.Ordinal),
+      Opening.LastIndexOf('Player language:', Sys.StringComparison.Ordinal)
+    );
+
+    const Explored: World.State := World.NewAdventure() with
+      RoomId := 'boot-rack';
+      HasKey := true;
+      GrateOpen := true;
+      Discoveries := ['mara'];
+    end with;
+    const FollowUpContext: Tools.Context := new Tools.Context(
+      'adventure.json',
+      Explored,
+      [new Saves.Turn('schau dich um', 'Hier stehen Stiefel.', 'boot-rack', 'none', '')],
+      false,
+      Submissions
+    );
+    const Turn: string := Session.TurnPrompt('turn-2', FollowUpContext, 'Schlüssel prüfen');
+    X.Assert.Contains('Recorded discoveries: ["mara"]', Turn);
+    X.Assert.Contains('"name":"Stiefelregal"', Turn);
+    X.Assert.Contains('Recent completed turns:', Turn);
+    X.Assert.Contains('"roomId":"boot-rack"', Turn);
+    X.Assert.Contains('Player command as JSON: "Schlüssel prüfen"', Turn);
+  finally
+    Global.CultureInfo.CurrentUICulture := Previous;
+  end try;
 end procedure;
 
 end unit;

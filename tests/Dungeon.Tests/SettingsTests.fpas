@@ -1,7 +1,10 @@
 // Verifies first-run initialization and preservation of user settings.
 unit Dungeon.Tests.SettingsTests;
 
-uses Dungeon.Settings as Settings, System.IO as IO, Xunit as X;
+uses
+  Dungeon.App as App, Dungeon.Settings as Settings, Dungeon.StartMenu as Menu,
+  Fpas.Ui.Tui.Application as Tui, Fpas.Ui.TerminalExtensions.Input as Keys,
+  System as Sys, System.IO as IO, Xunit as X;
 
 // A later launch keeps the settings file's contents.
 [X.FactAttribute]
@@ -29,14 +32,91 @@ begin
   const Temporary: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-settings-');
   const Path: string := IO.Path.Combine(Temporary.FullName, 'settings.json');
   try
-    const Initial: Settings.Choice := Settings.Load(Path);
+    const Initial: Settings.Preferences := Settings.Load(Path);
     X.Assert.Equal<string>('codex', Initial.Agent);
-    Settings.Save(Path, new Settings.Choice('antigravity', 'sample-model', 'sample-thinking'));
+    X.Assert.False(Initial.GenerateRoomArt);
+    IO.File.WriteAllText(
+      Path,
+      '{"agent":"antigravity","model":"sample-model","thinkingLevel":"sample-thinking"}'
+    );
 
-    const Loaded: Settings.Choice := Settings.Load(Path);
+    const Loaded: Settings.Preferences := Settings.Load(Path);
     X.Assert.Equal<string>('antigravity', Loaded.Agent);
     X.Assert.Equal<string>('sample-model', Loaded.Model);
     X.Assert.Equal<string>('sample-thinking', Loaded.ThinkingLevel);
+    X.Assert.False(Loaded.GenerateRoomArt);
+  finally
+    Temporary.Delete(true);
+  end try;
+end procedure;
+
+procedure Send(Session: Tui.HeadlessSession; Input: Tui.Input);
+begin
+  case Session.Send(Input) of
+    when Tui.Admission.Queued(const Receipt: long):
+      for Attempt: int := 1 to 24 do
+        case Session.Step() of
+          when Tui.StepResult.Processed(const Id: long, _, _):
+            if Id = Receipt then
+              return;
+            end if;
+          else
+        end case;
+      end for;
+    else
+  end case;
+
+  X.Assert.Fail('The keyboard input was not processed.');
+end procedure;
+
+[X.FactAttribute]
+public procedure SavesRoomArtFromTheKeyboardAtEightyByTwentyFive();
+begin
+  const Temporary: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-settings-');
+  const Path: string := IO.Path.Combine(Temporary.FullName, 'settings.json');
+  try
+    const Start: App.Model := App.Open(Path);
+    const Dialog: App.Model := App.Update(
+      Start,
+      App.Message.StartInput(Menu.Message.Click(1))
+    ).Model;
+    using const Session: Tui.HeadlessSession := Tui.StartHeadless<App.Model, App.Message>(
+      Dialog, App.Update, App.View, 80, 25, App.Theme(Dialog)
+    );
+    for Id: string in ['settings-generate-art', 'settings-save'] do
+      var Focused: bool := false;
+      for Attempt: int := 1 to 12 do
+        Focused := Sys.Array.Exists<Tui.ControlSnapshot>(
+          Session.Snapshot().Controls,
+          function(Item: Tui.ControlSnapshot): bool => Item.Id = Id and Item.Focused
+        );
+        if Focused then
+          break;
+        end if;
+
+        Send(Session, Tui.Input.KeyPress(Keys.Key.Tab, Keys.KeyModifiers.None));
+      end for;
+
+      X.Assert.True(
+        Focused,
+        'Tab could not reach ' + Id + #10 + Sys.String.Join(
+          #10.ToString(),
+          Session.Snapshot().Lines
+        )
+      );
+      Send(
+        Session,
+        if Id = 'settings-generate-art' then
+          Tui.Input.Character(' ')
+        else
+          Tui.Input.KeyPress(Keys.Key.Enter, Keys.KeyModifiers.None)
+        end if
+      );
+    end for;
+
+    const Reopened: App.Model := App.Open(Path);
+    X.Assert.True(Reopened.Saved.GenerateRoomArt);
+    X.Assert.Equal<Settings.Choice>(Start.Saved.AgentChoice(), Reopened.Saved.AgentChoice());
   finally
     Temporary.Delete(true);
   end try;

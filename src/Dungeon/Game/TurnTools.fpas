@@ -5,7 +5,7 @@ uses
   Dungeon.Game.Journal as Journal, Dungeon.Game.Navigation as Navigation, Dungeon.Game.World as World, Dungeon.Game.RoomView as Rooms, Dungeon.Game.Saves as Saves, Dungeon.Game.Art as Art, Dungeon.Game.ArtRequests as Draw,
   ModelContextProtocol as Mcp, ModelContextProtocol.Server as Server, ModelContextProtocol.Protocol as Protocol,
   System as Sys, System.Collections.Concurrent as Concurrent, System.Collections.Generic as Lists,
-  System.Text.Json as Json, System.Text.Json.Serialization.Metadata as Metadata;
+  System.Text.Json as Json, System.Text.Json.Nodes as Nodes, System.Text.Json.Serialization.Metadata as Metadata;
 
 public type Proposal = record
   public Reply: string;
@@ -40,7 +40,7 @@ begin
     raise new Mcp.McpException('Read the current room or an open exit from it.');
   end if;
 
-  return Rooms.Describe(State, RoomId, Art.Complete(Art.Load(Value.SavePath, State, RoomId)));
+  return Rooms.Describe(State, RoomId);
 end function;
 
 function GetHistory(Value: Context; RoomId: string; Limit: int): array of Saves.Turn;
@@ -109,6 +109,67 @@ begin
   return 'Staged for this turn. End the prompt now.';
 end function;
 
+function ParameterDescription(ToolName: string; ParameterName: string): string;
+begin
+  case ParameterName of
+    when 'turnId':
+      return 'Active turnId supplied in the current turn prompt.';
+    when 'requestId':
+      return 'Active requestId supplied in the current illustration prompt.';
+    when 'roomId':
+      return case ToolName of
+        when 'get_room': 'Current room ID or an open exit roomId from currentScene.exits.';
+        else 'Exact room ID to filter by, or an empty string for all rooms.';
+      end case;
+    when 'query':
+      return 'Case-insensitive substring matched against replies, facts, commands, targets, rooms, and speakers. Use an empty string for no text filter.';
+    when 'person':
+      return 'Exact internal speaker ID such as mara, iven, edda, or ada (case-insensitive). Use an empty string for no person filter.';
+    when 'beforeTurn':
+      return 'Return turns strictly before this 1-based turn number. Pass 0 for the first page, then pass nextBeforeTurn until 0.';
+    when 'limit':
+      return 'Maximum number of entries to return, from 1 to 20.';
+    when 'destination':
+      return 'Exact visited room ID, exact English or German room name, or exact speaker ID of a previously met person (such as mara or iven).';
+    when 'action':
+      return 'Action to commit: none, move, or an exact action from currentScene.interactions where available is true.';
+    when 'target':
+      return 'Empty string for none, an open exit roomId for move, or the exact target from currentScene.interactions where available is true.';
+    when 'reply':
+      return 'Player-facing narration in the player language: 1 to 800 characters of plain text with no Markdown and no internal IDs.';
+    when 'drawing':
+      return 'Drawing with columns (50 or 65), zero-based focusX/focusY, palette (1 to 36 single-cell tiles using allowed #RRGGBB colors), and rows (exact height count of palette-index strings).';
+    else
+      return '';
+  end case;
+end function;
+
+function AnnotateParameters(Name: string; Schema: Json.JsonElement): Json.JsonElement;
+begin
+  const Root: Nodes.JsonNode? := Nodes.JsonNode.Parse(Schema.GetRawText());
+  if Root <> null and Root is Nodes.JsonObject then
+    const Document: Nodes.JsonObject := cast<Nodes.JsonObject>(Root);
+    const PropertiesNode: Nodes.JsonNode? := Document['properties'];
+    if PropertiesNode <> null and PropertiesNode is Nodes.JsonObject then
+      const Properties: Nodes.JsonObject := cast<Nodes.JsonObject>(PropertiesNode);
+      for Key: string in [
+        'turnId', 'requestId', 'roomId', 'query', 'person', 'beforeTurn', 'limit', 'destination',
+        'action', 'target', 'reply', 'drawing'
+      ] do
+        const Entry: Nodes.JsonNode? := Properties[Key];
+        const Text: string := ParameterDescription(Name, Key);
+        if Text <> '' and Entry <> null and Entry is Nodes.JsonObject then
+          cast<Nodes.JsonObject>(Entry)['description'] := Nodes.JsonValue.Create<string>(Text);
+        end if;
+      end for;
+    end if;
+
+    return Json.JsonSerializer.SerializeToElement<Nodes.JsonNode>(Document);
+  end if;
+
+  return Schema;
+end function;
+
 function Tool(Called: Sys.Delegate; Name: string; Description: string; ReadOnly: bool): Server.McpServerTool;
 begin
   const Options: Server.McpServerToolCreateOptions := new Server.McpServerToolCreateOptions();
@@ -123,11 +184,24 @@ begin
   Serializer.TypeInfoResolver := new Metadata.DefaultJsonTypeInfoResolver();
   Serializer.PropertyNamingPolicy := Json.JsonNamingPolicy.CamelCase;
   Options.SerializerOptions := Serializer;
-  return Server.McpServerTool.Create(Called, Options);
+  const Created: Server.McpServerTool := Server.McpServerTool.Create(Called, Options);
+  Created.ProtocolTool.InputSchema := AnnotateParameters(Name, Created.ProtocolTool.InputSchema);
+  return Created;
 end function;
 
-// Registers the tools on the official MCP SDK server.
-public function Register(Active: Concurrent.ConcurrentDictionary<string, Context?>; ArtPrompts: Draw.Registry? := null): Server.McpServerOptions;
+function ServerOptions(Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool>): Server.McpServerOptions;
+begin
+  const Identity: Protocol.Implementation := new Protocol.Implementation();
+  Identity.Name := 'into-the-dungeon';
+  Identity.Version := '0.1.0';
+  const Options: Server.McpServerOptions := new Server.McpServerOptions();
+  Options.ServerInfo := Identity;
+  Options.ToolCollection := Tools;
+  return Options;
+end function;
+
+// Registers only the gameplay tools for the game master session.
+public function Register(Active: Concurrent.ConcurrentDictionary<string, Context?>): Server.McpServerOptions;
 begin
   const ReadRoom: Sys.Func<string, string, Rooms.Scene> := function(turnId: string; roomId: string): Rooms.Scene => GetRoom(
     Find(Active, turnId),
@@ -166,27 +240,11 @@ begin
     reply
   );
   const Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool> := new Server.McpServerPrimitiveCollection<Server.McpServerTool>();
-  if ArtPrompts <> null then
-    const SubmitArt: Sys.Func<string, Art.Drawing, string> := function(requestId: string; drawing: Art.Drawing): string => Draw.Submit(
-      ArtPrompts,
-      requestId,
-      drawing
-    );
-    Tools.Add(
-      Tool(
-        SubmitArt,
-        'submit_room_art',
-        'Submit the Unicode tile palette, indexed rows and focus for this illustration request.',
-        false
-      )
-    );
-  end if;
-
   Tools.Add(
     Tool(
       ReadRoom,
       'get_room',
-      'Read the current room or an open neighbor, including people, available actions, outcomes, exits and obstacles.',
+      'Read the current room or an open exit destination before describing arrival, including description, details, exits, obstacles, and local interactions.',
       true
     )
   );
@@ -194,7 +252,7 @@ begin
     Tool(
       ReadJournal,
       'get_journal',
-      'Read the latest 20 committed encounters, including their original replies, places and turn numbers.',
+      'Read the latest 20 committed encounters (no pagination), including original replies, facts, speakers, places, and turn numbers. Use search_memories for older encounters.',
       true
     )
   );
@@ -202,7 +260,7 @@ begin
     Tool(
       SearchMemories,
       'search_memories',
-      'Search completed turns newest first. Use empty query, person or roomId for no filter. Set beforeTurn to 0 to start, then pass nextBeforeTurn until 0. Limit 1 to 20.',
+      'Search all completed turns newest first. Pass empty strings to omit query, person, or roomId filters. Use exact internal speaker IDs for person (e.g. mara, iven). Start with beforeTurn 0 and paginate with nextBeforeTurn until 0.',
       true
     )
   );
@@ -210,7 +268,7 @@ begin
     Tool(
       FindRoute,
       'find_route',
-      'Give directions over previously crossed passages to a visited room ID, English or German room name, or a person last met. A blocked route stops at its first obstacle.',
+      'Find directions over previously crossed passages to an exact visited room ID, exact English or German room name, or exact speaker ID of a previously met person. Returns status here, route, blocked (stopping at the first obstacle), unknown, or unmapped.',
       true
     )
   );
@@ -218,24 +276,38 @@ begin
     Tool(
       ReadHistory,
       'get_history',
-      'Read up to 20 completed turns. Use an empty roomId to retrieve turns across rooms.',
+      'Read up to 20 recent completed turns in chronological order. Use an empty roomId for turns across all rooms.',
       true
     )
   );
   Tools.Add(
     Tool(
       SubmitTurn, 'submit_turn',
-      'Stage narration with one available local action and its exact target, move to an open exit ID, or none with an empty target.',
+      'Stage the single player-visible narration (1 to 800 plain-text characters, no Markdown or internal IDs) and one validated action (available local interaction, move to an open exit roomId, or none with empty target). Only reply is shown to the player.',
       false
     )
   );
-  const Identity: Protocol.Implementation := new Protocol.Implementation();
-  Identity.Name := 'into-the-dungeon';
-  Identity.Version := '0.1.0';
-  const Options: Server.McpServerOptions := new Server.McpServerOptions();
-  Options.ServerInfo := Identity;
-  Options.ToolCollection := Tools;
-  return Options;
+  return ServerOptions(Tools);
+end function;
+
+// Registers only the illustration submission tool for the background room artist.
+public function RegisterArt(ArtPrompts: Draw.Registry): Server.McpServerOptions;
+begin
+  const SubmitArt: Sys.Func<string, Art.Drawing, string> := function(requestId: string; drawing: Art.Drawing): string => Draw.Submit(
+    ArtPrompts,
+    requestId,
+    drawing
+  );
+  const Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool> := new Server.McpServerPrimitiveCollection<Server.McpServerTool>();
+  Tools.Add(
+    Tool(
+      SubmitArt,
+      'submit_room_art',
+      'Submit a validated room drawing (columns 50 or 65, 1 to 36 single-cell Unicode tiles using allowed #RRGGBB district colors, exact row count, and zero-based focus) for the active illustration requestId.',
+      false
+    )
+  );
+  return ServerOptions(Tools);
 end function;
 
 end unit;

@@ -7,6 +7,7 @@ uses
   Dungeon.Game.TurnTools as Tools, Dungeon.Mcp.Transport as Mcp, Dungeon.Acp.Dialogs as Dialogs, Dungeon.Game.ArtRequests as Draw, Dungeon.Game.Illustrator as Illustrator,
   Dungeon.Settings as Settings, dotacp.client as Client, dotacp.@protocol as P, StreamJsonRpc as Rpc,
   System as Sys, System.IO as IO, System.Globalization as Global, System.Text.Json as Json,
+  System.Text.Encodings.Web as Encoding,
   System.Collections.Concurrent as Collections, System.Collections.Generic as Lists, System.Text as Buffers,
   System.Threading as Threads, System.Threading.Channels as Channels, System.Threading.Tasks as Tasks;
 
@@ -32,7 +33,7 @@ async function OpenSession(
 begin
   const Initialized: P.InitializeResponse := await Agents.Initialize(Connection, Token);
   const Caps: P.AgentCapabilities? := Initialized.AgentCapabilities;
-  if Saved <> null and Caps <> null then
+  if Saved <> null and Saved.GameMaster.Agent = Choice.Agent and Caps <> null then
     const Id: P.SessionId := new P.SessionId(Saved.SessionId);
     const Sessions: P.SessionCapabilities? := Caps.SessionCapabilities;
     try
@@ -64,61 +65,85 @@ begin
   return await Dialogs.NewSession(Connection, Directory, Choice, Servers, Token);
 end function;
 
-function TurnPrompt(Id: string; Value: Tools.Context; Command: string): string;
+function PromptJson(): Json.JsonSerializerOptions;
 begin
+  const Options: Json.JsonSerializerOptions := new Json.JsonSerializerOptions();
+  Options.PropertyNamingPolicy := Json.JsonNamingPolicy.CamelCase;
+  Options.Encoder := Encoding.JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
+  return Options;
+end function;
+
+// Builds the authoritative turn prompt sent to the game master for one player command or opening.
+public function TurnPrompt(Id: string; Value: Tools.Context; Command: string): string;
+begin
+  const JsonOptions: Json.JsonSerializerOptions := PromptJson();
+  const Language: string := Global.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
   const Message: Buffers.StringBuilder := new Buffers.StringBuilder();
   discard Message.AppendLine(
-    'You are the game master of Into the Dungeon. Treat the saved world facts below as authoritative.'
+    'You are the game master of Into the Dungeon. Treat the world state below and the dungeon MCP tools as authoritative.'
   );
   discard Message.AppendLine(
-    'Use the local scene below. Use only the dungeon MCP tools, with the supplied turnId. Use get_history for recent commands.'
+    'If the dungeon MCP tools are hidden, use tool discovery to load them. Use only the dungeon MCP tools for game actions, always passing the supplied turnId.'
   );
   discard Message.AppendLine(
-    'Call submit_turn exactly once for the result. Supply turnId, action, target, and short plain-text reply in the player language.'
+    'The player sees ONLY the reply passed to submit_turn; your normal assistant message is ignored. Call submit_turn exactly once with turnId, action, target, and reply, then end the prompt immediately with minimal or no extra text.'
   );
   discard Message.AppendLine(
-    'Use one action per turn. To describe a blocked attempt or look around use none with an empty target.'
+    'Style and UI: write in second person in the player language. Supply 1 to 800 characters of plain text without Markdown (no **, *, #, lists, or backticks) and without internal IDs (such as pump-room, brass-key, take_key, or turnId).'
   );
   discard Message.AppendLine(
-    'For movement read the open destination before describing arrival. Use move with its ID. For local interactions copy an available action and target from the current room.'
+    'The UI shows only the room name, room art, and narration log (no separate exit list, inventory panel, or action buttons). When arriving in a room or looking around, naturally mention open and blocked exits, present characters, and noticeable cue details so the player knows their options.'
   );
   discard Message.AppendLine(
-    'If a tool rejects an action, correct it. Finish after submit_turn succeeds.'
+    'Localization: use each room''s localized name from the JSON and keep character proper names (such as Mara, Iven, Edda, Ada) unchanged. Translate English descriptions, directions, cues, and outcomes naturally and consistently into the player language.'
   );
   discard Message.AppendLine(
-    'Reveal only what the command discovers. Speak in the voice of a present character. Use get_journal for recent discoveries and search_memories for earlier conversations or clues.'
+    'Scene fields and spoiler rules: cue is visibly noticeable in the room. outcomeOrHint with available=true is the discovery or result—reveal it ONLY when submitting that exact action and target in this turn, never on none or unrelated commands. outcomeOrHint with available=false is a blocking hint—do NOT submit that action; use action "none" with target "" and narrate the hint. When alreadyLearned is true, acknowledge prior knowledge (talk or inspect may still be used if the player asks again, since characters can give updated replies).'
   );
   discard Message.AppendLine(
-    'Explain the cost of a final choice and use resolve only for an explicit player decision. After resolution allow further exploration.'
+    'World boundaries: only characters present in the current room may speak; when the player talks to a present character, convey their voice and perspective. Never invent items, exits, characters, or world changes not backed by the scene or committed action, and never narrate an action as succeeded unless you submit it.'
   );
   discard Message.AppendLine(
-    'Player language: ' + Global.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
+    'Actions (one per turn): if the player asks for multiple steps at once, execute only the first valid action and do not narrate later steps as done. For movement, first call get_room(turnId, destinationRoomId) for an exit with open=true before describing arrival, then submit action "move" with that roomId. For a local interaction, copy an exact action and target from currentScene.interactions where available=true. For everything else—looking around, blocked attempts, inventory or status questions, giving directions, or impossible commands—use action "none" with target "".'
   );
+  discard Message.AppendLine(
+    'Final choice: explain the permanent cost before committing, and use resolve ONLY for an explicit player decision. After an ending is chosen, allow further exploration.'
+  );
+  discard Message.AppendLine(
+    'Memory and directions: use get_journal for the latest 20 committed encounters (no pagination), search_memories for older encounters or filtered searches (pass exact internal speaker IDs such as mara or iven for person), get_history for recent turns by room, and find_route for directions to an exact visited room ID, exact English or German room name, or previously met speaker ID (status is here, route, blocked, unknown, or unmapped). If any tool rejects an input or action, correct it and retry.'
+  );
+  discard Message.AppendLine('Player language: ' + Language);
   discard Message.AppendLine('turnId: ' + Id);
   discard Message.AppendLine('World brief: ' + Value.WorldState.WorldBrief);
   discard Message.AppendLine('Current room ID: ' + Value.WorldState.RoomId);
-  discard Message.AppendLine('Grate open: ' + Value.WorldState.GrateOpen.ToString());
   discard Message.AppendLine(
-    'Current scene: ' + Json.JsonSerializer.Serialize<Rooms.Scene>(
-      Tools.GetRoom(Value, Value.WorldState.RoomId)
+    'Recorded discoveries: ' + Json.JsonSerializer.Serialize<array of string>(
+      Value.WorldState.Discoveries,
+      JsonOptions
     )
   );
   discard Message.AppendLine(
-    'For directions, use find_route. A person destination is their last recorded meeting place. Giving directions uses none.'
+    'Current scene: ' + Json.JsonSerializer.Serialize<Rooms.Scene>(
+      Tools.GetRoom(Value, Value.WorldState.RoomId),
+      JsonOptions
+    )
   );
-  discard Message.AppendLine('Recent completed turns:');
-  for Index: int := Sys.Math.Max(0, Value.History.Length - 4) to Value.History.Length - 1 do
-    discard Message.AppendLine(Json.JsonSerializer.Serialize<Saves.Turn>(Value.History[Index]));
-  end for;
+  if Value.History.Length > 0 then
+    discard Message.AppendLine('Recent completed turns:');
+    for Index: int := Sys.Math.Max(0, Value.History.Length - 4) to Value.History.Length - 1 do
+      discard Message.AppendLine(
+        Json.JsonSerializer.Serialize<Saves.Turn>(Value.History[Index], JsonOptions)
+      );
+    end for;
+  end if;
 
   if Value.Opening then
     discard Message.AppendLine(
-      'Describe the opening scene. Use action none. Language: ' +
-      Global.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
+      'Describe the opening scene so the player knows where they are, what stands out, and what exits or clues are visible. Use action "none" and target "".'
     );
   else
     discard Message.AppendLine(
-      'Player command as JSON: ' + Json.JsonSerializer.Serialize<string>(Command)
+      'Player command as JSON: ' + Json.JsonSerializer.Serialize<string>(Command, JsonOptions)
     );
   end if;
 
@@ -173,9 +198,9 @@ begin
   return new Presentation(History, State.RoomId, Art.Load(Path, State, State.RoomId));
 end function;
 
-procedure RequestArt(Room: World.State; Frame: Presentation; Visits: Channels.Channel<Draw.Visit>);
+procedure RequestArt(Room: World.State; Frame: Presentation; Visits: Channels.Channel<Draw.Visit>?);
 begin
-  if not Art.Complete(Frame.Images) then
+  if Visits <> null and not Art.Complete(Frame.Images) then
     const Count: int := Frame.History.Length;
     discard Visits.Writer.TryWrite(
       new Draw.Visit(
@@ -192,7 +217,7 @@ end procedure;
 async function Play(
   Connection: Client.Connection; Directory: string; Path: string; Choice: Settings.Choice;
   Saved: Saves.Save?; Initial: World.State; Servers: array of P.McpServer?;
-  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: Channels.Channel<string>; Visits: Channels.Channel<Draw.Visit>;
+  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: Channels.Channel<string>; Visits: Channels.Channel<Draw.Visit>?;
   Post: function(Event): Tasks.Task; Token: Threads.CancellationToken
 ): Tasks.Task<bool>;
 begin
@@ -235,7 +260,9 @@ begin
     end if;
 
     Current := Commit(Path, Current, State, '', Opening);
-  elsif Saved.SessionId <> Current.SessionId or Saved.WorldState = null then
+  elsif Saved.SessionId <> Current.SessionId or Saved.GameMaster <> Current.GameMaster
+    or Saved.WorldState = null
+  then
     Saves.Write(Path, Current);
   end if;
   var Frame: Presentation := Present(Path, Current.History, State);
@@ -279,7 +306,7 @@ end function;
 // Owns the save slot and the MCP listener for one active adventure.
 public async function Run(
   Path: string; Choice: Settings.Choice; ContinueGame: bool; Queue: Channels.Channel<string>;
-  Post: function(Event): Tasks.Task; Token: Threads.CancellationToken
+  Post: function(Event): Tasks.Task; Token: Threads.CancellationToken; GenerateRoomArt: bool := false
 ): Tasks.Task;
 begin
   try
@@ -299,12 +326,7 @@ begin
     if Saved <> null then
       await Post(Event.Restored(Present(Path, Saved.History, Initial)));
     end if;
-    const Selected: Settings.Choice := if Saved = null then
-      Choice
-    else
-      Saved.GameMaster
-    end if;
-    const Exe: string := Agents.Resolve(Selected.Agent);
+    const Exe: string := Agents.Resolve(Choice.Agent);
     if Exe = '' then
       await Post(Event.Failed('Settings.AgentMissing'));
       return;
@@ -314,31 +336,35 @@ begin
       IO.Path.Combine(IO.Path.GetDirectoryName(Path) ?? '', 'game-master')
     ).FullName;
     const Active: Collections.ConcurrentDictionary<string, Tools.Context?> := new Collections.ConcurrentDictionary<string, Tools.Context?>();
-    const PipeName: string := 'dungeon-' + Sys.Guid.NewGuid().ToString('N');
-    const Servers: array of P.McpServer? := [Mcp.AgentConfig(PipeName)];
+    const GamePipe: string := 'dungeon-' + Sys.Guid.NewGuid().ToString('N');
+    const ArtPipe: string := 'dungeon-art-' + Sys.Guid.NewGuid().ToString('N');
+    const GameServers: array of P.McpServer? := [Mcp.AgentConfig(GamePipe)];
     using const Stop: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
       Token
     );
     const ArtPrompts: Draw.Registry := new Draw.Registry();
-    const Visits: Channels.Channel<Draw.Visit> := Channels.Channel.CreateUnbounded<Draw.Visit>();
-    const Listener: Tasks.Task := Mcp.Listen(
-      PipeName,
-      Tools.Register(Active, ArtPrompts),
-      Stop.Token
-    );
-    const Artist: Tasks.Task := Illustrator.Run(
-      Visits.Reader,
-      Path,
-      Selected,
-      Exe,
-      Directory,
-      Servers,
-      ArtPrompts,
-      function(RoomId: string; Images: Art.Pair; Finished: bool): Tasks.Task => Post(
-        Event.ArtChanged(RoomId, Images, Finished)
-      ),
-      Stop.Token
-    );
+    const Visits: Channels.Channel<Draw.Visit>? := if GenerateRoomArt then
+      Channels.Channel.CreateUnbounded<Draw.Visit>()
+    else
+      null
+    end if;
+    const GameListener: Tasks.Task := Mcp.Listen(GamePipe, Tools.Register(Active), Stop.Token);
+    const ArtListener: Tasks.Task := if Visits = null then
+      Tasks.Task.CompletedTask
+    else
+      Mcp.Listen(ArtPipe, Tools.RegisterArt(ArtPrompts), Stop.Token)
+    end if;
+    const Artist: Tasks.Task := if Visits = null then
+      Tasks.Task.CompletedTask
+    else
+      Illustrator.Run(
+        Visits.Reader, Path, Choice, Exe, Directory, [Mcp.AgentConfig(ArtPipe)], ArtPrompts,
+        function(RoomId: string; Images: Art.Pair; Finished: bool): Tasks.Task => Post(
+          Event.ArtChanged(RoomId, Images, Finished)
+        ),
+        Stop.Token
+      )
+    end if;
     const Peer: Callbacks.Callbacks := new Callbacks.Callbacks(
       procedure(Notification: P.SessionNotification) begin end procedure,
       procedure() begin
@@ -347,15 +373,15 @@ begin
     );
     try
       discard await Agents.Run<bool>(
-        Selected.Agent, Exe, Directory, Peer,
+        Choice.Agent, Exe, Directory, Peer,
         function(Connection: Client.Connection): Tasks.Task<bool> => Play(
           Connection,
           Directory,
           Path,
-          Selected,
+          Choice,
           Saved,
           Initial,
-          Servers,
+          GameServers,
           Active,
           Queue,
           Visits,
@@ -365,8 +391,11 @@ begin
       );
     finally
       Stop.Cancel();
-      discard Visits.Writer.TryComplete();
-      await Tasks.Task.WhenAll([Artist, Listener]);
+      if Visits <> null then
+        discard Visits.Writer.TryComplete();
+      end if;
+
+      await Tasks.Task.WhenAll([Artist, GameListener, ArtListener]);
     end try;
   catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
     await Post(Event.Failed('Settings.Timeout'));

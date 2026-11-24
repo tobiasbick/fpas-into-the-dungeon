@@ -17,24 +17,31 @@ the first conversation at high water. The game validates the action and replaces
 the save atomically after the ACP prompt completes. An interrupted or rejected turn leaves the previous
 save intact.
 
-Each prompt includes the premise, the last four turns and the current scene. The
-scene supplies local details, people, available actions and their outcomes,
-inventory, exits and obstacles. Rooms and exits have stable IDs and display names
-in the player's UI language. Continue restores the save and displays its current
-room and conversation. It reopens the saved ACP session when the agent can load it and
-starts a replacement conversation when the agent cannot restore it. An older
+Each prompt includes the GM rules, UI visibility constraints, spoiler and
+localization guidance, the premise, recorded discoveries, up to four recent
+turns (omitted on opening) and the current scene serialized in camelCase JSON
+matching the MCP tools. The scene supplies local details, people, available
+actions and their outcomes or blocking hints, inventory, exits and obstacles.
+Rooms and exits have stable IDs and display names in the player's UI language.
+Continue restores the current room, conversation and room art. The agent, model
+and thinking level come from `settings.json`. Continue reuses the saved ACP
+session when it belongs to the selected agent and that agent can restore it.
+Otherwise, the selected agent starts a new ACP session for the existing
+adventure. The save records the session owner and ID after setup. An older
 transcript-only save keeps its transcript and begins with the new adventure's
-initial world state. Version 1 two-room saves keep their adventure ID, room, key,
-grate, agent session and transcript. They resume with the campaign premise and
-empty discoveries. The next save writes version 2.
+initial world state. Version 1 two-room saves keep their adventure ID, room,
+key, grate, agent session and transcript. They resume with the campaign premise
+and empty discoveries. The next save writes version 2.
 
 ## Game master tools
 
-The game supplies a local stdio MCP server to the ACP agent on session setup.
-The stdio subprocess forwards MCP messages over a per-adventure named pipe.
+The game supplies separate local stdio MCP servers to the gameplay ACP agent
+and the background room illustrator over per-adventure named pipes, so the game
+master only sees gameplay tools and the illustrator only sees `submit_room_art`.
 The [official .NET MCP SDK](https://www.nuget.org/packages/ModelContextProtocol.Core)
-serves requests in the running game. The game process owns the save and reads
-one player command at a time.
+serves requests in the running game and publishes parameter descriptions in each
+tool's JSON schema. The game process owns the save and reads one player command
+at a time.
 
 | Tool | Purpose |
 | --- | --- |
@@ -81,18 +88,23 @@ where they are.
 
 Entering or resuming a room displays its saved narration immediately. The
 adventure checks its own art directory for the **50 × 16** and **65 × 21**
-drawings. A background worker asks the selected game master for the missing
-sizes, small first. It uses the same agent and model settings in a separate
-ACP conversation, so player commands can continue while art is being drawn.
-The prompt supplies the room, its district, the narration, and the complete
-companion drawing when one exists. The artist keeps the viewpoint, palette
-and landmark consistent across both compositions.
+drawings even when **Generate room art** is off. Enable the setting to let a
+background worker ask the selected game master for missing sizes, small first.
+It uses the same agent and model settings in a separate ACP conversation, so
+player commands can continue while art is being drawn.
+The prompt supplies the room, its district's list of allowed RGB colors, the
+narration, and the complete companion drawing when one exists. The district
+JSON in `src/Dungeon/Game/Campaign/` defines an `artPalette` for all its rooms.
+The artist keeps the viewpoint and landmark consistent across sizes and
+matches the companion with the closest colors from that list.
 
 Each `submit_room_art` call uses an opaque request ID scoped to one drawing.
 A drawing describes a palette of foreground/background RGB colours and
 single-cell Unicode glyphs. Its rows index that palette and its zero-based
-focus coordinates identify the main landmark. The game validates the drawing,
-then publishes it after the ACP prompt finishes. Each size is written
+focus coordinates identify the main landmark. The game checks both foreground
+and background against the district colors for each new submission, then
+publishes it after the ACP prompt finishes. Saved drawings keep their original
+colors, including drawings made before district palettes. Each size is written
 atomically to its own UTF-8 JSON file beside the slot, for example
 `art/<adventure-id>/<room-id>-50x16-v1.json`. If play is interrupted after
 one drawing, the next visit or Continue can complete the pair. Restart gives

@@ -7,7 +7,7 @@ uses
   Dungeon.Game.Screen as Screen, Dungeon.Game.Saves as Saves, Dungeon.App as App, Dungeon.StartMenu as Menu, Dungeon.Settings as Settings,
   Fpas.Ui.TerminalExtensions.CellGrids as Grids, Fpas.Ui.Widgets.Developer.Terminal as T, Fpas.Ui.Tui.Application as Tui,
   ModelContextProtocol as Mcp, ModelContextProtocol.Client as Client, ModelContextProtocol.Protocol as P, System as Sys, System.IO as IO, System.IO.Pipes as Pipes,
-  System.Collections.Concurrent as Concurrent, System.Collections.Generic as Lists, System.Threading.Tasks as Tasks,
+  System.Collections.Generic as Lists, System.Threading.Tasks as Tasks,
   System.Threading as Threads, System.Text.Json as Json, Xunit as X;
 
 function Drawing(Width: int; Symbol: string): Art.Drawing;
@@ -31,19 +31,25 @@ begin
   );
 end function;
 
+function DistrictDrawing(Width: int): Art.Drawing;
+begin
+  return Drawing(Width, '▒') with
+    Palette := [new Art.Tile(' ', '#D08040', '#0d0605'), new Art.Tile('▒', '#FFAA22', '#382019')];
+  end with;
+end function;
+
 async function Exercise(Path: string; Token: Threads.CancellationToken): Tasks.Task;
 begin
   const State: World.State := World.NewAdventure();
   const Room: Draw.Visit := new Draw.Visit(State, 'The pump bell shakes.');
   const Requests: Draw.Registry := new Draw.Registry();
-  const Contexts: Concurrent.ConcurrentDictionary<string, Tools.Context?> := new Concurrent.ConcurrentDictionary<string, Tools.Context?>();
   const Name: string := 'dungeon-' + Sys.Guid.NewGuid().ToString('N');
   using const Stop: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
     Token
   );
   const Server: Tasks.Task := Transport.Listen(
     Name,
-    Tools.Register(Contexts, Requests),
+    Tools.RegisterArt(Requests),
     Stop.Token
   );
   try
@@ -60,6 +66,15 @@ begin
       null,
       Token
     );
+    const Offered: Lists.IList<Client.McpClientTool> := await Peer.ListToolsAsync(
+      cancellationToken := Token
+    );
+    const ArtTool: Client.McpClientTool := X.Assert.Single<Client.McpClientTool>(Offered);
+    X.Assert.Equal<string>('submit_room_art', ArtTool.Name);
+    const ArtSchema: string := ArtTool.JsonSchema.GetRawText();
+    X.Assert.Contains('Active requestId', ArtSchema);
+    X.Assert.Contains('1 to 36 tiles', ArtSchema);
+    X.Assert.Contains('#RRGGBB', ArtSchema);
     const Updated: Lists.List<Art.Pair> := new Lists.List<Art.Pair>();
     const Prompts: Lists.List<string> := new Lists.List<string>();
     var Interrupt: bool := true;
@@ -73,6 +88,12 @@ begin
       LastId := X.Assert.Single<string>(Requests.Keys);
       X.Assert.Contains(LastId, Text);
       X.Assert.Contains('The pump bell shakes.', Text);
+      X.Assert.Contains(
+        'Use only these district colors for both foreground and background: #0D0605',
+        Text
+      );
+      X.Assert.Contains('1 to 36 tiles', Text);
+      X.Assert.Contains('Example drawing JSON shape:', Text);
       const Job: Draw.Request? := Requests[LastId];
       X.Assert.NotNull(Job);
       if Job = null then
@@ -84,7 +105,7 @@ begin
       end if;
       const Args: Lists.Dictionary<string, object?> := new Lists.Dictionary<string, object?>();
       Args['requestId'] := LastId;
-      const Picture: Art.Drawing := Drawing(Job.Width, '▒');
+      const Picture: Art.Drawing := DistrictDrawing(Job.Width);
       const Web: Json.JsonSerializerOptions := new Json.JsonSerializerOptions(
         Json.JsonSerializerDefaults.Web
       );
@@ -102,6 +123,25 @@ begin
       );
       X.Assert.True(Bad.IsError ?? false);
       X.Assert.False(Job.Result.Task.IsCompleted);
+      for Ink: Art.Tile in [
+        new Art.Tile('▒', '#B8C9CE', '#382019'), new Art.Tile('▒', '#FFAA22', '#B8C9CE')
+      ] do
+        Args['drawing'] := Json.JsonSerializer.SerializeToElement<Art.Drawing>(
+          Picture with
+            Palette := [Picture.Palette[0], Ink];
+          end with, Web
+        );
+        const ColorError: P.CallToolResult := await Peer.CallToolAsync(
+          'submit_room_art', Args, null, null, Token
+        );
+        X.Assert.True(ColorError.IsError ?? false);
+        const ErrorText: P.TextContentBlock := X.Assert.IsType<P.TextContentBlock>(
+          X.Assert.Single<P.ContentBlock>(ColorError.Content)
+        );
+        X.Assert.Contains('#B8C9CE is outside the district palette.', ErrorText.Text);
+        X.Assert.False(Job.Result.Task.IsCompleted);
+      end for;
+
       Args['drawing'] := Json.JsonSerializer.SerializeToElement<Art.Drawing>(Picture, Web);
       const Accepted: P.CallToolResult := await Peer.CallToolAsync(
         'submit_room_art',
@@ -128,19 +168,21 @@ begin
     X.Assert.NotNull(Updated[0].Compact);
     X.Assert.Null(Updated[0].Full);
     X.Assert.True(Requests.IsEmpty);
+    const Legacy: Art.Picture := Art.Decode(Drawing(50, '▒'), 50);
     const File: string := IO.Path.Combine(
       IO.Path.GetDirectoryName(Path) ?? '',
       'art',
       State.AdventureId,
       'pump-room-50x16-v1.json'
     );
+    IO.File.WriteAllText(File, Art.Encode(Legacy));
     const Stamp: Sys.DateTime := new Sys.DateTime(2020, 1, 1);
     IO.File.SetLastWriteTimeUtc(File, Stamp);
     Interrupt := false;
     await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
     X.Assert.Equal<int>(3, Prompts.Count);
     X.Assert.Contains('65 columns and 21 rows', Prompts[2]);
-    X.Assert.Contains(Art.Encode(Art.Decode(Drawing(50, '▒'), 50)), Prompts[2]);
+    X.Assert.Contains(Art.Encode(Legacy), Prompts[2]);
     X.Assert.Equal<Sys.DateTime>(Stamp, IO.File.GetLastWriteTimeUtc(File));
     X.Assert.True(Art.Complete(Art.Load(Path, State, State.RoomId)));
     await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
@@ -153,7 +195,7 @@ begin
     await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
     X.Assert.Equal<int>(4, Prompts.Count);
     X.Assert.Contains('50 columns and 16 rows', Prompts[3]);
-    X.Assert.Contains(Art.Encode(Art.Decode(Drawing(65, '▒'), 65)), Prompts[3]);
+    X.Assert.Contains(Art.Encode(Art.Decode(DistrictDrawing(65), 65)), Prompts[3]);
     X.Assert.True(Art.Complete(Art.Load(Path, State, State.RoomId)));
     discard X.Assert.Throws<Mcp.McpException>(
       procedure() begin
@@ -242,7 +284,7 @@ begin
   );
   const Model: App.Model := new App.Model(
     '',
-    new Settings.Choice(),
+    new Settings.Preferences(),
     new Menu.Model(true),
     Adventure := Game
   );

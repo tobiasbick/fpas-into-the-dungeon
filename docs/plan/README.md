@@ -34,8 +34,8 @@ the game master tools, and the data that survives a restart.
 ## Game settings
 
 The `Dungeon.Settings` project creates `settings.json` with an empty JSON object
-on first launch. The game loads the saved agent, model and thinking-level IDs
-at startup. The base directory comes from .NET's
+on first launch. The game loads the saved agent, model, thinking level and
+room art preference at startup. The base directory comes from .NET's
 `Environment.SpecialFolder.ApplicationData`.
 
 - Windows uses `%APPDATA%\into-the-dungeon\settings.json`.
@@ -44,10 +44,12 @@ at startup. The base directory comes from .NET's
   `~/.config/into-the-dungeon/settings.json`.
 
 Open **Settings** from the start menu. At 80 × 25, the provider list is on the
-left and the model and thinking selectors are on the right. Use the arrow keys
-to choose the provider, Tab to move among fields and actions, and Enter to open
-a selector or activate a button. Save writes the selection and returns to the
-start menu. Back or Escape discards edits. Escape closes an open picker first.
+left and the model and thinking selectors are on the right. **Generate room art**
+is off by default, including for older settings files. Use the arrow keys to
+choose the provider, Tab to move among fields and actions, and Space to toggle
+the checkbox. Enter opens a selector or activates a button. Save writes the
+preferences and returns to the start menu. Back or Escape discards edits.
+Escape closes an open picker first.
 
 The game uses [dotacp.client](https://www.nuget.org/packages/dotacp.client/)
 to read ACP session configuration from locally installed agents. Install and
@@ -58,6 +60,12 @@ on `PATH`:
 - Claude Code: [`claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp)
 - Cursor: [`agent acp`](https://cursor.com/docs/cli/acp)
 - Antigravity: [`agy acp`](https://antigravity.google/docs/cli/acp)
+- OpenCode: [`opencode acp`](https://opencode.ai/docs/cli/acp)
+- Pi (ACP): [`openma-pi-acp`](https://www.npmjs.com/package/@openma/pi-acp)
+
+Install the Pi adapter with `npm install -g @openma/pi-acp` alongside a
+compatible Pi installation. The adapter registers the game's MCP tools for
+each ACP session.
 
 Loading runs in the background. The model list and thinking levels come from
 the selected agent's current session. Changing the model requests its updated
