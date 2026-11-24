@@ -4,7 +4,7 @@ unit Dungeon.Game.Session;
 uses
   Dungeon.Acp.Processes as Agents, Dungeon.Acp.Discovery as Acp, Dungeon.Acp.ClientCallbacks as Callbacks,
   Dungeon.Game.Saves as Saves, Dungeon.Game.World as World, Dungeon.Game.Art as Art,
-  Dungeon.Game.TurnTools as Tools, Dungeon.Mcp.Transport as Mcp, Dungeon.EmberArt as Ember,
+  Dungeon.Game.TurnTools as Tools, Dungeon.Mcp.Transport as Mcp, Dungeon.Acp.Dialogs as Dialogs, Dungeon.Game.ArtRequests as Draw, Dungeon.Game.Illustrator as Illustrator,
   Dungeon.Settings as Settings, dotacp.client as Client, dotacp.@protocol as P, StreamJsonRpc as Rpc,
   System as Sys, System.IO as IO, System.Globalization as Global, System.Text.Json as Json,
   System.Collections.Concurrent as Collections, System.Collections.Generic as Lists, System.Text as Buffers,
@@ -14,67 +14,16 @@ uses
 public type Presentation = record
   public History: array of Saves.Turn;
   public RoomId: string;
-  public Image: Ember.Scene?;
+  public Images: Art.Pair;
 end record;
 
 public type Event = variant
   Restored(Value: Presentation);
   Ready(Value: Presentation);
+  ArtChanged(RoomId: string; Images: Art.Pair; Finished: bool);
   TurnRejected;
   Failed(Status: string);
 end variant;
-
-async function Prompt(
-  Connection: Client.Connection; Id: P.SessionId; Text: string; Token: Threads.CancellationToken
-): Tasks.Task<bool>;
-begin
-  const Content: P.TextContent := new P.TextContent();
-  Content.Text := Text;
-  const Request: P.PromptRequest := new P.PromptRequest();
-  Request.SessionId := Id;
-  Request.Prompt := [Content];
-  using const Deadline: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
-    Token
-  );
-  Deadline.CancelAfter(Sys.TimeSpan.FromMinutes(3));
-  try
-    const Result: P.PromptResponse := await Connection.PromptAsync(Request, Deadline.Token);
-    return Result.StopReason = P.StopReason.EndTurn;
-  finally
-    if Deadline.IsCancellationRequested then
-      const Cancel: P.CancelNotification := new P.CancelNotification();
-      Cancel.SessionId := Id;
-      try
-        using const CancelDeadline: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(
-          750
-        );
-        await Connection.CancelAsync(Cancel, CancelDeadline.Token).WaitAsync(CancelDeadline.Token);
-      catch Failure: Sys.Exception do
-        // Connection disposal closes the transport if the agent no longer responds.
-      end try;
-    end if;
-  end try;
-end function;
-
-async function NewSession(
-  Connection: Client.Connection; Directory: string; Choice: Settings.Choice;
-  Servers: array of P.McpServer?; Token: Threads.CancellationToken
-): Tasks.Task<P.SessionId>;
-begin
-  const Request: P.NewSessionRequest := new P.NewSessionRequest();
-  Request.Cwd := Directory;
-  Request.McpServers := Servers;
-  const Started: P.NewSessionResponse := await Connection.NewSessionAsync(Request, Token);
-  discard await Acp.Configure(
-    Connection,
-    Started.SessionId,
-    Started.ConfigOptions,
-    Choice,
-    true,
-    Token
-  );
-  return Started.SessionId;
-end function;
 
 async function OpenSession(
   Connection: Client.Connection; Directory: string; Choice: Settings.Choice;
@@ -112,7 +61,7 @@ begin
     end try;
   end if;
 
-  return await NewSession(Connection, Directory, Choice, Servers, Token);
+  return await Dialogs.NewSession(Connection, Directory, Choice, Servers, Token);
 end function;
 
 function TurnPrompt(Id: string; Value: Tools.Context; Command: string): string;
@@ -131,10 +80,19 @@ begin
     'Use one action per turn. To describe a blocked attempt or look around use none with an empty target.'
   );
   discard Message.AppendLine(
-    'Use take_key with brass-key, open_grate with north-grate, or move with the adjacent room ID. Only claim a change the world allows.'
+    'For movement read the open destination before describing arrival. Use move with its ID. For local interactions copy an available action and target from the current room.'
   );
   discard Message.AppendLine(
     'If a tool rejects an action, correct it. Finish after submit_turn succeeds.'
+  );
+  discard Message.AppendLine(
+    'Reveal only what the command discovers. Speak in the voice of a present character. get_journal recalls earlier discoveries.'
+  );
+  discard Message.AppendLine(
+    'Explain the cost of a final choice and use resolve only for an explicit player decision. After resolution allow further exploration.'
+  );
+  discard Message.AppendLine(
+    'Player language: ' + Global.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName
   );
   discard Message.AppendLine('turnId: ' + Id);
   discard Message.AppendLine('World brief: ' + Value.WorldState.WorldBrief);
@@ -183,7 +141,7 @@ begin
   );
   discard Active.TryAdd(TurnId, Context);
   try
-    if not await Prompt(Connection, Id, TurnPrompt(TurnId, Context, Command), Token) then
+    if not await Dialogs.Prompt(Connection, Id, TurnPrompt(TurnId, Context, Command), Token) then
       return null;
     end if;
 
@@ -211,13 +169,29 @@ end function;
 
 function Present(Path: string; History: array of Saves.Turn; State: World.State): Presentation;
 begin
-  return new Presentation(History, State.RoomId, Art.Load(Path, State));
+  return new Presentation(History, State.RoomId, Art.Load(Path, State, State.RoomId));
 end function;
+
+procedure RequestArt(Room: World.State; Frame: Presentation; Visits: Channels.Channel<Draw.Visit>);
+begin
+  if not Art.Complete(Frame.Images) then
+    const Count: int := Frame.History.Length;
+    discard Visits.Writer.TryWrite(
+      new Draw.Visit(
+        Room, if Count > 0 then
+          Frame.History[Count - 1].Reply
+        else
+          ''
+        end if
+      )
+    );
+  end if;
+end procedure;
 
 async function Play(
   Connection: Client.Connection; Directory: string; Path: string; Choice: Settings.Choice;
   Saved: Saves.Save?; Initial: World.State; Servers: array of P.McpServer?;
-  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: Channels.Channel<string>;
+  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: Channels.Channel<string>; Visits: Channels.Channel<Draw.Visit>;
   Post: function(Event): Tasks.Task; Token: Threads.CancellationToken
 ): Tasks.Task<bool>;
 begin
@@ -265,6 +239,7 @@ begin
   end if;
   var Frame: Presentation := Present(Path, Current.History, State);
   await Post(Event.Ready(Frame));
+  RequestArt(State, Frame, Visits);
 
   while true do
     const Command: string := await Queue.Reader.ReadAsync(Token);
@@ -284,14 +259,18 @@ begin
     else
       Current := Commit(Path, Current, State, Command, Next);
       State := Next.WorldState;
-      Frame := if Frame.RoomId = State.RoomId and Frame.Image <> null then
+      const Entered: bool := Frame.RoomId <> State.RoomId;
+      Frame := if Entered then
+        Present(Path, Current.History, State)
+      else
         Frame with
           History := Current.History;
         end with
-      else
-        Present(Path, Current.History, State)
       end if;
       await Post(Event.Ready(Frame));
+      if Entered then
+        RequestArt(State, Frame, Visits);
+      end if;
     end if;
   end while;
 end function;
@@ -339,7 +318,26 @@ begin
     using const Stop: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
       Token
     );
-    const Listener: Tasks.Task := Mcp.Listen(PipeName, Tools.Register(Active), Stop.Token);
+    const ArtPrompts: Draw.Registry := new Draw.Registry();
+    const Visits: Channels.Channel<Draw.Visit> := Channels.Channel.CreateUnbounded<Draw.Visit>();
+    const Listener: Tasks.Task := Mcp.Listen(
+      PipeName,
+      Tools.Register(Active, ArtPrompts),
+      Stop.Token
+    );
+    const Artist: Tasks.Task := Illustrator.Run(
+      Visits.Reader,
+      Path,
+      Selected,
+      Exe,
+      Directory,
+      Servers,
+      ArtPrompts,
+      function(RoomId: string; Images: Art.Pair; Finished: bool): Tasks.Task => Post(
+        Event.ArtChanged(RoomId, Images, Finished)
+      ),
+      Stop.Token
+    );
     const Peer: Callbacks.Callbacks := new Callbacks.Callbacks(
       procedure(Notification: P.SessionNotification) begin end procedure,
       procedure() begin
@@ -359,13 +357,15 @@ begin
           Servers,
           Active,
           Queue,
+          Visits,
           Post,
           Token
         )
       );
     finally
       Stop.Cancel();
-      await Listener;
+      discard Visits.Writer.TryComplete();
+      await Tasks.Task.WhenAll([Artist, Listener]);
     end try;
   catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
     await Post(Event.Failed('Settings.Timeout'));

@@ -1,90 +1,192 @@
-// Materializes and loads the two versioned room illustrations.
+// Validates, decodes and stores a room's two generated terminal drawings.
 unit Dungeon.Game.Art;
 
 uses
-  Dungeon.Game.World as World, Dungeon.EmberArt as Ember, StbImageSharp as Png,
-  System as Sys, System.IO as IO, System.Reflection as Reflection;
+  Dungeon.Game.World as World, Dungeon.DataFiles as Files, Fpas.Ui.Widgets.Developer.Terminal as T, Fpas.Ui.Tui.Internal.Rendering.Glyphs as Glyphs,
+  System as Sys, System.Collections.Generic as Lists, System.IO as IO, System.Globalization as Global, System.Text.Json as Json,
+  System.Text.Encodings.Web as Encoding;
 
-const StyleVersion: string := 'ember-v1';
+public const Small: int := 50;
+public const Large: int := 65;
+public const Keys: string := '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
-function Name(RoomId: string): string;
+public type Tile = record
+  public Glyph: string;
+  public Foreground: string;
+  public Background: string;
+end record;
+
+// One palette key represents one terminal cell. Short rows have an implicit tile-zero tail.
+public type Drawing = record
+  public Columns: int;
+  public FocusX: int;
+  public FocusY: int;
+  public Palette: array of Tile;
+  public Rows: array of string;
+end record;
+
+public type Picture = record
+  public Source: Drawing;
+  public Cells: array of T.Cell;
+end record;
+
+public type Pair = record
+  public Compact: Picture? := null;
+  public Full: Picture? := null;
+end record;
+
+public function Height(Columns: int): int;
+begin
+  if Columns = Small then
+    return 16;
+  elsif Columns = Large then
+    return 21;
+  end if;
+
+  raise new IO.InvalidDataException('Choose a width of 50 or 65 cells.');
+end function;
+
+function Color(Text: string): int;
+begin
+  var Value: int := 0;
+  if Text = null or Text.Length <> 7 or Text[0] <> #35 or not int.TryParse(
+    Text.Substring(1),
+    Global.NumberStyles.AllowHexSpecifier, Global.CultureInfo.InvariantCulture, out Value
+  )
+  then
+    raise new IO.InvalidDataException('Use #RRGGBB for each foreground and background.');
+  end if;
+
+  return Value;
+end function;
+
+public function Decode(Value: Drawing; Width: int): Picture;
+begin
+  const Rows: int := Height(Width);
+  if Value = null or Value.Columns <> Width or Value.Rows = null or Value.Rows.Length <> Rows then
+    raise new IO.InvalidDataException(
+      'Expected ' + Width.ToString() + ' columns and ' + Rows.ToString() + ' rows.'
+    );
+  end if;
+
+  if Value.FocusX < 0 or Value.FocusX >= Width or Value.FocusY < 0 or Value.FocusY >= Rows then
+    raise new IO.InvalidDataException('Place the zero-based focus inside the drawing.');
+  end if;
+
+  if Value.Palette = null or Value.Palette.Length < 1 or Value.Palette.Length > Keys.Length then
+    raise new IO.InvalidDataException('Supply 1 to 36 palette tiles.');
+  end if;
+  const Palette: Lists.List<T.Cell> := new Lists.List<T.Cell>(Value.Palette.Length);
+  for Index: int := 0 to Value.Palette.Length - 1 do
+    const Ink: Tile := Value.Palette[Index];
+    if Ink = null or Ink.Glyph = null or Ink.Glyph.Length = 0 or Ink.Glyph.Length > 32
+      or Global.StringInfo.GetNextTextElement(
+      Ink.Glyph
+    ) <> Ink.Glyph or Glyphs.Width(Ink.Glyph) <> 1
+      or Glyphs.Sanitize(
+      Ink.Glyph
+    ) <> Ink.Glyph or Ink.Glyph = #8232.ToString() or Ink.Glyph = #8233.ToString()
+    then
+      raise new IO.InvalidDataException(
+        'Use one printable, single-cell Unicode text element per tile.'
+      );
+    end if;
+
+    Palette.Add(new T.Cell(Ink.Glyph, new T.Style(Color(Ink.Foreground), Color(Ink.Background))));
+  end for;
+  const Cells: Lists.List<T.Cell> := new Lists.List<T.Cell>(Width * Rows);
+  for Y: int := 0 to Rows - 1 do
+    const Line: string := Value.Rows[Y];
+    if Line = null or Line.Length > Width then
+      raise new IO.InvalidDataException(
+        'Row ' + Y.ToString() + ' exceeds the requested width or is null.'
+      );
+    end if;
+
+    for X: int := 0 to Width - 1 do
+      const Key: int := if X < Line.Length then
+        Keys.IndexOf(Line[X])
+      else
+        0
+      end if;
+      if Key < 0 or Key >= Palette.Count then
+        raise new IO.InvalidDataException('Unknown palette key in row ' + Y.ToString() + '.');
+      end if;
+
+      Cells.Add(Palette[Key]);
+    end for;
+  end for;
+
+  return new Picture(Value, Cells.ToArray());
+end function;
+
+function Options(): Json.JsonSerializerOptions;
+begin
+  const Result: Json.JsonSerializerOptions := new Json.JsonSerializerOptions();
+  Result.RespectRequiredConstructorParameters := true;
+  Result.PropertyNamingPolicy := Json.JsonNamingPolicy.CamelCase;
+  Result.Encoder := Encoding.JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
+  return Result;
+end function;
+
+public function Encode(Value: Picture): string;
+begin
+  return Json.JsonSerializer.Serialize<Drawing>(Value.Source, Options());
+end function;
+
+function PathFor(SavePath: string; State: World.State; RoomId: string; Width: int): string;
 begin
   if not World.KnownRoom(RoomId) then
     raise new Sys.ArgumentException('Unknown room art ID.');
   end if;
 
-  return RoomId + '-' + StyleVersion + '.png';
-end function;
-
-function PathFor(SavePath: string; State: World.State; RoomId: string): string;
-begin
   return IO.Path.Combine(
-    IO.Path.GetDirectoryName(SavePath) ?? '', 'art', State.AdventureId, Name(RoomId)
+    IO.Path.GetDirectoryName(SavePath) ?? '', 'art', State.AdventureId,
+    RoomId + '-' + Width.ToString() + 'x' + Height(Width).ToString() + '-v1.json'
   );
 end function;
 
-public function Exists(SavePath: string; State: World.State; RoomId: string): bool;
+function Read(SavePath: string; State: World.State; RoomId: string; Width: int): Picture?;
 begin
-  return IO.File.Exists(PathFor(SavePath, State, RoomId));
-end function;
-
-procedure Publish(Path: string; RoomId: string);
-begin
-  discard IO.Directory.CreateDirectory(IO.Path.GetDirectoryName(Path) ?? '');
-  const Input: IO.Stream? := Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(
-    'Dungeon.Rooms.' + Name(RoomId)
-  );
-  if Input = null then
-    raise new IO.FileNotFoundException('The packaged room illustration is missing.');
-  end if;
-
-  using const Source: IO.Stream := Input;
-  const Temp: string := Path + '.' + Sys.Guid.NewGuid().ToString('N') + '.tmp';
-  try
-    using const Output: IO.FileStream := IO.File.Create(Temp);
-    Source.CopyTo(Output);
-  catch Failure: Sys.Exception do
-    IO.File.Delete(Temp);
-    raise;
-  end try;
-
-  try
-    IO.File.Move(Temp, Path, false);
-  catch Failure: IO.IOException when IO.File.Exists(Path) do
-    // A concurrent request already published this illustration.
-  finally
-    IO.File.Delete(Temp);
-  end try;
-end procedure;
-
-// The adventure worker calls this after committing the current room.
-public function Load(SavePath: string; State: World.State): Ember.Scene?;
-begin
-  const Path: string := PathFor(SavePath, State, State.RoomId);
+  const Path: string := PathFor(SavePath, State, RoomId, Width);
   try
     if not IO.File.Exists(Path) then
-      Publish(Path, State.RoomId);
-    end if;
-
-    using const Source: IO.FileStream := IO.File.OpenRead(Path);
-    const Image: Png.ImageResult? := Png.ImageResult.FromStream(
-      Source,
-      Png.ColorComponents.RedGreenBlue
-    );
-    if Image = null or Image.Width <= 0 or Image.Height <= 0 or Image.Height mod 2 <> 0 then
-      return null;
-    end if;
-    const Pixels: array of byte := Image.Data ?? Sys.Array.Empty<byte>();
-    if cast<long>(Image.Width) * Image.Height * 3 <> Pixels.Length then
       return null;
     end if;
 
-    return Ember.Scene.FromPixels(Image.Width, Image.Height div 2, Pixels);
-  catch Failure: Sys.Exception when Failure is IO.IOException or Failure is
-    Sys.UnauthorizedAccessException
-    or Failure is Sys.InvalidOperationException do
+    using const Stream: IO.FileStream := IO.File.OpenRead(Path);
+    if Stream.Length > 65536 then
+      return null;
+    end if;
+    const Data: Drawing? := Json.JsonSerializer.Deserialize<Drawing>(Stream, Options());
+    if Data = null then
+      return null;
+    end if;
+
+    return Decode(Data, Width);
+  catch Failure: Sys.Exception when Failure is IO.IOException or Failure is IO.InvalidDataException
+    or Failure is Json.JsonException or Failure is Sys.UnauthorizedAccessException do
     return null;
   end try;
 end function;
+
+public function Load(SavePath: string; State: World.State; RoomId: string): Pair;
+begin
+  return new Pair(Read(SavePath, State, RoomId, Small), Read(SavePath, State, RoomId, Large));
+end function;
+
+public function Complete(Value: Pair): bool;
+begin
+  return Value.Compact <> null and Value.Full <> null;
+end function;
+
+// Only the adventure's single art worker publishes. An interrupted write leaves its sibling intact.
+public procedure Store(SavePath: string; State: World.State; Image: Picture);
+begin
+  const Width: int := Image.Source.Columns;
+  if Read(SavePath, State, State.RoomId, Width) = null then
+    Files.Write(PathFor(SavePath, State, State.RoomId, Width), Encode(Image), true);
+  end if;
+end procedure;
 
 end unit;

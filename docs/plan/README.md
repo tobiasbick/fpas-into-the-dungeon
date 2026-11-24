@@ -1,4 +1,4 @@
-Into the Dungeon will be a console-based text adventure with ASCII graphics and a large language model (LLM) as the game master.
+Into the Dungeon will be a console-based text adventure with Unicode terminal art and a large language model (LLM) as the game master.
 
 ## Start screen
 
@@ -28,7 +28,7 @@ The local feed in `.tmp/feed` needs matching packages for `Fpas.NET.Sdk`,
 
 The [console game screen](console-layouts.md) defines the first playable layout
 and how the start menu creates or resumes the single saved adventure.
-The [world state and room art](world-state.md) describe the two-room adventure,
+The [world state and room art](world-state.md) describe the campaign,
 the game master tools, and the data that survives a restart.
 
 ## Game settings

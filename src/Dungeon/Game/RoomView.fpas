@@ -1,0 +1,123 @@
+// Projects only local scenery, travel options and character knowledge for the GM.
+unit Dungeon.Game.RoomView;
+
+uses Dungeon.Game.Catalog as Catalog, Dungeon.Game.World as World, System as Sys, System.Collections.Generic as Lists;
+
+public type ExitInfo = record
+  public Direction: string;
+  public RoomId: string;
+  public Name: string;
+  public Open: bool;
+  public Obstacle: string;
+end record;
+
+public type Interaction = record
+  public Action: string;
+  public Target: string;
+  public Cue: string;
+  public Available: bool;
+  public OutcomeOrHint: string;
+  public AlreadyLearned: bool;
+end record;
+
+public type Scene = record
+  public Id: string;
+  public Name: string;
+  public District: string;
+  public Description: string;
+  public Details: array of string;
+  public Exits: array of ExitInfo;
+  public Interactions: array of Interaction;
+  public Inventory: array of string;
+  public Lake: string;
+  public Ending: string;
+  public ImageReady: bool;
+end record;
+
+function Outcome(State: World.State; Entry: Catalog.Encounter): string;
+begin
+  for Reply: Catalog.Change in Entry.Replies ?? Sys.Array.Empty<Catalog.Change>() do
+    if World.Matches(State, Reply.Condition) then
+      return Reply.Text;
+    end if;
+  end for;
+
+  return Entry.Result;
+end function;
+
+public function Describe(State: World.State; Id: string; HasImage: bool): Scene;
+begin
+  const Place: Catalog.Place := Catalog.At(Id);
+  const Details: Lists.List<string> := new Lists.List<string>();
+  for Detail: Catalog.Change in Place.Room.Changes ?? Sys.Array.Empty<Catalog.Change>() do
+    if World.Matches(State, Detail.Condition) then
+      Details.Add(Detail.Text);
+    end if;
+  end for;
+
+  const Exits: Lists.List<ExitInfo> := new Lists.List<ExitInfo>();
+  for Route: Catalog.Route in Place.Routes do
+    const Open: bool := World.Matches(State, Route.Condition);
+    Exits.Add(
+      new ExitInfo(
+        Route.Direction, Route.Destination, Catalog.At(Route.Destination).Room.Name,
+        Open, if Open then
+          ''
+        elsif State.Ending <> '' and (Route.Condition = 'high' or Route.Condition = 'low') then
+          'The gates are pinned. The lake level permanently closes this route.'
+        else
+          Route.Hint ?? ''
+        end if
+      )
+    );
+  end for;
+
+  const Offers: Lists.List<Interaction> := new Lists.List<Interaction>();
+  for Entry: Catalog.Encounter in Place.Room.Encounters ?? Sys.Array.Empty<Catalog.Encounter>() do
+    if not World.Visible(State, Entry) then
+      continue;
+    end if;
+
+    if Id <> State.RoomId then
+      if Entry.Action = 'talk' then
+        Details.Add(Entry.Cue);
+      end if;
+    else
+      const Allowed: bool := World.Available(State, Entry);
+      Offers.Add(
+        new Interaction(
+          Entry.Action, Entry.Target, Entry.Cue, Allowed,
+          if Allowed then
+            Outcome(State, Entry)
+          else
+            Entry.Hint ?? ''
+          end if,
+          Entry.Effect = 'remember' and World.Matches(State, Entry.Target)
+        )
+      );
+    end if;
+  end for;
+
+  return new Scene(
+    Id, Place.Room.Name, Place.DistrictName, Place.Room.Description, Details.ToArray(),
+    Exits.ToArray(), Offers.ToArray(), if State.HasKey then
+      [World.BrassKey]
+    else
+      []
+    end if,
+    State.Lake, State.Ending, HasImage
+  );
+end function;
+
+// Supplies acquired facts for a resumed session without disclosing the map.
+public function Journal(State: World.State): array of string;
+begin
+  const Notes: Lists.List<string> := new Lists.List<string>();
+  for Target: string in State.Discoveries do
+    Notes.Add(Catalog.Memory(Target));
+  end for;
+
+  return Notes.ToArray();
+end function;
+
+end unit;

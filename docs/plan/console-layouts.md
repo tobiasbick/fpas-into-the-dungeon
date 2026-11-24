@@ -8,7 +8,7 @@ conversation and the current command in view.
 ## Layout at 80 × 25
 
 - The left pane takes about two thirds of the upper area and shows the current
-  room illustration. A placeholder covers rooms without a readable image.
+  room illustration. The game master draws missing room art in the background.
 - The right pane takes the remaining third and shows player commands and game
   master replies in order. Text wraps to the pane width, and the player can
   reach the conversation with Tab or Shift+Tab and scroll with Page Up or
@@ -24,7 +24,7 @@ conversation and the current command in view.
 |                                                   | A stone passage leads    |
 |                                                   | north.                   |
 |                                                   |                          |
-|              [Room art placeholder]               |                          |
+|                Drawing the room…                  |                          |
 |                                                   |                          |
 |                                                   |                          |
 |                                                   |                          |

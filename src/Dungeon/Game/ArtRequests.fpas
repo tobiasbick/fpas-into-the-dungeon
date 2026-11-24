@@ -1,0 +1,110 @@
+// Scopes the art submission tool to one requested size, room and active prompt.
+unit Dungeon.Game.ArtRequests;
+
+uses
+  Dungeon.Game.Art as Art, Dungeon.Game.Catalog as Catalog, Dungeon.Game.World as World,
+  ModelContextProtocol as Mcp, System as Sys, System.IO as IO,
+  System.Collections.Concurrent as Concurrent, System.Threading as Threads, System.Threading.Tasks as Tasks;
+
+public type Request = record
+  public Width: int;
+  public Result: Tasks.TaskCompletionSource<Art.Picture>;
+end record;
+
+public type Registry = Concurrent.ConcurrentDictionary<string, Request?>;
+
+public type Visit = record
+  public State: World.State;
+  public Narration: string;
+end record;
+
+// A retry with the same drawing is safe. A second different drawing cannot replace the first.
+public function Submit(Active: Registry; RequestId: string; Drawing: Art.Drawing): string;
+begin
+  var Pending: Request? := null;
+  if not Active.TryGetValue(RequestId, out Pending) or Pending = null then
+    raise new Mcp.McpException('Use the requestId from the active illustration prompt.');
+  end if;
+
+  try
+    const Image: Art.Picture := Art.Decode(Drawing, Pending.Width);
+    if not Pending.Result.TrySetResult(Image) and Art.Encode(
+      Pending.Result.Task.Result
+    ) <> Art.Encode(Image)
+    then
+      raise new Mcp.McpException('This request already has a drawing.');
+    end if;
+  catch Failure: IO.InvalidDataException do
+    raise new Mcp.McpException(Failure.Message);
+  end try;
+
+  return 'Drawing accepted. End the prompt.';
+end function;
+
+function Instructions(Id: string; Room: Visit; Width: int; Sibling: Art.Picture?): string;
+begin
+  const Place: Catalog.Place := Catalog.At(Room.State.RoomId);
+  const Guide: string := if Sibling = null then
+    'Choose an original composition and palette for this adventure.'
+  else
+    'Match the subject, viewpoint, light, palette and focus of the saved companion drawing. Adapt its detail to this size. Companion JSON: ' +
+    Art.Encode(
+      Sibling
+    )
+  end if;
+  return 'Illustrate a room for a Unicode terminal adventure. Use only submit_room_art with requestId ' +
+    Id +
+    '. Draw a landscape of ' + Width.ToString() + ' columns and ' + Art.Height(Width).ToString() +
+    ' rows. Set drawing.columns and zero-based focusX/focusY on the main landmark. Build a palette of tiles ' +
+    'with glyph, foreground and background (#RRGGBB). Use single-cell printable Unicode glyphs such as box lines, blocks and shades. ' +
+    'Rows contain palette indexes 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ, one per cell. Trailing 0 cells may be omitted. ' +
+    'Make tile 0 the ambient background. Compose architecture with depth, texture, and a strong silhouette; omit titles and text. ' +
+    'Prefer lasting scenery. Correct validation errors and finish after acceptance.' + #10 + Guide +
+    #10 +
+    'Room: ' + Place.Room.Name + ', ' + Place.DistrictName + '. ' + Place.Room.Description + #10 +
+    'Scene narration for visual context: ' + Room.Narration;
+end function;
+
+// Check disk again on dequeue. Each accepted variant is published before the next prompt.
+public async function Fill(
+  Path: string; Room: Visit; Active: Registry;
+  Ask: function(string): Tasks.Task<bool>; Updated: function(Art.Pair): Tasks.Task;
+  Token: Threads.CancellationToken
+): Tasks.Task;
+begin
+  var Images: Art.Pair := Art.Load(Path, Room.State, Room.State.RoomId);
+  const Widths: array of int := [Art.Small, Art.Large];
+  for Width: int in Widths do
+    if (Width = Art.Small and Images.Compact <> null) or (Width = Art.Large and Images.Full <>
+      null)
+    then
+      continue;
+    end if;
+
+    Token.ThrowIfCancellationRequested();
+    const Id: string := Sys.Guid.NewGuid().ToString('N');
+    const Request: Request := new Request(Width, new Tasks.TaskCompletionSource<Art.Picture>());
+    if not Active.TryAdd(Id, Request) then
+      raise new Sys.InvalidOperationException('Duplicate art request ID.');
+    end if;
+
+    try
+      const Finished: bool := await Ask(
+        Instructions(Id, Room, Width, Images.Compact ?? Images.Full)
+      );
+      if not Finished or not Request.Result.Task.IsCompletedSuccessfully then
+        return;
+      end if;
+
+      Token.ThrowIfCancellationRequested();
+      Art.Store(Path, Room.State, Request.Result.Task.Result);
+      Images := Art.Load(Path, Room.State, Room.State.RoomId);
+      await Updated(Images);
+    finally
+      var Removed: Request? := null;
+      discard Active.TryRemove(Id, out Removed);
+    end try;
+  end for;
+end function;
+
+end unit;

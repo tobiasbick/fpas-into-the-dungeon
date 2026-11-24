@@ -1,30 +1,24 @@
-// Owns the fixed two-room map and validates proposed changes.
+// Owns campaign progress, passage conditions and the single-action turn rules.
 unit Dungeon.Game.World;
 
-uses System as Sys;
+uses Dungeon.Game.Catalog as Catalog, System as Sys, System.Collections.Generic as Lists;
 
 public const Entrance: string := 'pump-room';
 public const Grotto: string := 'grotto';
 public const BrassKey: string := 'brass-key';
-public const Brief: string := 'A flooded ruin in the ember forest. Explore the underground pump room and the grotto. ' +
-  'The player can find the brass key, open the north grate, and cross into the grotto. ' +
-  'Keep descriptions short, dark, and grounded in the supplied room facts.';
+public const Brief: string := 'The shift bell under the ember forest rings after forty silent years. Three knocks answer through the grate, the middle one doubled. ' +
+  'Find who rang and why. Reveal the history through things the player observes and people they meet. A keeper, a ferryman and a mechanic have different stakes in the water.';
 
-// The complete mutable world for this adventure, plus its pinned brief.
 public type State = record
   public AdventureId: string;
   public RoomId: string;
   public HasKey: bool;
   public GrateOpen: bool;
   public WorldBrief: string;
-  public Version: int := 1;
-end record;
-
-public type Room = record
-  public Id: string;
-  public Description: string;
-  public ExitDirection: string;
-  public ExitRoomId: string;
+  public Version: int := 2;
+  public Discoveries: array of string := [];
+  public Lake: string := 'high';
+  public Ending: string := '';
 end record;
 
 public function NewAdventure(): State;
@@ -34,74 +28,179 @@ end function;
 
 public function KnownRoom(Id: string): bool;
 begin
-  return Id = Entrance or Id = Grotto;
+  return Catalog.Contains(Id);
 end function;
 
-public function Describe(Id: string): Room;
+// Both navigation and narration evaluate the same campaign conditions.
+public function Matches(Value: State; Condition: string?): bool;
 begin
-  if Id = Entrance then
-    return new Room(
-      Entrance,
-      'An old iron pump stands in a vaulted stone chamber. Water drips from its pipe. An iron grate stands in the arch to the north.',
-      'north',
-      Grotto
-    );
-  elsif Id = Grotto then
-    return new Room(
-      Grotto,
-      'Shallow water covers the floor of a rocky grotto. Amber light glints under a stone arch. The pump room is south.',
-      'south',
-      Entrance
-    );
+  if Sys.String.IsNullOrEmpty(Condition) then
+    return true;
+  end if;
+  const Name: string := Condition ?? '';
+  if Name.StartsWith('!', Sys.StringComparison.Ordinal) then
+    return not Matches(Value, Name.Substring(1));
   end if;
 
-  raise new Sys.ArgumentException('Unknown room. Use a room ID from the map.');
+  case Name of
+    when 'key':
+      return Value.HasKey;
+    when 'grate':
+      return Value.GrateOpen;
+    when 'low', 'high':
+      return Value.Lake = Name;
+    when 'undecided':
+      return Value.Ending = '';
+    when 'drawdown', 'seal', 'balance':
+      return Value.Ending = Name;
+    else
+      return Sys.Array.IndexOf<string>(Value.Discoveries, Name) >= 0;
+  end case;
+end function;
+
+public function Visible(Value: State; Entry: Catalog.Encounter): bool;
+begin
+  if Entry.Effect = 'remember' and (Entry.Action = 'operate' or Entry.Action = 'tell')
+    and Matches(Value, Entry.Target)
+  then
+    return false;
+  end if;
+
+  return Matches(Value, Entry.Visible);
+end function;
+
+public function Available(Value: State; Entry: Catalog.Encounter): bool;
+begin
+  if not Visible(Value, Entry) then
+    return false;
+  end if;
+
+  for Need: string in Entry.Needs ?? Sys.Array.Empty<string>() do
+    if not Matches(Value, Need) then
+      return false;
+    end if;
+  end for;
+
+  return true;
+end function;
+
+public function CanMove(Value: State; Target: string): bool;
+begin
+  for Route: Catalog.Route in Catalog.At(Value.RoomId).Routes do
+    if Route.Destination = Target and Matches(Value, Route.Condition) then
+      return true;
+    end if;
+  end for;
+
+  return false;
 end function;
 
 public function Valid(Value: State): bool;
 begin
   var Id: Sys.Guid := Sys.Guid.Empty;
-  return Sys.Guid.TryParseExact(Value.AdventureId, 'N', out Id)
-    and Value.Version = 1
-    and KnownRoom(Value.RoomId)
-    and not Sys.String.IsNullOrWhiteSpace(Value.WorldBrief)
-    and (not Value.GrateOpen or Value.HasKey)
-    and (Value.RoomId <> Grotto or Value.GrateOpen);
+  if not Sys.Guid.TryParseExact(Value.AdventureId, 'N', out Id)
+    or Value.Version <> 2 or not KnownRoom(Value.RoomId)
+    or Sys.String.IsNullOrWhiteSpace(Value.WorldBrief)
+    or (Value.GrateOpen and not Value.HasKey)
+    or (Value.RoomId <> Entrance and not Value.GrateOpen)
+    or Value.Discoveries = null or (Value.Lake <> 'high' and Value.Lake <> 'low')
+  then
+    return false;
+  end if;
+  const Seen: Lists.HashSet<string> := new Lists.HashSet<string>();
+  for Fact: string in Value.Discoveries do
+    if not Catalog.KnownMemory(Fact) or not Seen.Add(Fact) then
+      return false;
+    end if;
+  end for;
+
+  case Value.Ending of
+    when '':
+      return true;
+    when 'drawdown':
+      return Value.Lake = 'low' and Matches(Value, 'pilot-bell') and Matches(Value, 'edda');
+    when 'seal':
+      return Value.Lake = 'high' and Matches(Value, 'evacuation-roster');
+    when 'balance':
+      return Value.Lake = 'high' and Matches(
+        Value,
+        'pilot-bell'
+      ) and Matches(Value, 'edda') and Matches(Value, 'return-valve');
+    else
+      return false;
+  end case;
 end function;
 
-// Applies a single valid action. Invalid actions can be described with "none".
-public function Apply(Value: State; Action: string; Target: string): State;
+// Keep both original room IDs, the inventory, the slot and its ACP history.
+public function Restore(Value: State): State;
 begin
-  case Action of
-    when 'none':
-      if Target = '' then
+  if Value.Version = 1 and (Value.RoomId = Entrance or Value.RoomId = Grotto) then
+    return new State(Value.AdventureId, Value.RoomId, Value.HasKey, Value.GrateOpen, Brief);
+  end if;
+
+  return Value;
+end function;
+
+function Resolve(Value: State; Entry: Catalog.Encounter): State;
+begin
+  case Entry.Effect ?? '' of
+    when 'remember':
+      if Matches(Value, Entry.Target) then
         return Value;
       end if;
-    when 'take_key':
-      if Target = BrassKey and Value.RoomId = Entrance and not Value.HasKey then
-        return Value with
-          HasKey := true;
-        end with;
-      end if;
-    when 'open_grate':
-      if Target = 'north-grate' and Value.RoomId = Entrance and Value.HasKey
-        and not Value.GrateOpen
-      then
-        return Value with
-          GrateOpen := true;
-        end with;
-      end if;
-    when 'move':
-      if Value.GrateOpen and Target = Describe(Value.RoomId).ExitRoomId then
-        return Value with
-          RoomId := Target;
-        end with;
-      end if;
+      const Facts: Lists.List<string> := new Lists.List<string>(Value.Discoveries);
+      Facts.Add(Entry.Target);
+      return Value with
+        Discoveries := Facts.ToArray();
+      end with;
+    when 'key':
+      return Value with
+        HasKey := true;
+      end with;
+    when 'grate':
+      return Value with
+        GrateOpen := true;
+      end with;
+    when 'low', 'high':
+      return Value with
+        Lake := Entry.Effect ?? '';
+      end with;
+    when 'drawdown':
+      return Value with
+        Lake := 'low';
+        Ending := 'drawdown';
+      end with;
+    when 'seal', 'balance':
+      return Value with
+        Lake := 'high';
+        Ending := Entry.Effect ?? '';
+      end with;
     else
+      raise new Sys.InvalidOperationException('Unknown campaign effect.');
   end case;
+end function;
+
+// Applies only the actions offered by the current location.
+public function Apply(Value: State; Action: string; Target: string): State;
+begin
+  if Action = 'none' and Target = '' then
+    return Value;
+  elsif Action = 'move' and CanMove(Value, Target) then
+    return Value with
+      RoomId := Target;
+    end with;
+  end if;
+
+  for Entry: Catalog.Encounter in Catalog.At(
+    Value.RoomId
+  ).Room.Encounters ?? Sys.Array.Empty<Catalog.Encounter>() do
+    if Entry.Action = Action and Entry.Target = Target and Available(Value, Entry) then
+      return Resolve(Value, Entry);
+    end if;
+  end for;
 
   raise new Sys.ArgumentException(
-    'That action is unavailable in the current world. Read the room and use none to describe a blocked attempt.'
+    'That action is unavailable here. Read get_room for exits, local actions and obstacles.'
   );
 end function;
 

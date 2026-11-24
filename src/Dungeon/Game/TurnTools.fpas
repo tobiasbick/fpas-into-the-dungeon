@@ -2,7 +2,7 @@
 unit Dungeon.Game.TurnTools;
 
 uses
-  Dungeon.Game.World as World, Dungeon.Game.Saves as Saves, Dungeon.Game.Art as Art,
+  Dungeon.Game.World as World, Dungeon.Game.RoomView as Rooms, Dungeon.Game.Saves as Saves, Dungeon.Game.Art as Art, Dungeon.Game.ArtRequests as Draw,
   ModelContextProtocol as Mcp, ModelContextProtocol.Server as Server, ModelContextProtocol.Protocol as Protocol,
   System as Sys, System.Collections.Concurrent as Concurrent, System.Collections.Generic as Lists,
   System.Text.Json as Json, System.Text.Json.Serialization.Metadata as Metadata;
@@ -22,15 +22,6 @@ public type Context = record
   public Submission: Concurrent.ConcurrentDictionary<string, Proposal?>;
 end record;
 
-type RoomView = record
-  public Room: World.Room;
-  public CurrentRoom: string;
-  public Inventory: array of string;
-  public ItemsHere: array of string;
-  public GrateOpen: bool;
-  public ImageReady: bool;
-end record;
-
 function Find(Active: Concurrent.ConcurrentDictionary<string, Context?>; TurnId: string): Context;
 begin
   var Found: Context? := null;
@@ -42,27 +33,14 @@ begin
   return Found;
 end function;
 
-function GetRoom(Value: Context; RoomId: string): RoomView;
+function GetRoom(Value: Context; RoomId: string): Rooms.Scene;
 begin
   const State: World.State := Value.WorldState;
-  if not World.KnownRoom(RoomId) then
-    raise new Mcp.McpException('Unknown roomId. Use pump-room or grotto.');
+  if RoomId <> State.RoomId and not World.CanMove(State, RoomId) then
+    raise new Mcp.McpException('Read the current room or an open exit from it.');
   end if;
 
-  return new RoomView(
-    World.Describe(RoomId), State.RoomId,
-    if State.HasKey then
-      [World.BrassKey]
-    else
-      []
-    end if,
-    if RoomId = World.Entrance and not State.HasKey then
-      [World.BrassKey]
-    else
-      []
-    end if,
-    State.GrateOpen, Art.Exists(Value.SavePath, State, RoomId)
-  );
+  return Rooms.Describe(State, RoomId, Art.Complete(Art.Load(Value.SavePath, State, RoomId)));
 end function;
 
 function GetHistory(Value: Context; RoomId: string; Limit: int): array of Saves.Turn;
@@ -104,11 +82,14 @@ begin
     raise new Mcp.McpException(Failure.Message);
   end try;
   const Result: Proposal := new Proposal(Narration, Action, Target, Changed);
-  if not Value.Submission.TryAdd('turn', Result) and not Result.Equals(
-    Value.Submission['turn']
-  )
-  then
-    raise new Mcp.McpException('This turn already has a proposal.');
+  if not Value.Submission.TryAdd('turn', Result) then
+    const Previous: Proposal? := Value.Submission['turn'];
+    if Previous = null or Previous.Action <> Action or Previous.Target <> Target
+      or Previous.Reply <>
+      Narration
+    then
+      raise new Mcp.McpException('This turn already has a proposal.');
+    end if;
   end if;
 
   return 'Staged for this turn. End the prompt now.';
@@ -124,6 +105,7 @@ begin
   Options.Idempotent := true;
   Options.OpenWorld := false;
   const Serializer: Json.JsonSerializerOptions := new Json.JsonSerializerOptions();
+  Serializer.RespectRequiredConstructorParameters := true;
   Serializer.TypeInfoResolver := new Metadata.DefaultJsonTypeInfoResolver();
   Serializer.PropertyNamingPolicy := Json.JsonNamingPolicy.CamelCase;
   Options.SerializerOptions := Serializer;
@@ -131,11 +113,14 @@ begin
 end function;
 
 // Registers the tools on the official MCP SDK server.
-public function Register(Active: Concurrent.ConcurrentDictionary<string, Context?>): Server.McpServerOptions;
+public function Register(Active: Concurrent.ConcurrentDictionary<string, Context?>; ArtPrompts: Draw.Registry? := null): Server.McpServerOptions;
 begin
-  const ReadRoom: Sys.Func<string, string, RoomView> := function(turnId: string; roomId: string): RoomView => GetRoom(
+  const ReadRoom: Sys.Func<string, string, Rooms.Scene> := function(turnId: string; roomId: string): Rooms.Scene => GetRoom(
     Find(Active, turnId),
     roomId
+  );
+  const ReadJournal: Sys.Func<string, array of string> := function(turnId: string): array of string => Rooms.Journal(
+    Find(Active, turnId).WorldState
   );
   const ReadHistory: Sys.Func<string, string, int, array of Saves.Turn> := function(turnId: string; roomId: string; limit: int): array of Saves.Turn => GetHistory(
     Find(Active, turnId),
@@ -149,11 +134,35 @@ begin
     reply
   );
   const Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool> := new Server.McpServerPrimitiveCollection<Server.McpServerTool>();
+  if ArtPrompts <> null then
+    const SubmitArt: Sys.Func<string, Art.Drawing, string> := function(requestId: string; drawing: Art.Drawing): string => Draw.Submit(
+      ArtPrompts,
+      requestId,
+      drawing
+    );
+    Tools.Add(
+      Tool(
+        SubmitArt,
+        'submit_room_art',
+        'Submit the Unicode tile palette, indexed rows and focus for this illustration request.',
+        false
+      )
+    );
+  end if;
+
   Tools.Add(
     Tool(
       ReadRoom,
       'get_room',
-      'Read a room by ID, its exit, key and grate state, and whether its saved art exists.',
+      'Read the current room or an open neighbor, including people, available actions, outcomes, exits and obstacles.',
+      true
+    )
+  );
+  Tools.Add(
+    Tool(
+      ReadJournal,
+      'get_journal',
+      'Recall only clues and events already learned in this adventure.',
       true
     )
   );
@@ -168,8 +177,7 @@ begin
   Tools.Add(
     Tool(
       SubmitTurn, 'submit_turn',
-      'Stage one turn with narration and one action. Use none with an empty target, take_key with brass-key, ' +
-      'open_grate with north-grate, or move with a neighboring room ID. End the prompt after acceptance.',
+      'Stage narration with one available local action and its exact target, move to an open exit ID, or none with an empty target.',
       false
     )
   );

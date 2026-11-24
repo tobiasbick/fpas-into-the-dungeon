@@ -9,6 +9,17 @@ uses
   System.Collections.Generic as Lists, System.Threading as Threads, System.Threading.Tasks as Tasks,
   Xunit as X;
 
+function Body(Value: P.CallToolResult): string;
+begin
+  X.Assert.False(Value.IsError ?? false);
+  const Block: P.ContentBlock? := X.Assert.Single<P.ContentBlock>(Value.Content);
+  if Block <> null and Block is P.TextContentBlock then
+    return cast<P.TextContentBlock>(Block).Text;
+  end if;
+
+  raise new Sys.InvalidOperationException('Expected MCP text content.');
+end function;
+
 async function Exercise(): Tasks.Task;
 begin
   const Name: string := 'dungeon-' + Sys.Guid.NewGuid().ToString('N');
@@ -46,7 +57,20 @@ begin
       null,
       Stop.Token
     );
-    X.Assert.False(Room.IsError ?? false);
+    const Opening: string := Body(Room);
+    X.Assert.Contains('brass-key', Opening);
+    X.Assert.Contains('north-grate', Opening);
+    X.Assert.DoesNotContain('evacuation-roster', Opening);
+    Args['roomId'] := 'master-seat';
+    const Far: P.CallToolResult := await Peer.CallToolAsync(
+      'get_room',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.True(Far.IsError ?? false);
+    Args['roomId'] := World.Entrance;
 
     Args['limit'] := 1;
     const Recent: P.CallToolResult := await Peer.CallToolAsync(
@@ -108,7 +132,75 @@ begin
       X.Assert.False(Initial.HasKey);
     end if;
 
+    const Opened: World.State := World.Apply(
+      World.Apply(Initial, 'take_key', World.BrassKey),
+      'open_grate',
+      'north-grate'
+    );
+    const Landing: World.State := World.Apply(
+      World.Apply(Opened, 'move', 'grotto'),
+      'move',
+      'bell-landing'
+    );
+    const Second: Concurrent.ConcurrentDictionary<string, Tools.Proposal?> := new Concurrent.ConcurrentDictionary<string, Tools.Proposal?>();
+    discard Active.TryAdd(
+      'at-bell',
+      new Tools.Context('adventure.json', Landing, History, false, Second)
+    );
+    Args['turnId'] := 'at-bell';
+    Args['action'] := 'talk';
+    Args['target'] := 'mara';
+    Args['reply'] := 'Mara recognises the signal.';
+    const Heard: P.CallToolResult := await Peer.CallToolAsync(
+      'submit_turn',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.False(Heard.IsError ?? false);
+    const Reheard: P.CallToolResult := await Peer.CallToolAsync(
+      'submit_turn',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.False(Reheard.IsError ?? false);
+    const Talk: Tools.Proposal? := Second['turn'];
+    X.Assert.NotNull(Talk);
+    if Talk <> null then
+      discard Active.TryAdd(
+        'following',
+        new Tools.Context('adventure.json', Talk.WorldState, History, false, Pending)
+      );
+    end if;
+
+    Args.Clear();
+    Args['turnId'] := 'following';
+    const Notes: P.CallToolResult := await Peer.CallToolAsync(
+      'get_journal',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.Contains('Mara', Body(Notes));
+    Args['roomId'] := 'bell-landing';
+    const Present: P.CallToolResult := await Peer.CallToolAsync(
+      'get_room',
+      Args,
+      null,
+      null,
+      Stop.Token
+    );
+    X.Assert.Contains('mara', Body(Present));
+    X.Assert.DoesNotContain('adas-message', Body(Present));
     Args['turnId'] := 'expired';
+    discard Args.Remove('roomId');
+    Args['action'] := 'none';
+    Args['target'] := '';
+    Args['reply'] := 'The pipe ticks.';
     const Expired: P.CallToolResult := await Peer.CallToolAsync(
       'submit_turn',
       Args,

@@ -11,12 +11,14 @@
 > on it, or whether I'll lose interest in a month or two.
 
 Into the Dungeon is a small terminal adventure written in
-[Functional Pascal](https://github.com/tobiasbick/functional-pascal). Type
-commands to explore the pump room, find a brass key, and open the way to the
-grotto. The game master narrates each turn. **Continue** picks up your saved
-adventure.
+[Functional Pascal](https://github.com/tobiasbick/functional-pascal). After forty silent years the shift bell rings beneath
+the ember forest. Find the keeper who recognises its signal, follow the ferry
+and the flooded railway, and decide what happens to the people below the dam.
+The game master narrates the journey through 200 places in ten districts and
+draws each room in two sizes of coloured Unicode art. **Continue** restores
+your adventure and its drawings.
 
-![The English game running at 80 × 25 in the pump room, with room art, the adventure log, and a command prompt](docs/images/pump-room.png)
+![Earlier 80 × 25 layout preview with the pump room, adventure log and command prompt](docs/images/pump-room.png)
 
 ## Quick start
 

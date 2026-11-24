@@ -1,0 +1,236 @@
+// Walks the production graph and resolves the campaign through its actual turn rules.
+unit Dungeon.Tests.CampaignTests;
+
+uses
+  Dungeon.Game.Catalog as Catalog, Dungeon.Game.World as World, Dungeon.Game.RoomView as Rooms,
+  Dungeon.Game.Saves as Saves, System as Sys, System.IO as IO,
+  System.Collections.Generic as Lists, Xunit as X;
+
+function Unlocked(): World.State;
+begin
+  return World.Apply(
+    World.Apply(World.NewAdventure(), 'take_key', World.BrassKey),
+    'open_grate',
+    'north-grate'
+  );
+end function;
+
+// Explore all currently open passages. Record parents to replay real move actions.
+function Paths(State: World.State): Lists.Dictionary<string, string>;
+begin
+  const Seen: Lists.Dictionary<string, string> := new Lists.Dictionary<string, string>();
+  const Pending: Lists.Queue<string> := new Lists.Queue<string>();
+  Pending.Enqueue(State.RoomId);
+  Seen.Add(State.RoomId, '');
+  while Pending.Count > 0 do
+    const Id: string := Pending.Dequeue();
+    const Here: World.State := State with
+      RoomId := Id;
+    end with;
+    for Edge: Catalog.Route in Catalog.At(Id).Routes do
+      if World.CanMove(Here, Edge.Destination) and Seen.TryAdd(Edge.Destination, Id) then
+        Pending.Enqueue(Edge.Destination);
+      end if;
+    end for;
+  end while;
+
+  return Seen;
+end function;
+
+function Walk(State: World.State; ToId: string): World.State;
+begin
+  const Seen: Lists.Dictionary<string, string> := Paths(State);
+  X.Assert.True(Seen.ContainsKey(ToId), 'Unreachable room ' + ToId);
+  const Steps: Lists.Stack<string> := new Lists.Stack<string>();
+  var Id: string := ToId;
+  while Id <> State.RoomId do
+    Steps.Push(Id);
+    Id := Seen[Id];
+  end while;
+  var Current: World.State := State;
+  while Steps.Count > 0 do
+    Current := World.Apply(Current, 'move', Steps.Pop());
+  end while;
+
+  return Current;
+end function;
+
+function DoAt(State: World.State; Room: string; Action: string; Target: string): World.State;
+begin
+  return World.Apply(Walk(State, Room), Action, Target);
+end function;
+
+procedure Refused(State: World.State; Action: string; Target: string);
+begin
+  discard X.Assert.Throws<Sys.ArgumentException>(
+    procedure() begin
+      discard World.Apply(State, Action, Target);
+    end procedure
+  );
+end procedure;
+
+procedure CheckCondition(Name: string?);
+begin
+  if Sys.String.IsNullOrEmpty(Name) then
+    return;
+  end if;
+  const Id: string := Name ?? '';
+  if Id.StartsWith('!', Sys.StringComparison.Ordinal) then
+    CheckCondition(Id.Substring(1));
+    return;
+  end if;
+
+  case Id of
+    when 'key', 'grate', 'low', 'high', 'undecided', 'drawdown', 'seal', 'balance':
+      return;
+    else
+      X.Assert.True(Catalog.KnownMemory(Id), 'Unknown condition ' + Id);
+  end case;
+end procedure;
+
+[X.FactAttribute]
+public procedure AllDistrictsCanBeExploredInOneAdventure();
+begin
+  const Locked: World.State := World.NewAdventure();
+  X.Assert.Equal<int>(1, Paths(Locked).Count);
+  const High: World.State := Unlocked();
+  const Arrival: Rooms.Scene := Rooms.Describe(Walk(High, 'grotto'), 'bell-landing', false);
+  X.Assert.Contains('Mara', string.Join(' ', Arrival.Details));
+  X.Assert.Empty(Arrival.Interactions);
+
+  const Wet: Lists.Dictionary<string, string> := Paths(High);
+  X.Assert.False(Wet.ContainsKey('trim-siding'));
+  const Low: World.State := DoAt(High, 'trial-weir', 'operate', 'draw-wheel');
+  const Dry: Lists.Dictionary<string, string> := Paths(Low);
+  const Ids: array of string := Catalog.RoomIds();
+  X.Assert.Equal<int>(200, Ids.Length);
+  const Districts: Lists.HashSet<string> := new Lists.HashSet<string>();
+  for Id: string in Ids do
+    const Place: Catalog.Place := Catalog.At(Id);
+    discard Districts.Add(Place.DistrictName);
+    X.Assert.True(Wet.ContainsKey(Id) or Dry.ContainsKey(Id), Id);
+    X.Assert.False(Sys.String.IsNullOrWhiteSpace(Place.Room.Description));
+    X.Assert.False(Sys.String.IsNullOrWhiteSpace(Place.Room.German));
+    const Ways: Lists.HashSet<string> := new Lists.HashSet<string>();
+    for Edge: Catalog.Route in Place.Routes do
+      X.Assert.True(Ways.Add(Edge.Direction), Id + ' ' + Edge.Direction);
+      X.Assert.True(Catalog.Contains(Edge.Destination));
+      CheckCondition(Edge.Condition);
+    end for;
+
+    for Encounter: Catalog.Encounter in Place.Room.Encounters ??
+      Sys.Array.Empty<Catalog.Encounter>() do
+      CheckCondition(Encounter.Visible);
+      for Need: string in Encounter.Needs ?? Sys.Array.Empty<string>() do
+        CheckCondition(Need);
+      end for;
+
+      for Reply: Catalog.Change in Encounter.Replies ?? Sys.Array.Empty<Catalog.Change>() do
+        CheckCondition(Reply.Condition);
+      end for;
+    end for;
+
+    for Change: Catalog.Change in Place.Room.Changes ?? Sys.Array.Empty<Catalog.Change>() do
+      CheckCondition(Change.Condition);
+    end for;
+  end for;
+
+  X.Assert.Equal<int>(10, Districts.Count);
+  X.Assert.True(World.CanMove(Walk(High, 'ferry-steps'), 'far-pier'));
+  X.Assert.False(World.CanMove(Walk(Low, 'ferry-steps'), 'far-pier'));
+  const Afloat: World.State := World.Apply(Low, 'operate', 'fill-wheel');
+  X.Assert.True(World.CanMove(Walk(Afloat, 'ferry-steps'), 'far-pier'));
+end procedure;
+
+function Summon(): World.State;
+begin
+  var Value: World.State := Unlocked();
+  Refused(Walk(Value, 'pilot-bell'), 'operate', 'pilot-bell');
+  Value := DoAt(Value, 'bell-landing', 'talk', 'mara');
+  Value := DoAt(Value, 'roll-vault', 'inspect', 'shift-roll');
+  Value := DoAt(Value, 'pilot-bell', 'operate', 'pilot-bell');
+  return DoAt(Value, 'mechanics-hearth', 'talk', 'edda');
+end function;
+
+[X.FactAttribute]
+public procedure ThreeEndingsChangeRoutesAndKeepTheirDecision();
+begin
+  const Crew: World.State := Summon();
+  const Seat: World.State := Walk(Crew, 'master-seat');
+  Refused(Seat, 'resolve', 'seal');
+  Refused(Seat, 'resolve', 'balance');
+  const Drained: World.State := World.Apply(Seat, 'resolve', 'drawdown');
+  X.Assert.Equal<string>('low', Drained.Lake);
+  X.Assert.True(World.Valid(Drained));
+  Refused(Drained, 'resolve', 'balance');
+  Refused(Walk(Drained, 'trial-weir'), 'operate', 'fill-wheel');
+
+  var Evacuated: World.State := DoAt(Crew, 'ferry-steps', 'talk', 'iven');
+  Evacuated := DoAt(Evacuated, 'high-landing', 'operate', 'evacuation-roster');
+  Refused(Walk(Evacuated, 'adas-window'), 'talk', 'ada');
+  Evacuated := DoAt(Evacuated, 'high-landing', 'talk', 'ada');
+  Evacuated := DoAt(Evacuated, 'bell-landing', 'tell', 'adas-message');
+  const Sealed: World.State := DoAt(Evacuated, 'master-seat', 'resolve', 'seal');
+  X.Assert.Equal<string>('seal', Sealed.Ending);
+  X.Assert.True(World.Valid(Sealed));
+  X.Assert.False(Paths(Sealed).ContainsKey('adas-window'));
+  X.Assert.True(World.CanMove(Walk(Sealed, 'ferry-steps'), 'far-pier'));
+
+  var Paired: World.State := DoAt(Crew, 'trial-weir', 'operate', 'draw-wheel');
+  Paired := DoAt(Paired, 'trim-siding', 'inspect', 'trim-scale');
+  Paired := DoAt(Paired, 'survey-table', 'inspect', 'spring-survey');
+  Paired := DoAt(Paired, 'return-valve', 'operate', 'return-valve');
+  Paired := DoAt(Paired, 'master-seat', 'resolve', 'balance');
+  X.Assert.Equal<string>('balance', Paired.Ending);
+  X.Assert.True(World.Valid(Paired));
+  X.Assert.True(Paths(Paired).ContainsKey('adas-window'));
+  X.Assert.True(World.CanMove(Walk(Paired, 'ferry-steps'), 'far-pier'));
+  Refused(Paired, 'resolve', 'drawdown');
+end procedure;
+
+[X.FactAttribute]
+public procedure RestoresDiscoveriesWaterAndTheOriginalTwoRoomSlot();
+begin
+  const Temporary: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-campaign-');
+  try
+    const Path: string := IO.Path.Combine(Temporary.FullName, 'adventure.json');
+    const OldId: string := '00112233445566778899aabbccddeeff';
+    IO.File.WriteAllText(
+      Path,
+      '{"gameMaster":{"agent":"claude"},"sessionId":"old","history":[{"command":"north","reply":"At the arch."}],"worldState":{"adventureId":"' +
+      OldId +
+      '","roomId":"grotto","hasKey":true,"grateOpen":true,"version":1,"worldBrief":"Two rooms."}}'
+    );
+    const Old: Saves.Save := Saves.Load(Path);
+    const Restored: World.State := Old.WorldState ?? World.NewAdventure();
+    X.Assert.Equal<string>(OldId, Restored.AdventureId);
+    X.Assert.Equal<string>('grotto', Restored.RoomId);
+    X.Assert.Equal<string>('north', Old.History[0].Command);
+    X.Assert.Equal<string>(World.Brief, Restored.WorldBrief);
+
+    var Value: World.State := DoAt(Restored, 'bell-landing', 'talk', 'mara');
+    Value := DoAt(Value, 'trial-weir', 'operate', 'draw-wheel');
+    Value := DoAt(Value, 'trim-siding', 'inspect', 'trim-scale');
+    Saves.Write(
+      Path, Old with
+        WorldState := Value;
+      end with
+    );
+    const Loaded: World.State := Saves.Load(Path).WorldState ?? World.NewAdventure();
+    X.Assert.Equivalent(Value, Loaded, true);
+    X.Assert.Equal<int>(2, Rooms.Journal(Loaded).Length);
+    X.Assert.Contains('four teeth', Rooms.Journal(Loaded)[1]);
+    Refused(Loaded, 'talk', 'edda');
+    const Ending: World.State := DoAt(Summon(), 'master-seat', 'resolve', 'drawdown');
+    Saves.Write(
+      Path, Old with
+        WorldState := Ending;
+      end with
+    );
+    X.Assert.Equivalent(Ending, Saves.Load(Path).WorldState, true);
+  finally
+    Temporary.Delete(true);
+  end try;
+end procedure;
+
+end unit;

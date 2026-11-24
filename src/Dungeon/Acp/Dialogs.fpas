@@ -1,0 +1,60 @@
+// Starts configured ACP conversations and bounds individual prompts.
+unit Dungeon.Acp.Dialogs;
+
+uses
+  Dungeon.Acp.Discovery as Acp, Dungeon.Settings as Settings, dotacp.client as Client,
+  dotacp.@protocol as P, System as Sys, System.Threading as Threads, System.Threading.Tasks as Tasks;
+
+public async function Prompt(
+  Connection: Client.Connection; Id: P.SessionId; Text: string; Token: Threads.CancellationToken
+): Tasks.Task<bool>;
+begin
+  const Content: P.TextContent := new P.TextContent();
+  Content.Text := Text;
+  const Request: P.PromptRequest := new P.PromptRequest();
+  Request.SessionId := Id;
+  Request.Prompt := [Content];
+  using const Deadline: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
+    Token
+  );
+  Deadline.CancelAfter(Sys.TimeSpan.FromMinutes(3));
+  try
+    const Result: P.PromptResponse := await Connection.PromptAsync(Request, Deadline.Token);
+    return Result.StopReason = P.StopReason.EndTurn;
+  finally
+    if Deadline.IsCancellationRequested then
+      const Cancel: P.CancelNotification := new P.CancelNotification();
+      Cancel.SessionId := Id;
+      try
+        using const CancelDeadline: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(
+          750
+        );
+        await Connection.CancelAsync(Cancel, CancelDeadline.Token).WaitAsync(CancelDeadline.Token);
+      catch Failure: Sys.Exception do
+        // Connection disposal closes the transport if the agent no longer responds.
+      end try;
+    end if;
+  end try;
+end function;
+
+public async function NewSession(
+  Connection: Client.Connection; Directory: string; Choice: Settings.Choice;
+  Servers: array of P.McpServer?; Token: Threads.CancellationToken
+): Tasks.Task<P.SessionId>;
+begin
+  const Request: P.NewSessionRequest := new P.NewSessionRequest();
+  Request.Cwd := Directory;
+  Request.McpServers := Servers;
+  const Started: P.NewSessionResponse := await Connection.NewSessionAsync(Request, Token);
+  discard await Acp.Configure(
+    Connection,
+    Started.SessionId,
+    Started.ConfigOptions,
+    Choice,
+    true,
+    Token
+  );
+  return Started.SessionId;
+end function;
+
+end unit;

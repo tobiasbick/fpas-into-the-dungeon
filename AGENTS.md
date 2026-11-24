@@ -1,6 +1,6 @@
 # AGENTS
 
-Into the Dungeon is a console-based text adventure with ASCII graphics and a
+Into the Dungeon is a console-based text adventure with Unicode terminal art and a
 large language model as the game master. The console interface uses the FPAS
 TUI. The game area sits above the command input and a status bar with an Exit
 action.
@@ -8,7 +8,7 @@ action.
 ## Reboot
 
 - Keep the first version focused on player commands, game master replies,
-  and ASCII room art.
+  and generated Unicode room art.
 - Record current design decisions under `docs/`.
 - Use the retained game development notes as background on the earlier
   version. [Game development notes](docs/agent-reference.md)

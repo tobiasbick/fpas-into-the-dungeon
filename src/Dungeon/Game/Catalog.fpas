@@ -1,0 +1,142 @@
+// Loads the authored districts and indexes each passage in both directions.
+unit Dungeon.Game.Catalog;
+
+uses
+  System as Sys, System.IO as IO, System.Reflection as Reflection,
+  System.Text.Json as Json, System.Collections.Generic as Lists;
+
+public type Change = record
+  public Condition: string;
+  public Text: string;
+end record;
+
+public type Encounter = record
+  public Action: string;
+  public Target: string;
+  public Cue: string;
+  public Result: string;
+  public Effect: string? := null;
+  public Needs: (array of string)? := null;
+  public Hint: string? := null;
+  public Visible: string? := null;
+  public Replies: (array of Change)? := null;
+end record;
+
+public type Location = record
+  public Id: string;
+  public Name: string;
+  public German: string;
+  public Description: string;
+  public Encounters: (array of Encounter)? := null;
+  public Changes: (array of Change)? := null;
+end record;
+
+type Link = record
+  public Start: string;
+  public Way: string;
+  public Finish: string;
+  public Back: string;
+  public Condition: string? := null;
+  public Hint: string? := null;
+end record;
+
+type District = record
+  public Name: string;
+  public Rooms: array of Location;
+  public Links: array of Link;
+end record;
+
+public type Route = record
+  public Direction: string;
+  public Destination: string;
+  public Condition: string?;
+  public Hint: string?;
+end record;
+
+public type Place = record
+  public Room: Location;
+  public DistrictName: string;
+  public Routes: Lists.List<Route>;
+end record;
+
+function Load(): Lists.Dictionary<string, Place>;
+begin
+  const Map: Lists.Dictionary<string, Place> := new Lists.Dictionary<string, Place>();
+  const Links: Lists.List<Link> := new Lists.List<Link>();
+  const Assembly: Reflection.Assembly := Reflection.Assembly.GetExecutingAssembly();
+  const Options: Json.JsonSerializerOptions := new Json.JsonSerializerOptions();
+  Options.PropertyNamingPolicy := Json.JsonNamingPolicy.CamelCase;
+
+  for Name: string in Assembly.GetManifestResourceNames() do
+    if Name.StartsWith('Dungeon.Campaign.', Sys.StringComparison.Ordinal) then
+      using const Stream: IO.Stream? := Assembly.GetManifestResourceStream(Name);
+      if Stream = null then
+        raise new IO.InvalidDataException(Name);
+      end if;
+      const Area: District? := Json.JsonSerializer.Deserialize<District>(Stream, Options);
+      if Area = null then
+        raise new IO.InvalidDataException(Name);
+      end if;
+
+      Links.AddRange(Area.Links);
+      for Room: Location in Area.Rooms do
+        Map.Add(Room.Id, new Place(Room, Area.Name, new Lists.List<Route>()));
+      end for;
+    end if;
+  end for;
+
+  for Edge: Link in Links do
+    Map[Edge.Start].Routes.Add(new Route(Edge.Way, Edge.Finish, Edge.Condition, Edge.Hint));
+    Map[Edge.Finish].Routes.Add(new Route(Edge.Back, Edge.Start, Edge.Condition, Edge.Hint));
+  end for;
+
+  return Map;
+end function;
+
+const Map: Lists.Dictionary<string, Place> := Load();
+
+// Supplies named locations for the room view, navigation and map verification.
+public function At(Id: string): Place;
+begin
+  return Map[Id];
+end function;
+
+public function Contains(Id: string): bool;
+begin
+  return not Sys.String.IsNullOrEmpty(Id) and Map.ContainsKey(Id);
+end function;
+
+public function RoomIds(): array of string;
+begin
+  const Ids: Lists.List<string> := new Lists.List<string>(Map.Keys);
+  return Ids.ToArray();
+end function;
+
+// Index permanent clues by the stable target stored in the save.
+function ReadMemories(): Lists.Dictionary<string, string>;
+begin
+  const Facts: Lists.Dictionary<string, string> := new Lists.Dictionary<string, string>();
+  for Place: Place in Map.Values do
+    for Entry: Encounter in Place.Room.Encounters ?? Sys.Array.Empty<Encounter>() do
+      if Entry.Effect = 'remember' then
+        Facts[Entry.Target] := Entry.Result;
+      end if;
+    end for;
+  end for;
+
+  return Facts;
+end function;
+
+const Memories: Lists.Dictionary<string, string> := ReadMemories();
+
+public function KnownMemory(Id: string): bool;
+begin
+  return not Sys.String.IsNullOrEmpty(Id) and Memories.ContainsKey(Id);
+end function;
+
+public function Memory(Id: string): string;
+begin
+  return Memories[Id];
+end function;
+
+end unit;

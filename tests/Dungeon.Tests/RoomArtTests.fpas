@@ -1,0 +1,271 @@
+// Exercises real illustration tool calls, partial saves and responsive cell rendering.
+unit Dungeon.Tests.RoomArtTests;
+
+uses
+  Dungeon.Game.Art as Art, Dungeon.Game.ArtRequests as Draw, Dungeon.Game.ArtCanvas as Canvas,
+  Dungeon.Game.World as World, Dungeon.Game.TurnTools as Tools, Dungeon.Mcp.Transport as Transport,
+  Dungeon.Game.Screen as Screen, Dungeon.Game.Saves as Saves, Dungeon.App as App, Dungeon.StartMenu as Menu, Dungeon.Settings as Settings,
+  Fpas.Ui.TerminalExtensions.CellGrids as Grids, Fpas.Ui.Widgets.Developer.Terminal as T, Fpas.Ui.Tui.Application as Tui,
+  ModelContextProtocol as Mcp, ModelContextProtocol.Client as Client, ModelContextProtocol.Protocol as P, System as Sys, System.IO as IO, System.IO.Pipes as Pipes,
+  System.Collections.Concurrent as Concurrent, System.Collections.Generic as Lists, System.Threading.Tasks as Tasks,
+  System.Threading as Threads, System.Text.Json as Json, Xunit as X;
+
+function Drawing(Width: int; Symbol: string): Art.Drawing;
+begin
+  const Height: int := Art.Height(Width);
+  const Rows: Lists.List<string> := new Lists.List<string>();
+  for Y: int := 0 to Height - 1 do
+    Rows.Add(
+      if Y = Height - 2 then
+        new string(#48, Width - 2) + '1'
+      else
+        ''
+      end if
+    );
+  end for;
+
+  return new Art.Drawing(
+    Width, Width - 2, Height - 2, [
+      new Art.Tile(' ', '#D08040', '#342810'), new Art.Tile(Symbol, '#FFAA22', '#304080')
+    ], Rows.ToArray()
+  );
+end function;
+
+async function Exercise(Path: string; Token: Threads.CancellationToken): Tasks.Task;
+begin
+  const State: World.State := World.NewAdventure();
+  const Room: Draw.Visit := new Draw.Visit(State, 'The pump bell shakes.');
+  const Requests: Draw.Registry := new Draw.Registry();
+  const Contexts: Concurrent.ConcurrentDictionary<string, Tools.Context?> := new Concurrent.ConcurrentDictionary<string, Tools.Context?>();
+  const Name: string := 'dungeon-' + Sys.Guid.NewGuid().ToString('N');
+  using const Stop: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
+    Token
+  );
+  const Server: Tasks.Task := Transport.Listen(
+    Name,
+    Tools.Register(Contexts, Requests),
+    Stop.Token
+  );
+  try
+    using const Pipe: Pipes.NamedPipeClientStream := new Pipes.NamedPipeClientStream(
+      '.', Name,
+      Pipes.PipeDirection.InOut, Pipes.PipeOptions.Asynchronous
+    );
+    await Pipe.ConnectAsync(Token);
+    const Options: Client.McpClientOptions := new Client.McpClientOptions();
+    Options.ProtocolVersion := '2025-11-25';
+    await using const Peer: Client.McpClient := await Client.McpClient.CreateAsync(
+      new P.StreamClientTransport(Pipe, Pipe),
+      Options,
+      null,
+      Token
+    );
+    const Updated: Lists.List<Art.Pair> := new Lists.List<Art.Pair>();
+    const Prompts: Lists.List<string> := new Lists.List<string>();
+    var Interrupt: bool := true;
+    var LastId: string := '';
+    const Notify: function(Art.Pair): Tasks.Task := function(Images: Art.Pair): Tasks.Task begin
+      Updated.Add(Images);
+      return Tasks.Task.CompletedTask;
+    end function;
+    const Ask: function(string): Tasks.Task<bool> := async function(Text: string): Tasks.Task<bool> begin
+      Prompts.Add(Text);
+      LastId := X.Assert.Single<string>(Requests.Keys);
+      X.Assert.Contains(LastId, Text);
+      X.Assert.Contains('The pump bell shakes.', Text);
+      const Job: Draw.Request? := Requests[LastId];
+      X.Assert.NotNull(Job);
+      if Job = null then
+        return false;
+      end if;
+
+      if Job.Width = Art.Large and Interrupt then
+        return false;
+      end if;
+      const Args: Lists.Dictionary<string, object?> := new Lists.Dictionary<string, object?>();
+      Args['requestId'] := LastId;
+      const Picture: Art.Drawing := Drawing(Job.Width, '▒');
+      const Web: Json.JsonSerializerOptions := new Json.JsonSerializerOptions(
+        Json.JsonSerializerDefaults.Web
+      );
+      Args['drawing'] := Json.JsonSerializer.SerializeToElement<Art.Drawing>(
+        Picture with
+          FocusX := -1;
+        end with, Web
+      );
+      const Bad: P.CallToolResult := await Peer.CallToolAsync(
+        'submit_room_art',
+        Args,
+        null,
+        null,
+        Token
+      );
+      X.Assert.True(Bad.IsError ?? false);
+      X.Assert.False(Job.Result.Task.IsCompleted);
+      Args['drawing'] := Json.JsonSerializer.SerializeToElement<Art.Drawing>(Picture, Web);
+      const Accepted: P.CallToolResult := await Peer.CallToolAsync(
+        'submit_room_art',
+        Args,
+        null,
+        null,
+        Token
+      );
+      X.Assert.False(Accepted.IsError ?? false);
+      const Retry: P.CallToolResult := await Peer.CallToolAsync(
+        'submit_room_art',
+        Args,
+        null,
+        null,
+        Token
+      );
+      X.Assert.False(Retry.IsError ?? false);
+      return true;
+    end function;
+
+    await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
+    X.Assert.Equal<int>(2, Prompts.Count);
+    discard X.Assert.Single<Art.Pair>(Updated);
+    X.Assert.NotNull(Updated[0].Compact);
+    X.Assert.Null(Updated[0].Full);
+    X.Assert.True(Requests.IsEmpty);
+    const File: string := IO.Path.Combine(
+      IO.Path.GetDirectoryName(Path) ?? '',
+      'art',
+      State.AdventureId,
+      'pump-room-50x16-v1.json'
+    );
+    const Stamp: Sys.DateTime := new Sys.DateTime(2020, 1, 1);
+    IO.File.SetLastWriteTimeUtc(File, Stamp);
+    Interrupt := false;
+    await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
+    X.Assert.Equal<int>(3, Prompts.Count);
+    X.Assert.Contains('65 columns and 21 rows', Prompts[2]);
+    X.Assert.Contains(Art.Encode(Art.Decode(Drawing(50, '▒'), 50)), Prompts[2]);
+    X.Assert.Equal<Sys.DateTime>(Stamp, IO.File.GetLastWriteTimeUtc(File));
+    X.Assert.True(Art.Complete(Art.Load(Path, State, State.RoomId)));
+    await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
+    X.Assert.Equal<int>(3, Prompts.Count);
+    const Other: World.State := World.NewAdventure();
+    X.Assert.Null(Art.Load(Path, Other, State.RoomId).Compact);
+    X.Assert.Null(Art.Load(Path, State, World.Grotto).Full);
+
+    IO.File.WriteAllText(File, '{broken');
+    await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
+    X.Assert.Equal<int>(4, Prompts.Count);
+    X.Assert.Contains('50 columns and 16 rows', Prompts[3]);
+    X.Assert.Contains(Art.Encode(Art.Decode(Drawing(65, '▒'), 65)), Prompts[3]);
+    X.Assert.True(Art.Complete(Art.Load(Path, State, State.RoomId)));
+    discard X.Assert.Throws<Mcp.McpException>(
+      procedure() begin
+        discard Draw.Submit(Requests, LastId, Drawing(50, '▒'));
+      end procedure
+    );
+  finally
+    Stop.Cancel();
+    await Server;
+  end try;
+end function;
+
+[X.FactAttribute]
+public procedure GeneratesAndRepairsOnlyMissingSizesThroughMcp();
+begin
+  const Dir: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-art-');
+  try
+    using const Stop: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(20000);
+    Exercise(IO.Path.Combine(Dir.FullName, 'adventure.json'), Stop.Token).GetAwaiter().GetResult();
+  finally
+    Dir.Delete(true);
+  end try;
+end procedure;
+
+function Cell(Grid: Grids.Image; Column: int; Row: int): T.Cell;
+begin
+  const Value: T.Cell? := Grid.At(Column, Row);
+  if Value = null then
+    raise new Sys.IndexOutOfRangeException();
+  end if;
+
+  return Value;
+end function;
+
+[X.FactAttribute]
+public procedure KeepsGlyphsColorsAndFocusAtTheirNativeSize();
+begin
+  const Small: Art.Picture := Art.Decode(Drawing(50, '░'), 50);
+  const Large: Art.Picture := Art.Decode(Drawing(65, '▓'), 65);
+  const Pair: Art.Pair := new Art.Pair(Small, Large);
+  X.Assert.Same(Small, Canvas.SelectImage(Pair, 64, 21));
+  X.Assert.Same(Small, Canvas.SelectImage(Pair, 65, 20));
+  X.Assert.Same(Large, Canvas.SelectImage(Pair, 65, 21));
+  const Cropped: Grids.Image := Canvas.Render(Small, 24, 8);
+  X.Assert.Equal<string>('░', Cell(Cropped, 22, 6).Text);
+  X.Assert.Equal<int>($FFAA22, Cell(Cropped, 22, 6).Colors.Foreground ?? 0);
+  const Centered: Grids.Image := Canvas.Render(Large, 101, 31);
+  X.Assert.Equal<string>('▓', Cell(Centered, 18 + 63, 5 + 19).Text);
+  X.Assert.NotEqual<int>(
+    Cell(Centered, 0, 10).Colors.Background ?? 0,
+    Cell(Centered, 17, 10).Colors.Background ?? 0
+  );
+  for Bad: string in ['界', #27.ToString(), #10.ToString(), 'ab'] do
+    discard X.Assert.Throws<IO.InvalidDataException>(
+      procedure() begin
+        discard Art.Decode(Drawing(50, Bad), 50);
+      end procedure
+    );
+  end for;
+end procedure;
+
+function Shows(Frame: Tui.Frame; Text: string): bool;
+begin
+  return Sys.Array.Exists<string>(Frame.Lines, function(Line: string): bool => Line.Contains(Text));
+end function;
+
+procedure Settle(Session: Tui.HeadlessSession);
+begin
+  for Index: int := 1 to 4 do
+    discard Session.Step();
+  end for;
+end procedure;
+
+[X.FactAttribute]
+public procedure ResizesTheArtPaneWhileKeepingTheNarration();
+begin
+  const Images: Art.Pair := new Art.Pair(
+    Art.Decode(Drawing(50, '░'), 50),
+    Art.Decode(Drawing(65, '▓'), 65)
+  );
+  const Game: Screen.Model := new Screen.Model(
+    [new Saves.Turn('', 'The bell rings.')],
+    RoomId := World.Entrance,
+    Images := Images,
+    Status := ''
+  );
+  const Model: App.Model := new App.Model(
+    '',
+    new Settings.Choice(),
+    new Menu.Model(true),
+    Adventure := Game
+  );
+  using const Session: Tui.HeadlessSession := Tui.StartHeadless<App.Model, App.Message>(
+    Model,
+    App.Update,
+    App.View,
+    80,
+    25,
+    App.Theme(Model)
+  );
+  Settle(Session);
+  X.Assert.True(Shows(Session.Snapshot(), '░'));
+  discard Session.Send(Tui.Input.Resize(120, 38));
+  Settle(Session);
+  X.Assert.True(Shows(Session.Snapshot(), '▓'));
+  discard Session.Send(Tui.Input.Resize(120, 25));
+  Settle(Session);
+  X.Assert.True(Shows(Session.Snapshot(), '░'));
+  discard Session.Send(Tui.Input.Resize(35, 15));
+  Settle(Session);
+  X.Assert.False(Shows(Session.Snapshot(), '░'));
+  X.Assert.True(Shows(Session.Snapshot(), 'The bell rings.'));
+end procedure;
+
+end unit;
