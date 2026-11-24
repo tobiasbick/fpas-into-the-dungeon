@@ -71,3 +71,12 @@ Loading runs in the background. The model list and thinking levels come from
 the selected agent's current session. Changing the model requests its updated
 thinking options. When an agent omits a selector, the corresponding field shows
 **Unavailable**.
+
+## Diagnostics
+
+`errors.log` is created in the settings directory when the game encounters an
+error. Each entry has a UTC timestamp, a source and an agent identifier. The log
+records ACP startup and prompt failures, recognized adapter error categories,
+and rejected or missing turn and illustration submissions. It keeps prompts,
+conversation contents, credentials and raw adapter output out of the file.
+At 256 KiB the game moves the current log to `errors.log.1` and starts a new one.

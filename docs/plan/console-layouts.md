@@ -16,7 +16,7 @@ conversation and the current command in view.
 - The command input spans the full width below both panes. Three rows are
   visible at a time. Longer input wraps and scrolls inside the field. Enter
   inserts a line break, and F2 sends the command.
-- The status bar sits below the input and shows `F10 Exit` in the first version.
+- The status bar sits below the input and shows `F9 Back` and `F10 Exit`.
 
 ```text
 +- Room view ---------------------------------------+- Adventure log ----------+
@@ -42,7 +42,7 @@ conversation and the current command in view.
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-|                                                                     F10 Exit |
+|                                                            F9 Back  F10 Exit |
 +------------------------------------------------------------------------------+
 ```
 
@@ -52,10 +52,11 @@ conversation and the current command in view.
   master settings. Once the new session is ready, it becomes the game's sole
   resumable session and begins with the game master's opening scene.
 - **Continue** is available when the game has a saved adventure. It restores
-  the world, current room art, and conversation, and reconnects the saved agent
-  so the player can enter the next command.
+  the world, current room art, and conversation, and starts the game master
+  from `settings.json` so the player can enter the next command.
 
 The game stores the session ID, game master selection, world state, and each
-completed turn in `adventure.json` beside `settings.json`. F10 exits the game.
-A turn in progress when the player exits may be interrupted. See
+completed turn in `adventure.json` beside `settings.json`. F9 lets the current
+turn finish, saves the adventure, and returns to the main menu after the
+session closes. F10 exits the game and may interrupt an active turn. See
 [world state and room art](world-state.md) for the save and tool details.

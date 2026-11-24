@@ -35,6 +35,20 @@ dotnet run --project src/Dungeon/Dungeon.fpasproj
 Press **F2** to send a command and **F10** to exit.
 See [game settings](docs/plan/README.md#game-settings) for agent setup.
 
+### Pi (ACP)
+
+With Pi installed, add the `@openma/pi-acp` adapter so Pi can use the
+game's MCP tools.
+
+```powershell
+npm install -g @openma/pi-acp
+```
+
+Make sure `openma-pi-acp` is on `PATH` and select **Pi (ACP)** in the game settings.
+
+The game writes errors to `errors.log` beside `settings.json`. On Windows,
+look in `%APPDATA%\into-the-dungeon\`. [Settings and diagnostics](docs/plan/README.md#diagnostics)
+
 ## License
 
 [BSD-3-Clause](LICENSE)

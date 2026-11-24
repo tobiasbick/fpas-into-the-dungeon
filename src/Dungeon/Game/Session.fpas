@@ -5,7 +5,7 @@ uses
   Dungeon.Acp.Processes as Agents, Dungeon.Acp.Discovery as Acp, Dungeon.Acp.ClientCallbacks as Callbacks,
   Dungeon.Game.Saves as Saves, Dungeon.Game.RoomView as Rooms, Dungeon.Game.World as World, Dungeon.Game.Art as Art,
   Dungeon.Game.TurnTools as Tools, Dungeon.Mcp.Transport as Mcp, Dungeon.Acp.Dialogs as Dialogs, Dungeon.Game.ArtRequests as Draw, Dungeon.Game.Illustrator as Illustrator,
-  Dungeon.Settings as Settings, dotacp.client as Client, dotacp.@protocol as P, StreamJsonRpc as Rpc,
+  Dungeon.Settings as Settings, Dungeon.ErrorLog as Errors, dotacp.client as Client, dotacp.@protocol as P, StreamJsonRpc as Rpc,
   System as Sys, System.IO as IO, System.Globalization as Global, System.Text.Json as Json,
   System.Text.Encodings.Web as Encoding,
   System.Collections.Concurrent as Collections, System.Collections.Generic as Lists, System.Text as Buffers,
@@ -28,7 +28,7 @@ end variant;
 
 async function OpenSession(
   Connection: Client.Connection; Directory: string; Choice: Settings.Choice;
-  Saved: Saves.Save?; Servers: array of P.McpServer?; Token: Threads.CancellationToken
+  Saved: Saves.Save?; Servers: array of P.McpServer?; Token: Threads.CancellationToken; Log: Errors.Sink
 ): Tasks.Task<P.SessionId>;
 begin
   const Initialized: P.InitializeResponse := await Agents.Initialize(Connection, Token);
@@ -59,6 +59,7 @@ begin
       end if;
     catch Failure: Rpc.RemoteInvocationException do
       // The authoritative game state still allows play with a replacement ACP conversation.
+      Log.Failure('restore ACP session; opening a new session', Failure);
     end try;
   end if;
 
@@ -153,9 +154,14 @@ end function;
 async function Propose(
   Connection: Client.Connection; Id: P.SessionId; Current: Saves.Save; Path: string; State: World.State;
   Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Command: string; Opening: bool;
-  Token: Threads.CancellationToken
+  Token: Threads.CancellationToken; Log: Errors.Sink
 ): Tasks.Task<Tools.Proposal?>;
 begin
+  const Phase: string := if Opening then
+    'opening turn'
+  else
+    'player turn'
+  end if;
   const TurnId: string := Sys.Guid.NewGuid().ToString('N');
   const Submissions: Collections.ConcurrentDictionary<string, Tools.Proposal?> := new Collections.ConcurrentDictionary<string, Tools.Proposal?>();
   const Context: Tools.Context := new Tools.Context(
@@ -167,13 +173,25 @@ begin
   );
   discard Active.TryAdd(TurnId, Context);
   try
-    if not await Dialogs.Prompt(Connection, Id, TurnPrompt(TurnId, Context, Command), Token) then
+    if not await Dialogs.Prompt(
+      Connection,
+      Id,
+      TurnPrompt(TurnId, Context, Command),
+      Token,
+      Log,
+      Phase
+    )
+    then
       return null;
     end if;
 
     Token.ThrowIfCancellationRequested();
     var Proposal: Tools.Proposal? := null;
     discard Submissions.TryGetValue('turn', out Proposal);
+    if Proposal = null then
+      Log.Write(Phase + ': ACP ended without an accepted submit_turn');
+    end if;
+
     return Proposal;
   finally
     var Removed: Tools.Context? := null;
@@ -218,7 +236,7 @@ async function Play(
   Connection: Client.Connection; Directory: string; Path: string; Choice: Settings.Choice;
   Saved: Saves.Save?; Initial: World.State; Servers: array of P.McpServer?;
   Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: Channels.Channel<string>; Visits: Channels.Channel<Draw.Visit>?;
-  Post: function(Event): Tasks.Task; Token: Threads.CancellationToken
+  Post: function(Event): Tasks.Task; Token: Threads.CancellationToken; Log: Errors.Sink
 ): Tasks.Task<bool>;
 begin
   using const Deadline: Threads.CancellationTokenSource := Threads.CancellationTokenSource.CreateLinkedTokenSource(
@@ -231,7 +249,8 @@ begin
     Choice,
     Saved,
     Servers,
-    Deadline.Token
+    Deadline.Token,
+    Log
   );
   Deadline.CancelAfter(Threads.Timeout.Infinite);
   var Current: Saves.Save := new Saves.Save(
@@ -252,7 +271,8 @@ begin
       Active,
       '',
       true,
-      Token
+      Token,
+      Log
     );
     if Opening = null then
       await Post(Event.Failed('Game.ToolsFailed'));
@@ -269,7 +289,7 @@ begin
   await Post(Event.Ready(Frame));
   RequestArt(State, Frame, Visits);
 
-  while true do
+  while await Queue.Reader.WaitToReadAsync(Token) do
     const Command: string := await Queue.Reader.ReadAsync(Token);
     const Next: Tools.Proposal? := await Propose(
       Connection,
@@ -280,7 +300,8 @@ begin
       Active,
       Command,
       false,
-      Token
+      Token,
+      Log
     );
     if Next = null then
       await Post(Event.TurnRejected);
@@ -301,6 +322,10 @@ begin
       end if;
     end if;
   end while;
+
+  Token.ThrowIfCancellationRequested();
+  Saves.Write(Path, Current);
+  return true;
 end function;
 
 // Owns the save slot and the MCP listener for one active adventure.
@@ -309,6 +334,7 @@ public async function Run(
   Post: function(Event): Tasks.Task; Token: Threads.CancellationToken; GenerateRoomArt: bool := false
 ): Tasks.Task;
 begin
+  const Log: Errors.Sink := new Errors.Sink(Path, 'game', Choice.Agent);
   try
     using const Lease: IO.FileStream := new IO.FileStream(
       Path + '.lock', IO.FileMode.OpenOrCreate, IO.FileAccess.ReadWrite, IO.FileShare.None
@@ -328,6 +354,7 @@ begin
     end if;
     const Exe: string := Agents.Resolve(Choice.Agent);
     if Exe = '' then
+      Log.Write('ACP launcher missing from PATH');
       await Post(Event.Failed('Settings.AgentMissing'));
       return;
     end if;
@@ -348,11 +375,12 @@ begin
     else
       null
     end if;
-    const GameListener: Tasks.Task := Mcp.Listen(GamePipe, Tools.Register(Active), Stop.Token);
+    const ArtLog: Errors.Sink := new Errors.Sink(Path, 'room-art', Choice.Agent);
+    const GameListener: Tasks.Task := Mcp.Listen(GamePipe, Tools.Register(Active, Log), Stop.Token);
     const ArtListener: Tasks.Task := if Visits = null then
       Tasks.Task.CompletedTask
     else
-      Mcp.Listen(ArtPipe, Tools.RegisterArt(ArtPrompts), Stop.Token)
+      Mcp.Listen(ArtPipe, Tools.RegisterArt(ArtPrompts, ArtLog), Stop.Token)
     end if;
     const Artist: Tasks.Task := if Visits = null then
       Tasks.Task.CompletedTask
@@ -362,13 +390,14 @@ begin
         function(RoomId: string; Images: Art.Pair; Finished: bool): Tasks.Task => Post(
           Event.ArtChanged(RoomId, Images, Finished)
         ),
-        Stop.Token
+        Stop.Token,
+        ArtLog
       )
     end if;
     const Peer: Callbacks.Callbacks := new Callbacks.Callbacks(
       procedure(Notification: P.SessionNotification) begin end procedure,
       procedure() begin
-        discard Queue.Writer.TryComplete();
+        discard Queue.Writer.TryComplete(new IO.IOException('The ACP agent disconnected.'));
       end procedure
     );
     try
@@ -386,8 +415,9 @@ begin
           Queue,
           Visits,
           Post,
-          Token
-        )
+          Token,
+          Log
+        ), Log
       );
     finally
       Stop.Cancel();
@@ -398,9 +428,14 @@ begin
       await Tasks.Task.WhenAll([Artist, GameListener, ArtListener]);
     end try;
   catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
+    Log.Write('ACP session or prompt timed out');
     await Post(Event.Failed('Settings.Timeout'));
   catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
+    Log.Failure('ACP session requires sign-in', Failure);
     await Post(Event.Failed('Settings.SignIn'));
+  catch Failure: Sys.Exception when not Token.IsCancellationRequested do
+    Log.Failure('adventure', Failure);
+    raise;
   finally
     discard Queue.Writer.TryComplete();
   end try;

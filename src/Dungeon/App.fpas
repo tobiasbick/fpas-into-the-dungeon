@@ -3,7 +3,7 @@ unit Dungeon.App;
 
 uses
   Dungeon.Acp.Processes as Agents, Dungeon.Acp.Discovery as Acp, Dungeon.Settings as Store, Dungeon.SettingsScreen as Settings,
-  Dungeon.StartMenu as Menu, Dungeon.StartScreen as Start,
+  Dungeon.StartMenu as Menu, Dungeon.StartScreen as Start, Dungeon.ErrorLog as Errors,
   Dungeon.Game.Screen as Game, Dungeon.Game.Art as Art, Dungeon.Game.Session as Session, Dungeon.Game.Saves as Saves,
   Fpas.Ui.Elements as E, Fpas.Ui.Composition as Views, Fpas.Ui.Mvu.Application as Mvu,
   Fpas.Ui.Mvu.Composition as Commands, Fpas.Ui.Widgets.Theming.Themes as Themes,
@@ -17,6 +17,7 @@ public type Message = variant
   OptionsLoaded(Value: Acp.Result);
   GameInput(Value: Game.Input);
   GameEvent(Value: Session.Event);
+  GameFinished(Failed: bool);
 end variant;
 
 // The application's persisted selection and its transient settings draft.
@@ -63,7 +64,8 @@ end function;
 function Load(Value: Model; Draft: Store.Preferences; KeepCatalog: bool := false): Mvu.Transition<Model, Message>;
   async function Discover(Post: function(Message): Tasks.Task; Token: Threads.CancellationToken): Tasks.Task;
   begin
-    const Result: Acp.Result := await Acp.Discover(Draft.AgentChoice(), Token);
+    const Log: Errors.Sink := new Errors.Sink(Value.SettingsPath, 'settings', Draft.Agent);
+    const Result: Acp.Result := await Acp.Discover(Draft.AgentChoice(), Token, Log);
     await Post(Message.OptionsLoaded(Result));
   end function;
 begin
@@ -118,6 +120,7 @@ function StartGame(Value: Model; ContinueGame: bool; Queue: Channels.Channel<str
       Token,
       Value.Saved.GenerateRoomArt
     );
+    await Post(Message.GameFinished(false));
   end function;
 begin
   return new Mvu.Transition<Model, Message>(
@@ -128,7 +131,7 @@ begin
     [
       Mvu.StartBackground<Message>(
         Adventure, Run,
-        function(Failure: Sys.Exception): Message => Message.GameEvent(Session.Event.Failed(''))
+        function(Failure: Sys.Exception): Message => Message.GameFinished(true)
       ),
       Mvu.Focus<Message>(Game.CommandId)
     ]
@@ -154,23 +157,48 @@ begin
   end with;
 end function;
 
+function MainMenu(Value: Model): Mvu.Transition<Model, Message>;
+begin
+  return Commit(
+    Value with
+      Adventure := null;
+      Commands := null;
+      MenuState := new Menu.Model(IO.File.Exists(Saves.PathFor(Value.SettingsPath)));
+    end with
+  );
+end function;
+
+function GameFailure(State: Game.Model; Status: string): Game.Model;
+begin
+  return State with
+    Closing := false;
+    Failed := true;
+    Status := if Status <> '' then
+      Status
+    elsif State.Pending <> '' then
+      'Game.TurnFailed'
+    else
+      'Game.ConnectionFailed'
+    end if;
+  end with;
+end function;
+
 function UpdateGame(Value: Model; State: Game.Model; Input: Message): Mvu.Transition<Model, Message>;
 begin
   var Next: Game.Model := State;
   case Input of
     when Message.GameInput(Game.Input.Exit):
       return new Mvu.Transition<Model, Message>(Value, [Mvu.Exit<Message>()]);
-    when Message.GameInput(Game.Input.Menu):
-      if State.Failed then
-        return new Mvu.Transition<Model, Message>(
-          Value with
-            Adventure := null;
-            Commands := null;
-            MenuState := new Menu.Model(IO.File.Exists(Saves.PathFor(Value.SettingsPath)));
-          end with,
-          [Mvu.CancelBackground<Message>(Adventure)]
-        );
+    when Message.GameInput(Game.Input.Back):
+      const Queue: Channels.Channel<string>? := Value.Commands;
+      if Queue = null then
+        return MainMenu(Value);
       end if;
+
+      discard Queue.Writer.TryComplete();
+      Next := State with
+        Closing := true;
+      end with;
     when Message.GameInput(Game.Input.Edit(const Text: string)):
       Next := State with
         Draft := Text;
@@ -188,7 +216,7 @@ begin
       const Text: string := State.Draft.Trim();
       const Queue: Channels.Channel<string>? := Value.Commands;
       if Text <> '' and (State.Status = '' or State.Status = 'Game.TurnRejected')
-        and Queue <> null and Queue.Writer.TryWrite(Text)
+        and not State.Closing and Queue <> null and Queue.Writer.TryWrite(Text)
       then
         Next := State with
           Draft := '';
@@ -225,16 +253,22 @@ begin
         Status := 'Game.TurnRejected';
       end with;
     when Message.GameEvent(Session.Event.Failed(const Status: string)):
-      Next := State with
-        Failed := true;
-        Status := if Status <> '' then
-          Status
-        elsif State.Pending <> '' then
-          'Game.TurnFailed'
-        else
-          'Game.ConnectionFailed'
-        end if;
-      end with;
+      Next := GameFailure(State, Status);
+    when Message.GameFinished(const Failed: bool):
+      if State.Closing and (not Failed or State.Failed) then
+        return MainMenu(Value);
+      end if;
+
+      return Commit(
+        Value with
+          Commands := null;
+          Adventure := if State.Failed then
+            State
+          else
+            GameFailure(State, '')
+          end if;
+        end with
+      );
     else
   end case;
 
@@ -335,6 +369,8 @@ begin
           );
         catch Failure: Sys.Exception when Failure is IO.IOException or Failure is
           Sys.UnauthorizedAccessException do
+          const Log: Errors.Sink := new Errors.Sink(Value.SettingsPath, 'settings', Draft.Agent);
+          Log.Failure('write settings', Failure);
           return Commit(
             Value with
               Status := 'Settings.SaveFailed';

@@ -2,7 +2,7 @@
 unit Dungeon.Acp.Discovery;
 
 uses
-  Dungeon.Settings as Settings, Dungeon.Acp.ClientCallbacks as Callbacks, Dungeon.Acp.Processes as Processes,
+  Dungeon.Settings as Settings, Dungeon.ErrorLog as Errors, Dungeon.Acp.ClientCallbacks as Callbacks, Dungeon.Acp.Processes as Processes,
   dotacp.client as Client, dotacp.@protocol as Protocol, StreamJsonRpc as Rpc, System as Sys,
   System.IO as IO, System.Threading as Threading,
   System.Threading.Tasks as Tasks, System.Collections.Generic as Collections;
@@ -208,11 +208,15 @@ end function;
 
 // Discovers current options in a cancellable, temporary ACP session.
 public async function Discover(
-  Desired: Settings.Choice; Token: Threading.CancellationToken
+  Desired: Settings.Choice; Token: Threading.CancellationToken; Log: Errors.Sink? := null
 ): Tasks.Task<Result>;
 begin
   const Exe: string := Processes.Resolve(Desired.Agent);
   if Exe = '' then
+    if Log <> null then
+      Log.Write('ACP launcher missing from PATH');
+    end if;
+
     return Result.Failed(Problem.MissingAgent);
   end if;
 
@@ -231,17 +235,29 @@ begin
             Directory.FullName,
             Desired,
             Deadline.Token
-          )
+          ), Log
         )
       );
     finally
       RemoveWorkspace(Directory);
     end try;
   catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
+    if Log <> null then
+      Log.Write('model discovery timed out');
+    end if;
+
     return Result.Failed(Problem.Timeout);
   catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
+    if Log <> null then
+      Log.Failure('model discovery requires sign-in', Failure);
+    end if;
+
     return Result.Failed(Problem.SignInRequired);
   catch Failure: Sys.Exception when not (Failure is Sys.OperationCanceledException) do
+    if Log <> null then
+      Log.Failure('model discovery', Failure);
+    end if;
+
     return Result.Failed(Problem.Unavailable);
   end try;
 end function;

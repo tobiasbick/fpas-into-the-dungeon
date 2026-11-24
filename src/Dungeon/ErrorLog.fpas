@@ -1,0 +1,106 @@
+// Writes bounded, local diagnostics using only game-defined messages and error categories.
+unit Dungeon.ErrorLog;
+
+uses
+  StreamJsonRpc as Rpc, System as Sys, System.Globalization as Global, System.IO as IO,
+  System.Text.RegularExpressions as Regex, System.Threading as Threads;
+
+const Gate: object := new object();
+const Limit: int := 256 * 1024;
+
+public function Category(Text: string): string;
+begin
+  const Options: Regex.RegexOptions := Regex.RegexOptions.IgnoreCase;
+  if Regex.Regex.IsMatch(
+    Text,
+    '\b(?:401|403)\b|invalid (?:token|api key)|unauthorized|authentication_error',
+    Options
+  )
+  then
+    return 'provider authentication or access denied';
+  elsif Regex.Regex.IsMatch(Text, '\b429\b|rate.limit|quota exceeded', Options) then
+    return 'provider rate limit or quota';
+  elsif Regex.Regex.IsMatch(
+    Text,
+    'ECONNREFUSED|ENOTFOUND|fetch failed|connection refused',
+    Options
+  )
+  then
+    return 'provider connection failed';
+  elsif Regex.Regex.IsMatch(Text, 'timed out|timeout', Options) then
+    return 'timeout';
+  elsif Regex.Regex.IsMatch(
+    Text,
+    'model.{0,80}not found|unknown model|model does not exist',
+    Options
+  )
+  then
+    return 'model unavailable';
+  elsif Regex.Regex.IsMatch(Text, '\b50[0234]\b|service unavailable', Options) then
+    return 'provider unavailable';
+  elsif Regex.Regex.IsMatch(
+    Text,
+    'mcp.{0,80}(?:error|failed)|(?:error|failed).{0,80}mcp',
+    Options
+  )
+  then
+    return 'MCP connection or tool error';
+  end if;
+
+  return '';
+end function;
+
+public type Sink = record
+  public AdjacentPath: string;
+  public Scope: string;
+  public Agent: string;
+
+  public procedure Write(Diagnostic: string);
+  begin
+    if not IO.Path.IsPathFullyQualified(self.AdjacentPath) then
+      return;
+    end if;
+
+    Threads.Monitor.Enter(Gate);
+    try
+      const Directory: string := IO.Path.GetDirectoryName(self.AdjacentPath) ?? '';
+      const Path: string := IO.Path.Combine(Directory, 'errors.log');
+      const File: IO.FileInfo := new IO.FileInfo(Path);
+      if File.Exists and File.Length >= Limit then
+        IO.File.Move(Path, Path + '.1', true);
+      end if;
+
+      IO.File.AppendAllText(
+        Path, Sys.DateTime.UtcNow.ToString('O', Global.CultureInfo.InvariantCulture) +
+          ' [' + self.Scope + '/' + self.Agent + '] ' + Diagnostic + Sys.Environment.NewLine
+      );
+    catch Failure: Sys.Exception when Failure is IO.IOException or Failure is
+      Sys.UnauthorizedAccessException do
+      // A failed diagnostic write cannot interrupt an adventure.
+    finally
+      Threads.Monitor.Exit(Gate);
+    end try;
+  end procedure;
+
+  public procedure Failure(Phase: string; Cause: Sys.Exception);
+  begin
+    const CauseType: string := Cause.GetType().Name;
+    const Code: string := if Cause is Rpc.RemoteInvocationException then
+      ' RPC ' + cast<Rpc.RemoteInvocationException>(Cause).ErrorCode.ToString(
+        Global.CultureInfo.InvariantCulture
+      )
+    else
+      ''
+    end if;
+    const Kind: string := Category(Cause.Message);
+    self.Write(
+      Phase + ': ' + CauseType + Code + (if Kind = '' then
+        ''
+      else
+        ' (' + Kind + ')'
+      end if)
+    );
+  end procedure;
+end record;
+
+end unit;

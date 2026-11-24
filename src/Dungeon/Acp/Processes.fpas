@@ -2,7 +2,8 @@
 unit Dungeon.Acp.Processes;
 
 uses
-  dotacp.client as Client, dotacp.@protocol as Protocol, System as Sys,
+  Dungeon.ErrorLog as Errors, dotacp.client as Client, dotacp.@protocol as Protocol, System as Sys,
+  System.Collections.Generic as Lists,
   System.Diagnostics as Diagnostics, System.IO as IO, System.Threading as Threading,
   System.Threading.Tasks as Tasks;
 
@@ -96,7 +97,7 @@ end function;
 // Owns the agent process and its SDK connection until the supplied work finishes.
 public async function Run<T>(
   AgentId: string; Exe: string; Directory: string; Callbacks: Client.IAcpClient;
-  Work: function(Client.Connection): Tasks.Task<T>
+  Work: function(Client.Connection): Tasks.Task<T>; Log: Errors.Sink? := null
 ): Tasks.Task<T>;
 begin
   using const Process: Diagnostics.Process := new Diagnostics.Process();
@@ -106,6 +107,19 @@ begin
   end if;
 
   try
+    if Log <> null then
+      const Seen: Lists.HashSet<string> := new Lists.HashSet<string>();
+      subscribe Process.ErrorDataReceived with procedure(Sender: object?; Line: Diagnostics.DataReceivedEventArgs) begin
+        const Text: string? := Line.Data;
+        if Text <> null then
+          const Kind: string := Errors.Category(Text);
+          if Kind <> '' and Seen.Add(Kind) then
+            Log.Write('adapter stderr: ' + Kind);
+          end if;
+        end if;
+      end procedure;
+    end if;
+
     Process.BeginErrorReadLine();
     const OpenConnection: Client.Connection? := Client.Connection.RunClient(
       Callbacks, Process.StandardInput.BaseStream, Process.StandardOutput.BaseStream
@@ -118,7 +132,11 @@ begin
     return await Work(Connection);
   finally
     try
-      if not Process.WaitForExit(750) then
+      if Process.WaitForExit(750) then
+        if Log <> null and Process.ExitCode <> 0 then
+          Log.Write('adapter exited with code ' + Process.ExitCode.ToString());
+        end if;
+      else
         Process.Kill(true);
         discard Process.WaitForExit(750);
       end if;

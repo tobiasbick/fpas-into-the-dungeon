@@ -3,6 +3,7 @@ unit Dungeon.Game.TurnTools;
 
 uses
   Dungeon.Game.Journal as Journal, Dungeon.Game.Navigation as Navigation, Dungeon.Game.World as World, Dungeon.Game.RoomView as Rooms, Dungeon.Game.Saves as Saves, Dungeon.Game.Art as Art, Dungeon.Game.ArtRequests as Draw,
+  Dungeon.ErrorLog as Errors,
   ModelContextProtocol as Mcp, ModelContextProtocol.Server as Server, ModelContextProtocol.Protocol as Protocol,
   System as Sys, System.Collections.Concurrent as Concurrent, System.Collections.Generic as Lists,
   System.Text.Json as Json, System.Text.Json.Nodes as Nodes, System.Text.Json.Serialization.Metadata as Metadata;
@@ -201,7 +202,7 @@ begin
 end function;
 
 // Registers only the gameplay tools for the game master session.
-public function Register(Active: Concurrent.ConcurrentDictionary<string, Context?>): Server.McpServerOptions;
+public function Register(Active: Concurrent.ConcurrentDictionary<string, Context?>; Log: Errors.Sink? := null): Server.McpServerOptions;
 begin
   const ReadRoom: Sys.Func<string, string, Rooms.Scene> := function(turnId: string; roomId: string): Rooms.Scene => GetRoom(
     Find(Active, turnId),
@@ -233,12 +234,17 @@ begin
     roomId,
     limit
   );
-  const SubmitTurn: Sys.Func<string, string, string, string, string> := function(turnId: string; action: string; target: string; reply: string): string => Submit(
-    Find(Active, turnId),
-    action,
-    target,
-    reply
-  );
+  const SubmitTurn: Sys.Func<string, string, string, string, string> := function(turnId: string; action: string; target: string; reply: string): string begin
+    try
+      return Submit(Find(Active, turnId), action, target, reply);
+    catch Failure: Mcp.McpException do
+      if Log <> null then
+        Log.Write('MCP submit_turn rejected');
+      end if;
+
+      raise;
+    end try;
+  end function;
   const Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool> := new Server.McpServerPrimitiveCollection<Server.McpServerTool>();
   Tools.Add(
     Tool(
@@ -291,13 +297,19 @@ begin
 end function;
 
 // Registers only the illustration submission tool for the background room artist.
-public function RegisterArt(ArtPrompts: Draw.Registry): Server.McpServerOptions;
+public function RegisterArt(ArtPrompts: Draw.Registry; Log: Errors.Sink? := null): Server.McpServerOptions;
 begin
-  const SubmitArt: Sys.Func<string, Art.Drawing, string> := function(requestId: string; drawing: Art.Drawing): string => Draw.Submit(
-    ArtPrompts,
-    requestId,
-    drawing
-  );
+  const SubmitArt: Sys.Func<string, Art.Drawing, string> := function(requestId: string; drawing: Art.Drawing): string begin
+    try
+      return Draw.Submit(ArtPrompts, requestId, drawing);
+    catch Failure: Mcp.McpException do
+      if Log <> null then
+        Log.Write('MCP submit_room_art rejected');
+      end if;
+
+      raise;
+    end try;
+  end function;
   const Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool> := new Server.McpServerPrimitiveCollection<Server.McpServerTool>();
   Tools.Add(
     Tool(
