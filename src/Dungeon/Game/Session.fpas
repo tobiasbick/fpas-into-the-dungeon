@@ -11,6 +11,31 @@ uses
   System.Collections.Concurrent as Collections, System.Collections.Generic as Lists, System.Text as Buffers,
   System.Threading as Threads, System.Threading.Channels as Channels, System.Threading.Tasks as Tasks;
 
+// Encapsulates the single-writer command stream passed from the UI to the session loop.
+public type CommandQueue = record
+  Channel: Channels.Channel<string>;
+
+  public static function Create(): CommandQueue;
+  begin
+    return new CommandQueue(Channels.Channel.CreateUnbounded<string>());
+  end function;
+
+  public function Send(Text: string): bool;
+  begin
+    return self.Channel.Writer.TryWrite(Text);
+  end function;
+
+  public procedure Complete(Error: Sys.Exception? := null);
+  begin
+    discard self.Channel.Writer.TryComplete(Error);
+  end procedure;
+
+  public function Reader(): Channels.ChannelReader<string>;
+  begin
+    return self.Channel.Reader;
+  end function;
+end record;
+
 // A complete frame of player-visible adventure data.
 public type Presentation = record
   public History: array of Saves.Turn;
@@ -213,12 +238,12 @@ end function;
 
 function Present(Path: string; History: array of Saves.Turn; State: World.State): Presentation;
 begin
-  return new Presentation(History, State.RoomId, Art.Load(Path, State, State.RoomId));
+  return new Presentation(History, State.RoomId, Art.Pair.Load(Path, State, State.RoomId));
 end function;
 
 procedure RequestArt(Room: World.State; Frame: Presentation; Visits: Channels.Channel<Draw.Visit>?);
 begin
-  if Visits <> null and not Art.Complete(Frame.Images) then
+  if Visits <> null and not Frame.Images.Complete() then
     const Count: int := Frame.History.Length;
     discard Visits.Writer.TryWrite(
       new Draw.Visit(
@@ -235,7 +260,7 @@ end procedure;
 async function Play(
   Connection: Client.Connection; Directory: string; Path: string; Choice: Settings.Choice;
   Saved: Saves.Save?; Initial: World.State; Servers: array of P.McpServer?;
-  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: Channels.Channel<string>; Visits: Channels.Channel<Draw.Visit>?;
+  Active: Collections.ConcurrentDictionary<string, Tools.Context?>; Queue: CommandQueue; Visits: Channels.Channel<Draw.Visit>?;
   Post: function(Event): Tasks.Task; Token: Threads.CancellationToken; Log: Errors.Sink
 ): Tasks.Task<bool>;
 begin
@@ -289,8 +314,9 @@ begin
   await Post(Event.Ready(Frame));
   RequestArt(State, Frame, Visits);
 
-  while await Queue.Reader.WaitToReadAsync(Token) do
-    const Command: string := await Queue.Reader.ReadAsync(Token);
+  const Input: Channels.ChannelReader<string> := Queue.Reader();
+  while await Input.WaitToReadAsync(Token) do
+    const Command: string := await Input.ReadAsync(Token);
     const Next: Tools.Proposal? := await Propose(
       Connection,
       Id,
@@ -330,7 +356,7 @@ end function;
 
 // Owns the save slot and the MCP listener for one active adventure.
 public async function Run(
-  Path: string; Choice: Settings.Choice; ContinueGame: bool; Queue: Channels.Channel<string>;
+  Path: string; Choice: Settings.Choice; ContinueGame: bool; Queue: CommandQueue;
   Post: function(Event): Tasks.Task; Token: Threads.CancellationToken; GenerateRoomArt: bool := false
 ): Tasks.Task;
 begin
@@ -397,7 +423,7 @@ begin
     const Peer: Callbacks.Callbacks := new Callbacks.Callbacks(
       procedure(Notification: P.SessionNotification) begin end procedure,
       procedure() begin
-        discard Queue.Writer.TryComplete(new IO.IOException('The ACP agent disconnected.'));
+        Queue.Complete(new IO.IOException('The ACP agent disconnected.'));
       end procedure
     );
     try
@@ -437,7 +463,7 @@ begin
     Log.Failure('adventure', Failure);
     raise;
   finally
-    discard Queue.Writer.TryComplete();
+    Queue.Complete();
   end try;
 end function;
 

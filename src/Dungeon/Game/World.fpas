@@ -9,6 +9,17 @@ public const BrassKey: string := 'brass-key';
 public const Brief: string := 'The shift bell under the ember forest rings after forty silent years. Three knocks answer through the grate, the middle one doubled. ' +
   'Find who rang and why. Reveal the history through things the player observes and people they meet. A keeper, a ferryman and a mechanic have different stakes in the water.';
 
+public type Offer = record
+  public Available: bool;
+  public OutcomeOrHint: string;
+  public AlreadyLearned: bool;
+end record;
+
+public type ActionNote = record
+  public Fact: string;
+  public Person: string;
+end record;
+
 public type State = record
   public AdventureId: string;
   public RoomId: string;
@@ -19,16 +30,74 @@ public type State = record
   public Discoveries: array of string := [];
   public Lake: string := 'high';
   public Ending: string := '';
+
+  // Keep both original room IDs, the inventory, the slot and its ACP history.
+  public function Restore(): State;
+  begin
+    if self.Version = 1 and (self.RoomId = Entrance or self.RoomId = Grotto) then
+      return new State(self.AdventureId, self.RoomId, self.HasKey, self.GrateOpen, Brief);
+    end if;
+
+    return self;
+  end function;
+
+  // Directions use only the obstruction. Local inspection can also offer the authored hint.
+  public function PassageObstacle(Edge: Catalog.Route; IncludeHint: bool): string;
+  begin
+    if Matches(self, Edge.Condition) then
+      return '';
+    end if;
+
+    if self.Ending <> '' and (Edge.Condition = 'high' or Edge.Condition = 'low') then
+      return 'The gates are pinned. The lake level permanently closes this passage.';
+    end if;
+    const Reason: string := Edge.Obstacle ?? 'This passage is closed.';
+    if IncludeHint and not Sys.String.IsNullOrEmpty(Edge.Hint) then
+      return Reason + ' ' + Edge.Hint;
+    end if;
+
+    return Reason;
+  end function;
+
+  public function InspectEncounter(Entry: Catalog.Encounter): Offer?;
+  begin
+    if not Visible(self, Entry) then
+      return null;
+    end if;
+
+    const Allowed: bool := Available(self, Entry);
+    return new Offer(
+      Allowed,
+      if Allowed then
+        Outcome(self, Entry)
+      else
+        Entry.Hint ?? ''
+      end if,
+      Entry.Effect = 'remember' and Matches(self, Entry.Target)
+    );
+  end function;
+
+  public function RecordAction(Action: string; Target: string): ActionNote;
+  begin
+    const Entry: Catalog.Encounter? := LocalEncounter(self, Action, Target);
+    if Entry = null then
+      return new ActionNote('', '');
+    end if;
+
+    return new ActionNote(
+      Outcome(self, Entry),
+      if Action = 'talk' then
+        Target
+      else
+        Entry.Person ?? ''
+      end if
+    );
+  end function;
 end record;
 
 public function NewAdventure(): State;
 begin
   return new State(Sys.Guid.NewGuid().ToString('N'), Entrance, false, false, Brief);
-end function;
-
-public function KnownRoom(Id: string): bool;
-begin
-  return Catalog.Contains(Id);
 end function;
 
 // Both navigation and narration evaluate the same campaign conditions.
@@ -58,25 +127,7 @@ begin
   end case;
 end function;
 
-// Directions use only the obstruction. Local inspection can also offer the authored hint.
-public function PassageObstacle(Value: State; Edge: Catalog.Route; IncludeHint: bool): string;
-begin
-  if Matches(Value, Edge.Condition) then
-    return '';
-  end if;
-
-  if Value.Ending <> '' and (Edge.Condition = 'high' or Edge.Condition = 'low') then
-    return 'The gates are pinned. The lake level permanently closes this passage.';
-  end if;
-  const Reason: string := Edge.Obstacle ?? 'This passage is closed.';
-  if IncludeHint and not Sys.String.IsNullOrEmpty(Edge.Hint) then
-    return Reason + ' ' + Edge.Hint;
-  end if;
-
-  return Reason;
-end function;
-
-public function Visible(Value: State; Entry: Catalog.Encounter): bool;
+function Visible(Value: State; Entry: Catalog.Encounter): bool;
 begin
   if Entry.Effect = 'remember' and (Entry.Action = 'operate' or Entry.Action = 'tell')
     and Matches(Value, Entry.Target)
@@ -87,7 +138,7 @@ begin
   return Matches(Value, Entry.Visible);
 end function;
 
-public function Available(Value: State; Entry: Catalog.Encounter): bool;
+function Available(Value: State; Entry: Catalog.Encounter): bool;
 begin
   if not Visible(Value, Entry) then
     return false;
@@ -117,7 +168,7 @@ public function Valid(Value: State): bool;
 begin
   var Id: Sys.Guid := Sys.Guid.Empty;
   if not Sys.Guid.TryParseExact(Value.AdventureId, 'N', out Id)
-    or Value.Version <> 2 or not KnownRoom(Value.RoomId)
+    or Value.Version <> 2 or not Catalog.Contains(Value.RoomId)
     or Sys.String.IsNullOrWhiteSpace(Value.WorldBrief)
     or (Value.GrateOpen and not Value.HasKey)
     or (Value.RoomId <> Entrance and not Value.GrateOpen)
@@ -147,16 +198,6 @@ begin
     else
       return false;
   end case;
-end function;
-
-// Keep both original room IDs, the inventory, the slot and its ACP history.
-public function Restore(Value: State): State;
-begin
-  if Value.Version = 1 and (Value.RoomId = Entrance or Value.RoomId = Grotto) then
-    return new State(Value.AdventureId, Value.RoomId, Value.HasKey, Value.GrateOpen, Brief);
-  end if;
-
-  return Value;
 end function;
 
 function Resolve(Value: State; Entry: Catalog.Encounter): State;
@@ -198,22 +239,14 @@ begin
   end case;
 end function;
 
-public function Outcome(Value: State; Entry: Catalog.Encounter): string;
+function Outcome(Value: State; Entry: Catalog.Encounter): string;
 begin
-  for Reply: Catalog.Change in Entry.Replies ?? Sys.Array.Empty<Catalog.Change>() do
-    if Matches(Value, Reply.Condition) then
-      return Reply.Text;
-    end if;
-  end for;
-
-  return Entry.Result;
+  return Entry.ReplyFor(function(Condition: string?): bool => Matches(Value, Condition));
 end function;
 
-public function LocalEncounter(Value: State; Action: string; Target: string): Catalog.Encounter?;
+function LocalEncounter(Value: State; Action: string; Target: string): Catalog.Encounter?;
 begin
-  for Entry: Catalog.Encounter in Catalog.At(
-    Value.RoomId
-  ).Room.Encounters ?? Sys.Array.Empty<Catalog.Encounter>() do
+  for Entry: Catalog.Encounter in Catalog.At(Value.RoomId).Encounters() do
     if Entry.Action = Action and Entry.Target = Target and Available(Value, Entry) then
       return Entry;
     end if;

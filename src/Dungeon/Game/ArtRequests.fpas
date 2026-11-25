@@ -8,8 +8,33 @@ uses
 
 public type Request = record
   public Width: int;
-  public Palette: array of string;
-  public Result: Tasks.TaskCompletionSource<Art.Picture>;
+  Palette: array of string;
+  Result: Tasks.TaskCompletionSource<Art.Picture>;
+
+  public static function Create(Width: int; Palette: array of string): Request;
+  begin
+    return new Request(Width, Palette, new Tasks.TaskCompletionSource<Art.Picture>());
+  end function;
+
+  public function IsCompleted(): bool;
+  begin
+    return self.Result.Task.IsCompleted;
+  end function;
+
+  public function TryAccept(Drawing: Art.Drawing): bool;
+  begin
+    const Image: Art.Picture := Art.Picture.Decode(Drawing, self.Width, self.Palette);
+    return self.Result.TrySetResult(Image) or self.Result.Task.Result.Encode() = Image.Encode();
+  end function;
+
+  public function Accepted(): Art.Picture?;
+  begin
+    if not self.Result.Task.IsCompletedSuccessfully then
+      return null;
+    end if;
+
+    return self.Result.Task.Result;
+  end function;
 end record;
 
 public type Registry = Concurrent.ConcurrentDictionary<string, Request?>;
@@ -28,11 +53,7 @@ begin
   end if;
 
   try
-    const Image: Art.Picture := Art.Decode(Drawing, Pending.Width, Pending.Palette);
-    if not Pending.Result.TrySetResult(Image) and Art.Encode(
-      Pending.Result.Task.Result
-    ) <> Art.Encode(Image)
-    then
+    if not Pending.TryAccept(Drawing) then
       raise new Mcp.McpException('This request already has a drawing.');
     end if;
   catch Failure: IO.InvalidDataException do
@@ -55,9 +76,7 @@ begin
     'Choose an original composition for this room.'
   else
     'Match the subject, viewpoint, light and focus of the saved companion drawing. Adapt its detail to this size and choose the closest colors from the district palette. Companion JSON: ' +
-    Art.Encode(
-      Sibling
-    )
+    Sibling.Encode()
   end if;
   return 'Illustrate a room for a Unicode terminal adventure. If submit_room_art is hidden, use tool discovery to load it. Call submit_room_art with requestId ' +
     Id +
@@ -93,23 +112,12 @@ public async function Fill(
   Token: Threads.CancellationToken
 ): Tasks.Task;
 begin
-  var Images: Art.Pair := Art.Load(Path, Room.State, Room.State.RoomId);
+  var Images: Art.Pair := Art.Pair.Load(Path, Room.State, Room.State.RoomId);
   const Place: Catalog.Place := Catalog.At(Room.State.RoomId);
-  const Widths: array of int := [Art.Small, Art.Large];
-  for Width: int in Widths do
-    if (Width = Art.Small and Images.Compact <> null) or (Width = Art.Large and Images.Full <>
-      null)
-    then
-      continue;
-    end if;
-
+  for Width: int in Images.MissingWidths() do
     Token.ThrowIfCancellationRequested();
     const Id: string := Sys.Guid.NewGuid().ToString('N');
-    const Request: Request := new Request(
-      Width,
-      Place.ArtPalette,
-      new Tasks.TaskCompletionSource<Art.Picture>()
-    );
+    const Request: Request := Request.Create(Width, Place.ArtPalette);
     if not Active.TryAdd(Id, Request) then
       raise new Sys.InvalidOperationException('Duplicate art request ID.');
     end if;
@@ -118,13 +126,14 @@ begin
       const Finished: bool := await Ask(
         Instructions(Id, Place, Room.Narration, Width, Images.Compact ?? Images.Full)
       );
-      if not Finished or not Request.Result.Task.IsCompletedSuccessfully then
+      const Image: Art.Picture? := Request.Accepted();
+      if not Finished or Image = null then
         return;
       end if;
 
       Token.ThrowIfCancellationRequested();
-      Art.Store(Path, Room.State, Request.Result.Task.Result);
-      Images := Art.Load(Path, Room.State, Room.State.RoomId);
+      Image.Store(Path, Room.State);
+      Images := Art.Pair.Load(Path, Room.State, Room.State.RoomId);
       await Updated(Images);
     finally
       var Removed: Request? := null;

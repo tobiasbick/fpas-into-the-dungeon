@@ -6,6 +6,7 @@ uses
   Dungeon.Game.World as World, Dungeon.Game.TurnTools as Tools, Dungeon.Mcp.Transport as Transport,
   Dungeon.Game.Screen as Screen, Dungeon.Game.Saves as Saves, Dungeon.App as App, Dungeon.StartMenu as Menu, Dungeon.Settings as Settings,
   Fpas.Ui.TerminalExtensions.CellGrids as Grids, Fpas.Ui.Widgets.Developer.Terminal as T, Fpas.Ui.Tui.Application as Tui,
+  Fpas.Ui.Tui.Headless as Headless,
   ModelContextProtocol as Mcp, ModelContextProtocol.Client as Client, ModelContextProtocol.Protocol as P, System as Sys, System.IO as IO, System.IO.Pipes as Pipes,
   System.Collections.Generic as Lists, System.Threading.Tasks as Tasks,
   System.Threading as Threads, System.Text.Json as Json, Xunit as X;
@@ -122,7 +123,7 @@ begin
         Token
       );
       X.Assert.True(Bad.IsError ?? false);
-      X.Assert.False(Job.Result.Task.IsCompleted);
+      X.Assert.False(Job.IsCompleted());
       for Ink: Art.Tile in [
         new Art.Tile('▒', '#B8C9CE', '#382019'), new Art.Tile('▒', '#FFAA22', '#B8C9CE')
       ] do
@@ -139,7 +140,7 @@ begin
           X.Assert.Single<P.ContentBlock>(ColorError.Content)
         );
         X.Assert.Contains('#B8C9CE is outside the district palette.', ErrorText.Text);
-        X.Assert.False(Job.Result.Task.IsCompleted);
+        X.Assert.False(Job.IsCompleted());
       end for;
 
       Args['drawing'] := Json.JsonSerializer.SerializeToElement<Art.Drawing>(Picture, Web);
@@ -168,35 +169,35 @@ begin
     X.Assert.NotNull(Updated[0].Compact);
     X.Assert.Null(Updated[0].Full);
     X.Assert.True(Requests.IsEmpty);
-    const Legacy: Art.Picture := Art.Decode(Drawing(50, '▒'), 50);
+    const Legacy: Art.Picture := Art.Picture.Decode(Drawing(50, '▒'), 50);
     const File: string := IO.Path.Combine(
       IO.Path.GetDirectoryName(Path) ?? '',
       'art',
       State.AdventureId,
       'pump-room-50x16-v1.json'
     );
-    IO.File.WriteAllText(File, Art.Encode(Legacy));
+    IO.File.WriteAllText(File, Legacy.Encode());
     const Stamp: Sys.DateTime := new Sys.DateTime(2020, 1, 1);
     IO.File.SetLastWriteTimeUtc(File, Stamp);
     Interrupt := false;
     await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
     X.Assert.Equal<int>(3, Prompts.Count);
     X.Assert.Contains('65 columns and 21 rows', Prompts[2]);
-    X.Assert.Contains(Art.Encode(Legacy), Prompts[2]);
+    X.Assert.Contains(Legacy.Encode(), Prompts[2]);
     X.Assert.Equal<Sys.DateTime>(Stamp, IO.File.GetLastWriteTimeUtc(File));
-    X.Assert.True(Art.Complete(Art.Load(Path, State, State.RoomId)));
+    X.Assert.True(Art.Pair.Load(Path, State, State.RoomId).Complete());
     await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
     X.Assert.Equal<int>(3, Prompts.Count);
     const Other: World.State := World.NewAdventure();
-    X.Assert.Null(Art.Load(Path, Other, State.RoomId).Compact);
-    X.Assert.Null(Art.Load(Path, State, World.Grotto).Full);
+    X.Assert.Null(Art.Pair.Load(Path, Other, State.RoomId).Compact);
+    X.Assert.Null(Art.Pair.Load(Path, State, World.Grotto).Full);
 
     IO.File.WriteAllText(File, '{broken');
     await Draw.Fill(Path, Room, Requests, Ask, Notify, Token);
     X.Assert.Equal<int>(4, Prompts.Count);
     X.Assert.Contains('50 columns and 16 rows', Prompts[3]);
-    X.Assert.Contains(Art.Encode(Art.Decode(DistrictDrawing(65), 65)), Prompts[3]);
-    X.Assert.True(Art.Complete(Art.Load(Path, State, State.RoomId)));
+    X.Assert.Contains(Art.Picture.Decode(DistrictDrawing(65), 65).Encode(), Prompts[3]);
+    X.Assert.True(Art.Pair.Load(Path, State, State.RoomId).Complete());
     discard X.Assert.Throws<Mcp.McpException>(
       procedure() begin
         discard Draw.Submit(Requests, LastId, Drawing(50, '▒'));
@@ -233,8 +234,8 @@ end function;
 [X.FactAttribute]
 public procedure KeepsGlyphsColorsAndFocusAtTheirNativeSize();
 begin
-  const Small: Art.Picture := Art.Decode(Drawing(50, '░'), 50);
-  const Large: Art.Picture := Art.Decode(Drawing(65, '▓'), 65);
+  const Small: Art.Picture := Art.Picture.Decode(Drawing(50, '░'), 50);
+  const Large: Art.Picture := Art.Picture.Decode(Drawing(65, '▓'), 65);
   const Pair: Art.Pair := new Art.Pair(Small, Large);
   X.Assert.Same(Small, Canvas.SelectImage(Pair, 64, 21));
   X.Assert.Same(Small, Canvas.SelectImage(Pair, 65, 20));
@@ -251,7 +252,7 @@ begin
   for Bad: string in ['界', #27.ToString(), #10.ToString(), 'ab'] do
     discard X.Assert.Throws<IO.InvalidDataException>(
       procedure() begin
-        discard Art.Decode(Drawing(50, Bad), 50);
+        discard Art.Picture.Decode(Drawing(50, Bad), 50);
       end procedure
     );
   end for;
@@ -273,8 +274,8 @@ end procedure;
 public procedure ResizesTheArtPaneWhileKeepingTheNarration();
 begin
   const Images: Art.Pair := new Art.Pair(
-    Art.Decode(Drawing(50, '░'), 50),
-    Art.Decode(Drawing(65, '▓'), 65)
+    Art.Picture.Decode(Drawing(50, '░'), 50),
+    Art.Picture.Decode(Drawing(65, '▓'), 65)
   );
   const Game: Screen.Model := new Screen.Model(
     [new Saves.Turn('', 'The bell rings.')],
@@ -288,7 +289,7 @@ begin
     new Menu.Model(true),
     Adventure := Game
   );
-  using const Session: Tui.HeadlessSession := Tui.StartHeadless<App.Model, App.Message>(
+  using const Session: Tui.HeadlessSession := Headless.Start<App.Model, App.Message>(
     Model,
     App.Update,
     App.View,

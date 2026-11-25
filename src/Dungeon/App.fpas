@@ -8,7 +8,7 @@ uses
   Fpas.Ui.Elements as E, Fpas.Ui.Composition as Views, Fpas.Ui.Mvu.Application as Mvu,
   Fpas.Ui.Mvu.Composition as Commands, Fpas.Ui.Widgets.Theming.Themes as Themes,
   System as Sys, System.IO as IO, System.Threading as Threads,
-  System.Threading.Tasks as Tasks, System.Threading.Channels as Channels, Fpas.Ui.Layout as Layout;
+  System.Threading.Tasks as Tasks, Fpas.Ui.Layout as Layout;
 
 // All input and effect replies for the terminal application.
 public type Message = variant
@@ -38,7 +38,7 @@ public type Model = record
   // Localized status key, or empty for the usual keyboard hints.
   public Status: string := '';
   public Adventure: Game.Model? := null;
-  public Commands: Channels.Channel<string>? := null;
+  public Commands: Session.CommandQueue? := null;
 end record;
 
 const Discovery: string := 'acp-settings';
@@ -102,7 +102,7 @@ begin
   );
 end function;
 
-function StartGame(Value: Model; ContinueGame: bool; Queue: Channels.Channel<string>): Mvu.Transition<Model, Message>;
+function StartGame(Value: Model; ContinueGame: bool; Queue: Session.CommandQueue): Mvu.Transition<Model, Message>;
   async function Run(Post: function(Message): Tasks.Task; Token: Threads.CancellationToken): Tasks.Task;
     function Report(Event: Session.Event): Tasks.Task;
     begin
@@ -154,7 +154,7 @@ begin
     History := Frame.History;
     RoomId := Frame.RoomId;
     Images := Images;
-    ArtUnavailable := SameRoom and State.ArtUnavailable and not Art.Complete(Images);
+    ArtUnavailable := SameRoom and State.ArtUnavailable and not Images.Complete();
   end with;
 end function;
 
@@ -191,12 +191,12 @@ begin
     when Message.GameInput(Game.Input.Exit):
       return new Mvu.Transition<Model, Message>(Value, [Mvu.Exit<Message>()]);
     when Message.GameInput(Game.Input.Back):
-      const Queue: Channels.Channel<string>? := Value.Commands;
+      const Queue: Session.CommandQueue? := Value.Commands;
       if Queue = null then
         return MainMenu(Value);
       end if;
 
-      discard Queue.Writer.TryComplete();
+      Queue.Complete();
       Next := State with
         Closing := true;
       end with;
@@ -215,9 +215,9 @@ begin
       end with;
     when Message.GameInput(Game.Input.Send):
       const Text: string := State.Draft.Trim();
-      const Queue: Channels.Channel<string>? := Value.Commands;
+      const Queue: Session.CommandQueue? := Value.Commands;
       if Text <> '' and (State.Status = '' or State.Status = 'Game.TurnRejected')
-        and not State.Closing and Queue <> null and Queue.Writer.TryWrite(Text)
+        and not State.Closing and Queue <> null and Queue.Send(Text)
       then
         Next := State with
           Draft := '';
@@ -240,7 +240,7 @@ begin
       if RoomId = State.RoomId then
         Next := State with
           Images := Images;
-          ArtUnavailable := Finished and not Art.Complete(Images);
+          ArtUnavailable := Finished and not Images.Complete();
         end with;
       end if;
     when Message.GameEvent(Session.Event.TurnRejected):
@@ -297,7 +297,7 @@ begin
     end if;
 
     if Entry = 'Menu.Start' or Entry = 'Menu.Restart' or Entry = 'Menu.Continue' then
-      return StartGame(Next, Entry = 'Menu.Continue', Channels.Channel.CreateUnbounded<string>());
+      return StartGame(Next, Entry = 'Menu.Continue', Session.CommandQueue.Create());
     end if;
   end if;
   const Mapped: Mvu.Transition<Menu.Model, Message> := Commands.MapTransition<Menu.Model, Menu.Message, Message>(
