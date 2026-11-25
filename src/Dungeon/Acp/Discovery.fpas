@@ -3,6 +3,7 @@ unit Dungeon.Acp.Discovery;
 
 uses
   Dungeon.Settings as Settings, Dungeon.ErrorLog as Errors, Dungeon.Acp.ClientCallbacks as Callbacks, Dungeon.Acp.Processes as Processes,
+  Fpas.Execution.Effects as Fx, Fpas.Execution.Workflows.Policies as Policies,
   dotacp.client as Client, dotacp.@protocol as Protocol, StreamJsonRpc as Rpc, System as Sys,
   System.IO as IO, System.Threading as Threading,
   System.Threading.Tasks as Tasks, System.Collections.Generic as Collections;
@@ -34,12 +35,6 @@ public type Problem = enum
   Timeout;
   Unavailable;
 end enum;
-
-// Outcome of asking an agent for its session configuration.
-public type Result = variant
-  Ready(Value: Catalog);
-  Failed(Reason: Problem);
-end variant;
 
 // Finds an ACP option by wire value, or returns -1.
 public function OptionIndex(Values: array of Option; Id: string): int;
@@ -206,60 +201,52 @@ begin
   );
 end function;
 
-// Discovers current options in a cancellable, temporary ACP session.
-public async function Discover(
-  Desired: Settings.Choice; Token: Threading.CancellationToken; Log: Errors.Sink? := null
-): Tasks.Task<Result>;
-begin
-  const Exe: string := Processes.Resolve(Desired.Agent);
-  if Exe = '' then
-    if Log <> null then
-      Log.Write('ACP launcher missing from PATH');
-    end if;
+// Describe a single discovery run. The MVU session supplies the selected agent and cancellation.
+public function Discover(Log: Errors.Sink): Fx.Effect<Catalog, Problem, Settings.Choice>;
+  function TimedOut(): Problem;
+  begin
+    Log.Write('model discovery timed out');
+    return Problem.Timeout;
+  end function;
 
-    return Result.Failed(Problem.MissingAgent);
-  end if;
-
-  using const Deadline: Threading.CancellationTokenSource := Threading.CancellationTokenSource.CreateLinkedTokenSource(
-    Token
-  );
-  Deadline.CancelAfter(Sys.TimeSpan.FromSeconds(20));
-  try
-    const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-acp-');
+  async function Read(Desired: Settings.Choice; Token: Threading.CancellationToken): Tasks.Task<Fx.Outcome<Catalog, Problem>>;
+  begin
     try
-      return Result.Ready(
-        await Processes.Run<Catalog>(
-          Desired.Agent, Exe, Directory.FullName, Callbacks.SettingsOnly(),
-          function(Connection: Client.Connection): Tasks.Task<Catalog> => ReadCatalog(
-            Connection,
-            Directory.FullName,
-            Desired,
-            Deadline.Token
-          ), Log
-        )
-      );
-    finally
-      RemoveWorkspace(Directory);
-    end try;
-  catch Failure: Sys.OperationCanceledException when not Token.IsCancellationRequested do
-    if Log <> null then
-      Log.Write('model discovery timed out');
-    end if;
+      const Exe: string := Processes.Resolve(Desired.Agent);
+      if Exe = '' then
+        Log.Write('ACP launcher missing from PATH');
+        return Fx.Outcome<Catalog, Problem>.Failure(Problem.MissingAgent);
+      end if;
 
-    return Result.Failed(Problem.Timeout);
-  catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
-    if Log <> null then
+      const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-acp-');
+      try
+        return Fx.Outcome<Catalog, Problem>.Success(
+          await Processes.Run<Catalog>(
+            Desired.Agent, Exe, Directory.FullName, Callbacks.SettingsOnly(),
+            function(Connection: Client.Connection): Tasks.Task<Catalog> => ReadCatalog(
+              Connection, Directory.FullName, Desired, Token
+            ), Token, Log
+          )
+        );
+      finally
+        RemoveWorkspace(Directory);
+      end try;
+    catch Failure: Sys.OperationCanceledException do
+      Token.ThrowIfCancellationRequested();
+      return Fx.Outcome<Catalog, Problem>.Failure(TimedOut());
+    catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
       Log.Failure('model discovery requires sign-in', Failure);
-    end if;
-
-    return Result.Failed(Problem.SignInRequired);
-  catch Failure: Sys.Exception when not (Failure is Sys.OperationCanceledException) do
-    if Log <> null then
+      return Fx.Outcome<Catalog, Problem>.Failure(Problem.SignInRequired);
+    catch Failure: Sys.Exception do
       Log.Failure('model discovery', Failure);
-    end if;
-
-    return Result.Failed(Problem.Unavailable);
-  end try;
+      return Fx.Outcome<Catalog, Problem>.Failure(Problem.Unavailable);
+    end try;
+  end function;
+begin
+  return Policies.WithDeadline<Catalog, Problem, Settings.Choice>(
+    Fx.Effect<Catalog, Problem, Settings.Choice>.Defer(Read), Sys.TimeSpan.FromSeconds(20),
+    TimedOut, Sys.TimeProvider.System
+  );
 end function;
 
 end unit;

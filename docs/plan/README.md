@@ -21,8 +21,24 @@ The menu follows the system's UI culture. The game project owns the English
 fallback in `Resources/Strings.resx` and the German translation in
 `Resources/Strings.de.resx`.
 
-The local feed in `.tmp/feed` needs matching packages for `Fpas.NET.Sdk`,
-`Fpas.Ui`, `Fpas.Ui.Mvu`, and `Fpas.Ui.Tui`.
+## Local FPAS packages
+
+The local feed in `.tmp/feed` uses `Fpas.NET.Sdk`, `Fpas.Execution.Workflows`,
+`Fpas.Ui`, `Fpas.Ui.Mvu`, and `Fpas.Ui.Tui` from the same FPAS revision.
+The SDK supplies `Fpas.Execution.Effects`. To build the workflow package,
+run this in the matching compiler checkout after preparing its SDK feed,
+then copy the resulting package into the game's feed. When replacing packages
+with the same development version, restore with a fresh NuGet package cache.
+
+```sh
+dotnet pack src/Fpas.Execution.Workflows/Fpas.Execution.Workflows.fpasproj -p:IsPackable=true -p:PackageVersion=0.1.0-dev -o sdk/feed
+```
+
+At FPAS revision `b40165bc3`, a function declared to return
+`Fx.Outcome<int, string>` builds with `return Fx.Outcome.Success(42);`,
+but `fpas check` reports FP4001 for that expression. Discovery uses the
+explicit form `Fx.Outcome<Catalog, Problem>.Success(...)` and the corresponding
+`Failure` form so both checks succeed.
 
 ## Game screen
 
@@ -67,8 +83,10 @@ Install the Pi adapter with `npm install -g @openma/pi-acp` alongside a
 compatible Pi installation. The adapter registers the game's MCP tools for
 each ACP session.
 
-Loading runs in the background. The model list and thinking levels come from
-the selected agent's current session. Changing the model requests its updated
+Discovery runs as a typed MVU effect. Its workflow gives the ACP agent 20
+seconds to return the options and waits for session cleanup. Closing Settings
+or selecting another agent cancels the previous request. The model list and
+thinking levels come from the selected agent's current session. Changing the model requests its updated
 thinking options. When an agent omits a selector, the corresponding field shows
 **Unavailable**.
 

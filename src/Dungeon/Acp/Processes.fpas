@@ -94,12 +94,24 @@ begin
   end if;
 end function;
 
+// Closing an owned agent also releases RPC calls when the adapter ignores cancellation.
+procedure StopProcess(Process: Diagnostics.Process);
+begin
+  try
+    if not Process.HasExited then
+      Process.Kill(true);
+    end if;
+  catch Race: Sys.InvalidOperationException when Process.HasExited do
+  end try;
+end procedure;
+
 // Owns the agent process and its SDK connection until the supplied work finishes.
 public async function Run<T>(
   AgentId: string; Exe: string; Directory: string; Callbacks: Client.IAcpClient;
-  Work: function(Client.Connection): Tasks.Task<T>; Log: Errors.Sink? := null
+  Work: function(Client.Connection): Tasks.Task<T>; Token: Threading.CancellationToken; Log: Errors.Sink? := null
 ): Tasks.Task<T>;
 begin
+  Token.ThrowIfCancellationRequested();
   using const Process: Diagnostics.Process := new Diagnostics.Process();
   Process.StartInfo := Launch(Exe, Agents[AgentIndex(AgentId)], Directory);
   if not Process.Start() then
@@ -107,6 +119,11 @@ begin
   end if;
 
   try
+    using const Registration: Threading.CancellationTokenRegistration := Token.Register(
+      procedure() begin
+        StopProcess(Process);
+      end procedure
+    );
     if Log <> null then
       const Seen: Lists.HashSet<string> := new Lists.HashSet<string>();
       subscribe Process.ErrorDataReceived with procedure(Sender: object?; Line: Diagnostics.DataReceivedEventArgs) begin
@@ -130,14 +147,16 @@ begin
 
     using const Connection: Client.Connection := OpenConnection;
     return await Work(Connection);
+  catch Failure: Sys.Exception when Token.IsCancellationRequested do
+    raise new Sys.OperationCanceledException(Token);
   finally
     try
       if Process.WaitForExit(750) then
-        if Log <> null and Process.ExitCode <> 0 then
+        if Log <> null and not Token.IsCancellationRequested and Process.ExitCode <> 0 then
           Log.Write('adapter exited with code ' + Process.ExitCode.ToString());
         end if;
       else
-        Process.Kill(true);
+        StopProcess(Process);
         discard Process.WaitForExit(750);
       end if;
     catch Race: Sys.InvalidOperationException when Process.HasExited do

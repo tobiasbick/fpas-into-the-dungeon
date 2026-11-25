@@ -14,7 +14,8 @@ uses
 public type Message = variant
   StartInput(Value: Menu.Message);
   SettingsInput(Value: Settings.Input);
-  OptionsLoaded(Value: Acp.Result);
+  OptionsLoaded(Value: Acp.Catalog);
+  OptionsFailed(Reason: Acp.Problem);
   GameInput(Value: Game.Input);
   GameEvent(Value: Session.Event);
   GameFinished(Failed: bool);
@@ -62,13 +63,8 @@ begin
 end function;
 
 function Load(Value: Model; Draft: Store.Preferences; KeepCatalog: bool := false): Mvu.Transition<Model, Message>;
-  async function Discover(Post: function(Message): Tasks.Task; Token: Threads.CancellationToken): Tasks.Task;
-  begin
-    const Log: Errors.Sink := new Errors.Sink(Value.SettingsPath, 'settings', Draft.Agent);
-    const Result: Acp.Result := await Acp.Discover(Draft.AgentChoice(), Token, Log);
-    await Post(Message.OptionsLoaded(Result));
-  end function;
 begin
+  const Log: Errors.Sink := new Errors.Sink(Value.SettingsPath, 'settings', Draft.Agent);
   return new Mvu.Transition<Model, Message>(
     Value with
       Draft := Draft;
@@ -82,9 +78,11 @@ begin
     end with,
     [
       Mvu.StartBackground<Message>(
-        Discovery, Discover,
-        function(Failure: Sys.Exception): Message => Message.OptionsLoaded(
-          Acp.Result.Failed(Acp.Problem.Unavailable)
+        Discovery,
+        Mvu.FromEffect<Acp.Catalog, Acp.Problem, Store.Choice, Message>(
+          Acp.Discover(Log),
+          function(Context: Mvu.BackgroundContext<Message>): Store.Choice => Draft.AgentChoice(),
+          Message.OptionsLoaded, Message.OptionsFailed
         )
       )
     ]
@@ -130,8 +128,11 @@ begin
     end with,
     [
       Mvu.StartBackground<Message>(
-        Adventure, Run,
-        function(Failure: Sys.Exception): Message => Message.GameFinished(true)
+        Adventure,
+        Mvu.FromWorker<Message>(
+          Run,
+          function(Failure: Sys.Exception): Message => Message.GameFinished(true)
+        )
       ),
       Mvu.Focus<Message>(Game.CommandId)
     ]
@@ -404,40 +405,37 @@ begin
   case Input of
     when Message.SettingsInput(const Action: Settings.Input):
       return UpdateSettings(Value, Draft, Action);
-    when Message.OptionsLoaded(const Result: Acp.Result):
-      case Result of
-        when Acp.Result.Ready(const Catalog: Acp.Catalog):
-          const Replaced: bool := (Draft.Model <> '' and Draft.Model <> Catalog.ModelId)
-            or (Draft.ThinkingLevel <> '' and Draft.ThinkingLevel <> Catalog.ThinkingId);
-          return Commit(
-            Value with
-              Catalog := Catalog;
-              Draft := Draft with
-                Model := Catalog.ModelId;
-                ThinkingLevel := Catalog.ThinkingId;
-              end with;
-              Loading := false;
-              Status := if Replaced then
-                'Settings.Changed'
-              else
-                ''
-              end if;
-            end with
-          );
-        when Acp.Result.Failed(const Reason: Acp.Problem):
-          return Commit(
-            Value with
-              Catalog := null;
-              Loading := false;
-              Status := case Reason of
-                when Acp.Problem.MissingAgent: 'Settings.AgentMissing';
-                when Acp.Problem.SignInRequired: 'Settings.SignIn';
-                when Acp.Problem.Timeout: 'Settings.Timeout';
-                else 'Settings.AgentFailed';
-              end case;
-            end with
-          );
-      end case;
+    when Message.OptionsLoaded(const Catalog: Acp.Catalog):
+      const Replaced: bool := (Draft.Model <> '' and Draft.Model <> Catalog.ModelId)
+        or (Draft.ThinkingLevel <> '' and Draft.ThinkingLevel <> Catalog.ThinkingId);
+      return Commit(
+        Value with
+          Catalog := Catalog;
+          Draft := Draft with
+            Model := Catalog.ModelId;
+            ThinkingLevel := Catalog.ThinkingId;
+          end with;
+          Loading := false;
+          Status := if Replaced then
+            'Settings.Changed'
+          else
+            ''
+          end if;
+        end with
+      );
+    when Message.OptionsFailed(const Reason: Acp.Problem):
+      return Commit(
+        Value with
+          Catalog := null;
+          Loading := false;
+          Status := case Reason of
+            when Acp.Problem.MissingAgent: 'Settings.AgentMissing';
+            when Acp.Problem.SignInRequired: 'Settings.SignIn';
+            when Acp.Problem.Timeout: 'Settings.Timeout';
+            else 'Settings.AgentFailed';
+          end case;
+        end with
+      );
     else
       return Commit(Value);
   end case;

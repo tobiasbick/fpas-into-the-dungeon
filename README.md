@@ -25,11 +25,14 @@ you have explored.
 
 ## Quick start
 
-Use a true-color terminal, .NET 10, the matching FPAS SDK and UI packages in
-`.tmp/feed`, and an installed, signed-in ACP agent.
+Use a true-color terminal, the FPAS CLI, .NET 10, and an installed, signed-in ACP agent.
+Place the matching FPAS SDK, workflow and UI packages in `.tmp/feed`.
+[Local package setup](docs/plan/README.md#local-fpas-packages)
+
+Run the game from the repository root.
 
 ```powershell
-dotnet run --project src/Dungeon/Dungeon.fpasproj
+fpas run Dungeon.slnx
 ```
 
 Press **F2** to send a command and **F10** to exit.

@@ -1,0 +1,142 @@
+// Exercise the game's background commands and their replies through the MVU runtime.
+unit Dungeon.Tests.BackgroundTests;
+
+uses
+  Dungeon.Acp.Processes as Agents, Dungeon.Acp.ClientCallbacks as Callbacks, dotacp.client as Client,
+  Dungeon.App as App, Dungeon.Settings as Settings, Dungeon.SettingsScreen as Dialog,
+  Dungeon.StartMenu as Menu, Dungeon.Game.Screen as Game,
+  Fpas.Ui.Mvu.Application as Mvu, Fpas.Ui.Mvu.Session as Runtime,
+  System as Sys, System.Threading.Tasks as Tasks, System.IO as IO, System.Threading as Threads, Xunit as X;
+
+function Start(Path: string): Runtime.Runtime<App.Model, App.Message, int>;
+begin
+  const Model: App.Model := new App.Model(
+    Path,
+    new Settings.Preferences('missing-test-agent'),
+    new Menu.Model(false)
+  );
+  return Runtime.Start<App.Model, App.Message, int>(
+    Model,
+    App.Update,
+    procedure(Request: Mvu.HostRequest) begin end procedure,
+    4
+  );
+end function;
+
+[X.FactAttribute]
+public procedure LeavingSettingsDiscardsAQueuedDiscoveryFailure();
+begin
+  using const Deadline: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(
+    5000
+  );
+  const Ui: Runtime.Runtime<App.Model, App.Message, int> := Start('');
+  try
+    const Open: App.Message := App.Message.StartInput(Menu.Message.Click(1));
+    Ui.Dispatch(Open);
+    X.Assert.True(Ui.Model().Loading);
+    X.Assert.True(Ui.WaitForWork(Deadline.Token).GetAwaiter().GetResult());
+    Ui.Dispatch(App.Message.SettingsInput(Dialog.Input.Back));
+    discard Ui.Advance();
+    X.Assert.Null(Ui.Model().Draft);
+    X.Assert.Equal<string>('', Ui.Model().Status);
+
+    Ui.Dispatch(Open);
+    X.Assert.True(Ui.WaitForWork(Deadline.Token).GetAwaiter().GetResult());
+    discard Ui.Advance();
+    X.Assert.False(Ui.Model().Loading);
+    X.Assert.Equal<string>('Settings.AgentMissing', Ui.Model().Status);
+  finally
+    Ui.Close().WaitAsync(Deadline.Token).GetAwaiter().GetResult();
+  end try;
+end procedure;
+
+[X.FactAttribute]
+public procedure AdventureWorkerDeliversTheFailureBeforeCompletion();
+begin
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-worker-');
+  try
+    using const Deadline: Threads.CancellationTokenSource := new Threads.CancellationTokenSource(
+      5000
+    );
+    const Ui: Runtime.Runtime<App.Model, App.Message, int> := Start(
+      IO.Path.Combine(Directory.FullName, 'settings.json')
+    );
+    try
+      Ui.Dispatch(App.Message.StartInput(Menu.Message.Activate));
+      X.Assert.True(Ui.WaitForWork(Deadline.Token).GetAwaiter().GetResult());
+      discard Ui.Advance();
+      X.Assert.NotNull(Ui.Model().Commands);
+      X.Assert.Equal<string>(
+        'Settings.AgentMissing',
+        (Ui.Model().Adventure ?? new Game.Model()).Status
+      );
+      X.Assert.True(Ui.WaitForWork(Deadline.Token).GetAwaiter().GetResult());
+      discard Ui.Advance();
+      X.Assert.Null(Ui.Model().Commands);
+      X.Assert.Equal<string>(
+        'Settings.AgentMissing',
+        (Ui.Model().Adventure ?? new Game.Model()).Status
+      );
+    finally
+      Ui.Close().WaitAsync(Deadline.Token).GetAwaiter().GetResult();
+    end try;
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+[X.FactAttribute]
+public procedure CancellingAnUnresponsiveAdapterReleasesTheRpcCall();
+  async function Negotiate(Connection: Client.Connection): Tasks.Task<bool>;
+  begin
+    // This peer reads requests but never replies, even to cancellation.
+    const Waiting: Tasks.Task := Agents.Initialize(Connection, Threads.CancellationToken.None);
+    Stop.Cancel();
+    try
+      await Waiting.WaitAsync(Sys.TimeSpan.FromSeconds(5));
+    catch Failure: Sys.TimeoutException do
+      Stalled := true;
+      raise;
+    end try;
+
+    return true;
+  end function;
+begin
+  using const Stop: Threads.CancellationTokenSource := new Threads.CancellationTokenSource();
+  var Stalled: bool := false;
+  const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-acp-stop-');
+  try
+    const Adapter: string := IO.Path.Combine(
+      Directory.FullName, if Sys.OperatingSystem.IsWindows() then
+        'silent.cmd'
+      else
+        'silent'
+      end if
+    );
+    if Sys.OperatingSystem.IsWindows() then
+      IO.File.WriteAllText(Adapter, '@more > nul' + Sys.Environment.NewLine);
+    else
+      IO.File.WriteAllText(Adapter, '#!/bin/sh' + #10 + 'exec cat >/dev/null' + #10);
+      IO.File.SetUnixFileMode(Adapter, IO.UnixFileMode.UserRead or IO.UnixFileMode.UserExecute);
+    end if;
+
+    const Cancelled: Sys.OperationCanceledException := X.Assert.ThrowsAny<Sys.OperationCanceledException>(
+      procedure() begin
+        discard Agents.Run<bool>(
+          'claude',
+          Adapter,
+          Directory.FullName,
+          Callbacks.SettingsOnly(),
+          Negotiate,
+          Stop.Token
+        ).GetAwaiter().GetResult();
+      end procedure
+    );
+    X.Assert.Equal<Threads.CancellationToken>(Stop.Token, Cancelled.CancellationToken);
+    X.Assert.False(Stalled, 'The RPC call stayed pending after the adapter was cancelled.');
+  finally
+    Directory.Delete(true);
+  end try;
+end procedure;
+
+end unit;
