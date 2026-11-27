@@ -1,12 +1,21 @@
 // Discovers session selectors from a locally installed ACP agent using dotacp.
 unit Dungeon.Acp.Discovery;
 
-uses
-  Dungeon.Settings as Settings, Dungeon.ErrorLog as Errors, Dungeon.Acp.ClientCallbacks as Callbacks, Dungeon.Acp.Processes as Processes,
-  Fpas.Execution.Effects as Fx, Fpas.Execution.Workflows.Policies as Policies,
-  dotacp.client as Client, dotacp.@protocol as Protocol, StreamJsonRpc as Rpc, System as Sys,
-  System.IO as IO, System.Threading as Threading,
-  System.Threading.Tasks as Tasks, System.Collections.Generic as Collections;
+uses Fpas.Execution.Effects as Fx;
+uses Fpas.Execution.Workflows.Policies as Policies;
+
+uses Dungeon.Acp.ClientCallbacks as Callbacks;
+uses Dungeon.Acp.Processes as Processes;
+uses Dungeon.ErrorLog as Errors;
+uses Dungeon.Settings as Settings;
+uses StreamJsonRpc as Rpc;
+uses System as Sys;
+uses System.Collections.Generic as Collections;
+uses System.IO as IO;
+uses System.Threading as Threading;
+uses System.Threading.Tasks as Tasks;
+uses dotacp.client as Client;
+uses dotacp.@protocol as Protocol;
 
 // A value named by an ACP configuration selector.
 public type Option = record
@@ -39,10 +48,13 @@ end enum;
 // Finds an ACP option by wire value, or returns -1.
 public function OptionIndex(Values: array of Option; Id: string): int;
 begin
-  return Sys.Array.FindIndex<Option>(Values, function(Value: Option): bool => Value.Id = Id);
+  return Sys.Array.FindIndex of Option(Values, function(Value: Option): bool => Value.Id = Id);
 end function;
 
-function Selector(Options: (array of Protocol.SessionConfigOption?)?; Category: string): Protocol.SessionConfigSelect?;
+function Selector(
+  Options: (array of Protocol.SessionConfigOption?)?;
+  Category: string
+): Protocol.SessionConfigSelect?;
 begin
   if Options = null then
     return null;
@@ -50,7 +62,7 @@ begin
 
   for OptionItem: Protocol.SessionConfigOption? in Options do
     if OptionItem is Protocol.SessionConfigSelect then
-      const Select: Protocol.SessionConfigSelect := cast<Protocol.SessionConfigSelect>(OptionItem);
+      const Select: Protocol.SessionConfigSelect := cast OptionItem as Protocol.SessionConfigSelect;
       const Id: string := Select.Id.ToString() ?? '';
       if Select.Category.ToString() = Category or Id = Category
         or (Category = 'thought_level' and (Id = 'reasoning_effort' or Id = 'thinking_level' or Id =
@@ -64,7 +76,10 @@ begin
   return null;
 end function;
 
-procedure AddOptions(Items: (array of Protocol.SessionConfigSelectOption?)?; Values: Collections.List<Option>);
+procedure AddOptions(
+  Items: (array of Protocol.SessionConfigSelectOption?)?;
+  Values: Collections.List of Option
+);
 begin
   if Items = null then
     return;
@@ -86,7 +101,7 @@ begin
     return [];
   end if;
 
-  const Result: Collections.List<Option> := new Collections.List<Option>();
+  const Result: Collections.List of Option := new Collections.List of Option();
   var Items: (array of Protocol.SessionConfigSelectOption?)? := null;
   var Groups: (array of Protocol.SessionConfigSelectGroup?)? := null;
   if Select.Options.TryGetSessionConfigSelectOption(out Items) then
@@ -135,9 +150,13 @@ end procedure;
 
 // Applies the saved model and, for gameplay, the thinking level reported by the agent.
 public async function Configure(
-  Connection: Client.Connection; Id: Protocol.SessionId; Initial: (array of Protocol.SessionConfigOption?)?;
-  Desired: Settings.Choice; ApplyThinking: bool; Token: Threading.CancellationToken
-): Tasks.Task<Catalog>;
+  Connection: Client.Connection;
+  Id: Protocol.SessionId;
+  Initial: (array of Protocol.SessionConfigOption?)?;
+  Desired: Settings.Choice;
+  ApplyThinking: bool;
+  Token: Threading.CancellationToken
+): Tasks.Task of Catalog;
 begin
   var Options: (array of Protocol.SessionConfigOption?)? := Initial;
   var Model: Protocol.SessionConfigSelect? := Selector(Options, 'model');
@@ -183,8 +202,11 @@ begin
 end function;
 
 async function ReadCatalog(
-  Connection: Client.Connection; Directory: string; Desired: Settings.Choice; Token: Threading.CancellationToken
-): Tasks.Task<Catalog>;
+  Connection: Client.Connection;
+  Directory: string;
+  Desired: Settings.Choice;
+  Token: Threading.CancellationToken
+): Tasks.Task of Catalog;
 begin
   discard await Processes.Initialize(Connection, Token);
   const Start: Protocol.NewSessionRequest := new Protocol.NewSessionRequest();
@@ -202,28 +224,31 @@ begin
 end function;
 
 // Describe a single discovery run. The MVU session supplies the selected agent and cancellation.
-public function Discover(Log: Errors.Sink): Fx.Effect<Catalog, Problem, Settings.Choice>;
+public function Discover(Log: Errors.Sink): Fx.Effect of (Catalog, Problem, Settings.Choice);
   function TimedOut(): Problem;
   begin
     Log.Write('model discovery timed out');
     return Problem.Timeout;
   end function;
 
-  async function Read(Desired: Settings.Choice; Token: Threading.CancellationToken): Tasks.Task<Fx.Outcome<Catalog, Problem>>;
+  async function Read(
+    Desired: Settings.Choice;
+    Token: Threading.CancellationToken
+  ): Tasks.Task of Fx.Outcome of (Catalog, Problem);
   begin
     try
       const Exe: string := Processes.Resolve(Desired.Agent);
       if Exe = '' then
         Log.Write('ACP launcher missing from PATH');
-        return Fx.Outcome<Catalog, Problem>.Failure(Problem.MissingAgent);
+        return (Fx.Outcome of (Catalog, Problem)).Failure(Problem.MissingAgent);
       end if;
 
       const Directory: IO.DirectoryInfo := IO.Directory.CreateTempSubdirectory('dungeon-acp-');
       try
-        return Fx.Outcome<Catalog, Problem>.Success(
-          await Processes.Run<Catalog>(
+        return (Fx.Outcome of (Catalog, Problem)).Success(
+          await Processes.Run of Catalog(
             Desired.Agent, Exe, Directory.FullName, Callbacks.SettingsOnly(),
-            function(Connection: Client.Connection): Tasks.Task<Catalog> => ReadCatalog(
+            function(Connection: Client.Connection): Tasks.Task of Catalog => ReadCatalog(
               Connection, Directory.FullName, Desired, Token
             ), Token, Log
           )
@@ -233,18 +258,18 @@ public function Discover(Log: Errors.Sink): Fx.Effect<Catalog, Problem, Settings
       end try;
     catch Failure: Sys.OperationCanceledException do
       Token.ThrowIfCancellationRequested();
-      return Fx.Outcome<Catalog, Problem>.Failure(TimedOut());
+      return (Fx.Outcome of (Catalog, Problem)).Failure(TimedOut());
     catch Failure: Rpc.RemoteInvocationException when Failure.ErrorCode = -32000 do
       Log.Failure('model discovery requires sign-in', Failure);
-      return Fx.Outcome<Catalog, Problem>.Failure(Problem.SignInRequired);
+      return (Fx.Outcome of (Catalog, Problem)).Failure(Problem.SignInRequired);
     catch Failure: Sys.Exception do
       Log.Failure('model discovery', Failure);
-      return Fx.Outcome<Catalog, Problem>.Failure(Problem.Unavailable);
+      return (Fx.Outcome of (Catalog, Problem)).Failure(Problem.Unavailable);
     end try;
   end function;
 begin
-  return Policies.WithDeadline<Catalog, Problem, Settings.Choice>(
-    Fx.Effect<Catalog, Problem, Settings.Choice>.Defer(Read), Sys.TimeSpan.FromSeconds(20),
+  return Policies.WithDeadline of (Catalog, Problem, Settings.Choice)(
+    (Fx.Effect of (Catalog, Problem, Settings.Choice)).Defer(Read), Sys.TimeSpan.FromSeconds(20),
     TimedOut, Sys.TimeProvider.System
   );
 end function;

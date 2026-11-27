@@ -34,11 +34,9 @@ with the same development version, restore with a fresh NuGet package cache.
 dotnet pack src/Fpas.Execution.Workflows/Fpas.Execution.Workflows.fpasproj -p:IsPackable=true -p:PackageVersion=0.1.0-dev -o sdk/feed
 ```
 
-At FPAS revision `b40165bc3`, a function declared to return
-`Fx.Outcome<int, string>` builds with `return Fx.Outcome.Success(42);`,
-but `fpas check` reports FP4001 for that expression. Discovery uses the
-explicit form `Fx.Outcome<Catalog, Problem>.Success(...)` and the corresponding
-`Failure` form so both checks succeed.
+The Windows build was verified with FPAS revision `2db13b34a`. The game uses
+one `uses` statement per import, `of` for generic arguments, and `cast … as …`
+for explicit casts.
 
 ## Game screen
 

@@ -1,12 +1,24 @@
 // Gives the game master a read-only snapshot and one validated proposal per turn.
 unit Dungeon.Game.TurnTools;
 
-uses
-  Dungeon.Game.Catalog as Catalog, Dungeon.Game.Journal as Journal, Dungeon.Game.Navigation as Navigation, Dungeon.Game.World as World, Dungeon.Game.RoomView as Rooms, Dungeon.Game.Saves as Saves, Dungeon.Game.Art as Art, Dungeon.Game.ArtRequests as Draw,
-  Dungeon.ErrorLog as Errors,
-  ModelContextProtocol as Mcp, ModelContextProtocol.Server as Server, ModelContextProtocol.Protocol as Protocol,
-  System as Sys, System.Collections.Concurrent as Concurrent, System.Collections.Generic as Lists,
-  System.Text.Json as Json, System.Text.Json.Nodes as Nodes, System.Text.Json.Serialization.Metadata as Metadata;
+uses Dungeon.ErrorLog as Errors;
+uses Dungeon.Game.Art as Art;
+uses Dungeon.Game.ArtRequests as Draw;
+uses Dungeon.Game.Catalog as Catalog;
+uses Dungeon.Game.Journal as Journal;
+uses Dungeon.Game.Navigation as Navigation;
+uses Dungeon.Game.RoomView as Rooms;
+uses Dungeon.Game.Saves as Saves;
+uses Dungeon.Game.World as World;
+uses ModelContextProtocol as Mcp;
+uses ModelContextProtocol.Protocol as Protocol;
+uses ModelContextProtocol.Server as Server;
+uses System as Sys;
+uses System.Collections.Concurrent as Concurrent;
+uses System.Collections.Generic as Lists;
+uses System.Text.Json as Json;
+uses System.Text.Json.Nodes as Nodes;
+uses System.Text.Json.Serialization.Metadata as Metadata;
 
 public type Proposal = record
   public Reply: string;
@@ -20,10 +32,13 @@ public type Context = record
   public WorldState: World.State;
   public History: array of Saves.Turn;
   public Opening: bool;
-  public Submission: Concurrent.ConcurrentDictionary<string, Proposal?>;
+  public Submission: Concurrent.ConcurrentDictionary of (string, Proposal?);
 end record;
 
-function Find(Active: Concurrent.ConcurrentDictionary<string, Context?>; TurnId: string): Context;
+function Find(
+  Active: Concurrent.ConcurrentDictionary of (string, Context?);
+  TurnId: string
+): Context;
 begin
   var Found: Context? := null;
   discard Active.TryGetValue(TurnId, out Found);
@@ -51,7 +66,7 @@ begin
       'Choose a known roomId or an empty roomId, and a limit from 1 to 20.'
     );
   end if;
-  const Recent: Lists.List<Saves.Turn> := new Lists.List<Saves.Turn>();
+  const Recent: Lists.List of Saves.Turn := new Lists.List of Saves.Turn();
   var Index: int := Value.History.Length - 1;
   while Index >= 0 and Recent.Count < Limit do
     const Entry: Saves.Turn := Value.History[Index];
@@ -66,7 +81,14 @@ begin
   return Recent.ToArray();
 end function;
 
-function Search(Value: Context; Query: string; Person: string; RoomId: string; BeforeTurn: int; Limit: int): Journal.Page;
+function Search(
+  Value: Context;
+  Query: string;
+  Person: string;
+  RoomId: string;
+  BeforeTurn: int;
+  Limit: int
+): Journal.Page;
 begin
   try
     return Journal.Search(Value.History, Query, Person, RoomId, BeforeTurn, Limit);
@@ -149,10 +171,10 @@ function AnnotateParameters(Name: string; Schema: Json.JsonElement): Json.JsonEl
 begin
   const Root: Nodes.JsonNode? := Nodes.JsonNode.Parse(Schema.GetRawText());
   if Root <> null and Root is Nodes.JsonObject then
-    const Document: Nodes.JsonObject := cast<Nodes.JsonObject>(Root);
+    const Document: Nodes.JsonObject := cast Root as Nodes.JsonObject;
     const PropertiesNode: Nodes.JsonNode? := Document['properties'];
     if PropertiesNode <> null and PropertiesNode is Nodes.JsonObject then
-      const Properties: Nodes.JsonObject := cast<Nodes.JsonObject>(PropertiesNode);
+      const Properties: Nodes.JsonObject := cast PropertiesNode as Nodes.JsonObject;
       for Key: string in [
         'turnId', 'requestId', 'roomId', 'query', 'person', 'beforeTurn', 'limit', 'destination',
         'action', 'target', 'reply', 'drawing'
@@ -160,18 +182,23 @@ begin
         const Entry: Nodes.JsonNode? := Properties[Key];
         const Text: string := ParameterDescription(Name, Key);
         if Text <> '' and Entry <> null and Entry is Nodes.JsonObject then
-          cast<Nodes.JsonObject>(Entry)['description'] := Nodes.JsonValue.Create<string>(Text);
+          (cast Entry as Nodes.JsonObject)['description'] := Nodes.JsonValue.Create of string(Text);
         end if;
       end for;
     end if;
 
-    return Json.JsonSerializer.SerializeToElement<Nodes.JsonNode>(Document);
+    return Json.JsonSerializer.SerializeToElement of Nodes.JsonNode(Document);
   end if;
 
   return Schema;
 end function;
 
-function Tool(Called: Sys.Delegate; Name: string; Description: string; ReadOnly: bool): Server.McpServerTool;
+function Tool(
+  Called: Sys.Delegate;
+  Name: string;
+  Description: string;
+  ReadOnly: bool
+): Server.McpServerTool;
 begin
   const Options: Server.McpServerToolCreateOptions := new Server.McpServerToolCreateOptions();
   Options.Name := Name;
@@ -190,7 +217,9 @@ begin
   return Created;
 end function;
 
-function ServerOptions(Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool>): Server.McpServerOptions;
+function ServerOptions(
+  Tools: Server.McpServerPrimitiveCollection of Server.McpServerTool
+): Server.McpServerOptions;
 begin
   const Identity: Protocol.Implementation := new Protocol.Implementation();
   Identity.Name := 'into-the-dungeon';
@@ -202,13 +231,19 @@ begin
 end function;
 
 // Registers only the gameplay tools for the game master session.
-public function Register(Active: Concurrent.ConcurrentDictionary<string, Context?>; Log: Errors.Sink? := null): Server.McpServerOptions;
+public function Register(
+  Active: Concurrent.ConcurrentDictionary of (string, Context?);
+  Log: Errors.Sink? := null
+): Server.McpServerOptions;
 begin
-  const ReadRoom: Sys.Func<string, string, Rooms.Scene> := function(turnId: string; roomId: string): Rooms.Scene => GetRoom(
+  const ReadRoom: Sys.Func of (string, string, Rooms.Scene) := function(
+    turnId: string;
+    roomId: string
+  ): Rooms.Scene => GetRoom(
     Find(Active, turnId),
     roomId
   );
-  const ReadJournal: Sys.Func<string, Journal.Page> := function(turnId: string): Journal.Page => Journal.Search(
+  const ReadJournal: Sys.Func of (string, Journal.Page) := function(turnId: string): Journal.Page => Journal.Search(
     Find(Active, turnId).History,
     '',
     '',
@@ -217,7 +252,14 @@ begin
     20,
     true
   );
-  const SearchMemories: Sys.Func<string, string, string, string, int, int, Journal.Page> := function(turnId: string; query: string; person: string; roomId: string; beforeTurn: int; limit: int): Journal.Page => Search(
+  const SearchMemories: Sys.Func of (string, string, string, string, int, int, Journal.Page) := function(
+    turnId: string;
+    query: string;
+    person: string;
+    roomId: string;
+    beforeTurn: int;
+    limit: int
+  ): Journal.Page => Search(
     Find(Active, turnId),
     query,
     person,
@@ -225,16 +267,28 @@ begin
     beforeTurn,
     limit
   );
-  const FindRoute: Sys.Func<string, string, Navigation.Directions> := function(turnId: string; destination: string): Navigation.Directions => Route(
+  const FindRoute: Sys.Func of (string, string, Navigation.Directions) := function(
+    turnId: string;
+    destination: string
+  ): Navigation.Directions => Route(
     Find(Active, turnId),
     destination
   );
-  const ReadHistory: Sys.Func<string, string, int, array of Saves.Turn> := function(turnId: string; roomId: string; limit: int): array of Saves.Turn => GetHistory(
+  const ReadHistory: Sys.Func of (string, string, int, array of Saves.Turn) := function(
+    turnId: string;
+    roomId: string;
+    limit: int
+  ): array of Saves.Turn => GetHistory(
     Find(Active, turnId),
     roomId,
     limit
   );
-  const SubmitTurn: Sys.Func<string, string, string, string, string> := function(turnId: string; action: string; target: string; reply: string): string begin
+  const SubmitTurn: Sys.Func of (string, string, string, string, string) := function(
+    turnId: string;
+    action: string;
+    target: string;
+    reply: string
+  ): string begin
     try
       return Submit(Find(Active, turnId), action, target, reply);
     catch Failure: Mcp.McpException do
@@ -245,7 +299,7 @@ begin
       raise;
     end try;
   end function;
-  const Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool> := new Server.McpServerPrimitiveCollection<Server.McpServerTool>();
+  const Tools: Server.McpServerPrimitiveCollection of Server.McpServerTool := new Server.McpServerPrimitiveCollection of Server.McpServerTool();
   Tools.Add(
     Tool(
       ReadRoom,
@@ -297,9 +351,15 @@ begin
 end function;
 
 // Registers only the illustration submission tool for the background room artist.
-public function RegisterArt(ArtPrompts: Draw.Registry; Log: Errors.Sink? := null): Server.McpServerOptions;
+public function RegisterArt(
+  ArtPrompts: Draw.Registry;
+  Log: Errors.Sink? := null
+): Server.McpServerOptions;
 begin
-  const SubmitArt: Sys.Func<string, Art.Drawing, string> := function(requestId: string; drawing: Art.Drawing): string begin
+  const SubmitArt: Sys.Func of (string, Art.Drawing, string) := function(
+    requestId: string;
+    drawing: Art.Drawing
+  ): string begin
     try
       return Draw.Submit(ArtPrompts, requestId, drawing);
     catch Failure: Mcp.McpException do
@@ -310,7 +370,7 @@ begin
       raise;
     end try;
   end function;
-  const Tools: Server.McpServerPrimitiveCollection<Server.McpServerTool> := new Server.McpServerPrimitiveCollection<Server.McpServerTool>();
+  const Tools: Server.McpServerPrimitiveCollection of Server.McpServerTool := new Server.McpServerPrimitiveCollection of Server.McpServerTool();
   Tools.Add(
     Tool(
       SubmitArt,
